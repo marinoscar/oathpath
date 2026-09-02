@@ -1,6 +1,6 @@
 # Personal Access Tokens
 
-This guide covers Personal Access Tokens (PATs) in the Enterprise Application Foundation.
+This guide covers Personal Access Tokens (PATs) in OathPath.
 
 ## Table of Contents
 

@@ -1,11 +1,11 @@
-# CLI (`appctl`)
+# CLI (`oathpath`)
 
 First-party command-line client for the API. It authenticates with the same
 device authorization flow as any other headless client, stores a personal
 access token, and then lets you call any API endpoint from a shell — which
 matters because this repository is a **baseline**: new endpoints get added
 and old ones get renamed constantly, and a CLI that hard-codes a subcommand
-per resource goes stale the day it ships. `appctl` has exactly one command
+per resource goes stale the day it ships. `oathpath` has exactly one command
 that talks to the API (`api <method> <path>`), so it stays correct against
 endpoints that don't exist yet.
 
@@ -17,38 +17,38 @@ covers — they're what you'd script or run in CI.
 
 ## Install
 
-There's no published package; the installer builds `appctl` from this repo
+There's no published package; the installer builds `oathpath` from this repo
 and deploys a standalone copy — you don't need a local clone to end up with
-a working `appctl` on your PATH.
+a working `oathpath` on your PATH.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/marinoscar/EnterpriseAppBase/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/marinoscar/oathpath/main/install.sh | bash
 ```
 
 It's safe to re-run: the installer detects an existing install at
-`~/.appctl/app`, shows the old → new version transition, and updates it in
+`~/.oathpath/app`, shows the old → new version transition, and updates it in
 place — the same command is also how you update.
 
 ### Install from a local clone
 
 If you already have the repo checked out (or want to test the installer
 itself without a network round-trip), point it at that directory with
-`APPCTL_SRC` instead of letting it `git clone`:
+`OATHPATH_SRC` instead of letting it `git clone`:
 
 ```bash
-APPCTL_SRC=/path/to/repo bash /path/to/repo/install.sh
+OATHPATH_SRC=/path/to/repo bash /path/to/repo/install.sh
 ```
 
 ### Update
 
 Re-run the same command you installed with — the curl one-liner above, or
-the `APPCTL_SRC` form for a local clone. Either way the installer detects
+the `OATHPATH_SRC` form for a local clone. Either way the installer detects
 the existing install and updates it in place.
 
 ### Uninstall
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/marinoscar/EnterpriseAppBase/main/install.sh | bash -s -- --uninstall
+curl -fsSL https://raw.githubusercontent.com/marinoscar/oathpath/main/install.sh | bash -s -- --uninstall
 ```
 
 or, from a local clone:
@@ -57,9 +57,9 @@ or, from a local clone:
 bash install.sh --uninstall
 ```
 
-This removes the installed app directory (`~/.appctl/app`) and the `appctl`
-shim (`~/.local/bin/appctl` by default). It leaves
-`~/.appctl/config.json` — your stored server URL and credentials — untouched;
+This removes the installed app directory (`~/.oathpath/app`) and the `oathpath`
+shim (`~/.local/bin/oathpath` by default). It leaves
+`~/.oathpath/config.json` — your stored server URL and credentials — untouched;
 uninstalling doesn't log you out.
 
 ### Requirements
@@ -70,7 +70,7 @@ The installer checks for these before doing anything else:
 | --- | --- | --- |
 | `node` | >= 20 | apps/cli's own `engines.node` floor |
 | `npm` | any | ships with Node.js |
-| `git` | any | only needed unless you use `APPCTL_SRC` |
+| `git` | any | only needed unless you use `OATHPATH_SRC` |
 | `curl` | any | only needed for the piped one-liner |
 
 apps/cli has no native modules, so there's no C-compiler / build-toolchain
@@ -80,24 +80,24 @@ requirement — just these four.
 
 1. Checks dependencies (`node`, `npm`, `git`, `curl`; warns, but doesn't
    fail, on low disk space).
-2. Gets the source — either `git clone --depth 1` of `APPCTL_REPO` at
-   `APPCTL_REF`, or a copy of `APPCTL_SRC` if set — into a temp directory
+2. Gets the source — either `git clone --depth 1` of `OATHPATH_REPO` at
+   `OATHPATH_REF`, or a copy of `OATHPATH_SRC` if set — into a temp directory
    that's cleaned up on exit.
 3. Builds the CLI workspace: `npm install --workspace=cli` then
    `npm run build --workspace=cli`, from that temp checkout.
 4. Deploys the standalone app: copies `apps/cli/dist`, `package.json` and
-   `README.md` into `~/.appctl/app` (replacing any previous install), then
+   `README.md` into `~/.oathpath/app` (replacing any previous install), then
    runs `npm install --omit=dev` there to pull in just the runtime
    dependencies (commander, ink, ink-select-input, ink-spinner,
    ink-text-input, react).
-5. Writes the `appctl` shim to `~/.local/bin/appctl` — a small script that
-   `exec`s `node ~/.appctl/app/dist/cli.js "$@"` — and makes it executable.
+5. Writes the `oathpath` shim to `~/.local/bin/oathpath` — a small script that
+   `exec`s `node ~/.oathpath/app/dist/cli.js "$@"` — and makes it executable.
 6. Checks whether the shim's directory is on `$PATH` and, if not, prints the
    `export` line to add to your shell config (see below).
 7. Verifies the install by running the new shim's `--version` and printing
    an install summary (version, install size, paths).
 
-If `~/.local/bin` (or your custom `APPCTL_BIN_DIR`) isn't on `$PATH`, add
+If `~/.local/bin` (or your custom `OATHPATH_BIN_DIR`) isn't on `$PATH`, add
 this to `~/.bashrc` or `~/.zshrc` and reload your shell:
 
 ```bash
@@ -114,12 +114,12 @@ Set these before running the installer to override its defaults:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `APPCTL_REPO` | `https://github.com/marinoscar/EnterpriseAppBase.git` | Git clone URL |
-| `APPCTL_REF` | `main` | Branch/tag/commit to install |
-| `APPCTL_HOME` | `$HOME/.appctl` | App install root (same directory the CLI stores `config.json` in) |
-| `APPCTL_BIN_DIR` | `$HOME/.local/bin` | Directory for the `appctl` shim |
+| `OATHPATH_REPO` | `https://github.com/marinoscar/oathpath.git` | Git clone URL |
+| `OATHPATH_REF` | `main` | Branch/tag/commit to install |
+| `OATHPATH_HOME` | `$HOME/.oathpath` | App install root (same directory the CLI stores `config.json` in) |
+| `OATHPATH_BIN_DIR` | `$HOME/.local/bin` | Directory for the `oathpath` shim |
 | `GITHUB_TOKEN` | (unset) | Optional GitHub PAT, for cloning a private repo |
-| `APPCTL_SRC` | (unset) | Local directory to install from instead of cloning |
+| `OATHPATH_SRC` | (unset) | Local directory to install from instead of cloning |
 
 `NO_COLOR` and the installer's own `--no-color` flag both disable ANSI
 colour in its output.
@@ -127,7 +127,7 @@ colour in its output.
 ## Logging in
 
 ```bash
-appctl login
+oathpath login
 ```
 
 This runs the device authorization flow (RFC 8628) — the same "open this URL
@@ -147,12 +147,12 @@ and enter this code" flow you'd use for the CLI on a smart TV. It:
 The credential minted here is a **personal access token** (a `pat_...`
 string), not a short-lived session JWT — that's what makes it practical to
 stay logged in for days between commands. It's stored, along with the server
-URL, in `~/.appctl/config.json`. That file is created with `0600`
+URL, in `~/.oathpath/config.json`. That file is created with `0600`
 permissions (owner read/write only) even across restarts and partial
 rewrites — see the extensive comment on `writeConfigFile` in
 `apps/cli/src/config.ts` if you want the mechanics of how that's guaranteed
 under a hostile umask. The token itself is never printed by any command; if
-you need to see what's stored, `appctl config` prints the server URL and a
+you need to see what's stored, `oathpath config` prints the server URL and a
 masked hint (`pat_abcd••••••••` — the first eight characters, then a
 fixed-width mask) instead.
 
@@ -166,8 +166,8 @@ token on the command line puts it in your shell history and in `ps` output
 for other users on the machine, which is why the CLI warns about it after a
 successful `--token` login.
 
-There is deliberately no `appctl logout` subcommand — logout only exists as
-a screen in the interactive menu (`appctl` with no arguments, then choose
+There is deliberately no `oathpath logout` subcommand — logout only exists as
+a screen in the interactive menu (`oathpath` with no arguments, then choose
 Logout). It calls `DELETE /api/pat/{id}` to revoke the token on the server
 *before* deleting the local file, on purpose: the PAT this CLI holds is
 long-lived, so simply deleting the local copy would leave a fully valid,
@@ -179,7 +179,7 @@ equivalent of the interactive logout.
 ## Calling the API
 
 ```bash
-appctl api GET /api/auth/me
+oathpath api GET /api/auth/me
 ```
 
 `api` is the one command that talks to arbitrary endpoints. The response
@@ -187,7 +187,7 @@ body goes to stdout and nothing else does — status line, spinner and errors
 all go to stderr — so a pipeline sees exactly the server's JSON:
 
 ```bash
-appctl api GET /api/users --raw | jq '.data[].email'
+oathpath api GET /api/users --raw | jq '.data[].email'
 ```
 
 `--raw` prints compact, uncoloured JSON with a trailing newline and nothing
@@ -198,7 +198,7 @@ not the unwrapped `data` field — because a paginated list's `data` +
 `TransformInterceptor` as `{ data, meta }` look identical from the outside,
 and unwrapping one of them silently drops the pagination info.
 
-Other flags, from `appctl api --help`:
+Other flags, from `oathpath api --help`:
 
 ```
 Arguments:
@@ -215,25 +215,25 @@ Options:
 ```
 
 The exit code is `0` only for a 2xx response; anything else exits non-zero
-with the server's own error message, so `appctl api ... || echo failed` (or
+with the server's own error message, so `oathpath api ... || echo failed` (or
 just relying on `set -e`) works the way you'd expect in a script. The `/api`
-prefix is optional — `appctl api GET /api/auth/me` and `appctl api GET
+prefix is optional — `oathpath api GET /api/auth/me` and `oathpath api GET
 /auth/me` request the same thing, since the client's base URL already ends
 in `/api`.
 
 ## Deploying to a server
 
 ```bash
-appctl deploy doctor
+oathpath deploy doctor
 ```
 
 Four subcommands (`doctor`, `install`, `update`, `status`) take this
 repository — or, far more likely, your fork of it — from an empty VPS to
 running, migrated, seeded, and served over HTTPS at a real domain, and back
 to the latest revision on every subsequent deploy. They run **on the VPS
-itself**: SSH in with your own credentials, build `appctl` from a checkout
+itself**: SSH in with your own credentials, build `oathpath` from a checkout
 there (see [Building from source](#building-from-source-development) below),
-and run these from inside it. There's no SSH client in `appctl` and no
+and run these from inside it. There's no SSH client in `oathpath` and no
 laptop-driven orchestration — it never dials out to a server on your behalf.
 
 For the full walkthrough — prerequisites, the manual step after install,
@@ -244,8 +244,8 @@ For why it's built this way, see
 ### Checking prerequisites
 
 ```bash
-appctl deploy doctor
-appctl deploy doctor --domain app.example.com
+oathpath deploy doctor
+oathpath deploy doctor --domain app.example.com
 ```
 
 Nothing is installed, written or started — it's read-only, so it's safe to
@@ -258,14 +258,14 @@ database (reachable, credentials valid, database exists, can create tables,
 TLS), and — once `--domain` turns them on — DNS and the certificate.
 
 ```bash
-appctl deploy doctor --json | jq '.checks[] | select(.status=="fail")'
+oathpath deploy doctor --json | jq '.checks[] | select(.status=="fail")'
 ```
 
 Exits `6` (`EXIT.PRECONDITION`) when a required check fails, `0` when only
 recommended checks fail — warnings never fail the run. `--json` prints a
 machine-readable report on stdout and nothing on stderr.
 
-Other flags, from `appctl deploy doctor --help`:
+Other flags, from `oathpath deploy doctor --help`:
 
 ```
 Options:
@@ -286,7 +286,7 @@ an unreachable database before you're mid-pipeline, not partway through one.
 ### Installing
 
 ```bash
-appctl deploy install --domain app.example.com
+oathpath deploy install --domain app.example.com
 ```
 
 Runs preflight → checkout → environment → validate-environment → build →
@@ -298,8 +298,8 @@ value hardcoded in the CLI — a fork deploys itself with no configuration
 change; see "Deploying a fork" below.
 
 ```bash
-appctl deploy install --domain app.example.com --staging
-appctl deploy install --non-interactive --domain app.example.com
+oathpath deploy install --domain app.example.com --staging
+oathpath deploy install --non-interactive --domain app.example.com
 ```
 
 Use `--staging` while you're still working out the setup — it requests a
@@ -318,7 +318,7 @@ the step that failed rather than re-running everything before it.
 discards uncommitted changes in the checkout it manages; `--skip-doctor`,
 `--skip-proxy` and `--skip-seed` each skip exactly the one stage they name.
 
-Other flags, from `appctl deploy install --help`:
+Other flags, from `oathpath deploy install --help`:
 
 ```
 Options:
@@ -360,7 +360,7 @@ needed — nothing here assumes `main`), and the environment wizard's
 questions are parsed structurally from *your fork's own*
 `infra/compose/.env.example`, not a list of field names hardcoded into the
 CLI. Rename the app, add a new secret to your `.env.example`, remove a
-feature block: `appctl deploy install` follows all of it with no flag
+feature block: `oathpath deploy install` follows all of it with no flag
 changes, for the same reason `api <method> <path>` (above) doesn't go stale
 as endpoints change — nothing about a specific repository's shape is baked
 into the tool.
@@ -368,7 +368,7 @@ into the tool.
 ### Updating
 
 ```bash
-appctl deploy update
+oathpath deploy update
 ```
 
 Brings an already-installed server up to the latest revision (or, with
@@ -376,7 +376,7 @@ Brings an already-installed server up to the latest revision (or, with
 It refuses to run at all if nothing is installed at `--root` yet.
 
 ```bash
-appctl deploy update --ref v1.4.0
+oathpath deploy update --ref v1.4.0
 ```
 
 If the resolved ref's commit hasn't moved since the last successful run,
@@ -396,9 +396,9 @@ want them upserted back.
 There's no automatic rollback. A partly-applied database migration can't be
 undone by checking out the old code, so on failure `update` prints the
 previous revision and the exact command to redeploy it —
-`appctl deploy update --ref <sha> --force` — and leaves that decision to you.
+`oathpath deploy update --ref <sha> --force` — and leaves that decision to you.
 
-Other flags, from `appctl deploy update --help`:
+Other flags, from `oathpath deploy update --help`:
 
 ```
 Options:
@@ -415,7 +415,7 @@ Options:
 ### Checking status
 
 ```bash
-appctl deploy status
+oathpath deploy status
 ```
 
 Reports whether the deployment at `--root` is healthy: container state, an
@@ -423,8 +423,8 @@ immediate `/api/health/ready` poll, migration state, and — with `--domain` —
 an external HTTPS check.
 
 ```bash
-appctl deploy status --domain app.example.com
-appctl deploy status --json || alert 'deployment unhealthy'
+oathpath deploy status --domain app.example.com
+oathpath deploy status --json || alert 'deployment unhealthy'
 ```
 
 `/api/health/ready` returning 200 only proves the app can run `SELECT 1`
@@ -436,7 +436,7 @@ probe.
 Exits `0` when serving and the schema is current, `1` when installed but
 unhealthy, `2` when nothing is installed at `--root`.
 
-Other flags, from `appctl deploy status --help`:
+Other flags, from `oathpath deploy status --help`:
 
 ```
 Options:
@@ -463,11 +463,11 @@ home directory to have logged in from earlier, so skip `login` entirely and
 set:
 
 ```bash
-export APPCTL_SERVER_URL=https://app.example.com
-export APPCTL_TOKEN=pat_...
+export OATHPATH_SERVER_URL=https://app.example.com
+export OATHPATH_TOKEN=pat_...
 ```
 
-The environment always wins over `~/.appctl/config.json` when both are
+The environment always wins over `~/.oathpath/config.json` when both are
 present, specifically so a pipeline's service token can't be shadowed by
 whatever a developer happens to have logged in as on a shared runner.
 
@@ -476,12 +476,12 @@ Create and revoke the token itself from the web UI's **Access Tokens** page
 for CI use; the device flow is how the CLI gets one for a human logging in
 interactively.
 
-`appctl` also refuses to launch its interactive menu unless stdout and stdin
+`oathpath` also refuses to launch its interactive menu unless stdout and stdin
 are both real terminals, `TERM` is set to something other than `dumb`, and
-neither `CI` nor `CONTINUOUS_INTEGRATION` is set — so `appctl api ...` in a
+neither `CI` nor `CONTINUOUS_INTEGRATION` is set — so `oathpath api ...` in a
 pipeline behaves identically whether or not those variables happen to be
 set. If you need to force that refusal in an environment that looks like a
-terminal but isn't one you want to interact with, set `APPCTL_NO_TUI` to
+terminal but isn't one you want to interact with, set `OATHPATH_NO_TUI` to
 any truthy value (anything except empty, `0`, `false`, or `no`); every
 explicit subcommand ignores this gate entirely and is unaffected by it.
 
@@ -489,27 +489,27 @@ explicit subcommand ignores this gate entirely and is unaffected by it.
 
 There are two identities here, and they are deliberately independent.
 
-**The product name** — the "Enterprise App" half of the `Enterprise App CLI`
+**The product name** — the "OathPath" half of the `OathPath CLI`
 banner in `--help` and the interactive UI — is not set in this package at all.
 It comes from the shared constant every app renders, so renaming the product
 renames the CLI banner, the browser wordmark and the email templates together:
 
 ```js
 // packages/shared/index.js
-exports.APP_NAME = 'Enterprise App';
+exports.APP_NAME = 'OathPath';
 ```
 
 **The executable's own identity** — the command name shown in `--help` and
-errors, the config directory (`~/.appctl/`), and the `APPCTL_`
+errors, the config directory (`~/.oathpath/`), and the `OATHPATH_`
 environment-variable prefix — is derived from a separate constant:
 
 ```ts
 // apps/cli/src/branding.ts
-export const CLI_NAME = 'appctl';
+export const CLI_NAME = 'oathpath';
 ```
 
 The split is intentional: a product called "Acme" may perfectly well still
-ship a command called `appctl`, and renaming the binary moves a filesystem
+ship a command called `oathpath`, and renaming the binary moves a filesystem
 path and an environment-variable prefix, which renaming the product must not.
 
 Change that one line (see the comment above it in `branding.ts` for the
@@ -521,15 +521,15 @@ to itself by name follow automatically. The one place it can't reach is the
 code runs, so it has to be updated by hand to match, and a test in
 `apps/cli/src/branding.test.ts` asserts the two stay in sync.
 
-Note that the env var prefix is `APPCTL_`, not `APP_` — a bare `APP_` prefix
+Note that the env var prefix is `OATHPATH_`, not `APP_` — a bare `APP_` prefix
 is generic enough to collide with unrelated variables in a shared CI shell,
 so the prefix is derived from the (longer, more specific) binary name
 instead. If you've seen `APP_SERVER_URL` / `APP_TOKEN` mentioned elsewhere,
 that's what it would have been under a shorter, collision-prone prefix;
-`APPCTL_SERVER_URL` / `APPCTL_TOKEN` is what the code actually reads.
+`OATHPATH_SERVER_URL` / `OATHPATH_TOKEN` is what the code actually reads.
 
-`install.sh`'s default `APPCTL_REPO` (the git URL it clones when
-`APPCTL_SRC` isn't set) is a second place a fork has to edit by hand,
+`install.sh`'s default `OATHPATH_REPO` (the git URL it clones when
+`OATHPATH_SRC` isn't set) is a second place a fork has to edit by hand,
 alongside the `bin` key above. It's a standalone shell script that runs
 *before* any of this repo's own code executes — `git clone`s the source
 first — so it has no way to read `CLI_NAME` out of `branding.ts` and derive
@@ -560,8 +560,8 @@ or, from inside `apps/cli`:
 node dist/cli.js --help
 ```
 
-If you want the bare `appctl` command on your PATH without publishing, `npm
-link` from `apps/cli` (`package.json`'s `bin` field maps `appctl` to
+If you want the bare `oathpath` command on your PATH without publishing, `npm
+link` from `apps/cli` (`package.json`'s `bin` field maps `oathpath` to
 `./dist/cli.js`) does that using the standard npm mechanism.
 
 For iterating on the CLI's own source without rebuilding on every change,

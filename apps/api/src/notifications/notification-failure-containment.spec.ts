@@ -59,7 +59,7 @@ const WORKING_EMAIL_SETTINGS: EmailSettings = {
   enabled: true,
   provider: 'ses',
   fromAddress: 'no-reply@example.com',
-  fromName: 'Enterprise App Foundation',
+  fromName: 'OathPath',
 };
 
 const ROLES = {

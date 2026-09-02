@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Rebranded to OathPath.** The application, its CLI, its database and its
+  observability identity all carried names inherited from the upstream
+  template. `APP_NAME` is now `OathPath`, which renames the web wordmark and
+  page title, the OpenAPI document and reference page, all email templates and
+  the CLI banner from one constant. The CLI binary is `oathpath` (config in
+  `~/.oathpath/`, environment variables prefixed `OATHPATH_`), the default
+  database is `oathpath`, and the OpenTelemetry service is `oathpath-api`.
+
+### Fixed
+
+- **The installer and the API's own documentation pointed at a different
+  repository.** `install.sh` defaulted to cloning `marinoscar/EnterpriseAppBase`
+  and the OpenAPI contact and external-docs URLs pointed there too. That
+  repository is live and has diverged, so `curl … | bash` installed the
+  upstream template rather than this application.
+- **Several identifiers had opted out of their own derivation scheme**, so
+  renaming the binary would have left them stale with no error: the deploy
+  state filename and version field, the journal filename prefix and its
+  retention regex, and the nginx vhost ownership marker. All now derive from
+  `CLI_NAME`.
+- `trace.decorator.ts` hardcoded the OpenTelemetry service name and ignored
+  `OTEL_SERVICE_NAME`, so configuring the name renamed the service everywhere
+  except that tracer's instrumentation scope.
+
+### Removed
+
+- `apps/web/test-results.json`, a committed Vitest report holding absolute
+  paths from another machine and references to deleted test files.
+
 ## [1.1.0] - 2026-06-10
 
 ### Changed
