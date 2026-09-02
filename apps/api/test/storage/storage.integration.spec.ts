@@ -9,6 +9,8 @@ import { setupBaseMocks } from '../fixtures/mock-setup.helper';
 import {
   createMockTestUser,
   createMockAdminUser,
+  createMockContributorUser,
+  createMockViewerUser,
   authHeader,
 } from '../helpers/auth-mock.helper';
 import { STORAGE_PROVIDER } from '../../src/storage/providers/storage-provider.interface';
@@ -443,6 +445,183 @@ describe('Storage Integration', () => {
         .delete('/api/storage/objects/550e8400-e29b-41d4-a716-446655440001')
         .set(authHeader(user.accessToken))
         .expect(404);
+    });
+
+    describe('storage:delete_any', () => {
+      const OTHER_OWNER_ID = 'someone-else-user-id';
+
+      /** The object under test always belongs to somebody else. */
+      function othersObject() {
+        return { ...mockStorageObject, uploadedById: OTHER_OWNER_ID };
+      }
+
+      function stubSuccessfulDelete() {
+        context.prismaMock.storageObject.findUnique.mockResolvedValue(
+          othersObject(),
+        );
+        mockStorageProvider.delete.mockResolvedValue(undefined);
+        context.prismaMock.storageObject.delete.mockResolvedValue({});
+        context.prismaMock.auditEvent.create.mockResolvedValue({});
+      }
+
+      it("lets an Admin holding the permission delete another user's object", async () => {
+        const admin = await createMockAdminUser(context);
+        stubSuccessfulDelete();
+
+        await request(context.app.getHttpServer())
+          .delete(`/api/storage/objects/${mockStorageObjectId}`)
+          .set(authHeader(admin.accessToken))
+          .expect(204);
+
+        expect(mockStorageProvider.delete).toHaveBeenCalledWith(
+          mockStorageObject.storageKey,
+        );
+        expect(context.prismaMock.storageObject.delete).toHaveBeenCalledWith({
+          where: { id: mockStorageObjectId },
+        });
+      });
+
+      it('audits the cross-user delete with both user ids and the permission', async () => {
+        const admin = await createMockAdminUser(context);
+        stubSuccessfulDelete();
+
+        await request(context.app.getHttpServer())
+          .delete(`/api/storage/objects/${mockStorageObjectId}`)
+          .set(authHeader(admin.accessToken))
+          .expect(204);
+
+        expect(context.prismaMock.auditEvent.create).toHaveBeenCalledWith({
+          data: expect.objectContaining({
+            actorUserId: admin.id,
+            action: 'storage:object:delete',
+            targetType: 'storage_object',
+            targetId: mockStorageObjectId,
+            meta: expect.objectContaining({
+              ownerUserId: OTHER_OWNER_ID,
+              overridePermission: 'storage:delete_any',
+            }),
+          }),
+        });
+      });
+
+      it("refuses a Viewer, who does not hold it, on another user's object", async () => {
+        const viewer = await createMockViewerUser(context);
+        context.prismaMock.storageObject.findUnique.mockResolvedValue(
+          othersObject(),
+        );
+
+        await request(context.app.getHttpServer())
+          .delete(`/api/storage/objects/${mockStorageObjectId}`)
+          .set(authHeader(viewer.accessToken))
+          .expect(403);
+
+        expect(mockStorageProvider.delete).not.toHaveBeenCalled();
+        expect(context.prismaMock.storageObject.delete).not.toHaveBeenCalled();
+      });
+
+      it("refuses a Contributor, who does not hold it, on another user's object", async () => {
+        const contributor = await createMockContributorUser(context);
+        context.prismaMock.storageObject.findUnique.mockResolvedValue(
+          othersObject(),
+        );
+
+        await request(context.app.getHttpServer())
+          .delete(`/api/storage/objects/${mockStorageObjectId}`)
+          .set(authHeader(contributor.accessToken))
+          .expect(403);
+      });
+
+      it('leaves a self-delete unchanged, with no override in the audit row', async () => {
+        const admin = await createMockAdminUser(context);
+
+        context.prismaMock.storageObject.findUnique.mockResolvedValue({
+          ...mockStorageObject,
+          uploadedById: admin.id,
+        });
+        mockStorageProvider.delete.mockResolvedValue(undefined);
+        context.prismaMock.storageObject.delete.mockResolvedValue({});
+        context.prismaMock.auditEvent.create.mockResolvedValue({});
+
+        await request(context.app.getHttpServer())
+          .delete(`/api/storage/objects/${mockStorageObjectId}`)
+          .set(authHeader(admin.accessToken))
+          .expect(204);
+
+        const meta = (context.prismaMock.auditEvent.create as jest.Mock).mock
+          .calls[0][0].data.meta;
+        expect(meta).not.toHaveProperty('ownerUserId');
+        expect(meta).not.toHaveProperty('overridePermission');
+      });
+
+      // The override governs who may delete, never whether an id exists.
+      it('404s on a missing object for holder and non-holder alike', async () => {
+        const admin = await createMockAdminUser(context);
+        const viewer = await createMockViewerUser(context);
+        const missingId = '550e8400-e29b-41d4-a716-446655440002';
+
+        context.prismaMock.storageObject.findUnique.mockResolvedValue(null);
+
+        await request(context.app.getHttpServer())
+          .delete(`/api/storage/objects/${missingId}`)
+          .set(authHeader(admin.accessToken))
+          .expect(404);
+
+        await request(context.app.getHttpServer())
+          .delete(`/api/storage/objects/${missingId}`)
+          .set(authHeader(viewer.accessToken))
+          .expect(404);
+      });
+    });
+  });
+
+  /**
+   * storage:delete_any is scoped to deletion by its name, and the
+   * implementation keeps it there by giving delete its own authorization path
+   * instead of threading a permission through the helper that read and write
+   * share. These are the assertions that hold that line: if a future refactor
+   * folds the override back into the shared helper, an Admin starts passing
+   * these and they fail loudly.
+   */
+  describe('storage:delete_any does not widen read or write', () => {
+    const OTHER_OWNER_ID = 'someone-else-user-id';
+
+    beforeEach(() => {
+      context.prismaMock.storageObject.findUnique.mockResolvedValue({
+        ...mockStorageObject,
+        uploadedById: OTHER_OWNER_ID,
+      });
+    });
+
+    it("an Admin still cannot GET another user's object", async () => {
+      const admin = await createMockAdminUser(context);
+
+      await request(context.app.getHttpServer())
+        .get(`/api/storage/objects/${mockStorageObjectId}`)
+        .set(authHeader(admin.accessToken))
+        .expect(403);
+    });
+
+    it("an Admin still cannot get a download URL for another user's object", async () => {
+      const admin = await createMockAdminUser(context);
+
+      await request(context.app.getHttpServer())
+        .get(`/api/storage/objects/${mockStorageObjectId}/download`)
+        .set(authHeader(admin.accessToken))
+        .expect(403);
+
+      expect(mockStorageProvider.getSignedDownloadUrl).not.toHaveBeenCalled();
+    });
+
+    it("an Admin still cannot PATCH metadata on another user's object", async () => {
+      const admin = await createMockAdminUser(context);
+
+      await request(context.app.getHttpServer())
+        .patch(`/api/storage/objects/${mockStorageObjectId}/metadata`)
+        .set(authHeader(admin.accessToken))
+        .send({ metadata: { tampered: true } })
+        .expect(403);
+
+      expect(context.prismaMock.storageObject.update).not.toHaveBeenCalled();
     });
   });
 

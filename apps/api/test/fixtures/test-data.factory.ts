@@ -59,6 +59,21 @@ export const mockPermissions = {
     name: 'allowlist:write',
     description: 'Modify allowlist',
   },
+  storageRead: {
+    id: randomUUID(),
+    name: 'storage:read',
+    description: 'Read object metadata, get download URLs',
+  },
+  storageWrite: {
+    id: randomUUID(),
+    name: 'storage:write',
+    description: 'Upload, update metadata',
+  },
+  storageDeleteAny: {
+    id: randomUUID(),
+    name: 'storage:delete_any',
+    description: 'Admin: delete any object',
+  },
 };
 
 export const mockRoles = {
@@ -338,6 +353,11 @@ export function createMockAuditEvent(options: CreateMockAuditEventOptions): any 
 /**
  * Maps role names to their permissions
  * This mirrors the actual RBAC configuration
+ *
+ * Keep the grants here in step with `prisma/seed.ts`. A permission missing
+ * from this map makes an integration test's admin quietly weaker than a real
+ * one, so a route that enforces it would appear to fail closed for the wrong
+ * reason.
  */
 export const rolePermissionsMap = {
   admin: [
@@ -350,14 +370,20 @@ export const rolePermissionsMap = {
     mockPermissions.rbacManage,
     mockPermissions.allowlistRead,
     mockPermissions.allowlistWrite,
+    mockPermissions.storageRead,
+    mockPermissions.storageWrite,
+    mockPermissions.storageDeleteAny,
   ],
   contributor: [
     mockPermissions.userSettingsRead,
     mockPermissions.userSettingsWrite,
+    mockPermissions.storageRead,
+    mockPermissions.storageWrite,
   ],
   viewer: [
     mockPermissions.userSettingsRead,
     mockPermissions.userSettingsWrite,
+    mockPermissions.storageRead,
   ],
 };
 

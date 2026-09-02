@@ -774,6 +774,152 @@ describe('ObjectsService', () => {
         }),
       });
     });
+
+    describe('storage:delete_any override', () => {
+      // The object belongs to someone else in every test here; only the
+      // caller's capability varies.
+      const othersObject = {
+        ...mockStorageObject,
+        uploadedById: otherUserId,
+      };
+
+      it("deletes another user's object when the caller holds the permission", async () => {
+        mockPrisma.storageObject.findUnique.mockResolvedValue(othersObject as any);
+        mockStorageProvider.delete.mockResolvedValue(undefined);
+        mockPrisma.storageObject.delete.mockResolvedValue({} as any);
+        mockPrisma.auditEvent.create.mockResolvedValue({} as any);
+
+        await service.delete(othersObject.id, testUserId, true);
+
+        expect(mockStorageProvider.delete).toHaveBeenCalledWith(
+          othersObject.storageKey,
+        );
+        expect(mockPrisma.storageObject.delete).toHaveBeenCalledWith({
+          where: { id: othersObject.id },
+        });
+      });
+
+      it('records the override in the audit row, with both user ids', async () => {
+        mockPrisma.storageObject.findUnique.mockResolvedValue(othersObject as any);
+        mockStorageProvider.delete.mockResolvedValue(undefined);
+        mockPrisma.storageObject.delete.mockResolvedValue({} as any);
+        mockPrisma.auditEvent.create.mockResolvedValue({} as any);
+
+        await service.delete(othersObject.id, testUserId, true);
+
+        expect(mockPrisma.auditEvent.create).toHaveBeenCalledWith({
+          data: expect.objectContaining({
+            actorUserId: testUserId,
+            action: 'storage:object:delete',
+            targetType: 'storage_object',
+            targetId: othersObject.id,
+            meta: expect.objectContaining({
+              ownerUserId: otherUserId,
+              overridePermission: 'storage:delete_any',
+            }),
+          }),
+        });
+      });
+
+      it("refuses another user's object without the permission", async () => {
+        mockPrisma.storageObject.findUnique.mockResolvedValue(othersObject as any);
+
+        await expect(
+          service.delete(othersObject.id, testUserId, false),
+        ).rejects.toThrow(ForbiddenException);
+
+        expect(mockStorageProvider.delete).not.toHaveBeenCalled();
+        expect(mockPrisma.storageObject.delete).not.toHaveBeenCalled();
+        expect(mockPrisma.auditEvent.create).not.toHaveBeenCalled();
+      });
+
+      it('defaults to no override when the argument is omitted', async () => {
+        mockPrisma.storageObject.findUnique.mockResolvedValue(othersObject as any);
+
+        await expect(
+          service.delete(othersObject.id, testUserId),
+        ).rejects.toThrow(ForbiddenException);
+      });
+
+      it('does not mark a self-delete as an override, even for a holder', async () => {
+        mockPrisma.storageObject.findUnique.mockResolvedValue(mockStorageObject as any);
+        mockStorageProvider.delete.mockResolvedValue(undefined);
+        mockPrisma.storageObject.delete.mockResolvedValue({} as any);
+        mockPrisma.auditEvent.create.mockResolvedValue({} as any);
+
+        await service.delete(mockStorageObject.id, testUserId, true);
+
+        const meta = (mockPrisma.auditEvent.create as jest.Mock).mock
+          .calls[0][0].data.meta;
+        expect(meta).not.toHaveProperty('ownerUserId');
+        expect(meta).not.toHaveProperty('overridePermission');
+        expect(meta).toEqual({
+          name: mockStorageObject.name,
+          size: mockStorageObject.size.toString(),
+          mimeType: mockStorageObject.mimeType,
+        });
+      });
+
+      // The override decides who may delete an object, not whether an object
+      // exists. Both callers must see the same error for an absent id, or a
+      // holder could use the 403/404 split to probe for ids.
+      it('404s on a missing object for a holder and a non-holder alike', async () => {
+        mockPrisma.storageObject.findUnique.mockResolvedValue(null);
+
+        await expect(
+          service.delete('missing-id', testUserId, true),
+        ).rejects.toThrow(NotFoundException);
+        await expect(
+          service.delete('missing-id', testUserId, false),
+        ).rejects.toThrow(NotFoundException);
+      });
+    });
+  });
+
+  // Naming this explicitly so a future refactor that folds the override into
+  // the shared getObjectWithAuthCheck helper fails here rather than silently
+  // turning storage:delete_any into a read and write bypass.
+  describe('storage:delete_any does not leak into read or write', () => {
+    const othersObject = {
+      ...mockStorageObject,
+      uploadedById: otherUserId,
+    };
+
+    beforeEach(() => {
+      mockPrisma.storageObject.findUnique.mockResolvedValue(othersObject as any);
+    });
+
+    it("getById still refuses another user's object", async () => {
+      await expect(
+        service.getById(othersObject.id, testUserId),
+      ).rejects.toThrow(ForbiddenException);
+    });
+
+    it("getDownloadUrl still refuses another user's object", async () => {
+      await expect(
+        service.getDownloadUrl(othersObject.id, testUserId),
+      ).rejects.toThrow(ForbiddenException);
+    });
+
+    it("updateMetadata still refuses another user's object", async () => {
+      await expect(
+        service.updateMetadata(
+          othersObject.id,
+          { metadata: { a: 'b' } },
+          testUserId,
+        ),
+      ).rejects.toThrow(ForbiddenException);
+
+      expect(mockPrisma.storageObject.update).not.toHaveBeenCalled();
+    });
+
+    it('takes no permission argument on any read or write path', () => {
+      // delete() is the only method that accepts a capability; the arity of
+      // the others is the guard that it stayed that way.
+      expect(service.getById.length).toBe(2);
+      expect(service.updateMetadata.length).toBe(3);
+      expect(service.delete.length).toBe(2); // third arg has a default
+    });
   });
 
   describe('updateMetadata', () => {

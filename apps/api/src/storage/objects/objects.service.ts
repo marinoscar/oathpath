@@ -14,6 +14,7 @@ import { extname } from 'node:path';
 
 import { PrismaService } from '../../prisma/prisma.service';
 import { Prisma } from '@prisma/client';
+import { PERMISSIONS } from '../../common/constants/roles.constants';
 import { STORAGE_PROVIDER } from '../providers/storage-provider.interface';
 import type { StorageProvider } from '../providers/storage-provider.interface';
 import {
@@ -468,9 +469,24 @@ export class ObjectsService {
 
   /**
    * Delete object from storage and database
+   *
+   * @param canDeleteAny whether the caller holds `storage:delete_any`, which
+   *   lets them delete an object they did not upload. The controller resolves
+   *   the permission to this single capability rather than handing the service
+   *   the caller's whole permission list: the service needs to know "may this
+   *   caller delete something they do not own", not who they are.
    */
-  async delete(id: string, userId: string): Promise<void> {
-    const object = await this.getObjectWithAuthCheck(id, userId);
+  async delete(
+    id: string,
+    userId: string,
+    canDeleteAny = false,
+  ): Promise<void> {
+    const object = await this.getObjectForDelete(id, userId, canDeleteAny);
+
+    // True only when the override is what admitted this call: the caller is
+    // deleting somebody else's object. A self-delete never sets it, so the
+    // audit trail cannot imply an override that did not happen.
+    const isOverride = object.uploadedById !== userId;
 
     this.logger.log(`Deleting object ${id} from storage and database`);
 
@@ -482,12 +498,29 @@ export class ObjectsService {
       where: { id },
     });
 
-    // Create audit event
+    // Create audit event. A cross-user delete is recorded distinctly — an admin
+    // removing another user's data is precisely what audit_events exists for,
+    // and a row identical to a self-delete would defeat that. `actorUserId`
+    // already says who; these two keys say whose object it was and which
+    // permission admitted the call.
     await this.createAuditEvent(userId, 'storage:object:delete', id, {
       name: object.name,
       size: object.size.toString(),
       mimeType: object.mimeType,
+      ...(isOverride
+        ? {
+            ownerUserId: object.uploadedById,
+            overridePermission: PERMISSIONS.STORAGE_DELETE_ANY,
+          }
+        : {}),
     });
+
+    if (isOverride) {
+      this.logger.warn(
+        `Object ${id} deleted by ${userId} via ${PERMISSIONS.STORAGE_DELETE_ANY}; ` +
+          `uploaded by ${object.uploadedById}`,
+      );
+    }
 
     this.logger.log(`Object deleted: ${id}`);
   }
@@ -528,6 +561,12 @@ export class ObjectsService {
 
   /**
    * Helper method to get object with ownership check
+   *
+   * Ownership is the whole authorization rule on the read and write paths
+   * (`getById`, `getDownloadUrl`, `updateMetadata`, and the upload lifecycle).
+   * There is deliberately no permission argument here — see
+   * {@link getObjectForDelete}.
+   *
    * @private
    */
   private async getObjectWithAuthCheck(
@@ -544,6 +583,45 @@ export class ObjectsService {
 
     // Check ownership
     if (object.uploadedById !== userId) {
+      throw new ForbiddenException('You do not have access to this object');
+    }
+
+    return object;
+  }
+
+  /**
+   * Resolve an object for deletion, honouring the `storage:delete_any` override.
+   *
+   * WHY THIS IS NOT A FLAG ON `getObjectWithAuthCheck`. That helper is shared
+   * by every read and write path in this service. Threading the permission
+   * through it would make `storage:delete_any` a read *and* write bypass in the
+   * same edit — a holder could suddenly GET, download and PATCH other users'
+   * objects — which is not what the permission's name promises, and not what
+   * issue #199 chose. Delete gets its own two-line path instead, so widening
+   * the override to reads or writes has to be a deliberate change here rather
+   * than a side effect of touching shared code.
+   *
+   * Note the ordering: existence is resolved before ownership, exactly as in
+   * the shared helper. A missing id is a 404 for holder and non-holder alike,
+   * so the override changes who may delete an object and nothing about which
+   * error an absent one produces.
+   *
+   * @private
+   */
+  private async getObjectForDelete(
+    id: string,
+    userId: string,
+    canDeleteAny: boolean,
+  ): Promise<any> {
+    const object = await this.prisma.storageObject.findUnique({
+      where: { id },
+    });
+
+    if (!object) {
+      throw new NotFoundException('Object not found');
+    }
+
+    if (object.uploadedById !== userId && !canDeleteAny) {
       throw new ForbiddenException('You do not have access to this object');
     }
 
