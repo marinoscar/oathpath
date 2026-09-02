@@ -8,7 +8,7 @@ application's display name.
 Edit **one line** in [`index.js`](./index.js):
 
 ```js
-exports.APP_NAME = 'Your Product Name';
+exports.APP_NAME = 'OathPath';
 ```
 
 Then rebuild. That is the whole change — every surface below derives from this
@@ -32,16 +32,24 @@ Two caveats, both real:
    Seven of the eleven baselines are `fullPage` shots that include the AppBar
    wordmark; the rail-scoped and drill-down ones are unaffected.
 
-2. **The name is not the only identity string.** These are deliberately
-   separate and are *not* derived from `APP_NAME`:
-   - `CLI_NAME` (`appctl`) in `apps/cli/src/branding.ts` — the executable name,
-     which also seeds the config directory and the env-var prefix. It has its
-     own rationale documented in that file; a product called "Acme" may well
-     still ship a binary called `appctl`.
+2. **The name is not the only identity string.** `CLI_NAME` in
+   `apps/cli/src/branding.ts` is deliberately separate and is *not* derived
+   from `APP_NAME`. It names the executable, and it additionally seeds the
+   config directory and the environment-variable prefix, so it carries
+   constraints this constant does not (lowercase ASCII, no spaces or dots).
+   Renaming the product should rename the banner; renaming the binary is a
+   second, independent decision. Its rationale is documented in that file.
+
+   Two things that *were* once listed here as deliberately out of scope no
+   longer are, because this repository stopped being a template and became a
+   product:
    - The GitHub repository URLs in `apps/api/src/openapi/document.ts` and
-     `description.ts` — those point at the actual repository, not the product.
-   - Prose in `README.md`, `docs/`, and `scripts/dev.ps1`, which describes this
-     template itself. Epic #161 scoped those out on purpose.
+     `description.ts` point at *this* repository. They pointed at the upstream
+     template until the OathPath rename, which was a real defect — the two
+     repositories both exist and have diverged.
+   - Prose in `README.md`, `docs/`, and `scripts/dev.ps1` names the product.
+     The upstream template scoped that out on purpose; the OathPath rename
+     brought it back in.
 
 ## Consumers
 
