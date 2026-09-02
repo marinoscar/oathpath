@@ -1,6 +1,17 @@
 /**
- * The three destination stubs — `/learn`, `/practice`, `/progress` (issue #69,
+ * The remaining destination stubs — `/practice` and `/progress` (issue #69,
  * epic #50).
+ *
+ * `/learn` WAS the third, and is not any more: #121 replaced it with the real
+ * Learn destination once #111 gave the API a read surface over the question
+ * bank. It is dropped from `PAGES` rather than kept with a weakened assertion,
+ * because every claim below is specifically about an EMPTY state — the
+ * verbatim two sentences, the "no delivery promise" rule, the single `h1` with
+ * nothing else on the page — and none of them is true of a screen that renders
+ * content. `__tests__/pages/LearnPage.test.tsx` is what covers it now.
+ *
+ * `docs/specs/journey-shell.md` §8.1 still describes the superseded empty
+ * state; it is no longer read by any test.
  *
  * WHAT THESE TESTS ACTUALLY PROTECT, in order of how quietly each would break:
  *
@@ -28,7 +39,6 @@ import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { render } from '../utils/test-utils';
 import { setViewportWidth } from '../setup';
-import LearnPage from '../../pages/LearnPage';
 import PracticePage from '../../pages/PracticePage';
 import ProgressPage from '../../pages/ProgressPage';
 
@@ -58,7 +68,6 @@ function specCopy(heading: string): string[] {
 }
 
 const PAGES = [
-  { name: 'Learn', heading: '8.1', element: <LearnPage /> },
   { name: 'Practice', heading: '8.2', element: <PracticePage /> },
   { name: 'Progress', heading: '8.3', element: <ProgressPage /> },
 ] as const;

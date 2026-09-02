@@ -234,6 +234,9 @@ import type {
   CivicsAnswerCorrection,
   CivicsAnswerCorrectionResult,
   CivicsDynamicAnswerPage,
+  CivicsCategory,
+  CivicsQuestionDetail,
+  CivicsQuestionListResponse,
 } from '../types';
 
 // Allowlist API
@@ -835,4 +838,101 @@ export async function correctCivicsDynamicAnswer(
   input: CivicsAnswerCorrection,
 ): Promise<CivicsAnswerCorrectionResult> {
   return api.put<CivicsAnswerCorrectionResult>('/civics/dynamic-answers', input);
+}
+
+// Civics content — the read surface (epic #51, API #111)
+// =============================================================================
+//
+// Three calls, one controller, and the ONLY place in the web app that names
+// these endpoints. Every route is `@Auth()` with NO permission: civics content
+// is the core product material every authenticated learner reads, and gating it
+// would leave a Viewer — the default role every new account gets — unable to
+// study, which is the entire product.
+//
+// -----------------------------------------------------------------------------
+// THE LEARNER'S TEST VERSION IS NEVER SENT, AND THAT IS DELIBERATE
+// -----------------------------------------------------------------------------
+//
+// `GET /api/civics/questions` takes an OPTIONAL `testVersionCode`, and omitting
+// it does not mean "every version": the API falls back to the caller's own
+// `learner_profiles.test_version_code`. So the browser sends nothing, and the
+// answer is correct for this learner by construction — there is no version
+// picker on `/learn`, because there is no question a learner could answer by
+// choosing one. A client that helpfully passed the code it read out of the
+// profile context would be a second copy of a decision the server already owns,
+// wrong the moment a learner's filing date moves them between banks.
+//
+// The categories route is the exception, and only because the version is in its
+// PATH; `/learn` reads that code from `LearnerProfileContext`, which has already
+// loaded the profile once for the whole session.
+//
+// -----------------------------------------------------------------------------
+// THERE IS NO `stateCode` PARAMETER, HERE OR ON THE SERVER
+// -----------------------------------------------------------------------------
+//
+// Answer resolution reads the caller's state from their own profile row. The
+// query DTO is a `z.strictObject`, so adding `?stateCode=TX` here would be a
+// 400 rather than a silently-honoured parameter — a client written against a
+// misremembered contract fails loudly instead of quietly memorising Texas's
+// governor.
+// =============================================================================
+
+/**
+ * One version's categories, in the order the official material uses.
+ *
+ * An unknown version code is a 404, not an empty list — "this version does not
+ * exist" and "this version has no content loaded yet" are different facts.
+ */
+export async function getCivicsCategories(
+  testVersionCode: string,
+): Promise<CivicsCategory[]> {
+  return api.get<CivicsCategory[]>(
+    `/civics/versions/${encodeURIComponent(testVersionCode)}/categories`,
+  );
+}
+
+/**
+ * A page of question summaries — `number`, `prompt`, `categoryId`,
+ * `seniorEligible`, `dynamicScope`. **No answers**: those are resolved per
+ * caller and belong on the detail route.
+ *
+ * `seniorEligible` is an EXPLICIT filter with no implicit default from the
+ * caller's own `seniorExemption`. A learner claiming the 65/20 accommodation is
+ * still entitled to browse the full bank, and a list that silently shrank to 20
+ * questions with nothing saying why would be the same unexplained gap the spec
+ * rejects for `state`-scope questions.
+ */
+export async function getCivicsQuestions(params?: {
+  page?: number;
+  pageSize?: number;
+  categoryId?: string;
+  seniorEligible?: boolean;
+}): Promise<CivicsQuestionListResponse> {
+  const searchParams = new URLSearchParams();
+  if (params?.page) searchParams.set('page', String(params.page));
+  if (params?.pageSize) searchParams.set('pageSize', String(params.pageSize));
+  if (params?.categoryId) searchParams.set('categoryId', params.categoryId);
+  // `!== undefined`, not truthiness: `false` is a meaningful value to send.
+  if (params?.seniorEligible !== undefined) {
+    searchParams.set('seniorEligible', params.seniorEligible ? 'true' : 'false');
+  }
+
+  const query = searchParams.toString();
+  return api.get<CivicsQuestionListResponse>(
+    `/civics/questions${query ? `?${query}` : ''}`,
+  );
+}
+
+/**
+ * One question, with its answers already resolved for THIS caller.
+ *
+ * CALLERS MUST BRANCH ON `answerResolution`. A `state`-scope question asked by
+ * a learner with no state set resolves 200 with `answers: []`,
+ * `verifiedAt: null` and `answerResolution: 'state_required'` — never a 404,
+ * never another state's answer, never a guess.
+ */
+export async function getCivicsQuestion(
+  id: string,
+): Promise<CivicsQuestionDetail> {
+  return api.get<CivicsQuestionDetail>(`/civics/questions/${id}`);
 }

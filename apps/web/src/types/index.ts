@@ -1206,6 +1206,113 @@ export interface CivicsDynamicAnswerPage {
   totalPages: number;
 }
 
+// Civics content — the question bank the learner reads (epic #51, API #111)
+// =============================================================================
+//
+// Shaped field for field from `apps/api/src/civics/dto/`, not from memory. The
+// three DTO files there are the contract; these interfaces are the browser's
+// half of it, and nothing else in the web app may invent a field name for this
+// domain.
+//
+// THERE IS NO `testVersionCode` INPUT AND NO `stateCode` INPUT ANYWHERE BELOW.
+// Both resolution inputs are read server-side from the caller's own
+// `learner_profiles` row (`civics-content.md` §8), and the query DTO is a
+// `z.strictObject`, so an invented `?stateCode=TX` is a 400 rather than a
+// parameter something might one day start honouring.
+// =============================================================================
+
+/** How a question's answers vary. A property of the question, fixed at transcription. */
+export type CivicsDynamicScope = 'none' | 'national' | 'state';
+
+/** One `civics_categories` row — `GET /api/civics/versions/:code/categories`. */
+export interface CivicsCategory {
+  id: string;
+  /** The exam's top-level grouping, verbatim from USCIS — e.g. `AMERICAN GOVERNMENT`. */
+  section: string;
+  /** A stable slug, e.g. `principles_of_american_democracy`. */
+  code: string;
+  name: string;
+  /**
+   * Render order within the version.
+   *
+   * The official categories are NOT alphabetical (Government precedes History
+   * precedes Integrated Civics). The rows arrive already sorted by it; it is on
+   * the wire so a client that groups locally can put them back.
+   */
+  sortOrder: number;
+}
+
+/** One row of `GET /api/civics/questions`. No answers — those are per-caller. */
+export interface CivicsQuestionSummary {
+  id: string;
+  /** The official question number within its version — `1..100` on `v2008`. */
+  number: number;
+  prompt: string;
+  categoryId: string;
+  testVersionCode: string;
+  /** Membership in the 65/20 accommodation's subset. Never affects answers. */
+  seniorEligible: boolean;
+  dynamicScope: CivicsDynamicScope;
+}
+
+/** One resolved answer. Only currently-correct rows ever appear. */
+export interface CivicsAnswer {
+  id: string;
+  text: string;
+  /** Which slot this answer occupies among simultaneously accepted ones. */
+  sort: number;
+  /** The state this answer is for, or null for a national or static answer. */
+  stateCode: string | null;
+  /** When a human reviewer last confirmed this exact text. `current as of …`. */
+  verifiedAt: string;
+  /** The citation this row's text and dates come from. Public on purpose. */
+  sourceNote: string | null;
+}
+
+/**
+ * Whether the answers below are THIS caller's answers, and if not, why.
+ *
+ * `state_required` is the case a client MUST handle: a `state`-scope question
+ * asked by a learner with no `state_code` on their profile. `answers` is empty
+ * and `verifiedAt` is null. Render the question with a prompt to set their
+ * state — never an error, never a blank, and never another state's answer.
+ */
+export type CivicsAnswerResolution = 'resolved' | 'state_required';
+
+/** `GET /api/civics/questions/:id`. */
+export interface CivicsQuestionDetail extends CivicsQuestionSummary {
+  /** The question's category, inlined — one screen, one round trip. */
+  category: CivicsCategory;
+  answerResolution: CivicsAnswerResolution;
+  /**
+   * The state code the answers were resolved against, or null.
+   *
+   * Null for a `none`- or `national`-scope question AND for an unresolved one;
+   * `answerResolution` is what tells those apart. It exists so a learner who
+   * moved and forgot to update their plan can see WHICH state they are reading.
+   */
+  resolvedForStateCode: string | null;
+  /**
+   * The most recent `verifiedAt` across the resolved answers, or null.
+   *
+   * DERIVED SERVER-SIDE. "Current as of …" renders from this one field rather
+   * than from a max the browser computes, so two screens cannot disagree about
+   * how fresh the same fact is.
+   */
+  verifiedAt: string | null;
+  /** Every currently accepted answer, in slot order. Empty on `state_required`. */
+  answers: CivicsAnswer[];
+}
+
+/** `GET /api/civics/questions` — the `flat` pagination shape, as `/allowlist`. */
+export interface CivicsQuestionListResponse {
+  items: CivicsQuestionSummary[];
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+}
+
 /** `PUT /api/civics/dynamic-answers` — the request body. */
 export interface CivicsAnswerCorrection {
   questionId: string;

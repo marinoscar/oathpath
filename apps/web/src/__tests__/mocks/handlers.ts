@@ -1,6 +1,7 @@
 import { http, HttpResponse } from 'msw';
 
 import { JOURNEY_STAGES, homeResponse } from '../utils/journey-fixtures';
+import { civicsHandlers } from '../utils/civics-fixtures';
 
 // Use wildcard pattern to match relative URLs
 const API_BASE = '*/api';
@@ -265,4 +266,16 @@ export const handlers = [
   http.get(`${API_BASE}/journey/stages`, () => {
     return HttpResponse.json({ data: JOURNEY_STAGES });
   }),
+
+  // ---------------------------------------------------------------------------
+  // Civics content (epic #51)
+  //
+  // Defaulted for the same reason the two journey reads above are: `/learn` is
+  // a real destination several suites navigate to in passing, and without these
+  // it would fall through to a real fetch and render its error state for
+  // reasons that have nothing to do with the test doing the navigating.
+  //
+  // The suites that actually test `/learn` override these with `server.use`.
+  // ---------------------------------------------------------------------------
+  ...civicsHandlers(),
 ];
