@@ -7,6 +7,7 @@ import { AiSettingsService } from './ai-settings.service';
 import { AiConnectionTestService } from './ai-connection-test.service';
 import { AiUserKeyController } from './ai-user-key.controller';
 import { AiUserKeyService } from './ai-user-key.service';
+import { AiStatusService } from './ai-status.service';
 import { OpenAiProvider } from './providers/openai.provider';
 
 // =============================================================================
@@ -66,13 +67,14 @@ import { OpenAiProvider } from './providers/openai.provider';
     // already owns.
     AiConnectionTestService,
     AiUserKeyService,
+    AiStatusService,
     OpenAiProvider,
   ],
   // AiConnectionTestService is deliberately NOT exported: running an outbound
   // call on the organisation's key is an admin action reached through this
   // module's controller, not a service other features should be able to
   // invoke. Same posture as EmailTestSendService.
-  exports: [AiSettingsService, OpenAiProvider],
+  exports: [AiSettingsService, AiStatusService, OpenAiProvider],
 })
 export class AiModule {
   /**
@@ -89,7 +91,14 @@ export class AiModule {
    *
    * The module is the one place that already knows about both.
    */
-  constructor(settings: AiSettingsService, openai: OpenAiProvider) {
+  constructor(
+    settings: AiSettingsService,
+    openai: OpenAiProvider,
+    status: AiStatusService,
+  ) {
     settings.onSettingsChanged(() => openai.invalidateCatalogCache());
+    // The gate's system half. An admin who has just bound the last model
+    // expects the app to become usable immediately, not after a TTL.
+    settings.onSettingsChanged(() => status.invalidate());
   }
 }

@@ -5,6 +5,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 
 import { AiUserKeyController } from './ai-user-key.controller';
 import { AiUserKeyService } from './ai-user-key.service';
+import { AiStatusService } from './ai-status.service';
 import {
   AI_USER_KEY_STATUS_CARRIES_NO_SECRET,
   updateAiUserKeySchema,
@@ -80,8 +81,9 @@ describe('AiUserKeyController — no route accepts a user id', () => {
 
   it('takes the user id from @CurrentUser and nowhere else', () => {
     const currentUserUses = CONTROLLER_SOURCE.match(/@CurrentUser\('id'\)/g);
-    // One per route: GET, PUT, DELETE, POST /test.
-    expect(currentUserUses).toHaveLength(4);
+    // One per route: GET /status, GET /key, PUT /key, DELETE /key,
+    // POST /key/test.
+    expect(currentUserUses).toHaveLength(5);
   });
 
   it('never reaches CredentialsService directly', () => {
@@ -100,6 +102,7 @@ describe('AiUserKeyController', () => {
     remove: jest.Mock;
     test: jest.Mock;
   };
+  let status: { describe: jest.Mock };
 
   beforeEach(async () => {
     service = {
@@ -108,11 +111,17 @@ describe('AiUserKeyController', () => {
       remove: jest.fn().mockResolvedValue(undefined),
       test: jest.fn().mockResolvedValue({ success: true }),
     };
+    status = {
+      describe: jest
+        .fn()
+        .mockResolvedValue({ userKeyConfigured: true, systemReady: true }),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       controllers: [AiUserKeyController],
       providers: [
         { provide: AiUserKeyService, useValue: service },
+        { provide: AiStatusService, useValue: status },
         { provide: PatService, useValue: { validateToken: jest.fn() } },
       ],
     }).compile();
@@ -121,11 +130,13 @@ describe('AiUserKeyController', () => {
   });
 
   it('passes only the authenticated caller to every operation', async () => {
+    await controller.getStatus(ALICE);
     await controller.getKey(ALICE);
     await controller.setKey({ apiKey: 'sk-x' } as never, ALICE);
     await controller.deleteKey(ALICE);
     await controller.testKey(ALICE);
 
+    expect(status.describe).toHaveBeenCalledWith(ALICE);
     expect(service.describe).toHaveBeenCalledWith(ALICE);
     expect(service.set).toHaveBeenCalledWith(ALICE, 'sk-x');
     expect(service.remove).toHaveBeenCalledWith(ALICE);
@@ -146,7 +157,7 @@ describe('AiUserKeyController', () => {
   });
 
   describe('gating', () => {
-    it.each(['getKey', 'setKey', 'deleteKey', 'testKey'] as const)(
+    it.each(['getStatus', 'getKey', 'setKey', 'deleteKey', 'testKey'] as const)(
       '%s declares NO permissions',
       (method) => {
         // Every authenticated user owns their own credentials. Gating these
