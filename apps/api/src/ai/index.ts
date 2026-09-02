@@ -19,6 +19,13 @@
 // =============================================================================
 
 export { BaseAiProvider } from './base-ai.provider';
+export { OpenAiProvider } from './providers/openai.provider';
+export {
+  classifyModel,
+  filterCatalog,
+  parseGeneration,
+  passesGenerationFloor,
+} from './providers/model-classifier';
 export {
   AI_SYSTEM_CREDENTIAL_LABEL,
   AI_SYSTEM_CREDENTIAL_NAME,
@@ -63,3 +70,4 @@ export type {
   AiCapabilitySet,
   AiProvider,
 } from './providers/ai-provider.interface';
+export type { CatalogFilter } from './providers/model-classifier';
