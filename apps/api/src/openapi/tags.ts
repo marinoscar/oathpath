@@ -135,6 +135,22 @@ export const TAG_GROUPS: OpenApiTagGroup[] = [
     ],
   },
   {
+    name: 'Journey',
+    tags: [
+      {
+        name: 'Journey',
+        description:
+          "The learner's own path to readiness: their profile (which civics test applies, " +
+          'which state, when the interview is, what the daily goal is), the home screen\'s ' +
+          'deterministic next action, and the eight-stage registry the UI renders progress ' +
+          'against. Every route here resolves the learner from the authenticated session and ' +
+          '**takes no user id** — nobody, administrators included, can read or write another ' +
+          "learner's profile through this API. No permission gates any of it, because every " +
+          'signed-in user owns their own journey.',
+      },
+    ],
+  },
+  {
     name: 'Storage',
     tags: [
       {
