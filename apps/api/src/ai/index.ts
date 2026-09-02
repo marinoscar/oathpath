@@ -66,6 +66,12 @@ export type {
   AiSettingsAdminView,
 } from './ai-settings.service';
 export { aiSettingsResponseSchema } from './dto/ai-settings-response.dto';
+export {
+  aiModelCatalogResponseSchema,
+  aiModelRoleSchema,
+  aiModelSchema,
+} from './dto/ai-model-catalog.dto';
+export type { AiModelCatalogResponse } from './dto/ai-model-catalog.dto';
 export { updateAiSettingsSchema } from './dto/update-ai-settings.dto';
 export type { AiSettingsResponse } from './dto/ai-settings-response.dto';
 export type { UpdateAiSettingsInput } from './dto/update-ai-settings.dto';

@@ -2,6 +2,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 
 import { AiSettingsController } from './ai-settings.controller';
 import { AiSettingsService } from './ai-settings.service';
+import { OpenAiProvider } from './providers/openai.provider';
 import {
   AI_SETTINGS_RESPONSE_CARRIES_NO_SECRET,
   aiSettingsResponseSchema,
@@ -25,18 +26,28 @@ const USER_ID = '11111111-1111-4111-8111-111111111111';
 
 describe('AiSettingsController', () => {
   let controller: AiSettingsController;
-  let service: { describeForAdmin: jest.Mock; update: jest.Mock };
+  let service: {
+    describeForAdmin: jest.Mock;
+    update: jest.Mock;
+    get: jest.Mock;
+    describeCatalog: jest.Mock;
+  };
+  let openai: { supports: jest.Mock; listModels: jest.Mock };
 
   beforeEach(async () => {
     service = {
       describeForAdmin: jest.fn().mockResolvedValue({ provider: null }),
       update: jest.fn().mockResolvedValue({ provider: 'openai' }),
+      get: jest.fn().mockResolvedValue({ provider: 'openai' }),
+      describeCatalog: jest.fn().mockResolvedValue({ models: [], roles: [] }),
     };
+    openai = { supports: jest.fn(() => true), listModels: jest.fn() };
 
     const module: TestingModule = await Test.createTestingModule({
       controllers: [AiSettingsController],
       providers: [
         { provide: AiSettingsService, useValue: service },
+        { provide: OpenAiProvider, useValue: openai },
         // Not exercised: these methods are called directly, never through
         // `JwtAuthGuard` — which `@Auth()` attaches at the route level and
         // which Nest's DI graph still resolves at module-compile time, since
@@ -75,6 +86,110 @@ describe('AiSettingsController', () => {
       await controller.replaceSettings({} as never, USER_ID, 'not-a-number');
 
       expect(service.update).toHaveBeenCalledWith({}, USER_ID, undefined);
+    });
+  });
+
+  describe('GET /models query parameters', () => {
+    it('resolves a role key to the capability family it needs', async () => {
+      // The web never has to know the role -> family mapping.
+      await controller.listModels(undefined, 'embed', undefined);
+
+      expect(service.describeCatalog).toHaveBeenCalledWith(
+        openai,
+        expect.objectContaining({ family: 'embedding' }),
+      );
+    });
+
+    it('accepts a family directly when no role is given', async () => {
+      await controller.listModels(undefined, undefined, 'tts');
+
+      expect(service.describeCatalog).toHaveBeenCalledWith(
+        openai,
+        expect.objectContaining({ family: 'tts' }),
+      );
+    });
+
+    it('lets the role win over an explicit family', async () => {
+      await controller.listModels(undefined, 'grader', 'tts');
+
+      expect(service.describeCatalog).toHaveBeenCalledWith(
+        openai,
+        expect.objectContaining({ family: 'text' }),
+      );
+    });
+
+    it('IGNORES an unknown role rather than rejecting it', async () => {
+      // A stale client asking about a removed role should see a full list, not
+      // an error page.
+      await controller.listModels(undefined, 'role-that-was-removed', undefined);
+
+      expect(service.describeCatalog).toHaveBeenCalledWith(
+        openai,
+        expect.objectContaining({ family: undefined }),
+      );
+    });
+
+    it('ignores an unknown family too', async () => {
+      await controller.listModels(undefined, undefined, 'not-a-family');
+
+      expect(service.describeCatalog).toHaveBeenCalledWith(
+        openai,
+        expect.objectContaining({ family: undefined }),
+      );
+    });
+
+    it('engages show-all only for the literal string "true"', async () => {
+      // A bare Boolean(showAll) would make `?showAll=false` engage the hatch,
+      // which is the opposite of what it says.
+      await controller.listModels('true', undefined, undefined);
+      expect(service.describeCatalog).toHaveBeenLastCalledWith(
+        openai,
+        expect.objectContaining({ showAll: true }),
+      );
+
+      await controller.listModels('false', undefined, undefined);
+      expect(service.describeCatalog).toHaveBeenLastCalledWith(
+        openai,
+        expect.objectContaining({ showAll: false }),
+      );
+
+      await controller.listModels(undefined, undefined, undefined);
+      expect(service.describeCatalog).toHaveBeenLastCalledWith(
+        openai,
+        expect.objectContaining({ showAll: false }),
+      );
+    });
+
+    it('passes null for the provider when none is selected', async () => {
+      service.get.mockResolvedValue({ provider: null });
+
+      await controller.listModels(undefined, undefined, undefined);
+
+      expect(service.describeCatalog).toHaveBeenCalledWith(
+        null,
+        expect.anything(),
+      );
+    });
+
+    it('passes null rather than failing when the settings row is corrupt', async () => {
+      // The admin page is where a corrupt row gets repaired.
+      service.get.mockRejectedValue(new Error('invalid at: provider'));
+
+      await expect(
+        controller.listModels(undefined, undefined, undefined),
+      ).resolves.toBeDefined();
+      expect(service.describeCatalog).toHaveBeenCalledWith(
+        null,
+        expect.anything(),
+      );
+    });
+
+    it('reads on system_settings:read, the same gate as the settings GET', () => {
+      const permissions = Reflect.getMetadata(
+        PERMISSIONS_KEY,
+        AiSettingsController.prototype.listModels,
+      );
+      expect(permissions).toEqual([PERMISSIONS.SYSTEM_SETTINGS_READ]);
     });
   });
 
