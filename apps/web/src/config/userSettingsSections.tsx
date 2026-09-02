@@ -20,6 +20,7 @@
  */
 
 import PersonIcon from '@mui/icons-material/Person';
+import FlagIcon from '@mui/icons-material/Flag';
 import PaletteIcon from '@mui/icons-material/Palette';
 import NotificationsIcon from '@mui/icons-material/Notifications';
 import VpnKeyIcon from '@mui/icons-material/VpnKey';
@@ -48,6 +49,36 @@ export const USER_SETTINGS_SECTIONS: SettingsSectionDef[] = [
   {
     label: 'Account',
     cards: [
+      {
+        // Issue #77, epic #50. The ongoing home for the six answers
+        // `/setup/journey` (#72) collects once — every one of which changes
+        // over a naturalization case: an interview is scheduled or moved, a
+        // learner moves state, a daily goal turns out to be too ambitious, the
+        // 65/20 accommodation starts applying after a birthday.
+        //
+        // A REGISTRY CARD PLUS A ROUTE, never a tab on an existing settings
+        // page (CLAUDE.md's Settings UI Pattern, rule 2): this is its own
+        // destination — a reachability question — and it is not a second view
+        // of anything else's content.
+        //
+        // Under `Account` rather than `Security`: `Security` holds long-lived
+        // CREDENTIALS, for the reason that group's own note gives, and this
+        // page holds no credential at all. It is the learner's own answers
+        // about their situation — the same kind of per-account preference
+        // Profile, Appearance and Notifications are — so it belongs where they
+        // are. It leads the group because it is the one card here a learner
+        // has a real reason to come back to: an interview date moves.
+        //
+        // NO `permission`, like every card in this file.
+        // `PUT /api/journey/profile` is `@Auth()` with no permissions and
+        // resolves the caller from the token, so there is no string to mirror
+        // — and inventing one would gate a learner out of their own plan.
+        title: 'Your plan',
+        description:
+          'Your filing date, interview date, state, and how much you want to study each day.',
+        Icon: FlagIcon,
+        path: '/settings/journey',
+      },
       {
         title: 'Profile',
         description: 'Your display name and profile image, and the email you signed in with.',
