@@ -104,17 +104,30 @@ record of what a later reader should not assume was verified:
    environment it was authored in had no Docker daemon, so nobody has run the
    walk against the compose stack.
 2. **The civics content is not human-verified.** `uscis.gov` was unreachable
-   when the content files were written, so `civics-2008.json` ships as an
-   `UNVERIFIED_MODEL_DRAFT` — every officeholder answer is a
-   `[DRAFT PLACEHOLDER]` string rather than a name — and `civics-2025.json`
-   ships `AWAITING_SOURCE` with zero questions. The loader refuses to load
-   either without `CIVICS_ALLOW_UNVERIFIED_CONTENT=true`, and refuses
-   outright under `NODE_ENV=production`, so this cannot reach a learner by
-   accident. Closing it needs a human with the official USCIS PDFs; see
-   [`docs/runbooks/updating-civics-content.md`](docs/runbooks/updating-civics-content.md).
+   when the content files were originally written, so `civics-2008.json`
+   ships as an `UNVERIFIED_MODEL_DRAFT` — every officeholder answer is a
+   `[DRAFT PLACEHOLDER]` string rather than a name, and it was never
+   transcribed from the official PDF at all. Issue #212 (2026-09-02) later
+   closed the gap on `civics-2025.json` specifically: it now holds all 128
+   questions, transcribed from the downloaded, hashed official USCIS source
+   (M-1778 (09/25)) rather than shipping empty, but its status is still
+   `UNVERIFIED_MODEL_DRAFT` — a real source document was read, but no human
+   has yet checked the transcription page by page. The loader refuses to
+   load either file without `CIVICS_ALLOW_UNVERIFIED_CONTENT=true`, and
+   refuses outright under `NODE_ENV=production`, so this cannot reach a
+   learner by accident. Closing 2008 needs a human with the official USCIS
+   PDF from scratch; closing 2025 needs a human verification pass against the
+   PDF already on file; see
+   [`docs/runbooks/updating-civics-content.md`](docs/runbooks/updating-civics-content.md)
+   §5.
 
 Both were closed as a deliberate call rather than an oversight, and #101 and
-#132 can be reopened if either is picked up.
+#132 can be reopened if either is picked up (#212 has since narrowed #132 to
+"verify, don't transcribe" for the 2025 file specifically). Nothing
+downstream should read E2's `done` as meaning the civics content has been
+verified against the official source — E4's grader and E8's interview engine
+ground their judgments in these rows, so that distinction matters to them
+specifically.
 
 <sup>‡</sup> **E3 and E4 have every child issue implemented and merged, and are
 `in progress` rather than `done` for one reason: nobody has run their
@@ -137,13 +150,11 @@ Two smaller facts a later reader should not have to discover:
    substitutes for the OpenAI provider rather than adding a provider kind, so
    `AI_PROVIDER_KINDS` gains nothing an admin could select.
 
-E4's grader and tutor also inherit E2's content caveat above in full: they
-ground every judgement and every explanation in `civics_answers` rows, so
-"grounded in the database" is exactly as true as the database is.
- Nothing downstream should read
-E2's `done` as meaning the civics content has been verified against the
-official source — E4's grader and E8's interview engine ground their judgments
-in these rows, so that distinction matters to them specifically.
+E4's grader and tutor inherit E2's content caveat above in full, and #212 does
+not lift it for them: they ground every judgement and every explanation in
+`civics_answers` rows, so "grounded in the database" is exactly as true as the
+database is — a transcription no human has checked page by page is still a
+transcription no human has checked.
 
 ---
 
@@ -516,9 +527,11 @@ block implying it was sourced, each content file now carries
 unconditionally under `NODE_ENV=production` regardless of that flag; the
 validator's `--strict` mode is the matching release gate. This turns the
 human-verification rule from a sentence in a spec into something the system
-enforces. The 2025 bank ships empty rather than fabricated: a bank of
+enforces. The 2025 bank shipped empty rather than fabricated: a bank of
 plausible-but-wrong questions would look complete and send a learner into a
-real citizenship interview having studied the wrong material.
+real citizenship interview having studied the wrong material. (The
+transcription gap this paragraph describes was later closed — see the
+2025-bank entry below.)
 
 **2026-09-02 — Both civics test versions ship.** Applicants who filed Form
 N-400 on or after 20 Oct 2025 take the 2025 test (128 questions in the bank,
@@ -527,6 +540,30 @@ the bank, 10 asked, 6 to pass). E1's `civics_test_versions` table and E2's
 content both ship both versions from the first migration — shipping only one
 would strand a real population of learners, and E1 already asks the filing
 date needed to pick the right one.
+
+**2026-09-02 — `civics-2025.json`'s transcription gap is closed (issue
+#212).** The file no longer ships `AWAITING_SOURCE` with zero questions: it
+now holds all 128 questions across the 8 real USCIS categories — "AMERICAN
+GOVERNMENT", "AMERICAN HISTORY", "SYMBOLS AND HOLIDAYS" at the section level,
+not the 3-category "Integrated Civics" scaffold carried over from the 2008
+test's structure — transcribed from the downloaded, hashed official source
+(M-1778 (09/25), "128 Civics Questions and Answers (2025 version)",
+sha256 `f280608c0fb6dc1eba344b4746a7ba52d02fe411fba30cedd4371819f0abe11c`).
+Status is `UNVERIFIED_MODEL_DRAFT`, deliberately not `HUMAN_VERIFIED` — a real
+source document was read this time, not model recall, but no human has yet
+checked the transcription page by page, which the loader still requires
+before production will serve it. Two content facts worth naming because they
+are easy to mistake for errors on review: (1) Q39 (Vice President) and Q57
+(Chief Justice) are modelled `dynamicScope: 'national'` here, a deliberate
+divergence from `civics-2008.json`'s narrower `'none'` scoping for both,
+because the 2025 source defers all four national officeholder questions to
+`uscis.gov/citizenship/testupdates`; (2) Q62's 56 per-state capital answers
+are not from the source document (which says "Answers will vary.") but are
+stable public facts filled in so the question is answerable, each with a
+`sourceNote` saying so. `npm run content:validate --workspace=api` reports 0
+structural errors; the only remaining known gap is the human-verification
+pass, which `docs/runbooks/updating-civics-content.md` §5.1 now walks
+through.
 
 **2026-09-02 — Voice is inside the MVP, not after it.** E6's readiness model
 caps a learner's score while there is no spoken-answer evidence and no
