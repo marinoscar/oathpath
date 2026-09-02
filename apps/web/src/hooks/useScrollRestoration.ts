@@ -16,7 +16,7 @@ const RESTORE_DEADLINE_MS = 1000;
  * collide with anything else the app (or a browser extension) puts in the
  * tab's storage.
  */
-const STORAGE_PREFIX = 'eab:scroll:';
+const STORAGE_PREFIX = 'oathpath:scroll:';
 
 /**
  * Restore the document's scroll position when a list-like page is returned to.

@@ -144,3 +144,8 @@ vite.config.ts.timestamp-*
 
 # Git worktrees (see CLAUDE.md: feature work happens in worktrees/<short-name>)
 worktrees/
+
+# Vitest/Playwright JSON reporter output (generated; a stale copy was
+# committed once and carried absolute paths from another machine)
+test-results.json
+test-results/

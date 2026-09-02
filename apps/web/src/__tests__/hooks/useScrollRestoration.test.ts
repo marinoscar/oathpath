@@ -10,7 +10,7 @@ import { useScrollRestoration } from '../../hooks/useScrollRestoration';
  */
 const RESTORE_DEADLINE_MS = 1000;
 
-const namespacedKey = (key: string) => `eab:scroll:${key}`;
+const namespacedKey = (key: string) => `oathpath:scroll:${key}`;
 
 /**
  * jsdom never lays out real content, so `document.documentElement.scrollHeight`
