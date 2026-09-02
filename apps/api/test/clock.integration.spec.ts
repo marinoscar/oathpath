@@ -6,15 +6,18 @@ import { createTestApp, TestContext } from './helpers/test-app.helper';
  *
  * The unit specs beside the middleware assert what `use()` does when called
  * directly. They structurally cannot catch what the *framework* does with the
- * result, and that is where the original defect lived: the middleware threw a
+ * result, and that is where the original defect lived: the middleware throws a
  * `BadRequestException`, which under the Fastify adapter reaches
  * `HttpExceptionFilter` holding a raw Node `ServerResponse` rather than a
  * Fastify reply. `response.code(...)` does not exist on it, so the filter threw
  * `TypeError`, nothing was written to the socket, and a typo'd header hung the
  * request until the client gave up -- no status, no error, no clue.
  *
- * This suite is the regression test for that. Every case asserts a real status
- * code off a real response, so a return to throwing fails loudly here instead
+ * That is fixed in the filter itself now (#183) rather than worked around
+ * here, and `middleware-exception.integration.spec.ts` covers the general
+ * case. This suite remains the regression test for the clock header
+ * specifically: every case asserts a real status code off a real response, so
+ * a regression in the filter's raw-response branch fails loudly here instead
  * of hanging.
  */
 describe('X-Test-Clock over HTTP (Fastify adapter)', () => {
@@ -52,7 +55,7 @@ describe('X-Test-Clock over HTTP (Fastify adapter)', () => {
         () =>
           reject(
             new Error(
-              'Request never produced a response — the middleware is throwing again instead of writing its own 400 (see TestClockMiddleware.reject).',
+              'Request never produced a response — HttpExceptionFilter is failing to write the middleware rejection (see #183).',
             ),
           ),
         5_000,
