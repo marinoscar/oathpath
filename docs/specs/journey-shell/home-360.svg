@@ -1,0 +1,51 @@
+<svg xmlns='http://www.w3.org/2000/svg' width='360' height='680' viewBox='0 0 360 680'>
+<rect x='0' y='0' width='360' height='680' fill='#ffffff'/>
+
+
+<rect x='0' y='0' width='360' height='52' fill='#1f2937'/>
+<text x='16' y='32' font-size='16' fill='#ffffff' font-weight='bold' font-family='Helvetica, Arial, sans-serif'>OathPath</text>
+<circle cx='336' cy='26' r='10' fill='#374151'/>
+<text x='336' y='30' font-size='10' fill='#ffffff' text-anchor='middle' font-family='Helvetica, Arial, sans-serif'>U</text>
+<circle cx='304' cy='26' r='9' fill='none' stroke='#ffffff' stroke-width='1.5'/>
+<circle cx='304' cy='22' r='1.6' fill='#ffffff'/>
+
+<rect x='20' y='76' width='120' height='24' rx='12' fill='#eaf1fd'/>
+<text x='80' y='92' font-size='11' fill='#2f6fed' text-anchor='middle' font-weight='bold' font-family='Helvetica, Arial, sans-serif'>Stage: Oriented</text>
+<rect x='20' y='124' width='320' height='150' rx='10' fill='#f3f4f6' stroke='#d1d5db'/>
+<text x='36' y='150' font-size='10' fill='#6b7280' font-family='Helvetica, Arial, sans-serif'>NEXT UP</text>
+<text x='36' y='174' font-size='16' fill='#1f2937' font-weight='bold' font-family='Helvetica, Arial, sans-serif'>
+<tspan x='36' dy='0'>12 days until your</tspan>
+<tspan x='36' dy='18'>interview</tspan>
+</text>
+<text x='36' y='216' font-size='12' fill='#4b5563' font-weight='normal' font-family='Helvetica, Arial, sans-serif'>
+<tspan x='36' dy='0'>Steady practice between now and</tspan>
+<tspan x='36' dy='18'>then matters more than a single</tspan>
+<tspan x='36' dy='18'>big push.</tspan>
+</text>
+<rect x='36' y='240' width='130' height='28' rx='6' fill='#2f6fed'/>
+<text x='101' y='258' font-size='12' fill='#ffffff' text-anchor='middle' font-family='Helvetica, Arial, sans-serif'>Go to Learn</text>
+<circle cx='80' cy='353' r='48' fill='none' stroke='#d1d5db' stroke-width='8' stroke-dasharray='4,5'/>
+<text x='80' y='351' font-size='11' fill='#6b7280' text-anchor='middle' font-family='Helvetica, Arial, sans-serif'>Not tracked</text>
+<text x='80' y='367' font-size='11' fill='#6b7280' text-anchor='middle' font-family='Helvetica, Arial, sans-serif'>yet</text>
+<text x='148' y='318' font-size='12' fill='#4b5563' font-weight='normal' font-family='Helvetica, Arial, sans-serif'>
+<tspan x='148' dy='0'>Your daily goal will show</tspan>
+<tspan x='148' dy='18'>here once practice</tspan>
+<tspan x='148' dy='18'>sessions exist.</tspan>
+</text>
+<line x1='20' y1='546' x2='340' y2='546' stroke='#d1d5db'/>
+<text x='20' y='566' font-size='10' fill='#6b7280' font-weight='normal' font-family='Helvetica, Arial, sans-serif'>
+<tspan x='20' dy='0'>OathPath is not USCIS. This is our own</tspan>
+<tspan x='20' dy='18'>assessment of your preparation — never</tspan>
+<tspan x='20' dy='18'>an official determination.</tspan>
+</text>
+<rect x='0' y='616' width='360' height='64' fill='#ffffff' stroke='#d1d5db' stroke-width='1'/>
+<rect x='6.0' y='620' width='78.0' height='40' rx='10' fill='#eaf1fd'/>
+<circle cx='45.0' cy='634' r='8' fill='none' stroke='#2f6fed' stroke-width='2'/>
+<text x='45.0' y='660' font-size='10' fill='#2f6fed' text-anchor='middle' font-family='Helvetica, Arial, sans-serif'>Home</text>
+<circle cx='135.0' cy='634' r='8' fill='none' stroke='#6b7280' stroke-width='2'/>
+<text x='135.0' y='660' font-size='10' fill='#6b7280' text-anchor='middle' font-family='Helvetica, Arial, sans-serif'>Learn</text>
+<circle cx='225.0' cy='634' r='8' fill='none' stroke='#6b7280' stroke-width='2'/>
+<text x='225.0' y='660' font-size='10' fill='#6b7280' text-anchor='middle' font-family='Helvetica, Arial, sans-serif'>Practice</text>
+<circle cx='315.0' cy='634' r='8' fill='none' stroke='#6b7280' stroke-width='2'/>
+<text x='315.0' y='660' font-size='10' fill='#6b7280' text-anchor='middle' font-family='Helvetica, Arial, sans-serif'>Progress</text>
+</svg>

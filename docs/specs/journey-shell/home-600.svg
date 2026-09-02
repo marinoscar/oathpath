@@ -1,0 +1,52 @@
+<svg xmlns='http://www.w3.org/2000/svg' width='600' height='680' viewBox='0 0 600 680'>
+<rect x='0' y='0' width='600' height='680' fill='#ffffff'/>
+
+
+<rect x='0' y='0' width='600' height='52' fill='#1f2937'/>
+<text x='16' y='32' font-size='16' fill='#ffffff' font-weight='bold' font-family='Helvetica, Arial, sans-serif'>OathPath</text>
+<circle cx='576' cy='26' r='10' fill='#374151'/>
+<text x='576' y='30' font-size='10' fill='#ffffff' text-anchor='middle' font-family='Helvetica, Arial, sans-serif'>U</text>
+<circle cx='544' cy='26' r='9' fill='none' stroke='#ffffff' stroke-width='1.5'/>
+<circle cx='544' cy='22' r='1.6' fill='#ffffff'/>
+
+<rect x='108' y='76' width='120' height='24' rx='12' fill='#eaf1fd'/>
+<text x='168' y='92' font-size='11' fill='#2f6fed' text-anchor='middle' font-weight='bold' font-family='Helvetica, Arial, sans-serif'>Stage: Oriented</text>
+<rect x='108' y='124' width='472' height='150' rx='10' fill='#f3f4f6' stroke='#d1d5db'/>
+<text x='124' y='150' font-size='10' fill='#6b7280' font-family='Helvetica, Arial, sans-serif'>NEXT UP</text>
+<text x='124' y='174' font-size='16' fill='#1f2937' font-weight='bold' font-family='Helvetica, Arial, sans-serif'>
+<tspan x='124' dy='0'>12 days until your interview</tspan>
+</text>
+<text x='124' y='198' font-size='12' fill='#4b5563' font-weight='normal' font-family='Helvetica, Arial, sans-serif'>
+<tspan x='124' dy='0'>Steady practice between now and then matters more than a</tspan>
+<tspan x='124' dy='18'>single big push.</tspan>
+</text>
+<rect x='124' y='240' width='130' height='28' rx='6' fill='#2f6fed'/>
+<text x='189' y='258' font-size='12' fill='#ffffff' text-anchor='middle' font-family='Helvetica, Arial, sans-serif'>Go to Learn</text>
+<text x='564' y='260' font-size='9' fill='#6b7280' text-anchor='end' font-family='Helvetica, Arial, sans-serif'>(shown here: the interview-countdown state — see spec for orientation / explore)</text>
+<circle cx='168' cy='353' r='48' fill='none' stroke='#d1d5db' stroke-width='8' stroke-dasharray='4,5'/>
+<text x='168' y='351' font-size='11' fill='#6b7280' text-anchor='middle' font-family='Helvetica, Arial, sans-serif'>Not tracked</text>
+<text x='168' y='367' font-size='11' fill='#6b7280' text-anchor='middle' font-family='Helvetica, Arial, sans-serif'>yet</text>
+<text x='236' y='318' font-size='12' fill='#4b5563' font-weight='normal' font-family='Helvetica, Arial, sans-serif'>
+<tspan x='236' dy='0'>Your daily goal will show here once practice</tspan>
+<tspan x='236' dy='18'>sessions exist.</tspan>
+</text>
+<line x1='108' y1='610' x2='580' y2='610' stroke='#d1d5db'/>
+<text x='108' y='630' font-size='10' fill='#6b7280' font-weight='normal' font-family='Helvetica, Arial, sans-serif'>
+<tspan x='108' dy='0'>OathPath is not USCIS. This is our own assessment of your</tspan>
+<tspan x='108' dy='18'>preparation — never an official determination.</tspan>
+</text>
+<rect x='0' y='52' width='88' height='628' fill='#ffffff' stroke='#d1d5db' stroke-width='1'/>
+<rect x='8' y='64' width='72' height='56' rx='10' fill='#eaf1fd'/>
+<circle cx='44.0' cy='88' r='9' fill='none' stroke='#2f6fed' stroke-width='2'/>
+<text x='44.0' y='110' font-size='10' fill='#2f6fed' text-anchor='middle' font-family='Helvetica, Arial, sans-serif'>Home</text>
+<circle cx='44.0' cy='172' r='9' fill='none' stroke='#6b7280' stroke-width='2'/>
+<text x='44.0' y='194' font-size='10' fill='#6b7280' text-anchor='middle' font-family='Helvetica, Arial, sans-serif'>Learn</text>
+<circle cx='44.0' cy='256' r='9' fill='none' stroke='#6b7280' stroke-width='2'/>
+<text x='44.0' y='278' font-size='10' fill='#6b7280' text-anchor='middle' font-family='Helvetica, Arial, sans-serif'>Practice</text>
+<circle cx='44.0' cy='340' r='9' fill='none' stroke='#6b7280' stroke-width='2'/>
+<text x='44.0' y='362' font-size='10' fill='#6b7280' text-anchor='middle' font-family='Helvetica, Arial, sans-serif'>Progress</text>
+<line x1='10' y1='404' x2='78' y2='404' stroke='#d1d5db' stroke-width='1'/>
+<circle cx='44.0' cy='444' r='9' fill='none' stroke='#6b7280' stroke-width='2' stroke-dasharray='2,2'/>
+<text x='44.0' y='466' font-size='9' fill='#6b7280' text-anchor='middle' font-family='Helvetica, Arial, sans-serif'>Console</text>
+<text x='44.0' y='478' font-size='8' fill='#6b7280' text-anchor='middle' font-family='Helvetica, Arial, sans-serif'>(admin only)</text>
+</svg>

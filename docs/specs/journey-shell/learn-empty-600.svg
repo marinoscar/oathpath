@@ -1,0 +1,41 @@
+<svg xmlns='http://www.w3.org/2000/svg' width='600' height='680' viewBox='0 0 600 680'>
+<rect x='0' y='0' width='600' height='680' fill='#ffffff'/>
+
+
+<rect x='0' y='0' width='600' height='52' fill='#1f2937'/>
+<text x='16' y='32' font-size='16' fill='#ffffff' font-weight='bold' font-family='Helvetica, Arial, sans-serif'>OathPath</text>
+<circle cx='576' cy='26' r='10' fill='#374151'/>
+<text x='576' y='30' font-size='10' fill='#ffffff' text-anchor='middle' font-family='Helvetica, Arial, sans-serif'>U</text>
+<circle cx='544' cy='26' r='9' fill='none' stroke='#ffffff' stroke-width='1.5'/>
+<circle cx='544' cy='22' r='1.6' fill='#ffffff'/>
+
+<text x='108' y='90' font-size='22' fill='#1f2937' font-weight='bold' font-family='Helvetica, Arial, sans-serif'>
+<tspan x='108' dy='0'>Learn</tspan>
+</text>
+<rect x='108' y='128' width='472' height='2' fill='#d1d5db'/>
+<text x='108' y='156' font-size='13' fill='#4b5563' font-weight='normal' font-family='Helvetica, Arial, sans-serif'>
+<tspan x='108' dy='0'>This is where you'll work through the official civics</tspan>
+<tspan x='108' dy='18'>questions for your test version, one at a time, with a clear</tspan>
+<tspan x='108' dy='18'>explanation whenever one doesn't click.</tspan>
+</text>
+<text x='108' y='232' font-size='13' fill='#4b5563' font-weight='normal' font-family='Helvetica, Arial, sans-serif'>
+<tspan x='108' dy='0'>There isn't any content here yet. For now, check Home for</tspan>
+<tspan x='108' dy='18'>what to do next, or revisit your setup answers.</tspan>
+</text>
+<rect x='108' y='292' width='140' height='32' rx='7' fill='#ffffff' stroke='#2f6fed' stroke-width='1.5'/>
+<text x='178' y='313' font-size='12' fill='#2f6fed' text-anchor='middle' font-family='Helvetica, Arial, sans-serif'>Back to Home</text>
+<rect x='0' y='52' width='88' height='628' fill='#ffffff' stroke='#d1d5db' stroke-width='1'/>
+<circle cx='44.0' cy='88' r='9' fill='none' stroke='#6b7280' stroke-width='2'/>
+<text x='44.0' y='110' font-size='10' fill='#6b7280' text-anchor='middle' font-family='Helvetica, Arial, sans-serif'>Home</text>
+<rect x='8' y='148' width='72' height='56' rx='10' fill='#eaf1fd'/>
+<circle cx='44.0' cy='172' r='9' fill='none' stroke='#2f6fed' stroke-width='2'/>
+<text x='44.0' y='194' font-size='10' fill='#2f6fed' text-anchor='middle' font-family='Helvetica, Arial, sans-serif'>Learn</text>
+<circle cx='44.0' cy='256' r='9' fill='none' stroke='#6b7280' stroke-width='2'/>
+<text x='44.0' y='278' font-size='10' fill='#6b7280' text-anchor='middle' font-family='Helvetica, Arial, sans-serif'>Practice</text>
+<circle cx='44.0' cy='340' r='9' fill='none' stroke='#6b7280' stroke-width='2'/>
+<text x='44.0' y='362' font-size='10' fill='#6b7280' text-anchor='middle' font-family='Helvetica, Arial, sans-serif'>Progress</text>
+<line x1='10' y1='404' x2='78' y2='404' stroke='#d1d5db' stroke-width='1'/>
+<circle cx='44.0' cy='444' r='9' fill='none' stroke='#6b7280' stroke-width='2' stroke-dasharray='2,2'/>
+<text x='44.0' y='466' font-size='9' fill='#6b7280' text-anchor='middle' font-family='Helvetica, Arial, sans-serif'>Console</text>
+<text x='44.0' y='478' font-size='8' fill='#6b7280' text-anchor='middle' font-family='Helvetica, Arial, sans-serif'>(admin only)</text>
+</svg>
