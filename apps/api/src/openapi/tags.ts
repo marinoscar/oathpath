@@ -148,6 +148,17 @@ export const TAG_GROUPS: OpenApiTagGroup[] = [
           "learner's profile through this API. No permission gates any of it, because every " +
           'signed-in user owns their own journey.',
       },
+      {
+        name: 'Civics',
+        description:
+          'The versioned USCIS civics question bank a learner studies from: the two test ' +
+          'versions, their categories, and the questions — each served with the answers that ' +
+          'are correct **now** and **for this caller**, since some answers depend on which ' +
+          "state they live in. Resolution reads the caller's own state from their learner " +
+          'profile; **no route takes a state or a user id**, so nobody can be served another ' +
+          "learner's answers. Read-only, and no permission gates it: this is the core study " +
+          'material every signed-in learner needs.',
+      },
     ],
   },
   {

@@ -14,6 +14,7 @@ import { SettingsModule } from './settings/settings.module';
 import { HealthModule } from './health/health.module';
 import { AllowlistModule } from './allowlist/allowlist.module';
 import { JourneyModule } from './journey/journey.module';
+import { CivicsModule } from './civics/civics.module';
 import { DeviceAuthModule } from './device-auth/device-auth.module';
 import { StorageModule } from './storage/storage.module';
 import { PatModule } from './pat/pat.module';
@@ -70,6 +71,12 @@ import configuration from './config/configuration';
     // `@CurrentUser('id')` — no new permission string, and no route that
     // accepts a user id.
     JourneyModule,
+    // The civics question bank's read API (#111, epic #51): versions,
+    // categories, a paginated question list, and one question with its
+    // answers resolved against the caller's own state. Every route is
+    // `@Auth()` with no permissions — the same reasoning JourneyModule
+    // records — and no route accepts a user id or a state code.
+    CivicsModule,
     DeviceAuthModule,
     StorageModule,
     PatModule,
