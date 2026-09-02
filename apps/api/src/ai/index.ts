@@ -21,6 +21,7 @@
 export { AiModule } from './ai.module';
 export { AiSettingsController } from './ai-settings.controller';
 export { AiSettingsService } from './ai-settings.service';
+// AiConnectionTestService is deliberately NOT exported — see ai.module.ts.
 export { BaseAiProvider } from './base-ai.provider';
 export { OpenAiProvider } from './providers/openai.provider';
 export {
@@ -72,6 +73,11 @@ export {
   aiModelSchema,
 } from './dto/ai-model-catalog.dto';
 export type { AiModelCatalogResponse } from './dto/ai-model-catalog.dto';
+export {
+  aiRoleReachabilitySchema,
+  aiTestResultSchema,
+} from './dto/ai-test-result.dto';
+export type { AiTestResult } from './dto/ai-test-result.dto';
 export { updateAiSettingsSchema } from './dto/update-ai-settings.dto';
 export type { AiSettingsResponse } from './dto/ai-settings-response.dto';
 export type { UpdateAiSettingsInput } from './dto/update-ai-settings.dto';
