@@ -1029,3 +1029,93 @@ export interface UpdateJourneyProfileInput {
   explanationLanguage?: string;
   timezone?: string;
 }
+
+// =============================================================================
+// Journey — the home screen payload and the stage registry (issue #74, epic #50)
+// =============================================================================
+//
+// Mirrors `apps/api/src/journey/dto/journey-home.dto.ts` and
+// `dto/journey-stage.dto.ts` field for field. Two absences below are the whole
+// point of the design and are easy to "helpfully" undo:
+//
+//   1. THERE IS NO `minutesToday`, AND NO CLIENT-SIDE DEFAULT FOR ONE. Nothing
+//      measures practice time in E1, so the ring has nothing to draw. A `0`
+//      invented here would be indistinguishable, to the learner reading it,
+//      from a real zero — `docs/specs/journey-shell.md` §10 rules exactly that
+//      out. `dailyGoal.tracked` is the honest flag instead, and it is `false`
+//      for the whole of this release.
+//
+//   2. THERE IS NO LOCAL STAGE LIST. `JourneyStage` is the shape of one item
+//      the server sends, never an array the web declares. §6 keeps the registry
+//      in the API for the same reason `notification-events.ts` and
+//      `ai-model-roles.ts` do: a second copy is detection instead of
+//      prevention. `JourneyStageKey` above is a TYPE, which carries no copy and
+//      no ordering — the eight labels and their order come down the wire.
+// =============================================================================
+
+/**
+ * One item from `GET /api/journey/stages`.
+ *
+ * `key` is deliberately a plain `string`, not `JourneyStageKey`: this is
+ * whatever the server declares, and a client union that disagreed with it would
+ * be the duplicate registry §6 rejects, wearing a type annotation.
+ */
+export interface JourneyStage {
+  key: string;
+  label: string;
+  description: string;
+}
+
+/**
+ * Which of the three E1 recommendations the server picked.
+ *
+ * A CLOSED UNION, mirroring `NEXT_ACTION_KINDS` on the server, and it exists
+ * for presentation only — the title, reason and path all arrive already
+ * written. A component branching on `kind` to choose COPY would be a second
+ * declaration of what the recommender already decided, and the two would
+ * disagree the first time the server's wording is edited.
+ */
+export type NextActionKind = 'orientation' | 'interview_countdown' | 'explore';
+
+/** The one recommendation Home renders — `journey-shell.md` §4. */
+export interface NextAction {
+  kind: NextActionKind;
+  /** Server-written. Rendered verbatim. */
+  title: string;
+  /** Server-written. Rendered verbatim. */
+  reason: string;
+  /**
+   * One of the recommender's own hardcoded paths — never assembled from user
+   * input, and never a route that redirects to `/` (§4.1).
+   */
+  path: string;
+}
+
+/** The daily-goal widget's data. See the `minutesToday` note above. */
+export interface DailyGoal {
+  /** The learner's own target, which they chose. A real fact. */
+  minutes: number;
+  /** Whether anything is being measured against it. `false` throughout E1. */
+  tracked: boolean;
+}
+
+/** `GET /api/journey/home`. */
+export interface JourneyHome {
+  stage: JourneyStageKey;
+  /** `YYYY-MM-DD`, or null when no interview is booked. */
+  interviewDate: string | null;
+  /**
+   * Whole CALENDAR days to the interview, in the learner's own timezone;
+   * negative once past, null when unset.
+   *
+   * SERVER-COMPUTED, and never recomputed in the browser: a client dividing a
+   * timestamp difference by 86 400 000 gets the wrong answer across a DST
+   * boundary, and "13 days" versus "14 days" is not a rounding detail to
+   * somebody counting down to their naturalization interview (§4.4, §9.1).
+   */
+  daysUntilInterview: number | null;
+  /** Its own fact, not derived from a negative count. Today is NOT past. */
+  interviewPast: boolean;
+  dailyGoal: DailyGoal;
+  nextAction: NextAction;
+}

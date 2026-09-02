@@ -228,6 +228,8 @@ import type {
   UnreadCountResponse,
   JourneyProfileResponse,
   UpdateJourneyProfileInput,
+  JourneyHome,
+  JourneyStage,
 } from '../types';
 
 // Allowlist API
@@ -737,4 +739,39 @@ export async function updateJourneyProfile(
   input: UpdateJourneyProfileInput,
 ): Promise<JourneyProfileResponse> {
   return api.put<JourneyProfileResponse>('/journey/profile', input);
+}
+
+/**
+ * The home screen's own payload — `GET /api/journey/home` (#65, #74).
+ *
+ * SEPARATE FROM `getJourneyProfile`, and not merged into it. The two answer
+ * different questions: the profile is the learner's stored answers (what the
+ * orientation form edits), while this is the server's *reading* of them — the
+ * recommendation, the countdown and the goal placeholder — recomputed against
+ * the server's clock on every load. `journey-shell.md` §6.1 keeps them apart
+ * for the reason `docs/specs/ai-settings.md` §5 keeps `userKeyConfigured` and
+ * `systemReady` apart: different audiences, different cache lifetimes.
+ *
+ * `daysUntilInterview` ARRIVES COMPUTED. Nothing downstream may re-derive it
+ * from `interviewDate` — see the field's own note in `types/index.ts`.
+ */
+export async function getJourneyHome(): Promise<JourneyHome> {
+  return api.get<JourneyHome>('/journey/home');
+}
+
+/**
+ * The stage registry — `GET /api/journey/stages` (#65, #74).
+ *
+ * THE EIGHT STAGES ARE NEVER DECLARED IN THE WEB APP. This function is the
+ * only way the browser learns what stages exist, what they are called and what
+ * order they come in; there is deliberately no array in `config/` to fall back
+ * on, because a fallback IS the duplicate registry `journey-shell.md` §6
+ * rejects — copies can disagree in a working tree, in a branch, and in any
+ * build where the agreement test does not run.
+ *
+ * `@Auth()` with no permission: every learner needs it to render their own
+ * stage.
+ */
+export async function getJourneyStages(): Promise<JourneyStage[]> {
+  return api.get<JourneyStage[]>('/journey/stages');
 }
