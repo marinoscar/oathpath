@@ -42,6 +42,9 @@ const UserAppearancePage = lazy(() => import("./pages/UserAppearancePage"));
 const UserNotificationsPage = lazy(
   () => import("./pages/UserNotificationsPage"),
 );
+// Issue #77, epic #50 — the ongoing home for the six orientation answers,
+// rendering the SAME `JourneyProfileForm` `/setup/journey` above renders.
+const UserJourneyPage = lazy(() => import("./pages/UserJourneyPage"));
 const UserTokensPage = lazy(() => import("./pages/UserTokensPage"));
 // Issue #42, epic #25 — the user's own OpenAI key and what it has been used for.
 const UserAiKeyPage = lazy(() => import("./pages/UserAiKeyPage"));
@@ -235,6 +238,22 @@ function AppRoutes() {
                         <Route
                           path="/settings/notifications"
                           element={<UserNotificationsPage />}
+                        />
+                        {/* Ungated like its siblings (#77, epic #50). It edits the
+                        caller's OWN journey profile through
+                        `PUT /api/journey/profile`, which is `@Auth()` with no
+                        permissions and resolves the learner from the token — so
+                        the `Your plan` card declares no `permission` either, and
+                        there is no string a gate here could honestly mirror.
+
+                        INSIDE `RequireOrientation` with the rest of the shell,
+                        unlike `/setup/journey` which sits outside it. That is
+                        correct rather than an oversight: a learner who has not
+                        completed orientation is sent to the setup screen, and
+                        one who has is the only person this page is for. */}
+                        <Route
+                          path="/settings/journey"
+                          element={<UserJourneyPage />}
                         />
                         <Route
                           path="/settings/tokens"
