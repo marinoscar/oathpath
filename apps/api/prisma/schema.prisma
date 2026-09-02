@@ -720,6 +720,13 @@ model AiUsageEvent {
   // `Notification.user`.
   user User @relation("UserAiUsageEvents", fields: [userId], references: [id], onDelete: Cascade)
 
+  // Back-relation for `PracticeAttempt.aiUsageEventId` (issue #110, epic #53)
+  // — the grading calls this usage event recorded. No `onDelete` to set here:
+  // the FK and its `SetNull` behavior live on `PracticeAttempt`, the owning
+  // side; deleting a usage row nulls out the attempts that pointed to it
+  // rather than deleting them, matching that column's own comment.
+  practiceAttempts PracticeAttempt[] @relation("AiUsageEventPracticeAttempts")
+
   // The one query the UI actually makes: this user's events, newest first,
   // over a time window (#37's GET /api/ai/usage).
   //
@@ -1245,6 +1252,77 @@ enum PracticeGradingMethod {
   ai
 }
 
+// -----------------------------------------------------------------------------
+// AI Grading on `PracticeAttempt` (issue #110, epic #53)
+// -----------------------------------------------------------------------------
+// `gradingMethod: ai` (above) says an AI call happened. It does not say what
+// the AI found. When an `ai`-graded response comes back `incorrect`, this
+// enum is the grader's classification of WHY — the single fact
+// `outcome`/`gradingMethod` cannot express, and the one PRD.md's readiness
+// model and VISION.md's "we should never assume difficulty answering a
+// question means a user is incapable" both need: a learner who has never
+// heard of the fact and a learner who knows it cold but cannot get the
+// English out are not the same failure, and treating them the same is
+// exactly the false discouragement VISION.md warns against.
+//
+//   - `not_known` — the response is unrelated to any accepted answer. The
+//     learner has never learned the fact; nothing in the response gestures
+//     at it.
+//   - `not_recalled` — the learner produced the wrong member of a set they
+//     clearly recognise: a real branch of government when a different one
+//     was asked for, a real former officeholder when the current one was
+//     asked for. The shape of the answer is right; the specific fact
+//     recalled is wrong.
+//   - `expression` — THE CAUSE THIS PRODUCT EXISTS FOR. VISION.md: users
+//     "know the answer but struggle to say it confidently" and "speak
+//     English as a second language" — this is that user, captured as data.
+//     The response demonstrably MEANS an accepted answer, but the English is
+//     broken, partial, or mis-formed. Grading this as `not_known` would be
+//     the exact harm VISION.md names; this value is what lets the product
+//     tell the two apart and respond to them differently (more English
+//     practice, not more civics content).
+//   - `misheard` — the response answers a different question than the one
+//     asked, consistent with mishearing the prompt rather than not knowing
+//     the material. DECLARED NOW, PRODUCED STARTING IN E9: distinguishing
+//     "misheard" from "not_known" needs the transcription confidence E9's
+//     spoken-answer pipeline introduces, which does not exist yet. E3's
+//     grader will simply never emit it — see the two-values-now note below.
+//   - `nervous` — a self-correcting ramble, a false start, or an abandoned
+//     attempt that contains the right idea before the learner talks
+//     themselves out of it. DECLARED NOW, PRODUCED STARTING IN E8: telling
+//     this apart from `not_recalled` needs the response-timing signal E8's
+//     mock-interview engine introduces, which does not exist yet.
+//   - `unknown` — the grader ran and could not confidently classify the
+//     failure into any of the five causes above. This is the HONEST
+//     DEFAULT, not a leftover bucket: forcing a model to always pick one of
+//     the five manufactures a confident-sounding diagnosis out of a response
+//     that genuinely does not support one, which is worse than admitting
+//     uncertainty.
+//
+// `unknown` is a value the grader WRITES; a NULL `failureCause` column
+// (below) means the grader never ran at all. Collapsing those two into one
+// "no cause" state would erase the difference between "we have no idea why"
+// and "we didn't even ask" — two different facts about the row, and a
+// pipeline debugging silent AI-grading failures needs to tell them apart.
+//
+// Same reasoning as `PracticeAttempt`'s own `source`/`promptMode`/
+// `inputMode`/`hintUsed` (issue #66, "FOUR COLUMNS THIS EPIC WRITES ONLY ONE
+// VALUE OF" above): `misheard` and `nervous` are declared as real enum
+// values now, while E3/E4 can only ever produce the other four, because the
+// alternative is widening this enum AND retroactively guessing at every
+// historical row's unclassifiable failures once E8/E9 ship. Two unused
+// values cost nothing today; backfilling them later is not possible at all,
+// because the evidence (timing, transcription confidence) that would let a
+// grader distinguish them does not exist for a row graded before E8/E9.
+enum PracticeFailureCause {
+  not_known
+  not_recalled
+  expression
+  misheard
+  nervous
+  unknown
+}
+
 // One row per practice run. journey-shell.md and PRD.md's "Practicing" stage
 // are what this table backs: a learner drills a batch of questions, and this
 // row is the header record for that batch.
@@ -1323,6 +1401,57 @@ model PracticeAttempt {
 
   gradingMethod PracticeGradingMethod @map("grading_method")
 
+  // -----------------------------------------------------------------------
+  // AI grading output — all three NULLABLE, and each null for a DIFFERENT
+  // reason (issue #110, epic #53)
+  // -----------------------------------------------------------------------
+  // These three columns are written together, by the same grading call, and
+  // read together — they are grouped here rather than at the end of the
+  // table so that "what did the grader decide" stays one block, next to
+  // `gradingMethod`, which says whether a grader ran at all.
+  //
+  // NULL `failureCause`/`aiFeedback` means no grader ever ran for this
+  // attempt — `gradingMethod` is `exact` or `self`, or grading failed before
+  // producing output. `failureCause: unknown` means a grader DID run and
+  // could not tell why the response was wrong. Collapsing "never asked" and
+  // "asked, no answer" into one NULL would make it impossible to later ask
+  // "how often is our grader unable to classify a failure?" — that question
+  // needs the two states kept apart.
+  //
+  // NO BACKFILL. Every row written before this migration, and every row an
+  // `exact`/`self`-graded attempt writes after it, is valid with all three
+  // columns NULL — there is no historical AI verdict to reconstruct for a
+  // response no grader ever looked at.
+
+  // See `PracticeFailureCause` above for the full enum and each value's
+  // definition and observable signal. NULL means no grader ran; `unknown`
+  // means the grader ran and could not tell — those are different facts.
+  failureCause PracticeFailureCause? @map("failure_cause")
+
+  // The grader's STRUCTURED verdict only — `{ verdict, failureCause,
+  // feedback }` — and NOTHING ELSE. Never the prompt sent to the model,
+  // never the raw completion text, never any key material. The prompt is
+  // reconstructable from `responseText` + `answerSnapshot` + the question at
+  // any time and does not need to be frozen here; the raw completion is
+  // exactly the kind of unbounded, ungoverned provider text `AiUsageEvent`'s
+  // own comments already exclude from that table's columns for the same
+  // reason. Keeping this column to the parsed verdict means a stored row can
+  // never leak a credential or a provider's internal reasoning even if this
+  // table is ever exported or displayed directly.
+  aiFeedback Json? @map("ai_feedback")
+
+  // Which `AiUsageEvent` row this attempt's grading call produced, so a
+  // grading verdict can be traced back to its cost, latency, and
+  // provider/model — the same relationship `AiUsageEvent` already exists to
+  // answer, not a duplicate of it. Nullable because a non-`ai`-graded attempt
+  // has no such call, and onDelete: SetNull (NOT Cascade, and NOT Restrict)
+  // because this is the same "evidence must outlive its bookkeeping" shape as
+  // `PracticeAttempt.sessionId` above: pruning old usage-history rows (a
+  // retention job, an admin cleanup) must never destroy the graded attempt
+  // that call produced. The attempt is the evidence; the usage row is
+  // accounting for it.
+  aiUsageEventId String? @map("ai_usage_event_id") @db.Uuid
+
   // Whether the correct answer was shown to the learner before (or instead
   // of) them answering — a flashcard-style reveal. Distinct from `hintUsed`:
   // a learner can reveal the full answer without ever seeing a partial hint,
@@ -1351,9 +1480,10 @@ model PracticeAttempt {
   // already happened — same reasoning as `AiUsageEvent` above.
 
   // Relations
-  user     User             @relation("UserPracticeAttempts", fields: [userId], references: [id], onDelete: Cascade)
-  question CivicsQuestion   @relation(fields: [questionId], references: [id], onDelete: Restrict)
-  session  PracticeSession? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+  user         User             @relation("UserPracticeAttempts", fields: [userId], references: [id], onDelete: Cascade)
+  question     CivicsQuestion   @relation(fields: [questionId], references: [id], onDelete: Restrict)
+  session      PracticeSession? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+  aiUsageEvent AiUsageEvent?    @relation("AiUsageEventPracticeAttempts", fields: [aiUsageEventId], references: [id], onDelete: SetNull)
 
   // The readiness model's core query: this user's history with this
   // question, in order — "has this learner ever answered this correctly,
@@ -1361,5 +1491,8 @@ model PracticeAttempt {
   @@index([userId, questionId, answeredAt])
   // Session detail view: all attempts belonging to one session.
   @@index([sessionId])
+  // Reverse lookup from a usage row to the attempt(s) it graded — the
+  // AiUsageEvent side of the relationship this column exists to answer.
+  @@index([aiUsageEventId])
   @@map("practice_attempts")
 }
