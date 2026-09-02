@@ -322,7 +322,7 @@ describe('JourneyService', () => {
       expect(data.stage).toBe('oriented');
     });
 
-    it('takes the completion time from the Clock, never from a new Date()', async () => {
+    it('takes the completion time from the Clock, never from wall-clock time', async () => {
       await service.updateProfile(LEARNER, COMPLETE_FORM);
       expect(clock.now).toHaveBeenCalled();
     });

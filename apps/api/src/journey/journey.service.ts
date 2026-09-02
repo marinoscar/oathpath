@@ -35,8 +35,12 @@ import { filedFromFor, resolveTestVersionCode } from './test-version-resolution'
 // and a reviewer, not a query-string edit.
 //
 // -----------------------------------------------------------------------------
-// NO `new Date()` IN THIS MODULE, ANYWHERE
+// NOTHING IN THIS MODULE CONSTRUCTS A WALL-CLOCK DATE, ANYWHERE
 // -----------------------------------------------------------------------------
+//
+// There is no bare `Date` construction in any file under `src/journey/` --
+// grep for it and the result is empty, comments included, so the rule is
+// checkable rather than merely stated.
 //
 // Every notion of "now" comes from the injected `Clock` (#63), which is what
 // makes `X-Test-Clock` able to pin a countdown in a test without sleeping, and
