@@ -1563,6 +1563,90 @@ state.
 
 ---
 
+#### POST /civics/questions/:id/explain
+Issue #120, E4 (epic #53). Streams a tutor's explanation of the answer to one
+question, **for this caller**, generated on **their own** stored AI key.
+`@Auth()`, no permissions — every authenticated learner owns their own
+explanations, and no route accepts a user id or state code (both resolve from
+the caller's own `learner_profiles` row, the same resolution
+`GET /civics/questions/{id}` uses). See
+[`docs/specs/ai-evaluation.md`](specs/ai-evaluation.md) for the dispatch and
+grounding design; this section documents the wire contract only.
+
+**Grounded, never consulted.** The question and the answers currently correct
+for this learner are read from the database and handed to the model as fact;
+it is asked what they *mean*, never what they *are*. That is what keeps a
+question whose answer changed after the model's training cutoff — who is
+President, who is your governor — from being explained as whoever the model
+remembers.
+
+**Language** is the caller's own `explanationLanguage` (their learner
+profile), defaulting to `en`. There is no language parameter — a
+per-request override would let a request disagree with the person's own
+saved setting.
+
+**Transport.** `200 text/event-stream`, hand-written rather than Nest's
+`@Sse()` (which hard-codes GET, and this route takes a body). The native
+`EventSource` cannot send an `Authorization` header and only ever issues a
+GET, so a client must use a fetch-based SSE reader — see
+`apps/web/src/services/explainStream.ts`. A `?token=` query parameter is
+deliberately unsupported: a bearer token in a URL lands in the nginx access
+log, browser history and `Referer`. Disconnecting aborts the upstream call —
+inference runs on the learner's own key, so an abandoned stream is money
+generating text no one will read — and the usage row is still written, from
+`BaseAiProvider.stream`'s own `finally`.
+
+**Parameters:**
+- `id` (uuid) — question id
+
+**Request Body** (optional; `POST` with no body is the ordinary call):
+```json
+{ "focus": "I always mix up the branches" }
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `focus` | string, trimmed, max 200 chars | No | What the learner finds confusing, in their own words. Treated strictly as data in the prompt, never as an instruction. |
+
+`z.strictObject` — an unknown key is a 400 naming it. There is no `stateCode`,
+`userId`, or `language` field; sending one is rejected rather than ignored.
+
+**Response.** An open `text/event-stream`. An opening `: connected` comment
+flushes the headers immediately (dropped by clients, never dispatched as a
+frame), then any number of `delta` frames, then **exactly one terminal frame,
+always last** — a client that never sees one should treat the connection as
+still open, not as failed.
+
+| Frame (`event:`) | `data` | Terminal? | Meaning |
+|---|---|---|---|
+| `delta` | `{"text": "…"}` | No | One chunk of the explanation. Never empty. Any number may arrive. |
+| `done` | `{"usage": {"promptTokens": 212, "completionTokens": 96, "totalTokens": 308}}` | Yes | The explanation is whole. `usage` fields may individually be `null` — never `0` for an unknown count. |
+| `unavailable` | `{"cause": "no_user_key" \| "ai_disabled" \| "role_unbound" \| "capability_unsupported"}` | Yes | No call was attempted — the caller has no stored key, or an administrator has not finished configuring AI. **Not a failure**: render the shared "AI is not set up" state, not an error. See `ai-evaluation.md` §4 for what each cause means and why they are checked in that order. |
+| `state_required` | `{"answerResolution": "state_required"}` | Yes | A `state`-scope question asked by a learner with no state set. **No model is called** — guessing a state would teach a confident, memorable, wrong governor. Echoes the same discriminator `GET /civics/questions/{id}` returns, so the client renders the prompt it already has. Not an `unavailable` cause — see `civics-explain.service.ts`'s `CivicsExplainFrame` for why this is deliberately a separate, fifth terminal frame rather than a member of that closed four-value set. |
+| `error` | `{"errorCode": "…", "error": "…"}` | Yes | The call was attempted and did not produce a usable answer. Deltas already delivered were really received; the explanation is not whole and must not be presented as one. |
+
+Example stream:
+```
+: connected
+
+event: delta
+data: {"text":"The Constitution "}
+
+event: delta
+data: {"text":"is the supreme law "}
+
+event: done
+data: {"usage":{"promptTokens":212,"completionTokens":96,"totalTokens":308}}
+
+```
+
+**Error Cases:**
+- 404 Not Found — unknown question id (thrown, and resolved, before the
+  stream opens — an unknown id is an ordinary 404 JSON envelope, never a
+  stream that opens and immediately breaks)
+
+---
+
 ### Civics Admin
 
 Issue #117. Corrects `national`- and `state`-scope answers at runtime — the
@@ -1694,11 +1778,15 @@ public exam material, so the diff itself is what a reviewer needs.
 ### Practice
 
 Issue #73, epic #52 (E3). The practice loop: open a session, be asked a
-question, answer it, be graded deterministically (no AI in this grading
-path), and see a summary. Design rationale — the two-table shape, the
-normalisation pipeline, the answer-snapshot lifecycle, and self-mark — lives
-in [`docs/specs/practice-sessions.md`](specs/practice-sessions.md); this
-section covers only the wire contract.
+question, answer it, be graded, and see a summary. Grading is a two-rung
+ladder — deterministic string matching first, then (E4, epic #53) a
+semantic AI grader on a miss — described below the attempts route; design
+rationale for the loop itself — the two-table shape, the normalisation
+pipeline, the answer-snapshot lifecycle, and self-mark — lives in
+[`docs/specs/practice-sessions.md`](specs/practice-sessions.md), and the
+grading ladder's own design lives in
+[`docs/specs/ai-evaluation.md`](specs/ai-evaluation.md) §6. This section
+covers only the wire contract.
 
 **Every route below is `@Auth()` with no permissions**, and every route is
 caller-scoped: the learner is resolved from `@CurrentUser('id')`, never from
@@ -1872,6 +1960,9 @@ question, prompt only. A `completed` or `abandoned` session returns
         "revealed": false,
         "hintUsed": false,
         "durationMs": 8400,
+        "failureCause": null,
+        "aiFeedback": null,
+        "aiUsageEventId": null,
         "answeredAt": "2026-09-01T14:01:00.000Z",
         "answerSnapshot": {
           "resolvedAt": "2026-09-01T14:01:00.000Z",
@@ -1894,6 +1985,39 @@ question, prompt only. A `completed` or `abandoned` session returns
 ```
 
 Attempts are oldest first — the order they were answered in.
+
+**The AI grading rung (issue #116, E4).** Three fields carry rung 2's
+output — `failureCause`, `aiFeedback`, `aiUsageEventId` — and they are
+**null together on every deterministically graded attempt**, which is the
+normal case, not a degraded one: a match, a skip, and a miss whose grading
+call was `unavailable` or `failed` all keep `gradingMethod: "exact"` with all
+three null. `gradingMethod: "self"` never produces them either. Only
+`gradingMethod: "ai"` populates them, and does so together — a row carrying
+some of the three would be one whose `failureCause` cannot be traced to the
+call that produced it. See [`docs/specs/ai-evaluation.md`](specs/ai-evaluation.md)
+§6 for the ladder that decides when a grader is even called.
+
+| Field | Type | Description |
+|---|---|---|
+| `failureCause` | string \| null | Why the response missed. One of `not_known`, `not_recalled`, `expression`, `misheard`, `nervous`, `unknown` — or `null`. `null` on a `correct` verdict (nothing failed, so nothing to explain) as well as on every non-AI-graded attempt. **`null` and `"unknown"` are different answers**: `null` means no grader ran; `"unknown"` means one ran and honestly could not classify the miss. `misheard` and `nervous` are declared in the enum but never produced by this ladder — they need E9's transcription confidence and E8's interview timing respectively; a model that names one is coerced to `"unknown"` before persistence. |
+| `aiFeedback` | object \| null | The grader's full structured verdict, verbatim — `{"verdict": "correct" \| "partial" \| "incorrect", "failureCause": "…", "feedback": "…"}` — the same object validated against the grading schema, stored whole rather than as the `feedback` sentence alone. `null` on every non-AI-graded attempt. Never the prompt, never a raw model completion. |
+| `aiUsageEventId` | uuid \| null | The `ai_usage_events` row this grading call wrote. `null` both when no grader ran and when the row write itself failed — the graded evidence is never held back for its own accounting. |
+
+Example of an AI-graded attempt (`gradingMethod: "ai"`, `outcome: "correct"`
+from rung 2 despite `matchAnswer` missing on rung 1):
+```json
+{
+  "outcome": "correct",
+  "gradingMethod": "ai",
+  "failureCause": null,
+  "aiFeedback": {
+    "verdict": "correct",
+    "failureCause": "unknown",
+    "feedback": "Congress is accepted — nice work phrasing it your own way."
+  },
+  "aiUsageEventId": "uuid"
+}
+```
 
 **`answerSnapshot` is frozen at grading time and never re-resolved.** It
 holds exactly the accepted answers as `civics/answer-resolution.ts` returned
@@ -1924,14 +2048,23 @@ stored row) is never duplicated a second time inside the JSON document.
 Grades one response and writes one `practice_attempts` row — the evidence
 every later epic (mastery, readiness, streaks) reads.
 
-**Grading is deterministic and has no AI in it.** The response is compared
+**Rung 1 is deterministic and has no AI in it.** The response is compared
 against the question's currently accepted answers, first raw and
 case-sensitive, then after a documented seven-step normalisation (case,
 filler openings like "I think it's", possessives and punctuation, `U.S.` →
 `United States`, leading articles, number words to digits — the full table
-is `docs/specs/practice-sessions.md` §7). There is no fuzzy matching: a near
-miss is `incorrect`, and the self-mark route below is the learner's
-recourse.
+is `docs/specs/practice-sessions.md` §7). There is no fuzzy matching within
+this rung: a near miss is `incorrect` here.
+
+**Rung 2 (E4, epic #53) escalates a rung-1 miss to the `grader` AI role**,
+on the caller's own key, asking whether the response *means* one of the
+accepted answers even though it did not match one as a string — a
+paraphrase or non-idiomatic phrasing the exact matcher cannot recognise.
+The self-mark route below remains the learner's recourse for a rung-2 miss
+too. See the response shape below for what a rung-2 verdict adds to the
+row, and [`docs/specs/ai-evaluation.md`](specs/ai-evaluation.md) §6 for the
+full ladder, including why an unavailable or failed grading call falls back
+to rung 1's result rather than erroring the request.
 
 **Parameters:**
 - `id` (uuid) — session id
@@ -2033,6 +2166,9 @@ know" inseparable on the one row that has to carry both facts independently.
     "revealed": true,
     "hintUsed": false,
     "durationMs": 12000,
+    "failureCause": null,
+    "aiFeedback": null,
+    "aiUsageEventId": null,
     "answeredAt": "2026-09-01T14:02:00.000Z",
     "answerSnapshot": { "...": "unchanged from when the attempt was created" }
   }
