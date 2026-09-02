@@ -1802,6 +1802,143 @@ Notable properties of this behaviour:
 
 ---
 
+## 15. Per-User Credentials: the BYOK Threat Model
+
+Section 14 describes a credential store designed for **one organisation-wide
+secret an administrator types in** — an SMTP password. Epic #25 reuses it for a
+second, structurally different thing: **an API key belonging to a named
+individual**, one per user, which every AI request in the application runs on.
+
+That reuse is the right call — it inherits the cipher, the domain separation,
+the blank-preserves contract and the no-egress proofs rather than reinventing
+them — and it brings two properties that were harmless for one shared password
+and are not harmless per person.
+
+### Two Credential Scopes, Two Sub-Keys
+
+| What | Address | Read by |
+|---|---|---|
+| Server / admin OpenAI key | `(purpose: 'ai', name: 'openai')` | model catalog fetch, admin connection test |
+| Per-user BYOK key | `(purpose: 'ai-user', name: <userId>)` | that user's own inference and key test |
+
+The two `purpose` values are two HKDF sub-key domains (§14). A ciphertext lifted
+from one scope into the other — by a SQL write, or by a bug copying rows — fails
+GCM authentication rather than decrypting into a context where it means
+something else. That guarantee is worth more here than it was for SMTP, because
+one scope is organisation-wide and the other belongs to a person: without it, an
+organisation's key pasted into a user's row would decrypt and then be spent as
+if it were theirs.
+
+The addresses are declared in `apps/api/src/ai/ai-credential.constants.ts`, a
+leaf module that imports nothing.
+
+### An Administrator Cannot Read Any User's Key
+
+This is enforced **structurally**, not by a permission check.
+
+Every route in `apps/api/src/ai/ai-user-key.controller.ts` resolves the
+credential address from `@CurrentUser('id')`. There is no path parameter, no
+query parameter and no body field naming a user — so cross-user access is not
+something a permission grants or withholds; there is no input that expresses it.
+Widening it is a signature change with a visible diff, not a query-string edit.
+
+A test reads the controller's own source and asserts the absence: no `@Param`,
+no `@Query`, no user-identifying `@Body` field, exactly one `@CurrentUser('id')`
+per route, and no reference to `CredentialsService` at all. The absence of a
+parameter has no runtime behaviour, so a happy-path test could not see it.
+
+### `CredentialsService.list(purpose)` Must Not Reach a Controller
+
+`list('ai-user')` enumerates **every** user's key metadata. It returns
+`CredentialInfo`, which carries a compile-time proof that it cannot hold secret
+material and whose query does not select the ciphertext column — so this is not
+a plaintext leak. It is a **cross-user metadata leak** (who has a key, when they
+set it, the masked hint), and it is the shape that grows a "show me everything"
+endpoint.
+
+It has exactly one legitimate caller:
+`apps/api/src/ai/tasks/ai-credential-cleanup.task.ts`, a scheduled task with no
+HTTP surface, no caller and no response, where enumerating is the entire job.
+`CredentialsModule` still has no controller of its own.
+
+### The Orphaned-Key Defect, and Its Fix
+
+`Credential` has **no foreign key to `User`**. The only relation in
+`apps/api/prisma/schema.prisma` is `updatedByUserId`, which is `onDelete: SetNull` and records
+*who last edited* a credential — behaviour that is correct for the SMTP password
+it was designed for, where offboarding the admin who typed it in must not delete
+a working mail configuration.
+
+A per-user key is addressed by `name = <userId>`, **a string in a column, not a
+reference**. So no cascade fires, no query joins, and nothing will ever surface
+the row again. **Deleting a user leaves behind a live OpenAI credential** —
+encrypted, retained indefinitely, and still chargeable to someone who has left.
+
+The fix has two halves, because one alone does not hold:
+
+- **`AiUserKeyService.purgeForDeletedUser(userId)`** — the hook, idempotent, and
+  the right immediate action. It deletes the credential *before* writing the
+  audit row: an unaudited deletion is a smaller problem than a retained
+  credential.
+- **`AiUserCredentialCleanupTask`** — a nightly sweep for `('ai-user', <id>)`
+  rows matching no existing user. This is the part that actually holds. The
+  application has no user-deletion endpoint today, so the hook has no call site;
+  a hook with no call site is an unenforced promise that whoever adds the first
+  deletion path remembers to call it, and if they do not, the failure is
+  invisible. The sweep also collects rows orphaned by deletions performed outside
+  the application entirely — a `DELETE FROM users` run by an operator, a data
+  migration, a GDPR erasure done in SQL.
+
+**Deactivation preserves the key, deliberately.** Deactivation is reversible and
+the user may return; destroying their key on a temporary suspension would make
+reactivation silently useless until they noticed — and since a keyless user is
+blocked from the product, "silently useless" means locked out. Deletion is not
+reversible and the key must go.
+
+**The general rule, so the next one does not repeat this:** a `purpose` whose
+`name` is a user id owes the same deletion hook and the same sweep. Adding one
+without them is this defect again.
+
+### The Key Never Appears in a Response, a Log, an Audit Row or a Span
+
+- **Responses**: the read paths use `describe`, not `getSecret`. `getSecret` is
+  called from exactly two places in the AI module — the admin connection test
+  and the per-user key test — and in both the value goes straight into the
+  provider call and is never held, returned or stored.
+- **Provider errors**: `SecretRedactor`
+  (`apps/api/src/common/crypto/secret-redactor.ts`) is registered with the key
+  *the instant it is obtained*, before anything that can throw while holding it —
+  so even an error authored by the OpenAI SDK is scrubbed on the single exit
+  path in `BaseAiProvider`. A thrown non-`Error` is never `JSON.stringify`d: an
+  SDK error carries a request context built from the client's options.
+- **Audit rows**: `ai_key:set`, `ai_key:delete` and `ai_key:test` record
+  booleans and role keys only — **neither the key nor its hint**. An audit row is
+  queried and exported far more casually than a credential is, and a hint is a
+  substantial fraction of a short secret.
+- **Spans**: model ids, role keys and token counts only.
+- **`ai_usage_events`**: no key, and no prompt or completion content. It is
+  written on every AI call, so a column holding what a learner typed during
+  interview practice would make the highest-volume table the most sensitive one
+  too, for a reader that does not exist.
+
+### Key Rotation Now Locks Every User Out Until They Re-enter Their Key
+
+This epic **materially widens the blast radius** of a `SECRETS_ENCRYPTION_KEY`
+rotation described in
+[`docs/runbooks/rotate-secrets-encryption-key.md`](runbooks/rotate-secrets-encryption-key.md).
+
+Before, a botched rotation meant an administrator re-entering one SMTP password.
+Now it means **every user re-entering their own OpenAI key** — and because a
+keyless user is hard-blocked, every user is locked out of the product until they
+do. There is no administrator action that can fix it on their behalf: the keys
+are not readable, and nobody but the user has them.
+
+The failure is loud rather than silent, which is right: `CredentialsService`
+throws on a credential that exists but will not decrypt, rather than reporting it
+as "not configured".
+
+---
+
 ## Conclusion
 
 This security architecture provides defense-in-depth through multiple layers:
