@@ -13,6 +13,8 @@ import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { Auth } from '../auth/decorators/auth.decorator';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { AiUserKeyService } from './ai-user-key.service';
+import { AiStatusService } from './ai-status.service';
+import { AiStatusResponseDto } from './dto/ai-status.dto';
 import { AiTestResultDto } from './dto/ai-test-result.dto';
 import {
   AiUserKeyStatusDto,
@@ -29,6 +31,10 @@ import {
 //   PUT    /api/ai/key        @Auth(), no permissions
 //   DELETE /api/ai/key        @Auth(), no permissions
 //   POST   /api/ai/key/test   @Auth(), no permissions
+//
+// and, on the sibling `/api/ai` path, the availability gate:
+//
+//   GET    /api/ai/status     @Auth(), no permissions
 //
 // -----------------------------------------------------------------------------
 // NO ROUTE ACCEPTS A USER ID. THAT IS THE SECURITY BOUNDARY.
@@ -62,11 +68,43 @@ import {
 // =============================================================================
 
 @ApiTags('AI')
-@Controller('ai/key')
+@Controller('ai')
 export class AiUserKeyController {
-  constructor(private readonly userKeys: AiUserKeyService) {}
+  constructor(
+    private readonly userKeys: AiUserKeyService,
+    private readonly status: AiStatusService,
+  ) {}
 
-  @Get()
+  @Get('status')
+  @Auth()
+  @ApiOperation({
+    summary: 'Is AI available to you?',
+    description:
+      'Returns **two independent facts**, and deliberately no combined flag:\n\n' +
+      '- `userKeyConfigured` — you have a key saved. `false` **hard-blocks** you into the ' +
+      'key setup screen, framed as a first-run step rather than an error.\n' +
+      '- `systemReady` — your administrator has chosen a provider, bound the models, and ' +
+      'turned AI on. `false` does **not** block you: you get into the app, and AI surfaces ' +
+      'explain themselves at the point of use.\n\n' +
+      'Merging these would tell a user blocked by missing *administrator* configuration to ' +
+      'add a key they already have — which is the single most confusing thing this surface ' +
+      'could do.\n\n' +
+      'Cheap by design: no outbound provider call is ever made on this path, because the ' +
+      'client consults it on every navigation and a provider outage must not lock every ' +
+      'user out of an application that has nothing wrong with it.\n\n' +
+      'Reports nothing about the server key, the provider, or the bound model ids — only ' +
+      'which of the app’s own capabilities are unconfigured.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'The two availability facts',
+    type: AiStatusResponseDto,
+  })
+  async getStatus(@CurrentUser('id') userId: string) {
+    return this.status.describe(userId);
+  }
+
+  @Get('key')
   @Auth()
   @ApiOperation({
     summary: 'Describe your own stored AI key',
@@ -86,7 +124,7 @@ export class AiUserKeyController {
     return this.userKeys.describe(userId);
   }
 
-  @Put()
+  @Put('key')
   @Auth()
   @ApiOperation({
     summary: 'Save or replace your own AI key',
@@ -121,7 +159,7 @@ export class AiUserKeyController {
     return this.userKeys.describe(userId);
   }
 
-  @Delete()
+  @Delete('key')
   @Auth()
   @ApiOperation({
     summary: 'Remove your own AI key',
@@ -144,7 +182,7 @@ export class AiUserKeyController {
     return this.userKeys.describe(userId);
   }
 
-  @Post('test')
+  @Post('key/test')
   @Auth()
   @HttpCode(HttpStatus.OK)
   @ApiOperation({

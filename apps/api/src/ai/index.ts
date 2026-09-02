@@ -22,6 +22,7 @@ export { AiModule } from './ai.module';
 export { AiSettingsController } from './ai-settings.controller';
 export { AiUserKeyController } from './ai-user-key.controller';
 export { AiUserKeyService } from './ai-user-key.service';
+export { AiStatusService } from './ai-status.service';
 export { AiSettingsService } from './ai-settings.service';
 // AiConnectionTestService is deliberately NOT exported — see ai.module.ts.
 export { BaseAiProvider } from './base-ai.provider';
