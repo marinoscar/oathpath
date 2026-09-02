@@ -2,7 +2,7 @@
 
 ## Overview
 
-The file `oauth-regressions.e2e.spec.ts` contains comprehensive integration tests specifically designed to catch regressions related to the Google OAuth flow with NestJS + Fastify.
+The regression coverage described below lives in `oauth.integration.spec.ts` and is designed to catch regressions related to the Google OAuth flow with NestJS + Fastify. Like every suite in `apps/api/test/`, it runs against a real `AppModule` over Supertest with Prisma fully mocked — it never opens a database connection.
 
 ## Issues These Tests Would Have Caught
 
@@ -122,43 +122,38 @@ The file `oauth-regressions.e2e.spec.ts` contains comprehensive integration test
 ### Running the Tests
 
 ```bash
-# Run all e2e tests (requires database)
-npm run test:e2e
+# Run the full suite (unit + integration; no database involved)
+npm test
 
-# Run only OAuth regression tests
-npm run test:e2e -- oauth-regressions
-
-# Run with existing OAuth flow tests
-npm run test:e2e -- oauth
+# Run only the OAuth integration tests
+npm test -- oauth.integration
 ```
 
 ### Prerequisites
 
-1. **Database**: Tests require a PostgreSQL database
-   - Set `DATABASE_URL` environment variable
-   - Database will be reset before each test
-   - Requires roles and permissions to be seeded
+These tests never touch a database — Prisma is mocked in full
+(`test/mocks/prisma.mock.ts`) — but the suite boots the real `AppModule`, so
+`GoogleStrategy` needs OAuth config to construct without throwing.
 
-2. **Environment Variables**:
-   ```
-   DATABASE_URL=postgresql://user:pass@localhost:5432/testdb
-   JWT_SECRET=test-secret-key-minimum-32-chars
-   INITIAL_ADMIN_EMAIL=admin@example.com
-   APP_URL=http://localhost:3535
-   ```
+**Environment Variables** (`apps/api/.env.test`):
+```
+GOOGLE_CLIENT_ID=test-client-id
+GOOGLE_CLIENT_SECRET=test-client-secret
+GOOGLE_CALLBACK_URL=http://localhost:3535/api/auth/google/callback
+JWT_SECRET=test-secret-key-minimum-32-chars
+INITIAL_ADMIN_EMAIL=admin@example.com
+APP_URL=http://localhost:3535
+```
 
-3. **Run Database**:
-   ```bash
-   cd infra/compose
-   docker compose -f base.compose.yml up db
-   ```
+Do not add `DATABASE_URL` — there is no test database to point it at, and no
+database needs to be started to run these tests.
 
 ## Test Coverage
 
 These tests provide:
 - **Unit Test Coverage**: Individual component behavior
-- **Integration Test Coverage**: Full HTTP request/response cycle with real Fastify adapter
-- **Database Integration**: Real Prisma operations with transaction testing
+- **Integration Test Coverage**: Full HTTP request/response cycle with a real Fastify adapter, Prisma mocked
+- **Mocked-Transaction Coverage**: `context.prismaMock.$transaction` assertions in place of real transaction behavior — no database, no real transaction, ever
 - **Error Path Coverage**: All error scenarios that trigger the fixed code paths
 
 ## Verification Strategy
@@ -166,7 +161,7 @@ These tests provide:
 Each regression has:
 1. **At least 2 tests**: One for success path, one for failure path
 2. **Explicit assertions**: Tests verify specific behavior changes
-3. **Database validation**: Tests check database state after operations
+3. **Mock validation**: Tests check the calls made against the mocked Prisma client, not a real database's state
 4. **Error message validation**: Tests check error formats and content
 
 ## Future Maintenance
@@ -185,11 +180,12 @@ When adding OAuth providers or modifying auth flow:
 - `apps/api/src/common/filters/http-exception.filter.ts` - Exception filter
 - `apps/api/src/auth/auth.controller.ts` - Controller with error handling
 - `apps/api/test/mocks/google-oauth.mock.ts` - Mock OAuth strategy
-- `apps/api/test/auth/oauth-flow.e2e.spec.ts` - General OAuth tests
+- `apps/api/test/mocks/prisma.mock.ts` - Mocked Prisma client every test in this suite runs against
+- `apps/api/test/auth/oauth.integration.spec.ts` - OAuth integration tests, including this regression coverage
 
 ## Notes
 
 - Tests use `MockGoogleStrategy` to avoid real OAuth provider
-- Tests use `resetDatabase()` to ensure clean state
-- Tests verify both HTTP responses and database state
+- Tests use `resetPrismaMock()` / `context.prismaMock` to ensure clean mock state — there is no database to reset
+- Tests verify HTTP responses and the calls made against the mocked Prisma client, never real database state
 - Tests check for specific error conditions that triggered the bugs

@@ -467,11 +467,12 @@ return res.redirect(`${appUrl}/auth/callback?error=${errorMessage}`);
 **Backend Tests:**
 ```bash
 cd apps/api
-npm test                # Run all tests
+npm test                # Run all tests (unit *.spec.ts + integration *.integration.spec.ts)
 npm run test:watch      # Watch mode
 npm run test:cov        # With coverage
-npm run test:e2e        # E2E tests only
 ```
+API tests never touch a database — Prisma is mocked in full, for both unit
+and integration suites. See [`apps/api/TESTING.md`](../apps/api/TESTING.md).
 
 **Frontend Tests:**
 ```bash
@@ -481,17 +482,24 @@ npm run test:watch      # Watch mode
 npm run test:coverage   # With coverage
 ```
 
-### Test Database
+### Test Environment (`.env.test`)
 
-Backend tests use a separate test database. Configure in `apps/api/.env.test`:
+Backend tests never touch a database — Prisma is mocked in full — but the
+suites boot the real `AppModule`, and that means Nest instantiates
+`GoogleStrategy`, which throws without OAuth config. Configure
+`apps/api/.env.test` with OAuth and JWT values only:
 
 ```bash
-DATABASE_URL="postgresql://user:password@localhost:5432/app_test"
+GOOGLE_CLIENT_ID="test-client-id"
+GOOGLE_CLIENT_SECRET="test-client-secret"
+GOOGLE_CALLBACK_URL="http://localhost:3535/api/auth/google/callback"
 JWT_SECRET="test-secret-key-min-32-characters"
 NODE_ENV="test"
 ```
 
-**Important:** The test database is truncated between test runs. Never point tests at your development database.
+**Do not add `DATABASE_URL` here.** There is no test database; nothing
+truncates, seeds, or migrates anything, and no test should ever be written
+that requires a live database.
 
 ### Mocking OAuth in Tests
 

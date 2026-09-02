@@ -2,46 +2,49 @@
 
 This document describes the testing approach and commands for the API.
 
+## Rule: API Tests Never Touch a Database
+
+Prisma is mocked in full (`test/mocks/prisma.mock.ts`, via `jest-mock-extended`).
+Every suite — unit and integration alike — runs against that mock, reset per
+test with `resetPrismaMock()`. There is no test database, no `DATABASE_URL`
+in the test environment, and nothing truncates, seeds, or migrates anything.
+
+This keeps the suites fast and hermetic, lets them run in CI with no service
+containers, and means no test run can ever destroy a developer's data.
+**Do not add a test that requires a live database.**
+
 ## Test Types
 
 ### Unit Tests
 - Located in `src/**/*.spec.ts` (colocated with source files)
-- Mock all external dependencies (database, external services)
+- Test a single service/controller/guard with all dependencies (Prisma included) mocked
 - Fast execution, no external dependencies required
-- **Default for `npm test`**
 
-### E2E Tests (Integration Tests)
-- Located in `test/**/*.e2e.spec.ts`
-- Test full application with real database
-- Require PostgreSQL database to be running
-- Run separately with `npm run test:e2e`
+### Integration Tests
+- Located in `test/**/*.integration.spec.ts`
+- Boot the real Nest `AppModule` and exercise it end-to-end over HTTP via Supertest
+- Prisma is still mocked (`createTestApp` defaults `useMockDatabase` to `true`,
+  and no call site in this repo passes `false`) — a real database is never
+  involved, only a real app wired to a fake data layer
+
+Both run together, in the same command — there is no separate suite to opt
+into.
 
 ## Test Commands
 
-### Run Unit Tests Only (Default)
+### Run All Tests
 ```bash
 npm test
 ```
-This is the default command and runs only unit tests. **No database required.**
+Runs every `*.spec.ts` and `*.integration.spec.ts` file. **No database
+required or used**, by either test type.
 
-### Run E2E Tests
-```bash
-npm run test:e2e
-```
-**Requires a PostgreSQL database to be running.** See "Running E2E Tests" section below.
-
-### Run All Tests (Unit + E2E)
-```bash
-npm run test:all
-```
-**Requires a PostgreSQL database to be running.**
-
-### Watch Mode (Unit Tests)
+### Watch Mode
 ```bash
 npm run test:watch
 ```
 
-### Coverage (Unit Tests)
+### Coverage
 ```bash
 npm run test:cov
 ```
@@ -51,42 +54,6 @@ npm run test:cov
 npm run test:debug
 ```
 
-## Running E2E Tests
-
-E2E tests require a PostgreSQL database. You have several options:
-
-### Option 1: Use Docker Compose (Recommended)
-```bash
-# Start test database
-cd ../../infra/compose
-docker compose -f base.compose.yml up db -d
-
-# Run E2E tests
-cd ../../apps/api
-npm run test:e2e
-
-# Stop database when done
-cd ../../infra/compose
-docker compose -f base.compose.yml down
-```
-
-### Option 2: Use Local PostgreSQL
-Ensure you have a test database configured and set the `DATABASE_URL` environment variable:
-
-```bash
-# Create .env.test file
-DATABASE_URL="postgresql://user:password@localhost:5432/testdb"
-
-# Run migrations
-npx prisma migrate deploy
-
-# Run E2E tests
-npm run test:e2e
-```
-
-### Option 3: CI/CD Pipeline
-In CI environments, E2E tests should be run with a dedicated test database service.
-
 ## Test Structure
 
 ### Unit Test Example
@@ -94,22 +61,24 @@ In CI environments, E2E tests should be run with a dedicated test database servi
 // src/auth/auth.service.spec.ts
 import { Test } from '@nestjs/testing';
 import { AuthService } from './auth.service';
-import { createMockPrismaService } from '../test/mocks/prisma.mock';
+import { createMockPrismaService, MockPrismaService } from '../../test/mocks/prisma.mock';
+import { PrismaService } from '../prisma/prisma.service';
 
 describe('AuthService', () => {
   let service: AuthService;
   let prisma: MockPrismaService;
 
   beforeEach(async () => {
+    prisma = createMockPrismaService();
+
     const module = await Test.createTestingModule({
       providers: [
         AuthService,
-        { provide: PrismaService, useValue: createMockPrismaService() },
+        { provide: PrismaService, useValue: prisma },
       ],
     }).compile();
 
     service = module.get(AuthService);
-    prisma = module.get(PrismaService);
   });
 
   it('should be defined', () => {
@@ -118,33 +87,40 @@ describe('AuthService', () => {
 });
 ```
 
-### E2E Test Example
+### Integration Test Example
 ```typescript
-// test/auth/auth.e2e.spec.ts
+// test/auth/auth.integration.spec.ts
 import request from 'supertest';
-import { createTestApp, closeTestApp } from '../helpers/test-app.helper';
+import {
+  TestContext,
+  createTestApp,
+  closeTestApp,
+} from '../helpers/test-app.helper';
+import { resetPrismaMock, mockPrismaTransaction, prismaMock } from '../mocks/prisma.mock';
+import { createMockAdminUser, authHeader } from '../helpers/auth-mock.helper';
 
-describe('Auth (e2e)', () => {
+describe('Auth (Integration)', () => {
   let context: TestContext;
 
   beforeAll(async () => {
-    context = await createTestApp();
+    context = await createTestApp({ useMockDatabase: true });
   });
 
   afterAll(async () => {
     await closeTestApp(context);
   });
 
-  beforeEach(async () => {
-    await resetDatabase(context.prisma);
+  beforeEach(() => {
+    resetPrismaMock();
+    mockPrismaTransaction();
   });
 
   it('/api/auth/me (GET)', async () => {
-    const user = await createTestUser(context);
+    const admin = await createMockAdminUser(context, 'admin@example.com');
 
     return request(context.app.getHttpServer())
       .get('/api/auth/me')
-      .set('Authorization', `Bearer ${user.accessToken}`)
+      .set(authHeader(admin.accessToken))
       .expect(200);
   });
 });
@@ -152,58 +128,57 @@ describe('Auth (e2e)', () => {
 
 ## Test Helpers
 
-### Database Helpers
-- `test/helpers/database.helper.ts` - Database cleanup and seeding utilities
-- `resetDatabase(prisma)` - Cleans and re-seeds the database
-- `cleanDatabase(prisma)` - Removes all data from the database
-- `seedBaseData(prisma)` - Seeds roles, permissions, and default settings
-
-### Auth Helpers
-- `test/helpers/auth.helper.ts` - User creation and authentication utilities
-- `createTestUser(context, options)` - Creates a user with JWT token
-- `createAdminUser(context)` - Creates an admin user
-- `createContributorUser(context)` - Creates a contributor user
-- `createViewerUser(context)` - Creates a viewer user
-- `authHeader(token)` - Returns Authorization header object
-
 ### App Helpers
 - `test/helpers/test-app.helper.ts` - Application setup utilities
-- `createTestApp()` - Creates a full NestJS application instance
-- `closeTestApp(context)` - Closes the application and disconnects from database
+- `createTestApp(options?)` - Creates a full NestJS application instance with Prisma mocked (`useMockDatabase` defaults to `true`)
+- `closeTestApp(context)` - Closes the application
+
+### Auth Helpers
+- `test/helpers/auth-mock.helper.ts` - Mock user creation and authentication utilities
+- `createMockAdminUser(context, email)` / `createMockContributorUser(...)` / `createMockViewerUser(...)` / `createMockInactiveUser(...)` - Creates a mock user with a signed JWT, backed entirely by the Prisma mock
+- `authHeader(token)` - Returns `{ Authorization: 'Bearer <token>' }`
+
+### Fixtures
+- `test/fixtures/mock-setup.helper.ts` - Common Prisma-mock setup (`setupBaseMocks`, `setupMockUser`)
+- `test/fixtures/test-data.factory.ts`, `roles.fixture.ts`, `users.fixture.ts`, `settings.fixture.ts` - Reusable mock data builders
 
 ### Mocks
-- `test/mocks/prisma.mock.ts` - Mock PrismaService for unit tests
+- `test/mocks/prisma.mock.ts` - The mocked `PrismaService` every test runs against (`createMockPrismaService`, `prismaMock`, `resetPrismaMock`, `mockPrismaTransaction`)
 - `test/mocks/google-oauth.mock.ts` - Mock Google OAuth profiles
 
 ## Best Practices
 
-1. **Unit tests should never connect to a real database** - Always use mocked PrismaService
-2. **E2E tests should use a dedicated test database** - Never use development or production databases
-3. **Clean database between E2E tests** - Use `resetDatabase()` in `beforeEach()`
-4. **Use test helpers** - Don't duplicate user creation or authentication logic
-5. **Fast feedback loop** - Run `npm test` (unit tests only) during development
-6. **Pre-commit validation** - Ensure unit tests pass before committing
-7. **CI pipeline** - Run both unit and E2E tests in CI with a test database
+1. **No test may open a database connection** - Prisma is mocked everywhere; if a test needs different data, configure the mock (`prismaMock.model.method.mockResolvedValue(...)`), don't reach for a real one
+2. **Reset the Prisma mock between tests** - Call `resetPrismaMock()` (and `mockPrismaTransaction()` where transactions are involved) in `beforeEach`
+3. **Use test helpers** - Don't duplicate mock user creation or authentication logic
+4. **Fast feedback loop** - `npm test` runs the whole suite quickly precisely because nothing waits on I/O to a database
+5. **Pre-commit validation** - Ensure tests pass before committing
+6. **CI pipeline** - `.github/workflows/ci.yml` runs `npm test --workspace=api` with no database service at all — it supplies fake OAuth/JWT values as environment variables because the suite boots the real `AppModule` (which instantiates `GoogleStrategy`), not because anything talks to Postgres
 
 ## Troubleshooting
 
-### "Can't reach database server" Error
-This means you're trying to run E2E tests without a database. Either:
-- Run unit tests only: `npm test`
-- Start a database and then run: `npm run test:e2e`
+### "OAuth2Strategy requires a clientID option" Error
+This means `GoogleStrategy` couldn't find OAuth config while the real `AppModule` was booting for an integration test — it is unrelated to any database. Create `apps/api/.env.test`:
+```bash
+GOOGLE_CLIENT_ID="test-client-id"
+GOOGLE_CLIENT_SECRET="test-client-secret"
+GOOGLE_CALLBACK_URL="http://localhost:3535/api/auth/google/callback"
+JWT_SECRET="test-secret-key-min-32-characters"
+NODE_ENV="test"
+```
+Do not add `DATABASE_URL` — there is no test database to point it at.
 
 ### Tests Timing Out
 - Increase timeout in `test/jest.config.js` (currently 30 seconds)
-- Check if database is slow or unresponsive
 - Consider running tests in parallel: `jest --maxWorkers=4`
 
 ### Mock Not Returning Expected Data
-- Check that you're using `mockPrisma.method.mockResolvedValue(data)` in your test
-- Ensure the mock is reset between tests with `beforeEach()`
+- Check that you're using `prismaMock.model.method.mockResolvedValue(data)` in your test
+- Ensure the mock is reset between tests with `resetPrismaMock()` in `beforeEach`
 - Verify the mock type matches the real Prisma client
 
 ## Coverage Goals
 
-- **Unit tests**: 80%+ coverage for business logic (services, guards, validators)
-- **E2E tests**: Critical user journeys (auth flow, RBAC, settings CRUD)
+- 80%+ coverage for business logic (services, guards, validators)
+- Integration tests cover critical user journeys (auth flow, RBAC, settings CRUD) through the real app, with Prisma mocked
 - Exclude from coverage: DTOs, modules, main.ts, type definitions

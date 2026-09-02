@@ -1045,8 +1045,9 @@ services:
 ```
 
 **PostgreSQL is not part of the Compose stack.** The `api` service connects out
-to a database you provide via the `POSTGRES_*` variables; only
-`infra/compose/test.compose.yml` starts a Postgres container, for tests.
+to a database you provide via the `POSTGRES_*` variables. No Compose file
+starts a Postgres container for tests — API tests never touch a database at
+all (Prisma is mocked in full; see `apps/api/TESTING.md`).
 
 ### 10.3 Environment Configuration
 

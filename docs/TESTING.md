@@ -27,9 +27,18 @@ This document describes the testing strategy, frameworks, and conventions used i
 
 **Key Features:**
 - Unit tests run in isolation with mocked dependencies
-- E2E tests use a real test database (PostgreSQL)
+- Integration tests boot a real Nest `AppModule` over HTTP (via Supertest) with Prisma mocked in full — **no test ever touches a database**
 - OAuth strategies are mocked to avoid external dependencies
-- Test database is reset between test suites for isolation
+- The Prisma mock is reset between tests (`resetPrismaMock()`) for isolation — there is no database to reset
+
+> **Rule: API tests never touch a database.** Prisma is mocked in full
+> (`test/mocks/prisma.mock.ts`, via `jest-mock-extended`); the suites are unit
+> and integration tests over a real Nest application with a fake data layer.
+> There is no test database, no `DATABASE_URL` in the test environment, and
+> nothing truncates, seeds, or migrates anything. This keeps the suites fast
+> and hermetic, lets them run in CI with no service containers, and means no
+> test run can ever destroy a developer's data. **Do not add a test that
+> requires a live database.**
 
 ### Frontend (Web)
 
@@ -60,19 +69,19 @@ apps/api/
 │   ├── setup.ts               # Global test setup
 │   ├── teardown.ts            # Global test cleanup
 │   ├── helpers/               # Test utilities
-│   │   ├── test-app.helper.ts    # App creation/teardown
-│   │   ├── auth.helper.ts        # User creation & JWT helpers
-│   │   └── database.helper.ts    # DB seeding & cleanup
+│   │   ├── test-app.helper.ts    # App creation/teardown (createTestApp mocks Prisma by default)
+│   │   └── auth-mock.helper.ts   # Mock user creation & JWT helpers
+│   ├── fixtures/              # Mock data builders and setup helpers
 │   ├── mocks/                 # Mock implementations
-│   │   ├── prisma.mock.ts        # Prisma client mocks
+│   │   ├── prisma.mock.ts        # Prisma client mock (jest-mock-extended) — the only "database" any test sees
 │   │   └── google-oauth.mock.ts  # OAuth strategy mocks
-│   └── **/*.e2e.spec.ts       # E2E integration tests
-└── .env.test                  # Test environment variables
+│   └── **/*.integration.spec.ts  # Integration tests (real AppModule, mocked Prisma)
+└── .env.test                  # Test environment variables (OAuth + JWT config only — no DATABASE_URL)
 ```
 
 **Test Types:**
-- **Unit tests** (`*.spec.ts`): Located alongside source files, test individual services/controllers/guards in isolation
-- **E2E tests** (`*.e2e.spec.ts`): Located in `test/` directory, test full request-response cycles with real database
+- **Unit tests** (`*.spec.ts`): Located alongside source files, test individual services/controllers/guards in isolation with a mocked `PrismaService`
+- **Integration tests** (`*.integration.spec.ts`): Located in `test/`, boot the real Nest `AppModule` and exercise full request-response cycles through Supertest — with Prisma still mocked, not a real database
 
 ### Frontend Test Organization
 
@@ -118,11 +127,8 @@ npm run test:watch
 # Run with coverage
 npm run test:cov
 
-# Run only unit tests (exclude e2e)
+# Run only unit tests (co-located *.spec.ts)
 npm run test:unit
-
-# Run only e2e tests
-npm run test:e2e
 
 # Debug tests
 npm run test:debug
@@ -158,15 +164,21 @@ npm run test:ci
 
 ### Environment Variables
 
-Backend tests require a test database. Create `apps/api/.env.test`:
+Backend tests never touch a database, but the suites boot the real `AppModule`, and that means Nest instantiates `GoogleStrategy`, which throws if OAuth config is missing. Create `apps/api/.env.test` with OAuth and JWT values only:
 
 ```bash
-DATABASE_URL="postgresql://user:password@localhost:5432/app_test"
+GOOGLE_CLIENT_ID="test-client-id"
+GOOGLE_CLIENT_SECRET="test-client-secret"
+GOOGLE_CALLBACK_URL="http://localhost:3535/api/auth/google/callback"
 JWT_SECRET="test-secret-key-min-32-characters"
 NODE_ENV="test"
 ```
 
-**Important:** The test database should be separate from development database. Tests will truncate all data between runs.
+**Do not add `DATABASE_URL` here.** There is no test database — Prisma is
+mocked in full (`test/mocks/prisma.mock.ts`) — so nothing reads it, and
+adding one only invites a future test to depend on a live connection that
+doesn't exist. CI supplies the same OAuth/JWT values as fake environment
+variables instead of a checked-in `.env.test` (see `.github/workflows/ci.yml`).
 
 ## Test Patterns & Conventions
 
@@ -174,7 +186,7 @@ NODE_ENV="test"
 
 **Backend:**
 - Unit tests: `*.spec.ts` (e.g., `auth.service.spec.ts`)
-- E2E tests: `*.e2e.spec.ts` (e.g., `auth.e2e.spec.ts`)
+- Integration tests: `*.integration.spec.ts` (e.g., `auth.integration.spec.ts`)
 
 **Frontend:**
 - All tests: `*.test.tsx` or `*.test.ts`
@@ -265,36 +277,44 @@ describe('ServiceName', () => {
 });
 ```
 
-### Backend Test Pattern (E2E Test)
+### Backend Test Pattern (Integration Test)
+
+Integration tests boot the real `AppModule` behind Supertest, but Prisma is
+still the mock from `test/mocks/prisma.mock.ts` — `createTestApp` defaults
+`useMockDatabase` to `true`, and no call site in the repo passes `false`.
+There is no database to reset; `resetPrismaMock()` clears the mock's call
+history instead.
 
 ```typescript
 import request from 'supertest';
 import { TestContext, createTestApp, closeTestApp } from '../helpers/test-app.helper';
-import { resetDatabase } from '../helpers/database.helper';
-import { createTestUser, authHeader } from '../helpers/auth.helper';
+import { resetPrismaMock, mockPrismaTransaction, prismaMock } from '../mocks/prisma.mock';
+import { createMockAdminUser, authHeader } from '../helpers/auth-mock.helper';
 
-describe('Controller (e2e)', () => {
+describe('Controller (Integration)', () => {
   let context: TestContext;
 
   beforeAll(async () => {
-    context = await createTestApp();
+    context = await createTestApp({ useMockDatabase: true });
   });
 
   afterAll(async () => {
     await closeTestApp(context);
   });
 
-  beforeEach(async () => {
-    await resetDatabase(context.prisma);
+  beforeEach(() => {
+    resetPrismaMock();
+    mockPrismaTransaction();
   });
 
   describe('GET /api/endpoint', () => {
     it('should return data for authenticated user', async () => {
-      const user = await createTestUser(context);
+      const admin = await createMockAdminUser(context, 'admin@example.com');
+      prismaMock.someModel.findMany.mockResolvedValue([]);
 
       const response = await request(context.app.getHttpServer())
         .get('/api/endpoint')
-        .set(authHeader(user.accessToken))
+        .set(authHeader(admin.accessToken))
         .expect(200);
 
       expect(response.body.data).toBeDefined();
@@ -549,19 +569,19 @@ render(
 4. **Test each method** with success and error cases
 5. **Verify calls** to mocked dependencies
 
-### Adding a Backend E2E Test
+### Adding a Backend Integration Test
 
-1. **Create test file** in `apps/api/test/` directory: `feature.e2e.spec.ts`
+1. **Create test file** in `apps/api/test/` directory: `feature.integration.spec.ts`
 2. **Use test helpers:**
    ```typescript
    import { createTestApp, closeTestApp } from '../helpers/test-app.helper';
-   import { resetDatabase } from '../helpers/database.helper';
-   import { createTestUser, authHeader } from '../helpers/auth.helper';
+   import { resetPrismaMock, mockPrismaTransaction, prismaMock } from '../mocks/prisma.mock';
+   import { createMockAdminUser, authHeader } from '../helpers/auth-mock.helper';
    ```
-3. **Set up test context** in `beforeAll`
-4. **Reset database** in `beforeEach` for test isolation
-5. **Test HTTP endpoints** with Supertest
-6. **Test RBAC** by creating users with different roles
+3. **Set up test context** in `beforeAll` (`createTestApp({ useMockDatabase: true })` — the default)
+4. **Reset the Prisma mock** in `beforeEach` (`resetPrismaMock()`) — there is no database to reset
+5. **Test HTTP endpoints** with Supertest, configuring `prismaMock` return values per test
+6. **Test RBAC** by creating mock users with different roles (`createMockAdminUser`, `createMockContributorUser`, `createMockViewerUser`)
 
 ### Adding a Frontend Component Test
 
@@ -623,7 +643,7 @@ module.exports = {
 - `testRegex`: Matches `*.spec.ts` files
 - `roots`: Includes both `src/` and `test/` directories
 - `setupFilesAfterEnv`: Runs setup before tests
-- `testTimeout`: 30 seconds for database operations
+- `testTimeout`: 30 seconds, generous headroom for booting the full `AppModule` in integration tests
 - `moduleNameMapper`: Supports `@/` path alias
 
 ### Frontend Configuration
@@ -707,20 +727,20 @@ export default defineConfig({
    - Mock Prisma, external APIs, file system
    - Unit tests should be fast (<100ms per test)
 
-2. **E2E Test Critical Paths**
+2. **Integration-Test Critical Paths**
    - Auth flows (login, logout, refresh)
    - RBAC enforcement
-   - Database transactions
    - API contract validation
+   - Prisma call shape (e.g. that a service passes the right `where`/`data` to a mocked `$transaction`)
 
 3. **Use Test Helpers**
-   - Leverage provided helpers for user creation, auth headers, DB reset
+   - Leverage provided helpers for mock user creation, auth headers, and Prisma mock reset
    - Keep test code DRY with shared utilities
 
-4. **Database Isolation**
-   - Always reset database in `beforeEach`
-   - Use separate test database
-   - Never use production data in tests
+4. **Mock Isolation**
+   - Always reset the Prisma mock in `beforeEach` (`resetPrismaMock()`)
+   - There is no test database to isolate — Prisma is mocked in full; do not add a test that requires a live database
+   - Never point a test at a real database, development or otherwise
 
 ### Frontend-Specific
 
@@ -800,8 +820,8 @@ npm run test:ui
 
 ### Backend
 
-**Issue:** Tests timeout waiting for database
-- **Solution:** Check `DATABASE_URL` in `.env.test`, ensure test DB is running
+**Issue:** `GoogleStrategy` throws "OAuth2Strategy requires a clientID option" on boot
+- **Solution:** Ensure `apps/api/.env.test` sets `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, and `GOOGLE_CALLBACK_URL` — tests boot the real `AppModule`, which instantiates `GoogleStrategy`, even though no test opens a database connection
 
 **Issue:** Prisma mock not working as expected
 - **Solution:** Clear mocks in `afterEach`, use `mockResolvedValue` for promises
@@ -1100,9 +1120,9 @@ This is the most important paragraph in this section: **blessing a diff without 
 
 This project uses industry-standard testing frameworks tailored to each layer:
 
-- **Backend:** Jest + Supertest for comprehensive API testing with real database
+- **Backend:** Jest + Supertest for comprehensive API testing over a fully mocked Prisma layer — no test database, ever
 - **Frontend:** Vitest + React Testing Library + MSW for fast, user-centric component testing
 - **Mocking:** Prisma mocks, OAuth mocks, MSW handlers for realistic test scenarios
-- **Helpers:** Shared utilities for user creation, database reset, and test app setup
+- **Helpers:** Shared utilities for mock user creation, Prisma mock reset, and test app setup
 
 When writing tests, focus on behavior over implementation, maintain test isolation, and leverage the provided helpers for consistency. Target 70% coverage with emphasis on business logic, auth flows, and RBAC enforcement.
