@@ -135,61 +135,59 @@ afterEach(() => {
 });
 
 // =============================================================================
-// 1. The starter dashboard is gone, and nothing it reached is now unreachable
+// 1. Home is the journey, and nothing the old dashboard reached is unreachable
 // =============================================================================
 
 describe('HomePage — the starter dashboard is gone', () => {
-  it('renders neither UserProfileCard nor QuickActions', async () => {
-    await renderHome();
+  // Until #74 this page was the starter template's dashboard: a
+  // `UserProfileCard` and a `QuickActions` shortcut grid. #74 took them off the
+  // page; #188 deleted both components, since nothing else ever mounted them.
+  //
+  // The assertions that only restated the deletion went with them. Two remain,
+  // and neither depends on those components having existed:
+  //
+  //  - Home must not GROW an identity panel back. The auth context is right
+  //    there, so rendering the user's email and roles here is a live
+  //    possibility, not a hypothetical one — this is the only assertion in the
+  //    suite that says home is about the journey and not about the account.
+  //  - Every destination the dashboard offered must still be reachable. That
+  //    was true before the components were deleted and it is what deleting
+  //    them was allowed to rest on, so it is the assertion that must not rot.
+  //
+  // Deliberately NOT asserted any more: that home renders no "Quick actions"
+  // heading, no "Member since" line and no "Account Settings" button, and that
+  // `HomePage.tsx` imports neither component. Those markers had exactly one
+  // source in the codebase and that source is gone, so nothing can make them
+  // fail; an import of a module that no longer exists fails `tsc` and the
+  // resolver long before it reaches a test.
 
-    // `QuickActions`' own heading.
-    expect(screen.queryByText(/quick actions/i)).not.toBeInTheDocument();
-    // `UserProfileCard`'s two unmistakable markers: the "Member since" line and
-    // the "Account Settings" button. Its email/roles are checked below.
-    expect(screen.queryByText(/member since/i)).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole('button', { name: /account settings/i }),
-    ).not.toBeInTheDocument();
-  });
-
-  it('does not put the user profile card back by rendering its contents', async () => {
+  it('does not grow an identity panel back', async () => {
     await renderHome({ wrapperOptions: { user: mockAdminUser } });
 
-    // The email and the role chips were the card's payload. Home is about the
-    // journey now; identity lives in the AppBar's user menu and on
-    // `/settings/profile`.
+    // The email and the role chips were the old card's payload, and every one
+    // of them is in `useAuth()` on this page. Home is about the journey;
+    // identity lives in the AppBar's user menu and on `/settings/profile`.
     expect(screen.queryByText(mockAdminUser.email)).not.toBeInTheDocument();
     expect(screen.queryByText('admin')).not.toBeInTheDocument();
   });
 
-  it('imports neither component', () => {
-    // The rendered assertions above would also pass if the components were
-    // imported and conditionally hidden. The import list is the structural
-    // statement.
-    const source = readFileSync(resolve(SRC, 'pages/HomePage.tsx'), 'utf8');
-    const imports = [...source.matchAll(/^import[\s\S]*?from '[^']+';$/gm)].join('\n');
-
-    expect(imports).not.toMatch(/UserProfileCard/);
-    expect(imports).not.toMatch(/QuickActions/);
-  });
-
   it('leaves both removed destinations reachable elsewhere', async () => {
-    // `QuickActions` offered exactly two destinations. Neither is orphaned:
-    // Settings is the user menu's one navigation row, and Console is the
-    // rail's pinned entry.
+    // The dashboard's shortcut grid offered exactly two destinations, and
+    // deleting it was only safe because neither is orphaned: Settings is the
+    // user menu's one navigation row, and Console is the rail's pinned entry.
     render(<UserMenu />);
     await userEvent.click(screen.getByRole('button'));
 
     expect(
       await screen.findByRole('menuitem', { name: SETTINGS_DESTINATION.label }),
     ).toBeInTheDocument();
-    // The user menu also carries the identity `UserProfileCard` displayed.
+    // The user menu also carries the identity the profile card displayed.
     expect(screen.getByText(mockUser.email)).toBeInTheDocument();
     expect(screen.getByText(mockUser.displayName!)).toBeInTheDocument();
 
     expect(RAIL_PINNED_DESTINATIONS).toContainEqual(CONSOLE_DESTINATION);
 
-    // And `UserProfileCard`'s editable half is a real, mounted route.
+    // And the profile card's editable half is a real, mounted route.
     expect(declaredRoutePaths()).toContain('/settings/profile');
   });
 });
