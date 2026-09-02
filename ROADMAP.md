@@ -27,14 +27,19 @@ file to match it, not the other way around.
 
 ## 2. What the MVP is
 
-The repository is currently a hardened SaaS shell: OAuth authentication,
-RBAC, a settings hub, notifications, storage, encrypted credentials, and a
-first-party CLI. It has **zero product domain code** — no question, no
-practice session, no readiness score. `VISION.md` and `PRD.md` describe the
-product this shell is meant to carry; the AI configuration epic (#25) has
-already shipped that foundation — server model-role bindings and per-user
-BYOK keys are in place on `main` — and eleven epics (E1–E11) now build on it,
-decomposing the product into buildable, independently testable slices.
+The repository began as a hardened SaaS shell: OAuth authentication, RBAC, a
+settings hub, notifications, storage, encrypted credentials, and a first-party
+CLI, with **zero product domain code**. `VISION.md` and `PRD.md` describe the
+product that shell is meant to carry, and eleven epics (E1–E11) decompose it
+into buildable, independently testable slices.
+
+Two foundations are now on `main`. The AI configuration epic (#25) shipped
+server model-role bindings and per-user BYOK keys. **E1 (#50) shipped the
+journey shell** — the four destinations, the `Clock` provider,
+`civics_test_versions`, `learner_profiles`, orientation and home's
+`nextAction` contract. What is still missing is the domain itself: there is
+no question, no practice session and no readiness score. That is what E2
+onward build.
 
 The MVP ships in two milestones.
 
@@ -70,8 +75,8 @@ a v2.
 | Order | Epic | Slice | Depends on | Status | Issue |
 |---|---|---|---|---|---|
 | — | AI configuration | Server model-role bindings (admin) plus mandatory per-user BYOK OpenAI keys; the one door (`AiDispatchService`) every later AI feature calls through | Foundation — required before E4, E8, E9, E10, E11 | done | [#25](https://github.com/marinoscar/oathpath/issues/25) |
-| E1 | Journey shell | Four-destination navigation (Home, Learn, Practice, Progress), the `Clock` provider, the learner profile (test version, senior exemption, interview date, state, goal), orientation, and home's `nextAction` contract | — | not started | [#50](https://github.com/marinoscar/oathpath/issues/50) |
-| E2 | Civics content | The versioned, provenance-tracked USCIS question bank for both test versions, dynamic answers with effective dates, and the Learn page | E1 | not started | [#51](https://github.com/marinoscar/oathpath/issues/51) |
+| E1 | Journey shell | Four-destination navigation (Home, Learn, Practice, Progress), the `Clock` provider, the learner profile (test version, senior exemption, interview date, state, goal), orientation, and home's `nextAction` contract | — | done | [#50](https://github.com/marinoscar/oathpath/issues/50) |
+| E2 | Civics content | The versioned, provenance-tracked USCIS question bank for both test versions, dynamic answers with effective dates, and the Learn page | E1 | in progress | [#51](https://github.com/marinoscar/oathpath/issues/51) |
 | E3 | Practice sessions | Deterministic (exact-match + normalisation) practice loop and `practice_attempts`, the one evidence table every later epic reads | E1, E2 | not started | [#52](https://github.com/marinoscar/oathpath/issues/52) |
 | E4 | AI Evaluator and Teacher | `AiDispatchService.run`, the `FakeAiProvider`, semantic grading with failure causes, streaming explanations — the first AI feature | #25, E2, E3 | not started | [#53](https://github.com/marinoscar/oathpath/issues/53) |
 | E5 | Memory | Spaced repetition (`question_mastery`), verified mastery (correct on ≥3 distinct days), the deterministic Study Coach recommender, Progress v1 | E1, E3 | not started | [#54](https://github.com/marinoscar/oathpath/issues/54) |
