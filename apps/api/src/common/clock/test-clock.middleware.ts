@@ -1,6 +1,7 @@
-import { BadRequestException, Injectable, NestMiddleware } from '@nestjs/common';
+import { HttpStatus, Injectable, NestMiddleware } from '@nestjs/common';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
+import type { ErrorResponse } from '../filters/http-exception.filter';
 import { clockOverrideStorage } from './clock';
 
 export const TEST_CLOCK_HEADER = 'x-test-clock';
@@ -32,7 +33,7 @@ const ISO_INSTANT =
 @Injectable()
 export class TestClockMiddleware implements NestMiddleware {
   // NestJS middleware under the Fastify adapter receives raw Node objects.
-  use(req: IncomingMessage, _res: ServerResponse, next: () => void): void {
+  use(req: IncomingMessage, res: ServerResponse, next: () => void): void {
     const raw = req.headers[TEST_CLOCK_HEADER];
 
     // No header: nothing is entered into the store, and `Clock` reports real
@@ -44,10 +45,16 @@ export class TestClockMiddleware implements NestMiddleware {
 
     // A repeated header is ambiguous -- two different pinned instants with no
     // principled way to choose. Reject rather than pick one.
+    //
+    // In practice Node reaches the same verdict one step earlier: for every
+    // header but `set-cookie` it joins duplicates into a single
+    // comma-separated string, which fails the ISO parse below and is rejected
+    // as malformed. So this branch is a defensive guard on a shape the types
+    // permit rather than the path a duplicate header usually takes -- both end
+    // at the same `reject`, and a duplicate header is a 400 either way.
     if (Array.isArray(raw)) {
-      throw new BadRequestException(
-        `${TEST_CLOCK_HEADER} must be sent at most once`,
-      );
+      this.reject(req, res, `${TEST_CLOCK_HEADER} must be sent at most once`);
+      return;
     }
 
     const parsed = parseIsoInstant(raw);
@@ -56,15 +63,77 @@ export class TestClockMiddleware implements NestMiddleware {
     // asserting against a wrong time it believes is a pinned time is worse
     // than a failing request.
     if (parsed === null) {
-      throw new BadRequestException(
+      this.reject(
+        req,
+        res,
         `${TEST_CLOCK_HEADER} must be an ISO-8601 instant with a zone designator, e.g. 2026-01-15T09:00:00Z`,
       );
+      return;
     }
 
     // The remainder of the request runs inside the store, so the override
     // lives exactly as long as this request's async context.
     clockOverrideStorage.run({ now: parsed }, next);
   }
+
+  /**
+   * Writes the 400 directly and does not call `next()`.
+   *
+   * **This deliberately does not `throw new BadRequestException(...)`, unlike
+   * every other input rejection in this codebase. Do not "fix" it back into a
+   * throw.**
+   *
+   * Under the Fastify adapter, an exception thrown from *middleware* -- as
+   * opposed to from a guard, pipe, controller or interceptor -- reaches
+   * `HttpExceptionFilter` with the raw Node `ServerResponse` in the arguments
+   * host, not a Fastify reply. The filter's last line is
+   * `response.code(status).send(...)`, and `ServerResponse` has no `.code()`,
+   * so the filter itself throws `TypeError: response.code is not a function`.
+   * Nothing is ever written to the socket and the request hangs until the
+   * client times out.
+   *
+   * A hang is a far worse outcome than the 500 it looks like it should have
+   * been: a developer who typo'd the header would get no error at all, which
+   * is precisely the silently-wrong failure this provider exists to eliminate.
+   *
+   * So the envelope is built here, matching `HttpExceptionFilter`'s
+   * `ErrorResponse` exactly -- same fields, and `code: 'BAD_REQUEST'` from the
+   * filter's own status mapping -- so this response is indistinguishable from
+   * every other 400 the API returns. The shape is imported rather than
+   * retyped, so a change to the envelope breaks this build too.
+   */
+  private reject(
+    req: IncomingMessage,
+    res: ServerResponse,
+    message: string,
+  ): void {
+    const body: ErrorResponse = {
+      statusCode: HttpStatus.BAD_REQUEST,
+      code: 'BAD_REQUEST',
+      message,
+      timestamp: new Date().toISOString(),
+      path: originalUrlOf(req),
+    };
+
+    res.statusCode = HttpStatus.BAD_REQUEST;
+    res.setHeader('content-type', 'application/json; charset=utf-8');
+    res.end(JSON.stringify(body));
+  }
+}
+
+/**
+ * The request path as `HttpExceptionFilter` would report it.
+ *
+ * `req.url` is not it: Nest mounts middleware through middie, which rewrites
+ * `url` relative to the mount point, so a rejected `GET /api/health/live`
+ * arrives here as `/`. Middie preserves the real path on `originalUrl`, which
+ * is what the filter's Fastify request would have carried. Without this the
+ * envelope would be the right shape with the wrong `path` -- the sort of
+ * detail that makes a debugging session longer than it needed to be.
+ */
+function originalUrlOf(req: IncomingMessage): string {
+  const { originalUrl } = req as IncomingMessage & { originalUrl?: string };
+  return originalUrl ?? req.url ?? '';
 }
 
 function parseIsoInstant(value: string): Date | null {

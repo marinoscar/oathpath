@@ -8,7 +8,14 @@ import {
 } from '@nestjs/common';
 import { hasVerbatimErrorBody } from '../exceptions/verbatim-error-body.exception';
 
-interface ErrorResponse {
+/**
+ * The standard error envelope every failing request returns.
+ *
+ * Exported so `TestClockMiddleware` — which must write its own 400 rather than
+ * throw, see the comment there — is compile-time bound to this shape instead of
+ * hand-rolling a copy that could drift.
+ */
+export interface ErrorResponse {
   statusCode: number;
   code: string;
   message: string;
