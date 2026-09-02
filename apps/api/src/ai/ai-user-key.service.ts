@@ -242,6 +242,77 @@ export class AiUserKeyService {
     return this.finishTest(userId, providerKind, attemptedAt, result);
   }
 
+  /**
+   * Remove the key belonging to a user account that is being DELETED.
+   *
+   * -------------------------------------------------------------------------
+   * WHY THIS EXISTS, AND WHY IT IS NOT MERELY HOUSEKEEPING (#38)
+   * -------------------------------------------------------------------------
+   *
+   * `Credential` has NO FOREIGN KEY TO `User`. The only relation in
+   * schema.prisma is `updatedByUserId`, which is `onDelete: SetNull` and
+   * records who last EDITED a credential, not who owns it — behaviour that is
+   * correct for the SMTP password it was designed for, where offboarding the
+   * admin who typed it in must not delete a working mail configuration.
+   *
+   * A per-user key is addressed by `(purpose 'ai-user', name <userId>)`, where
+   * the user id is A STRING IN THE `name` COLUMN, not a reference. The
+   * database therefore has no way to know that row belongs to that user, and
+   * nothing will ever collect it.
+   *
+   * So deleting a user leaves behind a row containing that person's live
+   * OpenAI API key — encrypted, retained indefinitely, and still chargeable to
+   * someone who has left. That is a data-retention defect.
+   *
+   * -------------------------------------------------------------------------
+   * DEACTIVATION IS THE OPPOSITE DECISION, AND IT IS DELIBERATE
+   * -------------------------------------------------------------------------
+   *
+   * Deactivation is REVERSIBLE and the user may return, so their key is
+   * PRESERVED. Destroying it on a temporary suspension would make
+   * reactivation silently useless until the user noticed and re-entered a key
+   * — and, because a keyless user is hard-blocked (#39), "silently useless"
+   * means locked out of the product.
+   *
+   * Deletion is not reversible and the key must go. Both halves are stated so
+   * neither reads as an oversight. See docs/specs/ai-settings.md §4.1.
+   *
+   * -------------------------------------------------------------------------
+   * NOTHING CALLS THIS TODAY, AND THAT IS THE POINT
+   * -------------------------------------------------------------------------
+   *
+   * This application has no user-deletion endpoint: `UsersService` offers
+   * deactivation (`isActive: false`) and role changes, and nothing else. So
+   * there is no site to hook, and a hook alone would be an unenforced promise
+   * that the FIRST deletion path anyone adds remembers to call it.
+   *
+   * `AiUserCredentialCleanupTask` is the enforcement: it sweeps for rows whose
+   * `name` matches no existing user and removes them, so a deletion path that
+   * forgets this method still cannot leave a key behind indefinitely. This
+   * method is the immediate, correct action; the sweep is the backstop that
+   * does not depend on anyone remembering.
+   *
+   * Idempotent: purging a user with no key stored is not an error.
+   */
+  async purgeForDeletedUser(userId: string): Promise<void> {
+    await this.credentials.deleteSecret(
+      AI_USER_CREDENTIAL_PURPOSE,
+      aiUserCredentialName(userId),
+    );
+
+    // Audited under the same action a user's own deletion uses. The actor is
+    // the user themselves rather than whoever ran the deletion: the row
+    // describes whose credential was destroyed, and `actorUserId` is the only
+    // user column an audit event has.
+    //
+    // NOTE THE ORDER: the credential is removed BEFORE the audit row is
+    // written, so a failure to audit cannot leave the key in place. An
+    // unaudited deletion is a smaller problem than a retained credential.
+    await this.audit(userId, 'ai_key:delete', { reason: 'account_deleted' });
+
+    this.logger.log(`AI key purged for deleted user ${userId}`);
+  }
+
   // ---------------------------------------------------------------------------
   // Internals
   // ---------------------------------------------------------------------------

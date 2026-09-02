@@ -209,9 +209,32 @@ ever collect it.
 key.** Encrypted, but retained indefinitely, and still chargeable to someone who
 has left. That is a data-retention defect, not housekeeping.
 
-The fix is explicit deletion at every point a user account is removed, using the
-idempotent `CredentialsService.deleteSecret`. It is a correctness requirement of
-this epic, not a follow-up.
+The fix has two halves, because one alone is not enough.
+
+**The hook.** `AiUserKeyService.purgeForDeletedUser(userId)` deletes the
+credential, using the idempotent `CredentialsService.deleteSecret`. It is the
+right immediate action wherever a user account is removed.
+
+**The sweep.** `AiUserCredentialCleanupTask` runs nightly, finds
+`('ai-user', <id>)` rows whose `<id>` matches no existing user, and deletes
+them.
+
+The sweep is not belt-and-braces; it is the part that actually holds. **This
+application has no user-deletion endpoint** — `UsersService` offers
+deactivation (`isActive: false`) and role changes and nothing else — so the
+hook has no call site today. A hook with no call site is an unenforced promise
+that whoever adds the first deletion path remembers to call it, and if they do
+not, the failure is invisible: no FK and no query will ever point at the
+orphan. The sweep does not depend on anyone remembering, and it additionally
+collects rows orphaned by deletions performed outside the application entirely
+— a `DELETE FROM users` run by an operator, a data migration, a GDPR erasure
+done in SQL.
+
+The sweep is the one legitimate caller of `CredentialsService.list('ai-user')`.
+§4.2's rule is about **controllers**; this is a scheduled server-side task with
+no HTTP surface, no caller and no response, and enumerating is the entire job —
+an orphan cannot be found without looking at the set. It reads
+`CredentialInfo`, so no key is decrypted even there.
 
 **Deactivation is the opposite decision, and it is deliberate.** Deactivation is
 reversible and the user may return; destroying their key on a temporary
