@@ -76,7 +76,7 @@ a v2.
 |---|---|---|---|---|---|
 | — | AI configuration | Server model-role bindings (admin) plus mandatory per-user BYOK OpenAI keys; the one door (`AiDispatchService`) every later AI feature calls through | Foundation — required before E4, E8, E9, E10, E11 | done | [#25](https://github.com/marinoscar/oathpath/issues/25) |
 | E1 | Journey shell | Four-destination navigation (Home, Learn, Practice, Progress), the `Clock` provider, the learner profile (test version, senior exemption, interview date, state, goal), orientation, and home's `nextAction` contract | — | done | [#50](https://github.com/marinoscar/oathpath/issues/50) |
-| E2 | Civics content | The versioned, provenance-tracked USCIS question bank for both test versions, dynamic answers with effective dates, and the Learn page | E1 | in progress<sup>†</sup> | [#51](https://github.com/marinoscar/oathpath/issues/51) |
+| E2 | Civics content | The versioned, provenance-tracked USCIS question bank for both test versions, dynamic answers with effective dates, and the Learn page | E1 | done<sup>†</sup> | [#51](https://github.com/marinoscar/oathpath/issues/51) |
 | E3 | Practice sessions | Deterministic (exact-match + normalisation) practice loop and `practice_attempts`, the one evidence table every later epic reads | E1, E2 | not started | [#52](https://github.com/marinoscar/oathpath/issues/52) |
 | E4 | AI Evaluator and Teacher | `AiDispatchService.run`, the `FakeAiProvider`, semantic grading with failure causes, streaming explanations — the first AI feature | #25, E2, E3 | not started | [#53](https://github.com/marinoscar/oathpath/issues/53) |
 | E5 | Memory | Spaced repetition (`question_mastery`), verified mastery (correct on ≥3 distinct days), the deterministic Study Coach recommender, Progress v1 | E1, E3 | not started | [#54](https://github.com/marinoscar/oathpath/issues/54) |
@@ -94,9 +94,10 @@ run the epic's Playwright journey spec locally against the compose stack and
 reported it passing (see [§6](#6-definition-of-done-per-epic) — this is a
 human check, not something `main` being green on GitHub implies by itself).
 
-<sup>†</sup> **E2: all ten child issues are merged and CI is green on `main`,
-but the epic is deliberately not marked `done`.** Two of this section's
-criteria are human checks that have not happened yet:
+<sup>†</sup> **E2 is closed and marked `done` by the repository owner, with two
+of this section's human checks knowingly outstanding.** All ten child issues
+are merged and CI is green on `main`; what follows is not a defect list but a
+record of what a later reader should not assume was verified:
 
 1. **`civics-learn.spec.ts` has never been executed.** It was written against
    the real component sources and it typechecks and registers, but the
@@ -111,6 +112,12 @@ criteria are human checks that have not happened yet:
    outright under `NODE_ENV=production`, so this cannot reach a learner by
    accident. Closing it needs a human with the official USCIS PDFs; see
    [`docs/runbooks/updating-civics-content.md`](docs/runbooks/updating-civics-content.md).
+
+Both were closed as a deliberate call rather than an oversight, and #101 and
+#132 can be reopened if either is picked up. Nothing downstream should read
+E2's `done` as meaning the civics content has been verified against the
+official source — E4's grader and E8's interview engine ground their judgments
+in these rows, so that distinction matters to them specifically.
 
 ---
 
