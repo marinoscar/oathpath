@@ -5,6 +5,8 @@ import { CredentialsModule } from '../credentials/credentials.module';
 import { AiSettingsController } from './ai-settings.controller';
 import { AiSettingsService } from './ai-settings.service';
 import { AiConnectionTestService } from './ai-connection-test.service';
+import { AiUserKeyController } from './ai-user-key.controller';
+import { AiUserKeyService } from './ai-user-key.service';
 import { OpenAiProvider } from './providers/openai.provider';
 
 // =============================================================================
@@ -47,13 +49,23 @@ import { OpenAiProvider } from './providers/openai.provider';
     // visible right here.
     CredentialsModule,
   ],
-  controllers: [AiSettingsController],
+  controllers: [
+    AiSettingsController,
+    // The per-user surface (#35). A SEPARATE CONTROLLER from the admin one,
+    // and not merely for tidiness: these routes are `@Auth()` with no
+    // permissions while every route on the other is gated on
+    // `system_settings:*`. Two controllers means the gate is visible per file
+    // rather than per decorator, and a route added to the wrong one is a
+    // visibly wrong file rather than a missing decorator.
+    AiUserKeyController,
+  ],
   providers: [
     AiSettingsService,
     // The test path (#32). Registered here rather than in a module of its own
     // because it is one method over the provider and settings this module
     // already owns.
     AiConnectionTestService,
+    AiUserKeyService,
     OpenAiProvider,
   ],
   // AiConnectionTestService is deliberately NOT exported: running an outbound

@@ -20,6 +20,8 @@
 
 export { AiModule } from './ai.module';
 export { AiSettingsController } from './ai-settings.controller';
+export { AiUserKeyController } from './ai-user-key.controller';
+export { AiUserKeyService } from './ai-user-key.service';
 export { AiSettingsService } from './ai-settings.service';
 // AiConnectionTestService is deliberately NOT exported — see ai.module.ts.
 export { BaseAiProvider } from './base-ai.provider';
@@ -78,6 +80,14 @@ export {
   aiTestResultSchema,
 } from './dto/ai-test-result.dto';
 export type { AiTestResult } from './dto/ai-test-result.dto';
+export {
+  aiUserKeyStatusSchema,
+  updateAiUserKeySchema,
+} from './dto/ai-user-key.dto';
+export type {
+  AiUserKeyStatus,
+  UpdateAiUserKeyInput,
+} from './dto/ai-user-key.dto';
 export { updateAiSettingsSchema } from './dto/update-ai-settings.dto';
 export type { AiSettingsResponse } from './dto/ai-settings-response.dto';
 export type { UpdateAiSettingsInput } from './dto/update-ai-settings.dto';
