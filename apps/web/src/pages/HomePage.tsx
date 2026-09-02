@@ -17,12 +17,20 @@
  * It is also the screen a learner lands on the instant orientation finishes, so
  * it was the first thing the product said after asking six personal questions.
  *
- * Both components come OFF this page and neither is deleted; their destinations
- * stay reachable. `UserProfileCard`'s content lives on `/settings/profile`, and
- * the identity it displayed (name, email, avatar) is in the AppBar's user menu
- * on every screen. `QuickActions`' two targets are `SETTINGS_DESTINATION` and
+ * Both components came OFF this page, and because this page was their only
+ * mount point they were rendered nowhere afterwards. Issue #188 deleted them
+ * rather than carry live, tested, unmounted code whose green suites gave no
+ * signal that nothing shipped them; `git log -- apps/web/src/components/home`
+ * has them if they are ever wanted back.
+ *
+ * Deleting them cost nothing because every destination they offered stays
+ * reachable. The profile card's content lives on `/settings/profile`, and the
+ * identity it displayed (name, email, avatar) is in the AppBar's user menu on
+ * every screen. The shortcut grid's two targets were `SETTINGS_DESTINATION` and
  * `CONSOLE_DESTINATION`: the first is the user menu's one navigation row, the
- * second is `RAIL_PINNED_DESTINATIONS`, which the navigation rail draws.
+ * second is `RAIL_PINNED_DESTINATIONS`, which the navigation rail draws. That
+ * is asserted, not asserted-by-hand: see "leaves both removed destinations
+ * reachable elsewhere" in `__tests__/pages/HomePage.test.tsx`.
  *
  * =============================================================================
  * EVERY ANSWER ON THIS PAGE COMES FROM THE SERVER
