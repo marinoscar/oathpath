@@ -476,7 +476,7 @@ describe('SettingsHubPage — the real admin registry', () => {
       window.dispatchEvent(new Event('scroll'));
 
       await waitFor(() => {
-        expect(window.sessionStorage.getItem('eab:scroll:admin-settings-hub')).toBe('42');
+        expect(window.sessionStorage.getItem('oathpath:scroll:admin-settings-hub')).toBe('42');
       });
     });
   });
@@ -641,7 +641,7 @@ describe('UserSettingsHubPage — the real user registry', () => {
       window.dispatchEvent(new Event('scroll'));
 
       await waitFor(() => {
-        expect(window.sessionStorage.getItem('eab:scroll:user-settings-hub')).toBe('84');
+        expect(window.sessionStorage.getItem('oathpath:scroll:user-settings-hub')).toBe('84');
       });
     });
   });
@@ -664,7 +664,7 @@ describe('Admin hub and user hub keep separate scroll offsets', () => {
     Object.defineProperty(window, 'scrollY', { value: 111, configurable: true });
     window.dispatchEvent(new Event('scroll'));
     await waitFor(() => {
-      expect(window.sessionStorage.getItem('eab:scroll:admin-settings-hub')).toBe('111');
+      expect(window.sessionStorage.getItem('oathpath:scroll:admin-settings-hub')).toBe('111');
     });
     unmount();
 
@@ -675,12 +675,12 @@ describe('Admin hub and user hub keep separate scroll offsets', () => {
     Object.defineProperty(window, 'scrollY', { value: 222, configurable: true });
     window.dispatchEvent(new Event('scroll'));
     await waitFor(() => {
-      expect(window.sessionStorage.getItem('eab:scroll:user-settings-hub')).toBe('222');
+      expect(window.sessionStorage.getItem('oathpath:scroll:user-settings-hub')).toBe('222');
     });
 
     // The admin hub's offset survived the user hub's write untouched — the
     // two keys are genuinely independent, not the same key overwritten twice.
-    expect(window.sessionStorage.getItem('eab:scroll:admin-settings-hub')).toBe('111');
-    expect(window.sessionStorage.getItem('eab:scroll:user-settings-hub')).toBe('222');
+    expect(window.sessionStorage.getItem('oathpath:scroll:admin-settings-hub')).toBe('111');
+    expect(window.sessionStorage.getItem('oathpath:scroll:user-settings-hub')).toBe('222');
   });
 });
