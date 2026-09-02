@@ -1,5 +1,5 @@
 /**
- * Type declarations for `@app/shared`, hand-written because this package has no
+ * Type declarations for `@oathpath/shared`, hand-written because this package has no
  * build step (see the long note at the top of `index.js` for why).
  *
  * Deliberately typed as `string` and NOT as the string literal. A literal type

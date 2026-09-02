@@ -1,5 +1,5 @@
 {
-  "name": "enterprise-app",
+  "name": "oathpath",
   "private": true,
   "workspaces": [
     "apps/*",

@@ -1,4 +1,4 @@
-import { APP_NAME } from '@app/shared';
+import { APP_NAME } from '@oathpath/shared';
 import { createTestApp, closeTestApp, TestContext } from '../helpers/test-app.helper';
 import { createOpenApiDocument } from '../../src/openapi/document';
 import {

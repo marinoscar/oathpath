@@ -39,8 +39,8 @@ FROM base AS deps
 COPY package.json package-lock.json ./
 COPY apps/api/package.json ./apps/api/
 COPY apps/web/package.json ./apps/web/
-# `@app/shared` is a real runtime dependency of this app, so `npm ci` has to
-# resolve it — and the workspace symlink it creates (node_modules/@app/shared)
+# `@oathpath/shared` is a real runtime dependency of this app, so `npm ci` has to
+# resolve it — and the workspace symlink it creates (node_modules/@oathpath/shared)
 # has to point at a directory that actually contains files.
 #
 # The WHOLE package is copied here, not just its manifest, precisely so that

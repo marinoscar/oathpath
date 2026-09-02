@@ -1,4 +1,4 @@
-import { APP_NAME } from '@app/shared';
+import { APP_NAME } from '@oathpath/shared';
 
 // =============================================================================
 // CLI identity — the one constant a fork renames  (issue #140, epic #110)
@@ -22,7 +22,7 @@ import { APP_NAME } from '@app/shared';
 // the BINARY's identity and are still seeded by `CLI_NAME` right here. The
 // PRODUCT's display name is a different fact with a different blast radius —
 // it appears in the browser wordmark and in email templates too — so it now
-// comes from `@app/shared`, and `CLI_DISPLAY_NAME` is derived from it. A fork
+// comes from `@oathpath/shared`, and `CLI_DISPLAY_NAME` is derived from it. A fork
 // renaming its product edits that one constant and the CLI banner follows;
 // renaming the executable is still an edit here, and the two are deliberately
 // independent.
@@ -60,7 +60,7 @@ export const CLI_NAME = 'appctl';
  *
  * Separate from `CLI_NAME` because the two genuinely differ: you type `git`
  * and the docs say "Git". `CLI_NAME` is this executable's own identity and is
- * still set right here; the PRODUCT half now comes from `@app/shared`, which
+ * still set right here; the PRODUCT half now comes from `@oathpath/shared`, which
  * the web app and the API render too (issue #165, epic #161).
  *
  * That split is the point rather than an inconsistency. Renaming the product

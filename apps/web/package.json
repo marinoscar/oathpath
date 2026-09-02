@@ -19,7 +19,7 @@
     "test:ci": "vitest run --coverage --reporter=junit --outputFile=junit.xml"
   },
   "dependencies": {
-    "@app/shared": "*",
+    "@oathpath/shared": "*",
     "@emotion/react": "^11.14.0",
     "@emotion/styled": "^11.14.1",
     "@mui/icons-material": "^9.1.0",
