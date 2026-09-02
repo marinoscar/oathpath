@@ -128,7 +128,35 @@ export function computeContentHash(file: ContentFile): string {
 // all — see `loadVersion`'s skip-clean branch below, which runs first and
 // never reaches this function for that case, because there is nothing to
 // "load" from an intentionally empty placeholder.
+//
+// The refusal is thrown as `UnverifiedContentError`, a distinct type, so that
+// `loadAllCivicsContent` can catch this specific decision — and only this
+// decision — to skip the offending file and continue to the next one
+// (issue #216). Any other error (a malformed file, a DB failure, a
+// constraint violation) is a plain `Error` and still propagates and aborts
+// the whole run.
 // -----------------------------------------------------------------------------
+
+export class UnverifiedContentError extends Error {
+  /**
+   * Filled in by `loadVersion` immediately after catching this error (it
+   * alone knows the file's testVersionCode/contentHash at the point the gate
+   * runs) so that `loadAllCivicsContent`'s catch site can build a skip
+   * summary shaped like `loadVersion`'s own AWAITING_SOURCE branch without
+   * re-reading or re-hashing the file.
+   */
+  public testVersionCode?: string;
+  public contentHash?: string;
+
+  constructor(
+    message: string,
+    public readonly fileLabel: string,
+    public readonly status: string,
+  ) {
+    super(message);
+    this.name = 'UnverifiedContentError';
+  }
+}
 
 export function assertTrustedForLoad(
   file: ContentFile,
@@ -141,18 +169,22 @@ export function assertTrustedForLoad(
   }
 
   if (env.NODE_ENV === 'production') {
-    throw new Error(
+    throw new UnverifiedContentError(
       `Refusing to load ${fileLabel}: provenance.transcription.status is "${status}", not ` +
         `HUMAN_VERIFIED. NODE_ENV=production never loads unverified civics content, regardless ` +
         `of CIVICS_ALLOW_UNVERIFIED_CONTENT.`,
+      fileLabel,
+      status,
     );
   }
 
   if (env.CIVICS_ALLOW_UNVERIFIED_CONTENT !== 'true') {
-    throw new Error(
+    throw new UnverifiedContentError(
       `Refusing to load ${fileLabel}: provenance.transcription.status is "${status}", not ` +
         `HUMAN_VERIFIED. Set CIVICS_ALLOW_UNVERIFIED_CONTENT=true to load unverified content in ` +
         `dev/CI (never set this in production).`,
+      fileLabel,
+      status,
     );
   }
 
@@ -293,7 +325,7 @@ async function loadAnswerSlot(
 // same-content re-run does not touch civics_test_versions.updated_at either.
 // -----------------------------------------------------------------------------
 
-async function stampContentHash(tx: Db, testVersionCode: string, hash: string): Promise<boolean> {
+export async function stampContentHash(tx: Db, testVersionCode: string, hash: string): Promise<boolean> {
   const version = await tx.civicsTestVersion.findUnique({ where: { code: testVersionCode } });
   if (!version) {
     throw new Error(
@@ -363,7 +395,18 @@ async function loadVersion(
     };
   }
 
-  assertTrustedForLoad(file, fileLabel, env);
+  try {
+    assertTrustedForLoad(file, fileLabel, env);
+  } catch (err) {
+    if (err instanceof UnverifiedContentError) {
+      // Attach what only this function knows, so the catch in
+      // `loadAllCivicsContent` can build a full skip summary from the error
+      // alone — see the class doc comment above.
+      err.testVersionCode = testVersionCode;
+      err.contentHash = contentHash;
+    }
+    throw err;
+  }
 
   const counters = freshCounters();
   let contentHashChanged = false;
@@ -503,9 +546,50 @@ export async function loadAllCivicsContent(
 
   const summaries: VersionLoadSummary[] = [];
   for (const filePath of files) {
-    const summary = await loadVersion(prisma, filePath, clock, env);
-    logSummary(summary);
-    summaries.push(summary);
+    try {
+      const summary = await loadVersion(prisma, filePath, clock, env);
+      logSummary(summary);
+      summaries.push(summary);
+    } catch (err) {
+      // Only the trust gate's own refusal is turned into a per-file skip.
+      // Everything else — a malformed file, a DB failure, a constraint
+      // violation — propagates and aborts the whole run, unchanged from
+      // before #216.
+      if (!(err instanceof UnverifiedContentError)) {
+        throw err;
+      }
+
+      const testVersionCode = err.testVersionCode;
+      const contentHash = err.contentHash;
+      // Short, because it is repeated on the per-file line and again in the
+      // CLI's closing SUMMARY. The full explanation is logged once, below.
+      const skipReason = `refused: not HUMAN_VERIFIED (status=${err.status})`;
+
+      // Loud and unmissable: a silent skip here would be worse than the old
+      // abort-the-whole-run behaviour it replaces (issue #216). `err.message`
+      // already names the file, the status and the governing rule, so it is
+      // the whole explanation and is not restated around it.
+      console.error(`[civics-loader] SKIPPED — ${err.message}`);
+
+      let contentHashChanged = false;
+      if (testVersionCode && contentHash) {
+        contentHashChanged = await prisma.$transaction((tx) =>
+          stampContentHash(tx, testVersionCode, contentHash),
+        );
+      }
+
+      const summary: VersionLoadSummary = {
+        file: err.fileLabel,
+        testVersionCode,
+        skipped: true,
+        skipReason,
+        ...freshCounters(),
+        contentHash: contentHash ?? '',
+        contentHashChanged,
+      };
+      logSummary(summary);
+      summaries.push(summary);
+    }
   }
   return summaries;
 }
@@ -529,8 +613,27 @@ if (require.main === module) {
     const adapter = new PrismaPg(databaseUrl);
     const prisma = new RuntimePrismaClient({ adapter });
     try {
-      await loadAllCivicsContent(prisma);
-      console.log('[civics-loader] Done.');
+      const summaries = await loadAllCivicsContent(prisma);
+      const loaded = summaries.filter((s) => !s.skipped);
+      const skipped = summaries.filter((s) => s.skipped);
+
+      const loadedList = loaded.map((s) => s.file).join(', ') || '(none)';
+      const skippedList = skipped.map((s) => `${s.file} [${s.skipReason}]`).join(', ') || '(none)';
+      console.log(`[civics-loader] SUMMARY: loaded: ${loadedList}; skipped: ${skippedList}`);
+
+      if (loaded.length === 0) {
+        // Every file was skipped or refused — this deployment would have NO
+        // civics content at all, which is a genuinely broken deploy, not a
+        // partial one. Distinct from the per-file skip above, which is
+        // expected in a mixed-verification directory (issue #216).
+        console.error(
+          '[civics-loader] FAILED: no civics content version was loaded (every file was skipped ' +
+            'or refused). This deployment has no civics content.',
+        );
+        process.exitCode = 1;
+      } else {
+        console.log('[civics-loader] Done.');
+      }
     } finally {
       await prisma.$disconnect();
     }
