@@ -18,6 +18,9 @@
 // directly is how that guarantee gets lost.
 // =============================================================================
 
+export { AiModule } from './ai.module';
+export { AiSettingsController } from './ai-settings.controller';
+export { AiSettingsService } from './ai-settings.service';
 export { BaseAiProvider } from './base-ai.provider';
 export { OpenAiProvider } from './providers/openai.provider';
 export {
@@ -58,6 +61,14 @@ export type {
   AiModelRoleDef,
 } from './ai-model-roles';
 export type { AiProviderKind, AiSettings } from './ai-settings.schema';
+export type {
+  AiApiKeyStatus,
+  AiSettingsAdminView,
+} from './ai-settings.service';
+export { aiSettingsResponseSchema } from './dto/ai-settings-response.dto';
+export { updateAiSettingsSchema } from './dto/update-ai-settings.dto';
+export type { AiSettingsResponse } from './dto/ai-settings-response.dto';
+export type { UpdateAiSettingsInput } from './dto/update-ai-settings.dto';
 export type {
   AiConnectionTestResult,
   AiModelCatalogResult,

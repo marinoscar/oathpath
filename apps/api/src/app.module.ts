@@ -17,6 +17,7 @@ import { StorageModule } from './storage/storage.module';
 import { PatModule } from './pat/pat.module';
 import { CredentialsModule } from './credentials/credentials.module';
 import { EmailModule } from './email/email.module';
+import { AiModule } from './ai/ai.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { LoggerModule } from './common/logger/logger.module';
 import { TestAuthModule } from './test-auth/test-auth.module';
@@ -69,6 +70,11 @@ import configuration from './config/configuration';
     // neither transport touches the network or reads a credential until its
     // first send.
     EmailModule,
+
+    // AI configuration: the server key, the model-role bindings, and the
+    // per-user BYOK surface (epic #25). Like EmailModule, it owns its own
+    // `system_settings` row and its own credential purposes.
+    AiModule,
     // Notifications (#121/#124/#125, epic #109): the event registry endpoint,
     // and since #125 the dispatcher, preference resolution and delivery
     // records. Registered here even though no real event is wired yet (#128)

@@ -108,6 +108,15 @@ export const TAG_GROUPS: OpenApiTagGroup[] = [
           'encrypted credential store, is never returned, and submitting it empty preserves it.',
       },
       {
+        name: 'AI Settings',
+        description:
+          'Server-side AI configuration: which provider, the master switch, and which model serves ' +
+          'each role (`tutor`, `grader`, …). Gated on `system_settings:read`/`:write`. The server ' +
+          'API key is write-only — it is held in the encrypted credential store, is never returned, ' +
+          'and submitting it empty preserves it. This key populates the model catalog and proves ' +
+          'connectivity; **inference runs on each user\'s own key**, under `AI`.',
+      },
+      {
         name: 'Notifications',
         description:
           'The registry of events this application can raise, and which channels each supports. ' +
