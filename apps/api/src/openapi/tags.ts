@@ -132,6 +132,18 @@ export const TAG_GROUPS: OpenApiTagGroup[] = [
           'Readable by any signed-in user, because every user renders their own notification ' +
           'preferences against it.',
       },
+      {
+        name: 'Civics Admin',
+        description:
+          'The dynamic civics answers an administrator maintains — the officeholder facts that ' +
+          "change without the question changing (who is Speaker of the House, who is your state's " +
+          'governor). Gated on `system_settings:read`/`:write`, reusing the settings permissions ' +
+          'rather than adding a pair. A correction never edits an answer in place: the current ' +
+          'row is closed and a new one opened, so an answer a learner was already graded against ' +
+          'stays readable. Static answers are not administered here — they change through a ' +
+          'reviewed content change. The learner-facing side of the same content is under ' +
+          '`Civics`.',
+      },
     ],
   },
   {
