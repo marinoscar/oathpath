@@ -40,6 +40,7 @@ model User {
   credentialUpdates         Credential[]     @relation("CredentialUpdatedBy")
   notificationDeliveries    NotificationDelivery[] @relation("UserNotificationDeliveries")
   notifications             Notification[]   @relation("UserNotifications")
+  aiUsageEvents             AiUsageEvent[]   @relation("UserAiUsageEvents")
 
   @@map("users")
 }
@@ -605,4 +606,124 @@ model Notification {
   //    backwards for the newest page, which is the only page anyone loads.
   @@index([userId, createdAt(sort: Desc)])
   @@map("notifications")
+}
+
+// =============================================================================
+// AI Usage Events (issue #34, epic #25)
+// =============================================================================
+//
+// One row per AI call, written by `BaseAiProvider` (#37) on success and on
+// failure alike.
+//
+// WHY THIS TABLE EXISTS AT ALL: every user brings their own OpenAI key and
+// pays for their own consumption (epic #25, decision 4). Per-user visibility
+// is the entire reason BYOK was chosen over a shared server key — without it,
+// a user has no way to see what the app is costing them, and the trade made in
+// #25 buys nothing.
+//
+// -----------------------------------------------------------------------------
+// WHAT IS NOT HERE, AND WILL NOT BE
+// -----------------------------------------------------------------------------
+//
+// No prompt text, no completion text, no API key, no key hint. Token counts
+// and metadata only. This table is written on EVERY AI call, so it is the
+// highest-volume place in the schema; a column holding what a learner typed
+// during interview practice would make it the most sensitive one too, for a
+// reader that does not exist. #37's own tests assert the absence.
+//
+// -----------------------------------------------------------------------------
+// THIS IS RECORDED USAGE, NOT A BILL
+// -----------------------------------------------------------------------------
+//
+// Token counts are not dollars, a call that fails mid-stream records nothing,
+// and the authoritative number is the user's own OpenAI dashboard. #42's page
+// says so on screen. Nothing downstream may present a sum of these columns as
+// an amount owed.
+// =============================================================================
+
+model AiUsageEvent {
+  id     String @id @default(uuid()) @db.Uuid
+  userId String @map("user_id") @db.Uuid
+
+  // Which provider actually served the call, and which model.
+  //
+  // PLAIN STRINGS, NOT ENUMS OR FOREIGN KEYS, for the same reason
+  // `NotificationDelivery.eventKey` is: `AI_PROVIDER_KINDS` and the model
+  // catalog live in code and at the provider respectively, not in a table. A
+  // usage record must outlive the binding that produced it — an admin who
+  // rebinds `grader` to a different model must not retroactively change what
+  // last month's rows say ran.
+  provider String
+  model    String
+
+  // The role the call served: 'tutor', 'grader', … See
+  // `apps/api/src/ai/ai-model-roles.ts`. A plain string for the same reason,
+  // and because a decommissioned role's historical rows must still read
+  // correctly.
+  roleKey String @map("role_key")
+
+  // ---------------------------------------------------------------------------
+  // Token counts — NULLABLE, AND THAT IS THE WHOLE DESIGN
+  // ---------------------------------------------------------------------------
+  //
+  // A call that fails mid-stream yields partial or no usage. Writing `0` there
+  // would be a CLAIM — a false one that quietly understates consumption, and
+  // the understatement is invisible because zero is a perfectly plausible
+  // value. NULL means "unknown"; `success` and `errorCode` are what
+  // distinguish it from a call that genuinely consumed nothing.
+  //
+  // Also null for a streamed response whose request omitted
+  // `stream_options: { include_usage: true }` — OpenAI emits usage only when
+  // that flag is set, which is the most likely way this feature ends up
+  // silently wrong. #37 asserts the flag rather than trusting it.
+  promptTokens     Int? @map("prompt_tokens")
+  completionTokens Int? @map("completion_tokens")
+  totalTokens      Int? @map("total_tokens")
+
+  // Wall-clock duration of the call. Null when the call never started (a
+  // configuration refusal recorded for completeness).
+  latencyMs Int? @map("latency_ms")
+
+  // Did the provider complete the call?
+  //
+  // NOT DERIVABLE FROM THE TOKEN COLUMNS. A successful call can report no
+  // usage, and a failed one can report partial usage; this is the independent
+  // fact, and it is what makes the nullability above readable.
+  success Boolean
+
+  // A short, stable classification of the failure — 'rate_limit',
+  // 'invalid_key', 'model_not_found', 'timeout'. Null on success.
+  //
+  // A CODE, NOT THE PROVIDER'S MESSAGE. The message is verbatim provider text
+  // that may quote a request; this column is written on every failed call and
+  // is meant to be GROUPed by, which a free-text message cannot be. The
+  // diagnosable text belongs in a log line and in the test endpoints' response,
+  // both of which are redacted paths.
+  errorCode String? @map("error_code")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  // NO `updatedAt`. A usage event is an immutable record of something that
+  // already happened; nothing rewrites one, and a column implying otherwise
+  // would be a second answer to "when" for no reader.
+
+  // Relations
+  //
+  // onDelete: Cascade — DELIBERATELY UNLIKE `Credential`, which has no user
+  // relation at all and whose missing FK is the defect #38 exists to work
+  // around. Usage rows are the user's own data with no reader once the account
+  // is gone, `userId` is NOT NULL so SetNull is not expressible, and retaining
+  // a deleted person's consumption history serves nobody. Same reasoning as
+  // `Notification.user`.
+  user User @relation("UserAiUsageEvents", fields: [userId], references: [id], onDelete: Cascade)
+
+  // The one query the UI actually makes: this user's events, newest first,
+  // over a time window (#37's GET /api/ai/usage).
+  //
+  // `sort: Desc` matters — a plain ascending index makes Postgres walk it
+  // backwards for the newest page, which is the only page anyone loads. The
+  // composite also serves the by-model and by-role breakdowns, which filter on
+  // the same leading `userId` before grouping.
+  @@index([userId, createdAt(sort: Desc)])
+  @@map("ai_usage_events")
 }
