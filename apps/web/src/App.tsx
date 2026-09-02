@@ -37,6 +37,7 @@ const AppearanceSettingsPage = lazy(() => import('./pages/Admin/AppearanceSettin
 const FeatureFlagsPage = lazy(() => import('./pages/Admin/FeatureFlagsPage'));
 // Issue #124, epic #109 — the admin email configuration and its test send.
 const EmailSettingsPage = lazy(() => import('./pages/Admin/EmailSettingsPage'));
+const AiSettingsPage = lazy(() => import('./pages/Admin/AiSettingsPage'));
 const AdvancedSettingsPage = lazy(() => import('./pages/Admin/AdvancedSettingsPage'));
 const AdminUsersPage = lazy(() => import('./pages/Admin/UsersPage'));
 
@@ -247,6 +248,24 @@ function AppRoutes() {
                       fallback={<Navigate to="/" replace />}
                     >
                       <EmailSettingsPage />
+                    </RequirePermission>
+                  }
+                />
+                {/* `system_settings:read`, the SAME string
+                    `config/adminSections.tsx`'s AI card declares and the same
+                    one `ai-settings.controller.ts` enforces on its GET.
+                    Saving and testing need `:write`, which the page gates
+                    internally — the route gate is about REACHABILITY, and a
+                    read-only admin diagnosing "why is AI broken" is worth
+                    letting in to look. */}
+                <Route
+                  path="/admin/settings/ai"
+                  element={
+                    <RequirePermission
+                      permission="system_settings:read"
+                      fallback={<Navigate to="/" replace />}
+                    >
+                      <AiSettingsPage />
                     </RequirePermission>
                   }
                 />

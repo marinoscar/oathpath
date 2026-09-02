@@ -38,6 +38,7 @@ import FlagIcon from '@mui/icons-material/Flag';
 import EmailOutlinedIcon from '@mui/icons-material/EmailOutlined';
 import DataObjectIcon from '@mui/icons-material/DataObject';
 import PeopleIcon from '@mui/icons-material/People';
+import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome';
 
 /**
  * One settings page, fully described for every surface that draws it.
@@ -136,6 +137,24 @@ export const ADMIN_SECTIONS: SettingsSectionDef[] = [
           'Choose how the application sends email, and send a test message to prove it works.',
         Icon: EmailOutlinedIcon,
         path: '/admin/settings/email',
+        permission: 'system_settings:read',
+      },
+      {
+        // Issue #33, epic #25. `system_settings:read` is the string
+        // `ai-settings.controller.ts` enforces on its GET, exactly as the
+        // cards above mirror their own controllers — the registry never
+        // invents a permission. Saving and testing need
+        // `system_settings:write`, which the PAGE gates internally: the card
+        // gate is about REACHABILITY, and a read-only admin diagnosing "why is
+        // AI broken" is worth letting in to look.
+        //
+        // Under General rather than a group of its own: this is deployment
+        // configuration, and one card does not earn a heading.
+        title: 'AI',
+        description:
+          'Choose the AI provider, bind a model to each role, and test the connection.',
+        Icon: AutoAwesomeIcon,
+        path: '/admin/settings/ai',
         permission: 'system_settings:read',
       },
       {

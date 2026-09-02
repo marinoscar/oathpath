@@ -215,6 +215,13 @@ import type {
   EmailSettings,
   EmailSettingsInput,
   EmailTestResult,
+  AiSettings,
+  AiSettingsInput,
+  AiModelCatalog,
+  AiTestResult,
+  AiKeyStatus,
+  AiStatus,
+  AiUsage,
   NotificationEventDef,
   AppNotification,
   NotificationListResponse,
@@ -516,3 +523,168 @@ export async function markAllNotificationsRead(): Promise<UnreadCountResponse> {
 
 /** Re-exported for consumers that only import from this module. */
 export type { AppNotification };
+
+// =============================================================================
+// AI configuration (epic #25)
+// =============================================================================
+
+/**
+ * The admin AI configuration — `GET /api/ai-settings` (#30).
+ *
+ * `system_settings:read`, the same string the registry card declares. The
+ * response carries `apiKeyStatus` (masked, non-secret) and never the key: it
+ * is unreadable through the API by design.
+ */
+export async function getAiSettings(): Promise<AiSettings> {
+  return api.get<AiSettings>('/ai-settings');
+}
+
+/**
+ * Replace the AI configuration — `PUT /api/ai-settings` (#30).
+ *
+ * PUT rather than PATCH, for the same reason email settings are: one small
+ * document edited on one screen, where a per-field merge could leave a
+ * half-saved state (a provider selected, its models not) that nothing in the
+ * UI can show.
+ *
+ * `apiKey` is WRITE-ONLY and BLANK PRESERVES. The caller OMITS the field
+ * entirely when the admin did not retype the key — the API treats omitted,
+ * `null` and `''` identically, but omitting is what the request visibly says,
+ * and a reviewer reading the network tab on an ordinary save sees no key field
+ * at all.
+ *
+ * `If-Match` is sent unconditionally, with `0` meaning "I believe nothing is
+ * stored yet", so even a first save is guarded rather than being the one
+ * unprotected write.
+ */
+export async function updateAiSettings(
+  input: AiSettingsInput,
+  expectedVersion?: number,
+): Promise<AiSettings> {
+  return api.put<AiSettings>('/ai-settings', input, {
+    headers:
+      expectedVersion === undefined
+        ? undefined
+        : { 'If-Match': String(expectedVersion) },
+  });
+}
+
+/**
+ * The bindable model catalog and the role registry — `GET /api/ai-settings/models`
+ * (#31).
+ *
+ * TWO THINGS IN ONE CALL, and the roles come back even when the catalog could
+ * not be fetched: they are code, not provider data, so a missing key has no
+ * bearing on them. Withholding them would leave the page unable to render the
+ * controls that explain what is wrong.
+ *
+ * `showAll` is the escape hatch — no generation floor, every family, including
+ * ids the API did not recognise. It exists because model naming is not ours to
+ * control, and a filter that cannot be switched off eventually locks an admin
+ * out of selecting a model that exists.
+ */
+export async function getAiModelCatalog(options?: {
+  role?: string;
+  showAll?: boolean;
+}): Promise<AiModelCatalog> {
+  const params = new URLSearchParams();
+  if (options?.role) params.set('role', options.role);
+  // Only ever the literal 'true'. The API engages the hatch on that string
+  // alone, so `?showAll=false` correctly does nothing.
+  if (options?.showAll) params.set('showAll', 'true');
+
+  const query = params.toString();
+  return api.get<AiModelCatalog>(`/ai-settings/models${query ? `?${query}` : ''}`);
+}
+
+/**
+ * Test the saved server configuration — `POST /api/ai-settings/test` (#32).
+ *
+ * `system_settings:WRITE`, not read: it causes the system to originate an
+ * outbound request on the organisation's credential.
+ *
+ * ANSWERS 200 EVEN WHEN THE TEST FAILED. Read `success`; a resolved promise
+ * means the endpoint answered, never that the key works.
+ */
+export async function testAiConnection(): Promise<AiTestResult> {
+  return api.post<AiTestResult>('/ai-settings/test');
+}
+
+/**
+ * The caller's OWN stored key — `GET /api/ai/key` (#35).
+ *
+ * Authenticated, no permissions: every user owns their own credentials, and
+ * gating this would leave a Viewer unable to use the app at all. There is no
+ * parameter naming a user, here or on the server.
+ */
+export async function getAiKeyStatus(): Promise<AiKeyStatus> {
+  return api.get<AiKeyStatus>('/ai/key');
+}
+
+/**
+ * Save or replace the caller's own key — `PUT /api/ai/key` (#35).
+ *
+ * The value is sent VERBATIM, untrimmed. A key whose surrounding whitespace is
+ * significant is a real key, and a user pasting from a developer console is
+ * exactly who a silent trim bites — with an authentication failure that has no
+ * visible cause.
+ */
+export async function setAiKey(apiKey: string): Promise<AiKeyStatus> {
+  return api.put<AiKeyStatus>('/ai/key', { apiKey });
+}
+
+/**
+ * Remove the caller's own key — `DELETE /api/ai/key` (#35).
+ *
+ * The only way to erase one, deliberately separate from the save so that
+ * destroying a credential is always asked for by name. Idempotent.
+ *
+ * NOTE THE CONSEQUENCE: removing the key re-arms the first-run gate, so the
+ * user is returned to `/setup/ai-key`. A page offering this must say so.
+ */
+export async function deleteAiKey(): Promise<AiKeyStatus> {
+  return api.delete<AiKeyStatus>('/ai/key');
+}
+
+/**
+ * Test the caller's own key — `POST /api/ai/key/test` (#35).
+ *
+ * REACHABILITY, NOT VALIDITY: it checks that each wired role's bound model is
+ * actually reachable on this key, and reports PER ROLE. The admin binds model
+ * ids using the server key, and a personal key may sit in a different
+ * organisation with no access to them — a check that only asked "is this key
+ * valid" would pass for a key that cannot run a single request the app makes.
+ *
+ * Answers 200 even on failure. Read `success`, and `authenticated` to tell a
+ * bad key from a good key with no model access.
+ */
+export async function testAiKey(): Promise<AiTestResult> {
+  return api.post<AiTestResult>('/ai/key/test');
+}
+
+/**
+ * Whether AI is available to the caller — `GET /api/ai/status` (#36).
+ *
+ * TWO INDEPENDENT FACTS. `userKeyConfigured === false` hard-blocks;
+ * `systemReady === false` does not block at all. Never derive a single "ready"
+ * from them — that is exactly how a user blocked by missing ADMIN
+ * configuration ends up being told to add a key they already have.
+ *
+ * Cheap by design (no provider round trip server-side), but still a request:
+ * callers must not fire it per render.
+ */
+export async function getAiStatus(): Promise<AiStatus> {
+  return api.get<AiStatus>('/ai/status');
+}
+
+/**
+ * The caller's own recorded usage — `GET /api/ai/usage` (#37).
+ *
+ * RECORDED USAGE, NOT A BILL. Token counts are not dollars, and
+ * `callsWithUnknownUsage` counts calls whose consumption was never reported.
+ * The authoritative figure is the user's own OpenAI dashboard.
+ */
+export async function getAiUsage(days?: number): Promise<AiUsage> {
+  const query = days === undefined ? '' : `?days=${days}`;
+  return api.get<AiUsage>(`/ai/usage${query}`);
+}

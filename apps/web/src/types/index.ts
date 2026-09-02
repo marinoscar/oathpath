@@ -671,3 +671,240 @@ export interface EmailTestResult {
   /** When the attempt was made. */
   attemptedAt?: string;
 }
+
+// =============================================================================
+// AI configuration (epic #25)
+// =============================================================================
+//
+// Two scopes, two shapes. The ADMIN half (`AiSettings`) is the server key, the
+// provider choice, the master switch and the role → model bindings; the USER
+// half (`AiKeyStatus`, `AiStatus`, `AiUsage`) is each person's own key and
+// what it has cost them.
+//
+// NEITHER KEY IS REPRESENTABLE HERE. `AiSettings` carries `apiKeyStatus` — a
+// masked, non-secret description — and `AiSettingsInput` carries a write-only
+// `apiKey`. There is deliberately no type on which a key can travel back from
+// the server, matching the API's own compile-time proofs.
+
+/** Providers the API can be configured to use. Mirrors `AI_PROVIDER_KINDS`. */
+export type AiProviderKind = 'openai';
+
+/**
+ * A model's capability family, as the API classifies it.
+ *
+ * `other` holds ids the classifier did not recognise, plus image and
+ * moderation models. They are hidden from the default view and reachable under
+ * "show all models" — the guarantee that an upstream naming change can never
+ * leave an admin with an empty dropdown and no workaround.
+ */
+export type AiCapabilityFamily =
+  | 'text'
+  | 'realtime'
+  | 'transcribe'
+  | 'tts'
+  | 'embedding'
+  | 'other';
+
+/**
+ * What the admin page may know about the stored SERVER key.
+ *
+ * NOT THE KEY. `hint` is the credential store's own mask (`••••` plus at most
+ * four trailing characters, and nothing at all below eight), derived on write
+ * by code that already held the plaintext.
+ *
+ * A boolean alone would not be enough: an admin who has just rotated a key
+ * needs to see WHICH value is live, and "when, and by whom" is the difference
+ * between "my change saved" and "I am looking at a colleague's value from
+ * months ago".
+ */
+export interface AiApiKeyStatus {
+  configured: boolean;
+  hint: string | null;
+  updatedAt: string | null;
+  updatedByUserId: string | null;
+}
+
+/** The AI configuration, as `GET /api/ai-settings` returns it. */
+export interface AiSettings {
+  /** `null` is "no provider chosen" — the state of every fresh install. */
+  provider: AiProviderKind | null;
+
+  /**
+   * Master switch, a SEPARATE AXIS from `provider` so an admin can turn AI off
+   * without losing the configuration they would otherwise have to rebuild.
+   */
+  enabled: boolean;
+
+  /** Role key → model id. `null` means the role is not bound. */
+  models: Record<string, string | null>;
+
+  /** The text-family generation floor. See `AiModelCatalog.minGeneration`. */
+  minModelGeneration: number;
+
+  apiKeyStatus: AiApiKeyStatus;
+
+  /**
+   * Why the stored configuration could not be read, when it could not be.
+   *
+   * FIELD PATHS ONLY, never stored values. The API degrades to defaults plus
+   * this message rather than 500ing, because a 500 would make the one screen
+   * capable of repairing the row the one screen the broken row takes down.
+   */
+  settingsError: string | null;
+
+  /** Bumped on every write; sent back as `If-Match` on the next save. */
+  version: number;
+
+  updatedAt: string | null;
+  updatedBy: { id: string; email: string } | null;
+}
+
+/**
+ * The PUT body.
+ *
+ * `apiKey` is WRITE-ONLY and BLANK PRESERVES: omit it (or send it empty) to
+ * keep the stored key. The page omits the field entirely rather than sending
+ * `''` — the API treats them identically, but omitting is what the request
+ * visibly says, and a reviewer reading the network tab sees no key field at
+ * all on a save that did not change one.
+ */
+export interface AiSettingsInput {
+  provider: AiProviderKind | null;
+  enabled: boolean;
+  models: Record<string, string | null>;
+  minModelGeneration?: number;
+  apiKey?: string;
+}
+
+/** One model the admin may bind, as classified by the API. */
+export interface AiModel {
+  id: string;
+  family: AiCapabilityFamily;
+  /** `null` means the generation could not be parsed — never "old". */
+  generation: number | null;
+  createdAt: string | null;
+}
+
+/**
+ * One model role, read from the API rather than duplicated here.
+ *
+ * THE WEB KEEPS NO COPY OF THIS LIST, deliberately — the same reasoning
+ * `getNotificationEvents` documents. A second declaration is a second thing to
+ * drift, and `wired` in particular is a per-DEPLOYMENT fact (it accounts for
+ * what the configured provider can actually serve), so a static copy would be
+ * wrong on any deployment whose provider differs.
+ */
+export interface AiModelRole {
+  key: string;
+  label: string;
+  description: string;
+  capability: AiCapabilityFamily;
+  /** False renders inert: declared in the IA, nothing dispatches to it. */
+  wired: boolean;
+}
+
+/** `GET /api/ai-settings/models`. */
+export interface AiModelCatalog {
+  models: AiModel[];
+  roles: AiModelRole[];
+  /**
+   * No server key is stored, so nothing was attempted.
+   *
+   * DISTINCT FROM `error`: this is the state of every fresh install, and
+   * rendering it as a failure makes a brand-new system look broken.
+   */
+  notConfigured: boolean;
+  /** A real provider refusal, verbatim and redacted. Null otherwise. */
+  error: string | null;
+  minGeneration: number;
+  showAll: boolean;
+}
+
+/** Whether one bound model is reachable on the key that was tested. */
+export interface AiRoleReachability {
+  roleKey: string;
+  modelId: string;
+  reachable: boolean;
+  /** The provider's verbatim message for THIS role. Null when reachable. */
+  error: string | null;
+}
+
+/**
+ * The outcome of a connection test, admin or per-user.
+ *
+ * `success` IS THE ONLY SUCCESS SIGNAL. Both test endpoints answer HTTP 200
+ * even when the test failed, because a refused connection is a successful
+ * diagnosis and this app's error envelope would suppress the detail. A caller
+ * that treats a resolved promise as "it works" reports success for every
+ * misconfiguration there is.
+ */
+export interface AiTestResult {
+  success: boolean;
+  /**
+   * Did the key itself authenticate?
+   *
+   * SEPARATE FROM `success` because the remedies differ. A key that fails here
+   * is wrong or revoked. A key that passes here and still fails overall
+   * belongs to an organisation without access to the bound models — and told
+   * only "the test failed", a user would replace a perfectly good key.
+   */
+  authenticated: boolean;
+  roles: AiRoleReachability[];
+  providerKind: AiProviderKind | null;
+  error: string | null;
+  attemptedAt?: string;
+}
+
+/** What a user may know about their OWN stored key. Never the key. */
+export interface AiKeyStatus {
+  configured: boolean;
+  hint: string | null;
+  updatedAt: string | null;
+}
+
+/**
+ * `GET /api/ai/status` — TWO INDEPENDENT FACTS, and no combined flag.
+ *
+ *   `userKeyConfigured === false` -> hard block into `/setup/ai-key`
+ *   `systemReady === false`       -> NOT a block; point-of-use messaging
+ *
+ * Merging them tells a user blocked by missing ADMIN configuration to add a
+ * key they already have. Do not add a `ready` helper to this type.
+ */
+export interface AiStatus {
+  userKeyConfigured: boolean;
+  systemReady: boolean;
+  /** Master switch, so a message can name the control that is off. */
+  enabled: boolean;
+  providerConfigured: boolean;
+  /** Wired roles with no model bound, by key. Names only. */
+  unboundRoles: string[];
+}
+
+/** One row of a usage breakdown, by model or by role. */
+export interface AiUsageBreakdown {
+  key: string;
+  calls: number;
+  totalTokens: number;
+}
+
+/**
+ * `GET /api/ai/usage` — RECORDED USAGE, NOT A BILL.
+ *
+ * Token counts are not dollars, this application carries no price table, and
+ * `callsWithUnknownUsage` counts calls whose consumption was never reported. A
+ * page rendering this must say so and link to the user's OpenAI dashboard;
+ * presenting an approximate figure as a bill is the failure to avoid.
+ */
+export interface AiUsage {
+  since: string;
+  calls: number;
+  successfulCalls: number;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  /** The honest caveat on every figure above. */
+  callsWithUnknownUsage: number;
+  byModel: AiUsageBreakdown[];
+  byRole: AiUsageBreakdown[];
+}
