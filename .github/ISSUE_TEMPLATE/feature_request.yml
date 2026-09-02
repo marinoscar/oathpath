@@ -1,0 +1,82 @@
+name: Feature
+description: A new capability, filed before implementation planning is finalised.
+title: "feat(<scope>): "
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Every feature is tracked by an issue **before** planning is finalised —
+        see the issue-driven development section of `CLAUDE.md`. Reference this
+        issue number from the commit or pull request (`Relates to #123`).
+
+        Title the issue with a Conventional Commit prefix: `feat(api):`,
+        `feat(web):`, `feat(db):`, `feat(core):` and so on.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: >
+        What is missing or wrong today, and for whom. Ground it in a real file,
+        endpoint, or a requirement in `VISION.md` / `PRD.md`. Not a restatement
+        of the solution.
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: >
+        The concrete change — real paths, real type, column and endpoint names.
+        Name the existing pattern you are following where one exists.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Testable statements. A reviewer should be able to check each one.
+      value: |
+        - [ ] 
+        - [ ] 
+        - [ ] 
+    validations:
+      required: true
+  - type: textarea
+    id: exclusions
+    attributes:
+      label: Exclusions
+      description: >
+        What this deliberately does not do, and which issue does it instead.
+        Scope that is not written down is scope that grows during review.
+  - type: dropdown
+    id: component
+    attributes:
+      label: Affected component
+      multiple: true
+      options:
+        - API
+        - Web
+        - Database
+        - CLI
+        - Infrastructure
+        - Documentation
+        - Tests
+    validations:
+      required: true
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      options:
+        - High — blocking other work
+        - Medium — planned
+        - Low — opportunistic
+    validations:
+      required: true
+  - type: input
+    id: epic
+    attributes:
+      label: Parent epic
+      description: The epic issue this belongs to, if any.
+      placeholder: "#25"

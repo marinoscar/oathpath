@@ -1,0 +1,112 @@
+name: CI
+
+# Runs the checks a contributor is expected to run locally, on every pull
+# request and on every push to main.
+#
+# WHY THE JOBS ARE SPLIT BY WORKSPACE rather than one "test everything" job:
+# they fail for unrelated reasons and take very different amounts of time
+# (web ~3min, api ~1min, cli ~10s). Three jobs run in parallel, and a red
+# check names the workspace that broke without anyone opening the log.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+# A second push to the same PR makes the first run's answer irrelevant.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Node 24 is what every workspace's `engines` field requires.
+  NODE_VERSION: '24'
+
+jobs:
+  api:
+    name: API — typecheck, test, build
+    runs-on: ubuntu-latest
+    env:
+      NODE_ENV: test
+      # ---------------------------------------------------------------------
+      # These are NOT secrets and must never be treated as any. The API test
+      # suite mocks Prisma (`test/mocks/prisma.mock.ts`) and never opens a
+      # socket, but it boots the real AppModule — so Nest instantiates
+      # GoogleStrategy, which throws "OAuth2Strategy requires a clientID
+      # option" when the value is absent. Locally these come from
+      # `apps/api/.env.test`, which is gitignored and therefore absent on a
+      # fresh clone; CI supplies them here instead.
+      #
+      # Every value below is deliberately fake and obviously so.
+      # ---------------------------------------------------------------------
+      GOOGLE_CLIENT_ID: ci-not-a-real-google-client-id
+      GOOGLE_CLIENT_SECRET: ci-not-a-real-google-client-secret
+      GOOGLE_CALLBACK_URL: http://localhost:3535/api/auth/google/callback
+      JWT_SECRET: ci-jwt-value-not-a-secret-padded-to-32-plus-chars
+      COOKIE_SECRET: ci-cookie-value-not-a-secret-padded-to-32-chars
+      APP_URL: http://localhost:3535
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: '5432'
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: oathpath_test
+      OTEL_ENABLED: 'false'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - run: npm ci --no-audit --no-fund
+
+      # Generated at run time rather than committed: a fixed base64 key in the
+      # tree is indistinguishable from a real one to a secret scanner, and this
+      # repository runs one.
+      - name: Generate an ephemeral encryption key
+        run: echo "SECRETS_ENCRYPTION_KEY=$(openssl rand -base64 32)" >> "$GITHUB_ENV"
+
+      # Must precede typecheck and test: the Prisma client is generated into
+      # node_modules, so without this the API does not compile.
+      - name: Generate the Prisma client
+        run: npm run prisma:generate --workspace=api
+
+      - run: npm run typecheck --workspace=api
+      - run: npm test --workspace=api
+      - run: npm run build --workspace=api
+
+  web:
+    name: Web — typecheck, test, build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - run: npm ci --no-audit --no-fund
+      - run: npm run typecheck --workspace=web
+      - run: npm run test:run --workspace=web
+      - run: npm run build --workspace=web
+
+  cli:
+    name: CLI — typecheck, test, build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - run: npm ci --no-audit --no-fund
+      - run: npm run typecheck --workspace=cli
+      - run: npm run test:run --workspace=cli
+      - run: npm run build --workspace=cli

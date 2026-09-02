@@ -1,0 +1,74 @@
+name: Epic
+description: A body of work spanning several features or sessions.
+title: "Epic: "
+labels: [epic]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        An epic owns its child-issue list; each child references the epic. Add
+        the epic to `ROADMAP.md` if it is part of the MVP sequence.
+
+        An epic should be **one vertical slice testable end to end** — design
+        spec, migration, API, web, browser test, docs — not a layer.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: >
+        What is missing today and why this work exists. Ground it in the
+        product doctrine in `VISION.md` / `PRD.md` and in the real state of
+        the codebase.
+    validations:
+      required: true
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Why now, and what it depends on
+      description: What must exist first, and what this unblocks.
+    validations:
+      required: true
+  - type: textarea
+    id: slice
+    attributes:
+      label: The slice
+      description: The work by layer — database, API, web — with real names.
+      value: |
+        **DB.**
+
+        **API.**
+
+        **Web.**
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: End-to-end acceptance
+      description: >
+        The single journey that proves this epic works, as a browser test would
+        drive it.
+    validations:
+      required: true
+  - type: textarea
+    id: decisions
+    attributes:
+      label: Decisions locked
+      description: >
+        Choices a child issue must not silently re-open, each with its reason.
+  - type: textarea
+    id: children
+    attributes:
+      label: Child issues
+      value: |
+        - [ ] 
+        - [ ] 
+    validations:
+      required: true
+  - type: textarea
+    id: out-of-scope
+    attributes:
+      label: Out of scope
+      description: What this epic deliberately leaves to a later one.
+    validations:
+      required: true
