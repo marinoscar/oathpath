@@ -1,6 +1,10 @@
 import { randomUUID } from 'node:crypto';
-import { test, expect, type Locator, type Page } from '@playwright/test';
+import { test, expect, type Locator } from '@playwright/test';
 import { seedOnboarding } from '../helpers/auth.helper';
+import {
+  fetchAcceptedAnswer,
+  fetchNextQuestionId,
+} from '../helpers/practice-questions';
 
 // =============================================================================
 // practice-session.spec.ts — issue #84, epic #52 (E3)
@@ -113,84 +117,12 @@ function testEmail(label: string): string {
   return `practice-session-${label}-${randomUUID()}@test.local`;
 }
 
-interface CivicsQuestionDetailResponse {
-  data: {
-    answerResolution: 'resolved' | 'state_required';
-    answers: { id: string; text: string }[];
-  };
-}
-
-interface PracticeSessionDetailResponse {
-  data: {
-    nextQuestion: { id: string } | null;
-  };
-}
-
-/**
- * The question the session is CURRENTLY asking, straight from the API.
- *
- * A plain GET — `PracticeController.getSession`'s own description says a
- * completed/abandoned session aside, this never mutates anything — so calling
- * it here does not consume or advance the question `PracticeSessionPage` is
- * already showing; it just names it. `question.id` never appears as text
- * anywhere in that page's DOM (see this file's header), so there is no
- * selector that could recover it another way.
- */
-async function fetchNextQuestionId(
-  page: Page,
-  authHeaders: Record<string, string>,
-  sessionId: string,
-): Promise<string> {
-  const response = await page.request.get(
-    `/api/practice/sessions/${sessionId}`,
-    { headers: authHeaders },
-  );
-  expect(response.ok(), 'GET /api/practice/sessions/:id').toBe(true);
-  const body = (await response.json()) as PracticeSessionDetailResponse;
-  const questionId = body.data.nextQuestion?.id;
-  if (!questionId) {
-    throw new Error(
-      `fetchNextQuestionId: session ${sessionId} reports no next question — ` +
-        'the session finished sooner than this spec expected it to.',
-    );
-  }
-  return questionId;
-}
-
-/**
- * That question's first accepted answer, read the way a prepared learner
- * already knows it — the PUBLIC civics content API, never anything
- * `PracticeSessionPage` rendered. `civics-content.md` §8 is explicit that this
- * is exam content, not a secret; `PracticeQuestionDto`'s header is explicit
- * that the practice screen could not hand it back even if this spec wanted it
- * to.
- */
-async function fetchAcceptedAnswer(
-  page: Page,
-  authHeaders: Record<string, string>,
-  questionId: string,
-): Promise<string> {
-  const response = await page.request.get(
-    `/api/civics/questions/${questionId}`,
-    { headers: authHeaders },
-  );
-  expect(response.ok(), 'GET /api/civics/questions/:id').toBe(true);
-  const body = (await response.json()) as CivicsQuestionDetailResponse;
-  const { answerResolution, answers } = body.data;
-  if (answerResolution !== 'resolved' || answers.length === 0) {
-    // Practice's own question selection (question-selection.ts) removes any
-    // question it cannot resolve an answer for from every pool BEFORE a
-    // session is created — a state-scope question for a learner with no state
-    // set, for instance. Reaching this means that guarantee broke, which is
-    // worth failing loudly for rather than this spec silently typing nothing.
-    throw new Error(
-      `fetchAcceptedAnswer: question ${questionId} is not resolved ` +
-        `(answerResolution: ${answerResolution}) — practice should never have ` +
-        'selected a question it cannot grade.',
-    );
-  }
-  return answers[0].text;
-}
+// `fetchNextQuestionId` and `fetchAcceptedAnswer` used to live here. They
+// moved to `../helpers/practice-questions` when `ai-evaluation.spec.ts`
+// (#131) needed the exact same "ask the server what it is currently asking,
+// then read the accepted answer the same way a prepared learner would" pair —
+// see that file's own header for the full reasoning, which is unchanged by
+// the move.
 
 /**
  * One `SummaryTally` count — the number for a given label ("correct", "not
