@@ -908,3 +908,124 @@ export interface AiUsage {
   byModel: AiUsageBreakdown[];
   byRole: AiUsageBreakdown[];
 }
+
+// =============================================================================
+// Journey — the learner profile and its two reference lists (epic #50)
+// =============================================================================
+//
+// Mirrors `apps/api/src/journey/dto/journey-profile.dto.ts` and
+// `update-journey-profile.dto.ts`. Two things about this shape are load-bearing
+// and easy to undo by accident:
+//
+//   1. THE WEB KEEPS NO COPY OF THE TEST VERSIONS OR THE STATE LIST. Both
+//      travel on the profile response, for the same one-registry reason
+//      `getNotificationEvents` and the AI model roles document: a second
+//      declaration is a second thing to drift, and the API validates
+//      `stateCode` against the very list it serves.
+//
+//   2. THE FILING-DATE CUTOFF IS NOT IN THIS FILE, AND MUST NEVER BE. Which
+//      civics test a filing date selects is server logic
+//      (`test-version-resolution.ts`, where the date appears exactly once in
+//      the repository). The browser learns it only as
+//      `CivicsTestVersionOption.filedFrom`, which is data — so a future
+//      carve-out is one server edit rather than one server edit plus a
+//      forgotten constant in the UI.
+// =============================================================================
+
+/** The eight `journey-stages.ts` keys, in journey order. */
+export type JourneyStageKey =
+  | 'uncertain'
+  | 'oriented'
+  | 'learning'
+  | 'remembering'
+  | 'speaking'
+  | 'practicing'
+  | 'performing'
+  | 'ready';
+
+/** The caller's own `learner_profiles` row. There is no user id in it. */
+export interface JourneyProfile {
+  stage: JourneyStageKey;
+  /** `YYYY-MM-DD`, or null when no interview is booked. A DAY, not an instant. */
+  interviewDate: string | null;
+  stateCode: string | null;
+  /**
+   * The resolved civics test, or null.
+   *
+   * NULL MEANS "NOT YET RESOLVED", never "the 2008 test" — nothing on screen
+   * may present a default here as if the learner had told us something.
+   */
+  testVersionCode: string | null;
+  seniorExemption: boolean;
+  dailyGoalMinutes: number;
+  /** BCP-47. Governs AI explanations only; questions stay in English. */
+  explanationLanguage: string;
+  /** IANA zone name. Every countdown in the API is computed in it. */
+  timezone: string;
+  /**
+   * When orientation was completed, or null.
+   *
+   * SERVER-SET. This is the literal field `RequireOrientation` checks, and
+   * there is no request field that writes it.
+   */
+  orientationCompletedAt: string | null;
+}
+
+/** One `civics_test_versions` row, plus the one derived eligibility field. */
+export interface CivicsTestVersionOption {
+  code: string;
+  label: string;
+  questionsAsked: number;
+  passThreshold: number;
+  seniorQuestionsAsked: number;
+  seniorPassThreshold: number;
+  /**
+   * The earliest Form N-400 filing date this version applies to, or null when
+   * it has no lower bound.
+   *
+   * DERIVED SERVER-SIDE, not a column. It is here so the orientation form can
+   * tell a learner which test their date selects without the browser learning
+   * the cutoff rule.
+   */
+  filedFrom: string | null;
+}
+
+/** One selectable state or territory. All 56, `DC` and the territories included. */
+export interface UsStateOption {
+  code: string;
+  name: string;
+}
+
+/** `GET /api/journey/profile` and the body `PUT` answers with. */
+export interface JourneyProfileResponse {
+  profile: JourneyProfile;
+  testVersions: CivicsTestVersionOption[];
+  states: UsStateOption[];
+}
+
+/**
+ * `PUT /api/journey/profile` — every field optional, absent means unchanged.
+ *
+ * THREE ABSENCES ARE DELIBERATE AND ENFORCED BY THE SERVER:
+ *
+ *   * no `userId` — the learner is `@CurrentUser('id')` and nothing else;
+ *   * no `stage` and no `orientationCompletedAt` — both are consequences the
+ *     server infers from what the profile holds after the merge;
+ *   * `filingDate` and `testVersionCode` are ALTERNATIVES. Sending both is a
+ *     400, because there is no principled way to choose between a date and a
+ *     code that contradicts it. This app's forms send `filingDate` and let the
+ *     server resolve the version.
+ *
+ * `interviewDate: null` is the one explicit clear: absent leaves a booked date
+ * alone, null removes it.
+ */
+export interface UpdateJourneyProfileInput {
+  interviewDate?: string | null;
+  stateCode?: string;
+  testVersionCode?: string;
+  filingDate?: string;
+  seniorExemption?: boolean;
+  dailyGoalMinutes?: number;
+  explanationLanguage?: string;
+  timezone?: string;
+}

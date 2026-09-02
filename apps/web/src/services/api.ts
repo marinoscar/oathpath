@@ -226,6 +226,8 @@ import type {
   AppNotification,
   NotificationListResponse,
   UnreadCountResponse,
+  JourneyProfileResponse,
+  UpdateJourneyProfileInput,
 } from '../types';
 
 // Allowlist API
@@ -687,4 +689,52 @@ export async function getAiStatus(): Promise<AiStatus> {
 export async function getAiUsage(days?: number): Promise<AiUsage> {
   const query = days === undefined ? '' : `?days=${days}`;
   return api.get<AiUsage>(`/ai/usage${query}`);
+}
+
+// =============================================================================
+// Journey — the learner profile (epic #50)
+// =============================================================================
+
+/**
+ * The caller's own profile plus the two reference lists — `GET /api/journey/profile`.
+ *
+ * `@Auth()` with no permissions: every learner owns their own profile, and the
+ * server resolves them from the JWT — there is no parameter here or on the
+ * server that could name anybody else.
+ *
+ * THREE THINGS IN ONE RESPONSE ON PURPOSE. The orientation form renders one
+ * control set out of all three, and fetching them separately would mean three
+ * round trips whose answers can disagree plus three loading states for one
+ * form.
+ *
+ * CHEAP, BUT STILL A REQUEST. `LearnerProfileContext` calls this ONCE on
+ * mount; a caller firing it per navigation would put a request storm behind a
+ * first-run screen a new learner cannot get past.
+ *
+ * NOTE THAT THIS GET WRITES ON ITS FIRST CALL for a given user — the server
+ * upserts the profile row lazily, so a first login gets defaults rather than a
+ * 404 on the very first screen it sees.
+ */
+export async function getJourneyProfile(): Promise<JourneyProfileResponse> {
+  return api.get<JourneyProfileResponse>('/journey/profile');
+}
+
+/**
+ * Save orientation or a later profile edit — `PUT /api/journey/profile`.
+ *
+ * A MERGE UNDER A `PUT`: an absent key leaves its field untouched, and only an
+ * explicit `interviewDate: null` clears a booked date.
+ *
+ * SEND `filingDate`, NOT `testVersionCode`. The server resolves which civics
+ * test a filing date selects (the cutoff exists in exactly one place, on the
+ * server), and a request carrying both fields is rejected with a 400.
+ *
+ * Answers with the SAME payload `getJourneyProfile` returns, so a caller can
+ * push the result straight into `LearnerProfileContext` instead of spending a
+ * second round trip re-reading what it was just told.
+ */
+export async function updateJourneyProfile(
+  input: UpdateJourneyProfileInput,
+): Promise<JourneyProfileResponse> {
+  return api.put<JourneyProfileResponse>('/journey/profile', input);
 }
