@@ -1,23 +1,363 @@
 /**
- * Practice (`/practice`) — the empty state, shipped with the destination.
+ * Practice (`/practice`) — the real destination.
  *
- * Issue #69, epic #50. A thin binding over
- * `components/journey/DestinationEmptyState`, which carries the layout and the
- * reasoning; this file contributes only the two sentences.
+ * Issue #76, epic #52. This SUPERSEDES the designed empty state #69 shipped
+ * here (`components/journey/DestinationEmptyState`), the same
+ * superseded-not-deleted relationship `LearnPage.tsx` has with E1's `/learn`
+ * stub — `docs/specs/practice-sessions.md` §12 records it explicitly, and
+ * `journey-shell.md` §8.2 still describes the copy this replaces.
  *
- * THE COPY IS VERBATIM FROM `docs/specs/journey-shell.md` §8.2 — see
- * `LearnPage.tsx` for why it stays that way, and §8 for why none of the three
- * stubs names a date.
+ * Three things, in the order a learner needs them:
+ *
+ *  1. **Quick 5** — one click, one request, straight into a session.
+ *  2. **By category** — the sections of their own test version.
+ *  3. **Recent sessions** — what they were just doing, and the way back into it.
+ *
+ * =============================================================================
+ * QUICK 5 IS ONE CLICK, NOT A CONFIGURATION FORM
+ * =============================================================================
+ *
+ * `POST /api/practice/sessions { kind: 'quick' }` and navigate. No count
+ * picker, no difficulty selector, no "which category?" step — `plannedCount`
+ * defaults to 5 server-side and is clamped down to what is actually available,
+ * so "4 of 5" on the summary screen is always honest without the client
+ * knowing anything about the pool.
+ *
+ * That matters beyond taste, because **Home's Next-up card takes this exact
+ * path**. E3 re-points `interview_countdown` at `/practice` (§12), so a learner
+ * following the one recommendation on their front page lands here; if starting
+ * required filling in a form first, the recommendation would be a detour rather
+ * than an action.
+ *
+ * Starting a session also closes any session still `in_progress` — server-side,
+ * in the same request — which is why this button never has to ask "you already
+ * have one open, what would you like to do?". There is no such state to
+ * reconcile. The recent-sessions band is refreshed afterwards for the same
+ * reason: a row that said "In progress" a moment ago has just become a row that
+ * was left unfinished.
+ *
+ * =============================================================================
+ * AN EMPTY HISTORY IS AN EMPTY STATE, NEVER A FABRICATED ZERO
+ * =============================================================================
+ *
+ * A learner with no attempts sees a sentence saying there is nothing here yet.
+ * NOT a chart with a flat line, not "0% correct", not a ring at zero, and not a
+ * disabled-looking dashboard implying data that has not arrived. `VISION.md`'s
+ * honesty rule and `journey-shell.md` §10 are the same rule from two
+ * directions: a fabricated zero is indistinguishable at a glance from a real
+ * measurement, and a learner cannot tell which one they are looking at.
+ *
+ * The three states are kept apart all the way down from `usePracticeSessions`:
+ * loading, empty, and failed are three different things to say, and only the
+ * middle one is an empty state. A failed fetch renders an error with a retry —
+ * never a blank page, and never a page that quietly pretends the learner has
+ * never practised.
+ *
+ * =============================================================================
+ * WHAT THIS PAGE IS NOT
+ * =============================================================================
+ *
+ * It is not a settings surface, so `CLAUDE.md`'s Settings UI Pattern does not
+ * apply: there is no `ADMIN_SECTIONS` or `USER_SETTINGS_SECTIONS` entry, no
+ * `SettingsHub` binding and no permission string to mirror from a controller,
+ * and adding any of them would be wrong rather than thorough.
+ *
+ * There is also NO NEW `DESTINATIONS` ENTRY. `/practice` has been one since E1
+ * (#69), owned by `config/destinations.ts` — read that file's header for why a
+ * second declaration is the exact split-brain the destination model exists to
+ * prevent. The two new routes underneath it (`/practice/sessions/:id` and its
+ * summary) need no entry either: `owns('/practice', …)` covers the whole
+ * subtree, which is why the rail keeps highlighting Practice inside a session.
+ *
+ * =============================================================================
+ * WIDTH AND HEADINGS
+ * =============================================================================
+ *
+ * One `h1` ("Practice") with an `h2` on each of the three bands. Mobile-first,
+ * every responsive value steps at `sm` (600px), and none of `CLAUDE.md`'s five
+ * coupled gates is touched — this page only agrees with them.
  */
 
-import { DestinationEmptyState } from '../components/journey/DestinationEmptyState';
+import { useState } from 'react';
+import {
+  Alert,
+  Box,
+  Button,
+  Container,
+  Divider,
+  List,
+  ListItem,
+  ListItemButton,
+  ListItemText,
+  Typography,
+} from '@mui/material';
+import BoltIcon from '@mui/icons-material/Bolt';
+import ChevronRightIcon from '@mui/icons-material/ChevronRight';
+import { Link as RouterLink, useNavigate } from 'react-router-dom';
+
+import { LoadingSpinner } from '../components/common/LoadingSpinner';
+import { RecentSessions } from '../components/practice/RecentSessions';
+// The same `/settings/journey` page the civics state notice links to. Imported
+// rather than re-spelled: two literals for one destination is how one of them
+// survives a route rename.
+import { SET_STATE_PATH as PLAN_PATH } from '../components/civics/StateRequiredNotice';
+import { useCivicsCategories } from '../hooks/useCivicsCategories';
+import { useIsMounted } from '../hooks/useIsMounted';
+import { useLearnerProfile } from '../contexts/LearnerProfileContext';
+import { usePracticeSessions } from '../hooks/usePracticeSessions';
+import { createPracticeSession } from '../services/api';
+import type { CreatePracticeSessionInput } from '../types';
 
 export default function PracticePage() {
+  const navigate = useNavigate();
+  const isMounted = useIsMounted();
+  const { profile, isLoading: isProfileLoading } = useLearnerProfile();
+
+  // The learner's test version comes from the profile the context already
+  // loaded ONCE for the session — never re-fetched per navigation, and never
+  // sent to the practice API, which resolves it from the caller's own row.
+  const testVersionCode = profile?.testVersionCode ?? null;
+
+  const {
+    categories,
+    isLoading: areCategoriesLoading,
+    error: categoriesError,
+  } = useCivicsCategories(testVersionCode);
+
+  const {
+    sessions,
+    isLoading: areSessionsLoading,
+    error: sessionsError,
+    refresh: refreshSessions,
+  } = usePracticeSessions();
+
+  /** Which start is in flight — `'quick'` or a category id. */
+  const [starting, setStarting] = useState<string | null>(null);
+  const [startError, setStartError] = useState<string | null>(null);
+
+  const start = async (input: CreatePracticeSessionInput, key: string) => {
+    setStarting(key);
+    setStartError(null);
+    try {
+      const state = await createPracticeSession(input);
+      if (!isMounted()) return;
+      navigate(`/practice/sessions/${state.session.id}`);
+    } catch (err) {
+      if (isMounted()) {
+        setStartError(
+          err instanceof Error
+            ? err.message
+            : 'A practice session could not be started.',
+        );
+        setStarting(null);
+        // Starting closes any session that was still open, and a failed start
+        // may still have changed nothing — either way the band on screen is no
+        // longer known to be current, so it is re-read rather than left to
+        // claim something stale.
+        void refreshSessions();
+      }
+    }
+  };
+
+  if (isProfileLoading) {
+    return (
+      <Container maxWidth="md" disableGutters>
+        <Box role="status" aria-live="polite" aria-label="Loading Practice">
+          <LoadingSpinner />
+        </Box>
+      </Container>
+    );
+  }
+
   return (
-    <DestinationEmptyState
-      title="Practice"
-      description="This is where you'll answer questions out loud or in writing and get real feedback — what you got right, what you missed, and why."
-      rightNow="There's nothing to practice here yet. For now, head back to Home to see what's ready."
-    />
+    <Container maxWidth="md" disableGutters>
+      <Box sx={{ py: { xs: 1, sm: 2 } }}>
+        <Typography variant="h4" component="h1" sx={{ fontWeight: 600 }}>
+          Practice
+        </Typography>
+        <Typography color="text.secondary" sx={{ mt: 1 }}>
+          Answer in your own words and see how it went &mdash; what matched,
+          what didn&rsquo;t, and what the accepted answer was.
+        </Typography>
+
+        <Divider aria-hidden sx={{ mt: 2, mb: 3 }} />
+
+        {/* No resolved test version: unfinished setup, not a failure, and said
+            that way — with the one link that fixes it. The same posture
+            `/learn` takes, down to the polite `role="status"`: nothing has gone
+            wrong, so nothing should interrupt a screen reader as though it
+            had. */}
+        {!testVersionCode ? (
+          <Alert severity="info" role="status">
+            We don&rsquo;t know which civics test applies to you yet, so there
+            are no questions to practise. Tell us your filing date in your plan
+            and practice will open up here.
+            <Box sx={{ mt: 1.5 }}>
+              <Button
+                component={RouterLink}
+                to={PLAN_PATH}
+                size="small"
+                variant="outlined"
+                color="inherit"
+              >
+                Open your plan
+              </Button>
+            </Box>
+          </Alert>
+        ) : (
+          <>
+            {startError && (
+              <Alert severity="error" sx={{ mb: 3 }}>
+                {startError}
+              </Alert>
+            )}
+
+            {/* -----------------------------------------------------------
+                1. Quick 5 — the one prominent action on this page.
+                ----------------------------------------------------------- */}
+            <Box component="section" aria-labelledby="practice-quick-heading">
+              <Typography
+                id="practice-quick-heading"
+                variant="overline"
+                component="h2"
+                color="text.secondary"
+                sx={{ display: 'block' }}
+              >
+                Start practising
+              </Typography>
+              <Typography color="text.secondary" sx={{ mt: 1, maxWidth: '60ch' }}>
+                Five questions from across your test, chosen for you &mdash;
+                ones you haven&rsquo;t seen yet come first.
+              </Typography>
+              <Button
+                variant="contained"
+                size="large"
+                startIcon={<BoltIcon />}
+                onClick={() => void start({ kind: 'quick' }, 'quick')}
+                disabled={starting !== null}
+                // Full width on a phone, where this IS the action of the
+                // screen; its own width from `sm` up, where a stretched
+                // primary button reads as the only thing to do here.
+                sx={{ mt: 2, width: { xs: '100%', sm: 'auto' } }}
+              >
+                {starting === 'quick' ? 'Starting…' : 'Start a Quick 5'}
+              </Button>
+            </Box>
+
+            {/* -----------------------------------------------------------
+                2. By category.
+                ----------------------------------------------------------- */}
+            <Box
+              component="section"
+              aria-labelledby="practice-categories-heading"
+              sx={{ mt: 4 }}
+            >
+              <Typography
+                id="practice-categories-heading"
+                variant="overline"
+                component="h2"
+                color="text.secondary"
+                sx={{ display: 'block' }}
+              >
+                Practise one section
+              </Typography>
+
+              {categoriesError ? (
+                <Alert severity="error" sx={{ mt: 1 }}>
+                  {categoriesError}
+                </Alert>
+              ) : areCategoriesLoading ? (
+                <LoadingSpinner />
+              ) : categories.length === 0 ? (
+                <Typography color="text.secondary" sx={{ mt: 1 }}>
+                  There are no sections to practise in your test version yet.
+                </Typography>
+              ) : (
+                // Buttons, not links, and deliberately: each one POSTs a new
+                // session and lands on a URL that does not exist until the
+                // server has created it. An `<a href>` here would be a promise
+                // the router could not keep on a middle-click.
+                //
+                // The server's order is preserved and never sorted — the
+                // official categories are not alphabetical (Government
+                // precedes History precedes Integrated Civics), and a
+                // well-meant `localeCompare` here would quietly renumber the
+                // exam.
+                <List disablePadding sx={{ mt: 1 }}>
+                  {categories.map((category) => (
+                    <ListItem key={category.id} disablePadding>
+                      <ListItemButton
+                        onClick={() =>
+                          void start(
+                            { kind: 'category', categoryId: category.id },
+                            category.id,
+                          )
+                        }
+                        disabled={starting !== null}
+                        sx={{ borderRadius: 1 }}
+                      >
+                        <ListItemText
+                          primary={category.name}
+                          secondary={
+                            starting === category.id ? 'Starting…' : category.section
+                          }
+                        />
+                        <ChevronRightIcon color="action" />
+                      </ListItemButton>
+                    </ListItem>
+                  ))}
+                </List>
+              )}
+            </Box>
+
+            {/* -----------------------------------------------------------
+                3. Recent sessions.
+                ----------------------------------------------------------- */}
+            <Box sx={{ mt: 4 }}>
+              {sessionsError ? (
+                <Alert
+                  severity="error"
+                  action={
+                    <Button
+                      color="inherit"
+                      size="small"
+                      onClick={() => void refreshSessions()}
+                    >
+                      Try again
+                    </Button>
+                  }
+                >
+                  {sessionsError}
+                </Alert>
+              ) : areSessionsLoading ? (
+                <LoadingSpinner />
+              ) : sessions.length === 0 ? (
+                <Box component="section" aria-labelledby="practice-recent-heading">
+                  <Typography
+                    id="practice-recent-heading"
+                    variant="overline"
+                    component="h2"
+                    color="text.secondary"
+                    sx={{ display: 'block' }}
+                  >
+                    Recent sessions
+                  </Typography>
+                  {/* The honest empty state. No chart, no zero, no ring. */}
+                  <Typography color="text.secondary" sx={{ mt: 1, maxWidth: '60ch' }}>
+                    You haven&rsquo;t practised yet. Once you do, your recent
+                    sessions show up here so you can pick up where you left off.
+                  </Typography>
+                </Box>
+              ) : (
+                <RecentSessions
+                  sessions={sessions}
+                  headingId="practice-recent-heading"
+                />
+              )}
+            </Box>
+          </>
+        )}
+      </Box>
+    </Container>
   );
 }

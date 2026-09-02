@@ -237,6 +237,14 @@ import type {
   CivicsCategory,
   CivicsQuestionDetail,
   CivicsQuestionListResponse,
+  CreatePracticeSessionInput,
+  PracticeAttempt,
+  PracticeAttemptResult,
+  PracticeSession,
+  PracticeSessionDetail,
+  PracticeSessionPage,
+  PracticeSessionState,
+  RecordPracticeAttemptInput,
 } from '../types';
 
 // Allowlist API
@@ -935,4 +943,167 @@ export async function getCivicsQuestion(
   id: string,
 ): Promise<CivicsQuestionDetail> {
   return api.get<CivicsQuestionDetail>(`/civics/questions/${id}`);
+}
+
+// =============================================================================
+// Practice — sessions, attempts and the self-mark (epic #52, API #73)
+// =============================================================================
+//
+// Six calls, one controller, and the ONLY place in the web app that names these
+// endpoints. Every route is `@Auth()` with NO permission and resolves the
+// learner from the token: a learner's own practice history is exactly as
+// private, and exactly as unconditionally theirs to act on, as their own
+// journey profile or their own AI key (`practice-sessions.md` §10).
+//
+// -----------------------------------------------------------------------------
+// NO ROUTE HERE TAKES A USER ID, A TEST VERSION OR A STATE CODE
+// -----------------------------------------------------------------------------
+//
+// Every one of those is resolved server-side from the caller's own
+// `learner_profiles` row — which questions are in the pool, which answers are
+// current for them, whether the 65/20 accommodation applies. The same reasoning
+// the civics block above gives at length: a browser that "helpfully" sent the
+// values it happens to hold would be a second copy of a decision the server
+// owns, wrong the moment a filing date moves a learner between banks.
+//
+// -----------------------------------------------------------------------------
+// THE CLIENT REPORTS WHAT HAPPENED. IT NEVER REPORTS THE VERDICT.
+// -----------------------------------------------------------------------------
+//
+// `RecordPracticeAttemptInput` has no `outcome`, no `correct` and no
+// `gradingMethod`, and the API's own DTO carries a compile-time proof that it
+// never will. Grading is `matchAnswer` run on the server against the answers
+// resolved at that instant. The one route by which a learner's own judgement
+// enters the evidence table is `selfMarkPracticeAttempt` below, which is a
+// separate call precisely so it can be recorded as `gradingMethod: 'self'` and
+// weighed differently by E5 — an asserted pass must never be indistinguishable
+// from a verified one.
+// =============================================================================
+
+/**
+ * Start a session — `POST /api/practice/sessions`.
+ *
+ * Returns the session together with its FIRST QUESTION, PROMPT ONLY. There is
+ * no second call to fetch the question, and there must not be one: the whole
+ * point of `PracticeQuestion` is that the answers are not in the payload that
+ * carries the prompt.
+ *
+ * Any session still `in_progress` for this learner is closed (`abandoned`)
+ * first, keeping every attempt it already produced. That is why "start Quick 5"
+ * is safe to offer as a single click from three different places — there is no
+ * "you already have a session open" state for a caller to reconcile.
+ *
+ * A 409 means there is nothing available to practise for this selection; a 400
+ * means the caller has no resolved test version, i.e. unfinished setup rather
+ * than a failure. Callers render both as prose, never as a stack trace.
+ */
+export async function createPracticeSession(
+  input: CreatePracticeSessionInput,
+): Promise<PracticeSessionState> {
+  return api.post<PracticeSessionState>('/practice/sessions', input);
+}
+
+/**
+ * The caller's own sessions, newest first — `GET /api/practice/sessions`.
+ *
+ * There are deliberately no filters server-side: "recent sessions" is the one
+ * question this endpoint answers, and an unknown query parameter is a 400
+ * rather than a filter that silently did nothing.
+ */
+export async function getPracticeSessions(params?: {
+  page?: number;
+  pageSize?: number;
+}): Promise<PracticeSessionPage> {
+  const searchParams = new URLSearchParams();
+  if (params?.page) searchParams.set('page', String(params.page));
+  if (params?.pageSize) searchParams.set('pageSize', String(params.pageSize));
+
+  const query = searchParams.toString();
+  return api.get<PracticeSessionPage>(
+    `/practice/sessions${query ? `?${query}` : ''}`,
+  );
+}
+
+/**
+ * One session, its attempts, and what comes next —
+ * `GET /api/practice/sessions/:id`.
+ *
+ * THIS IS THE ONLY SOURCE OF TRUTH FOR BOTH THE SESSION SCREEN AND THE SUMMARY
+ * SCREEN. Neither reads anything out of navigation state, so a reload mid-
+ * session resumes from the server with no attempt lost, and a summary revisited
+ * from Recent sessions a month later renders identically to the one shown the
+ * moment it was finished.
+ *
+ * Somebody else's session is a 404, not a 403 — confirming that an id names a
+ * real session would itself be the leak.
+ */
+export async function getPracticeSession(
+  id: string,
+): Promise<PracticeSessionDetail> {
+  return api.get<PracticeSessionDetail>(`/practice/sessions/${id}`);
+}
+
+/**
+ * Answer one question and be graded —
+ * `POST /api/practice/sessions/:id/attempts`.
+ *
+ * Writes exactly one `practice_attempts` row and returns it with
+ * `acceptedAnswers`, the next prompt-only question, and progress counted from
+ * the persisted rows. One attempt per question per session: a repeat is a 409,
+ * because answering a question again is a NEW session.
+ */
+export async function recordPracticeAttempt(
+  sessionId: string,
+  input: RecordPracticeAttemptInput,
+): Promise<PracticeAttemptResult> {
+  return api.post<PracticeAttemptResult>(
+    `/practice/sessions/${sessionId}/attempts`,
+    input,
+  );
+}
+
+/**
+ * "I was right — the matcher just didn't recognise it" —
+ * `POST /api/practice/sessions/:id/attempts/:attemptId/self-mark`.
+ *
+ * Flips a recorded `incorrect` or `skipped` attempt to `correct` with
+ * `gradingMethod: 'self'`.
+ *
+ * TWO REFUSALS A CALLER MUST RESPECT RATHER THAN RETRY:
+ *
+ *   * **409 when the attempt was not `revealed`.** The claim being made is "my
+ *     answer matched the accepted one", and that is only checkable against the
+ *     accepted one — not against the learner's memory of what they think it
+ *     was. `PracticeSessionPage` therefore offers the control exactly where the
+ *     endpoint accepts it; see that file's header for the whole reasoning.
+ *   * **400 when the matcher already graded it `correct`.** There is nothing to
+ *     grant, and overwriting `exact` with `self` would DOWNGRADE the record
+ *     from a verified match to a learner's own claim.
+ *
+ * Idempotent otherwise: a second call returns the same state.
+ */
+export async function selfMarkPracticeAttempt(
+  sessionId: string,
+  attemptId: string,
+): Promise<PracticeAttempt> {
+  return api.post<PracticeAttempt>(
+    `/practice/sessions/${sessionId}/attempts/${attemptId}/self-mark`,
+    {},
+  );
+}
+
+/**
+ * Finish a session — `POST /api/practice/sessions/:id/complete`.
+ *
+ * Every number in the returned `summary` is computed from the attempt rows that
+ * were actually written; nothing the client sent contributes to it. Idempotent
+ * — completing an already-completed session returns the stored summary and does
+ * NOT move `completedAt`, so the moment a learner finished stays the moment
+ * they finished. An abandoned session is a 409: it was closed by a later
+ * session start and has no completion to record.
+ */
+export async function completePracticeSession(
+  id: string,
+): Promise<PracticeSession> {
+  return api.post<PracticeSession>(`/practice/sessions/${id}/complete`, {});
 }

@@ -1,17 +1,19 @@
 /**
- * The remaining destination stubs — `/practice` and `/progress` (issue #69,
- * epic #50).
+ * The remaining destination stub — `/progress` (issue #69, epic #50).
  *
- * `/learn` WAS the third, and is not any more: #121 replaced it with the real
- * Learn destination once #111 gave the API a read surface over the question
- * bank. It is dropped from `PAGES` rather than kept with a weakened assertion,
- * because every claim below is specifically about an EMPTY state — the
- * verbatim two sentences, the "no delivery promise" rule, the single `h1` with
- * nothing else on the page — and none of them is true of a screen that renders
- * content. `__tests__/pages/LearnPage.test.tsx` is what covers it now.
+ * `/learn` and `/practice` WERE the other two, and are not any more. #121
+ * replaced Learn with the real destination once #111 gave the API a read
+ * surface over the question bank; #76 (epic #52) replaced Practice with the
+ * real one once #73 gave it a session API. Each is dropped from `PAGES` rather
+ * than kept with a weakened assertion, because every claim below is
+ * specifically about an EMPTY state — the verbatim two sentences, the "no
+ * delivery promise" rule, the single `h1` with nothing else on the page — and
+ * none of them is true of a screen that renders content.
+ * `__tests__/pages/LearnPage.test.tsx` and `__tests__/pages/PracticePage.test.tsx`
+ * are what cover those two now.
  *
- * `docs/specs/journey-shell.md` §8.1 still describes the superseded empty
- * state; it is no longer read by any test.
+ * `docs/specs/journey-shell.md` §8.1 and §8.2 still describe the superseded
+ * empty states; neither is read by any test any more.
  *
  * WHAT THESE TESTS ACTUALLY PROTECT, in order of how quietly each would break:
  *
@@ -39,7 +41,6 @@ import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { render } from '../utils/test-utils';
 import { setViewportWidth } from '../setup';
-import PracticePage from '../../pages/PracticePage';
 import ProgressPage from '../../pages/ProgressPage';
 
 const SPEC = resolve(
@@ -68,7 +69,6 @@ function specCopy(heading: string): string[] {
 }
 
 const PAGES = [
-  { name: 'Practice', heading: '8.2', element: <PracticePage /> },
   { name: 'Progress', heading: '8.3', element: <ProgressPage /> },
 ] as const;
 

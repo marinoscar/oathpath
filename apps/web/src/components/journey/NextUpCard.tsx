@@ -45,6 +45,7 @@ import { Box, Button, Card, CardContent, Typography } from '@mui/material';
 import EventAvailableOutlinedIcon from '@mui/icons-material/EventAvailableOutlined';
 import ExploreOutlinedIcon from '@mui/icons-material/ExploreOutlined';
 import PlaylistAddCheckOutlinedIcon from '@mui/icons-material/PlaylistAddCheckOutlined';
+import RecordVoiceOverOutlinedIcon from '@mui/icons-material/RecordVoiceOverOutlined';
 import type { SvgIconComponent } from '@mui/icons-material';
 import { Link as RouterLink } from 'react-router-dom';
 
@@ -64,15 +65,44 @@ import type { NextAction, NextActionKind } from '../../types';
  * rather than the product telling a learner something untrue. That is the whole
  * reason this map is acceptable where a map of titles would not be.
  *
- * Typed as a total `Record` over the closed union on purpose: when E3, E5 or E8
- * widens `NextActionKind`, this map fails to compile until it gets its glyph —
- * a build error is a better reminder than a blank space on the front page.
+ * Typed as a total `Record` over the closed union on purpose: when E5 or E8
+ * widens `NextActionKind` (with `review` and `interview`), this map fails to
+ * compile until it gets its glyph — a build error is a better reminder than a
+ * blank space on the front page. E3 (#81) is the first widening, and `practice`
+ * below is what satisfying it looks like.
  */
 const KIND_ICONS: Record<NextActionKind, SvgIconComponent> = {
   orientation: PlaylistAddCheckOutlinedIcon,
   interview_countdown: EventAvailableOutlinedIcon,
   explore: ExploreOutlinedIcon,
+  // E3 (#52). `docs/specs/practice-sessions.md` §12: `NEXT_ACTION_PATHS` gains
+  // `practice: '/practice'`, and the countdown branch re-points at it now that
+  // Practice has real content to send a learner to.
+  practice: RecordVoiceOverOutlinedIcon,
 };
+
+/**
+ * The glyph beside the title — with a FALLBACK, because the compile-time
+ * totality above is not a runtime guarantee.
+ *
+ * `kind` arrives over the wire from a server that deploys independently of this
+ * bundle. The day E5 adds `review`, every browser still holding today's
+ * JavaScript receives a `kind` that is not in today's `KIND_ICONS`, and
+ * `KIND_ICONS[kind]` is then `undefined`. Rendering `<undefined />` is not a
+ * missing icon — React throws "Element type is invalid", the `ErrorBoundary`
+ * catches it, and the learner's HOME SCREEN is replaced by an error for a
+ * recommendation whose title, reason and path were all perfectly good.
+ *
+ * That failure is worth one line to prevent, and the fallback is honest: a
+ * neutral glyph beside copy the server wrote. The card degrades to exactly what
+ * it always was — the server's words, rendered verbatim — which is the whole
+ * design of this component anyway. The BUTTON has never been keyed on `kind`
+ * either (see `actionLabel`), so an unknown kind changes nothing else on the
+ * card.
+ */
+function iconFor(kind: string): SvgIconComponent {
+  return KIND_ICONS[kind as NextActionKind] ?? ExploreOutlinedIcon;
+}
 
 /**
  * Every destination whose label could name a `nextAction` target.
@@ -120,7 +150,7 @@ export interface NextUpCardProps {
 }
 
 export function NextUpCard({ nextAction, headingId }: NextUpCardProps) {
-  const Icon = KIND_ICONS[nextAction.kind];
+  const Icon = iconFor(nextAction.kind);
 
   return (
     <Card
