@@ -25,8 +25,11 @@ already carries `S3_BUCKET`, `S3_REGION`, `APP_URL` and the AWS credentials from
 
 ```bash
 docker cp infra/aws oathpath-api-1:/tmp/aws
-docker exec oathpath-api-1 node /tmp/aws/setup-bucket.cjs
+docker exec -e NODE_PATH=/app/node_modules oathpath-api-1 node /tmp/aws/setup-bucket.cjs
 ```
+
+`NODE_PATH` is required because `/tmp` is outside the module resolution path, and npm
+workspaces hoist `@aws-sdk/client-s3` to the root `/app/node_modules`.
 
 From a checkout that does have the dependency installed, run it from the repo root after
 sourcing the environment file instead:

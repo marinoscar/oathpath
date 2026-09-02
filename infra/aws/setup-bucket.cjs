@@ -18,7 +18,11 @@
  * this is inside the running api container, which already carries S3_BUCKET,
  * S3_REGION, APP_URL and the AWS credentials from infra/compose/.env:
  *   docker cp infra/aws <project>-api-1:/tmp/aws
- *   docker exec <project>-api-1 node /tmp/aws/setup-bucket.cjs
+ *   docker exec -e NODE_PATH=/app/node_modules <project>-api-1 \
+ *     node /tmp/aws/setup-bucket.cjs
+ *
+ * NODE_PATH is needed because /tmp is outside the module resolution path;
+ * npm workspaces hoist @aws-sdk/client-s3 to the root /app/node_modules.
  *
  * Or from a checkout that has the dependency installed:
  *   set -a; source infra/compose/.env; set +a
