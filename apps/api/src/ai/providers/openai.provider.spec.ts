@@ -1,4 +1,5 @@
 import { Logger } from '@nestjs/common';
+import { z } from 'zod';
 
 import {
   OpenAiProvider,
@@ -12,6 +13,7 @@ import {
 } from '../ai-credential.constants';
 import type { CredentialsService } from '../../credentials/credentials.service';
 import type { AiUsageService } from '../ai-usage.service';
+import type { AiStreamEvent } from '../ai.types';
 
 // =============================================================================
 // OpenAiProvider (issue #29, epic #25)
@@ -62,9 +64,16 @@ function catalogOf(ids: Array<{ id: string; created?: number }>) {
 
 const SERVER_KEY = 'sk-server-abcdefghijklmnopqrst';
 
-/** Recording is exercised in ai-usage.spec.ts; here it only has to exist. */
+/**
+ * Recording is exercised in ai-usage.spec.ts; here it only has to exist.
+ *
+ * It returns a row id because `AiUsageService.record` does since #96 — a
+ * double that returned nothing would let `usageEventId` be dropped silently.
+ */
 function usageStub() {
-  return { record: jest.fn().mockResolvedValue(undefined) } as unknown as AiUsageService;
+  return {
+    record: jest.fn().mockResolvedValue('usage-row-1'),
+  } as unknown as AiUsageService;
 }
 
 function credentialsReturning(secret: string | null): CredentialsService {
@@ -900,5 +909,363 @@ describe('describeModel', () => {
   it('tolerates a missing or nonsense timestamp', () => {
     expect(describeModel('gpt-5.4').createdAt).toBeNull();
     expect(describeModel('gpt-5.4', Number.NaN).createdAt).toBeNull();
+  });
+});
+
+// =============================================================================
+// The structured-completion request shape (issue #96, epic #53)
+// =============================================================================
+//
+// One extra field on the same chat request, and the whole value of the feature
+// is in that field being exactly right. `strict: true` is what turns
+// `response_format` from a strong hint into a decoding constraint, and the
+// difference does not show up in testing — a capable model follows the hint
+// most of the time. It shows up as a grader that works for weeks and then
+// returns a field that is not there.
+// =============================================================================
+
+describe('OpenAiProvider.runStructuredCompletion — the request shape', () => {
+  const ALICE = '11111111-1111-4111-8111-111111111111';
+  const USER_KEY = 'sk-user-zyxwvutsrqponmlkjih';
+
+  const VERDICT = z.object({ correct: z.boolean(), reason: z.string() });
+
+  function provider(credentials = credentialsReturning(null)) {
+    return new OpenAiProvider(credentials, usageStub());
+  }
+
+  function request() {
+    return {
+      roleKey: 'grader',
+      modelId: 'gpt-5.4',
+      messages: [{ role: 'user' as const, content: 'grade this' }],
+      schemaName: 'civics_verdict',
+      schema: VERDICT,
+    };
+  }
+
+  function structuredReply(json: string) {
+    return {
+      choices: [{ message: { content: json } }],
+      usage: { prompt_tokens: 11, completion_tokens: 3, total_tokens: 14 },
+    };
+  }
+
+  it('sends response_format with the schema NAME and strict: true', async () => {
+    chatCreateMock.mockResolvedValue(
+      structuredReply('{"correct":true,"reason":"x"}'),
+    );
+
+    await provider().completeStructured(ALICE, USER_KEY, request());
+
+    expect(chatCreateMock.mock.calls[0][0]).toMatchObject({
+      response_format: {
+        type: 'json_schema',
+        json_schema: {
+          name: 'civics_verdict',
+          // WITHOUT THIS the schema is advice the model may take. With it,
+          // decoding cannot produce a reply that violates it.
+          strict: true,
+          schema: expect.objectContaining({ type: 'object' }),
+        },
+      },
+    });
+  });
+
+  it('sends the JSON Schema the base class converted, not a second conversion', async () => {
+    chatCreateMock.mockResolvedValue(
+      structuredReply('{"correct":true,"reason":"x"}'),
+    );
+
+    await provider().completeStructured(ALICE, USER_KEY, request());
+
+    const body = chatCreateMock.mock.calls[0][0] as {
+      response_format: { json_schema: { schema: Record<string, unknown> } };
+    };
+    expect(body.response_format.json_schema.schema).toMatchObject({
+      properties: {
+        correct: { type: 'boolean' },
+        reason: { type: 'string' },
+      },
+    });
+  });
+
+  it('NEVER streams a structured reply', async () => {
+    // A structured reply is parsed and validated as a whole; a half-decoded
+    // object is not an early draft of a grade.
+    chatCreateMock.mockResolvedValue(
+      structuredReply('{"correct":true,"reason":"x"}'),
+    );
+
+    await provider().completeStructured(ALICE, USER_KEY, request());
+
+    expect(chatCreateMock.mock.calls[0][0]).toMatchObject({ stream: false });
+    expect(chatCreateMock).toHaveBeenCalledWith(
+      expect.not.objectContaining({ stream_options: expect.anything() }),
+    );
+  });
+
+  it('uses the SAME request builder as the probe and the plain completion', async () => {
+    // `system` is a 400 on the gpt-5 line. A structured call with its own
+    // request shape is how that knowledge comes to disagree between the two.
+    chatCreateMock.mockResolvedValue(
+      structuredReply('{"correct":true,"reason":"x"}'),
+    );
+
+    await provider().completeStructured(ALICE, USER_KEY, {
+      ...request(),
+      messages: [
+        { role: 'system', content: 'You are a grader.' },
+        { role: 'user', content: 'grade this' },
+      ],
+    });
+
+    expect(chatCreateMock.mock.calls[0][0]).toMatchObject({
+      messages: [
+        { role: 'developer', content: 'You are a grader.' },
+        { role: 'user', content: 'grade this' },
+      ],
+    });
+  });
+
+  it('returns the validated value and the reported usage', async () => {
+    chatCreateMock.mockResolvedValue(
+      structuredReply('{"correct":false,"reason":"wrong war"}'),
+    );
+
+    const result = await provider().completeStructured(
+      ALICE,
+      USER_KEY,
+      request(),
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.data).toEqual({ correct: false, reason: 'wrong war' });
+    expect(result.usage).toEqual({
+      promptTokens: 11,
+      completionTokens: 3,
+      totalTokens: 14,
+    });
+    expect(result.usageEventId).toBe('usage-row-1');
+  });
+
+  it('reads NULL, not zero, when the provider reported no usage', async () => {
+    chatCreateMock.mockResolvedValue({
+      choices: [{ message: { content: '{"correct":true,"reason":"x"}' } }],
+    });
+
+    const result = await provider().completeStructured(
+      ALICE,
+      USER_KEY,
+      request(),
+    );
+
+    expect(result.usage).toEqual({
+      promptTokens: null,
+      completionTokens: null,
+      totalTokens: null,
+    });
+  });
+
+  it('turns an SDK failure into a diagnosable result, not a throw', async () => {
+    chatCreateMock.mockRejectedValue(new Error('429 rate limit exceeded'));
+
+    const result = await provider().completeStructured(
+      ALICE,
+      USER_KEY,
+      request(),
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.errorCode).toBe('rate_limit');
+    expect(result.data).toBeNull();
+  });
+
+  it('never lets the caller’s key reach the error string', async () => {
+    chatCreateMock.mockRejectedValue(
+      new Error(`401 Incorrect API key provided: ${USER_KEY}`),
+    );
+
+    const result = await provider().completeStructured(
+      ALICE,
+      USER_KEY,
+      request(),
+    );
+
+    expect(result.error).not.toContain(USER_KEY);
+    expect(result.error).toContain('[redacted]');
+  });
+
+  it('runs on the key it was PASSED, never on the stored server credential', async () => {
+    // Epic #25, decision 4: every inference call runs on the calling user's own
+    // key. A hook that reached for the server key would still work, which is
+    // exactly why nothing but a test would notice.
+    const credentials = credentialsReturning('sk-server-must-not-be-used');
+    chatCreateMock.mockResolvedValue(
+      structuredReply('{"correct":true,"reason":"x"}'),
+    );
+
+    await provider(credentials).completeStructured(ALICE, USER_KEY, request());
+
+    expect(credentials.getSecret).not.toHaveBeenCalled();
+    expect(constructedWith[0]).toMatchObject({ apiKey: USER_KEY });
+  });
+});
+
+// =============================================================================
+// The streaming request shape (issue #96, epic #53)
+// =============================================================================
+//
+// `stream_options: { include_usage: true }` is the one line in this provider
+// whose omission has no symptom of its own: no error, no warning, just a
+// consumption figure that is quietly always zero (#37). It is asserted here
+// rather than trusted to a comment.
+// =============================================================================
+
+describe('OpenAiProvider.openStream — the streaming request', () => {
+  const ALICE = '11111111-1111-4111-8111-111111111111';
+  const USER_KEY = 'sk-user-zyxwvutsrqponmlkjih';
+
+  const REQUEST = {
+    roleKey: 'tutor',
+    modelId: 'gpt-5.4',
+    messages: [{ role: 'user' as const, content: 'why?' }],
+  };
+
+  function provider(credentials = credentialsReturning(null)) {
+    return new OpenAiProvider(credentials, usageStub());
+  }
+
+  /** A streamed response: content chunks, then the usage-only chunk. */
+  function streamOf(
+    chunks: Array<{ text?: string; usage?: Record<string, number> }>,
+  ) {
+    return {
+      async *[Symbol.asyncIterator]() {
+        for (const chunk of chunks) {
+          yield {
+            choices: chunk.text ? [{ delta: { content: chunk.text } }] : [],
+            usage: chunk.usage
+              ? {
+                  prompt_tokens: chunk.usage.prompt,
+                  completion_tokens: chunk.usage.completion,
+                  total_tokens: chunk.usage.total,
+                }
+              : undefined,
+          };
+        }
+      },
+    };
+  }
+
+  async function drain(events: AsyncIterable<AiStreamEvent>) {
+    const out: AiStreamEvent[] = [];
+    for await (const event of events) out.push(event);
+    return out;
+  }
+
+  it('SETS stream_options: { include_usage: true } on every streamed request', async () => {
+    // THE test in this describe. Omit the flag and every streamed call records
+    // zero tokens, with nothing to notice in production.
+    chatCreateMock.mockResolvedValue(
+      streamOf([{ text: 'hi' }, { usage: { prompt: 5, completion: 2, total: 7 } }]),
+    );
+
+    await drain(provider().stream(ALICE, USER_KEY, REQUEST));
+
+    expect(chatCreateMock.mock.calls[0][0]).toMatchObject({
+      stream: true,
+      stream_options: { include_usage: true },
+    });
+  });
+
+  it('passes the abort signal in the SDK request options, where it reaches the socket', async () => {
+    // An abort that only breaks our loop leaves OpenAI generating — and
+    // billing — the rest of a response nobody will read.
+    const controller = new AbortController();
+    chatCreateMock.mockResolvedValue(
+      streamOf([{ text: 'hi' }, { usage: { prompt: 5, completion: 2, total: 7 } }]),
+    );
+
+    await drain(
+      provider().stream(ALICE, USER_KEY, REQUEST, controller.signal),
+    );
+
+    expect(chatCreateMock.mock.calls[0][1]).toEqual({
+      signal: controller.signal,
+    });
+  });
+
+  it('yields the deltas and ends with one done event carrying the usage', async () => {
+    chatCreateMock.mockResolvedValue(
+      streamOf([
+        { text: 'The ' },
+        { text: 'Civil War.' },
+        { usage: { prompt: 5, completion: 2, total: 7 } },
+      ]),
+    );
+
+    const events = await drain(provider().stream(ALICE, USER_KEY, REQUEST));
+
+    expect(events).toEqual([
+      { type: 'delta', text: 'The ' },
+      { type: 'delta', text: 'Civil War.' },
+      {
+        type: 'done',
+        usage: { promptTokens: 5, completionTokens: 2, totalTokens: 7 },
+        usageEventId: 'usage-row-1',
+      },
+    ]);
+  });
+
+  it('records NULL, not zero, when the stream ends with no usage chunk', async () => {
+    chatCreateMock.mockResolvedValue(streamOf([{ text: 'hi' }]));
+
+    const events = await drain(provider().stream(ALICE, USER_KEY, REQUEST));
+
+    expect(events.at(-1)).toMatchObject({
+      type: 'done',
+      usage: {
+        promptTokens: null,
+        completionTokens: null,
+        totalTokens: null,
+      },
+    });
+  });
+
+  it('turns an SDK failure into the terminal error event, never a rejection', async () => {
+    chatCreateMock.mockRejectedValue(new Error('401 Incorrect API key provided'));
+
+    const events = await drain(provider().stream(ALICE, USER_KEY, REQUEST));
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      type: 'error',
+      errorCode: 'invalid_key',
+    });
+  });
+
+  it('never lets the caller’s key reach the terminal error event', async () => {
+    chatCreateMock.mockRejectedValue(
+      new Error(`Request failed with Authorization: Bearer ${USER_KEY}`),
+    );
+
+    const events = await drain(provider().stream(ALICE, USER_KEY, REQUEST));
+    const terminal = events[0] as Extract<AiStreamEvent, { type: 'error' }>;
+
+    expect(terminal.error).not.toContain(USER_KEY);
+    expect(terminal.error).toContain('[redacted]');
+  });
+
+  it('runs on the key it was PASSED, never on the stored server credential', async () => {
+    const credentials = credentialsReturning('sk-server-must-not-be-used');
+    chatCreateMock.mockResolvedValue(
+      streamOf([{ text: 'hi' }, { usage: { prompt: 5, completion: 2, total: 7 } }]),
+    );
+
+    await drain(provider(credentials).stream(ALICE, USER_KEY, REQUEST));
+
+    expect(credentials.getSecret).not.toHaveBeenCalled();
+    expect(constructedWith[0]).toMatchObject({ apiKey: USER_KEY });
   });
 });
