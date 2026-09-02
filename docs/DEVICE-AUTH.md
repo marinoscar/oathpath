@@ -1,6 +1,6 @@
 # Device Authorization Flow (RFC 8628)
 
-This guide covers the Device Authorization Flow implementation in the Enterprise Application Foundation.
+This guide covers the Device Authorization Flow implementation in OathPath.
 
 > **This flow has two documents.** This one is the narrative guide — concepts,
 > a walkthrough, and copy-pasteable integration examples (Node.js, Python,
@@ -1200,7 +1200,7 @@ async function pollForToken(deviceCode, interval) {
 - **Security Architecture:** [SECURITY-ARCHITECTURE.md](SECURITY-ARCHITECTURE.md)
 - **API Reference:** [API.md](API.md)
 - **Authoritative schema & security rationale:** [`apps/api/src/device-auth/README.md`](../apps/api/src/device-auth/README.md)
-- **Reference PAT-flow consumer:** [`apps/cli/README.md`](../apps/cli/README.md) — the first-party CLI (`appctl`), which logs in through this exact flow requesting a `pat` credential
+- **Reference PAT-flow consumer:** [`apps/cli/README.md`](../apps/cli/README.md) — the first-party CLI (`oathpath`), which logs in through this exact flow requesting a `pat` credential
 
 ---
 

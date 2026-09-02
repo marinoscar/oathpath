@@ -1,10 +1,10 @@
 # System Architecture
 
-**Enterprise Application Foundation**
+**OathPath**
 **Version:** 1.0
 **Last Updated:** January 2026
 
-This document provides a comprehensive architectural overview of the Enterprise Application Foundation designed for AI-assisted development with specialized coding agents.
+This document provides a comprehensive architectural overview of OathPath, designed for AI-assisted development with specialized coding agents.
 
 ---
 
@@ -32,7 +32,7 @@ This document provides a comprehensive architectural overview of the Enterprise 
 
 ### Purpose
 
-The Enterprise Application Foundation is a production-grade web application template that establishes:
+OathPath is a production-grade web application that establishes:
 
 - **Secure Authentication**: OAuth 2.0 with Google (extensible to other providers)
 - **Fine-Grained Authorization**: Role-Based Access Control (RBAC) with permissions
@@ -260,7 +260,7 @@ All components served from the same base URL via Nginx reverse proxy:
 ### 5.1 Repository Structure
 
 ```
-EnterpriseAppBase/
+oathpath/
 ├── apps/
 │   ├── api/                          # Backend API (NestJS + Fastify)
 │   │   ├── src/
@@ -1578,7 +1578,7 @@ The orchestrating agent (Claude) handles:
 ```bash
 # 1. Clone repository
 git clone <repository-url>
-cd EnterpriseAppBase
+cd oathpath
 
 # 2. Configure environment
 cp infra/compose/.env.example infra/compose/.env

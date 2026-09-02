@@ -4,7 +4,9 @@ This file provides guidance for AI assistants working on this codebase.
 
 ## Project Overview
 
-Web Application Foundation with React UI + Node API + PostgreSQL. Production-grade foundation with OAuth authentication, RBAC authorization, and flexible settings framework.
+OathPath — a React UI + Node API + PostgreSQL web application with OAuth authentication, RBAC authorization, and a flexible settings framework.
+
+Product scope and vision live in `PRD.md` and `VISION.md`; this file describes the codebase.
 
 ## Technology Stack
 
@@ -34,7 +36,7 @@ Web Application Foundation with React UI + Node API + PostgreSQL. Production-gra
       src/
       src/__tests__/
       Dockerfile            # Web container (near its code)
-    cli/                    # First-party command-line client (`appctl`)
+    cli/                    # First-party command-line client (`oathpath`)
       src/
         commands/           # `login`, `api`, `config` subcommands
         tui/                # Interactive ink menu (real terminals only)
@@ -333,7 +335,7 @@ cd apps/api && npm run prisma:migrate
 - **API Reference (Scalar)**: http://localhost:3535/api/docs
 - **Uptrace**: http://localhost:14318 (when otel stack running)
 
-## Command-Line Client (`appctl`)
+## Command-Line Client (`oathpath`)
 
 `apps/cli` is the first-party CLI for this API (epic #110). It is a workspace
 package (`--workspace=cli`) that is built from this monorepo and not published;
@@ -347,7 +349,7 @@ do not restate it here.
 
 ### Deploying to a VPS
 
-VPS deployment (epic #168) lives entirely in this CLI as `appctl deploy
+VPS deployment (epic #168) lives entirely in this CLI as `oathpath deploy
 doctor|install|update|status` — there is no separate deploy script or
 Ansible playbook anywhere in this repo, and there shouldn't be. The design
 (why it runs on the VPS with no SSH client in the CLI, why TLS is terminated
