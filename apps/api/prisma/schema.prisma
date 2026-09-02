@@ -790,6 +790,8 @@ model CivicsTestVersion {
 
   // Relations
   learnerProfiles LearnerProfile[]
+  categories      CivicsCategory[]
+  questions       CivicsQuestion[]
 
   @@map("civics_test_versions")
 }
@@ -862,4 +864,183 @@ model LearnerProfile {
 
   @@index([testVersionCode])
   @@map("learner_profiles")
+}
+
+// =============================================================================
+// Civics Content: Categories, Questions & Answers (issue #97, epic #51)
+// =============================================================================
+//
+// The versioned question bank `LearnerProfile.testVersionCode` and
+// `CivicsTestVersion` above already anticipate: E1 seeded the test-version
+// *shape* (question counts, pass thresholds) with `contentHash` left null
+// until this content actually exists. This is that content. Loading it (a
+// seed/import script reading real USCIS question data) is explicitly OUT of
+// scope for #97 — these three tables define the shape only.
+//
+// No relation to `users` anywhere in this block: content is code-owned and
+// admin/seed-loaded, not user-owned, so there is nothing here for a user
+// deletion to cascade into.
+
+// A CLOSED, code-owned set — the dynamic-answer lifecycle a question can
+// have, not an open registry a feature module extends. `none` covers the
+// vast majority of questions (fixed answers, e.g. "How many amendments does
+// the Constitution have?"); `national` is a single fact that changes at the
+// federal level (President, Vice President, Speaker of the House);
+// `state` varies per state/territory (state capital, governor, U.S.
+// Representative). A Postgres enum, matching this schema's convention for
+// exactly this shape of field (`JourneyStage`, `StorageObjectStatus`,
+// `DeviceCodeStatus`): the database should reject a value the loader and the
+// interview engine don't both already know how to handle.
+enum CivicsDynamicScope {
+  none
+  national
+  state
+}
+
+// One row per (test version, category) — e.g. "AMERICAN GOVERNMENT / System
+// of Government" under the 2008 test. `section` and `code` mirror the
+// official USCIS category structure so a future loader can address a
+// category by the same keys the source material uses, without inventing its
+// own numbering.
+model CivicsCategory {
+  id String @id @default(uuid()) @db.Uuid
+
+  // onDelete: Restrict, matching `LearnerProfile.testVersion` above — a test
+  // version cannot be deleted while its categories still exist.
+  testVersionCode String @map("test_version_code")
+
+  section   String
+  code      String
+  name      String
+  sortOrder Int    @map("sort_order")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  // Relations
+  testVersion CivicsTestVersion @relation(fields: [testVersionCode], references: [code], onDelete: Restrict)
+  questions   CivicsQuestion[]
+
+  // A category is addressed by its own code within one test version — 2008
+  // and 2025 can each freely define (or redefine) the same `code`.
+  @@unique([testVersionCode, code])
+  @@map("civics_categories")
+}
+
+// One row per official question, scoped to a test version. `number` is the
+// question's official ordinal within that version (e.g. #1-#100 on the 2008
+// test) — NOT a global id, which is exactly why the uniqueness guarantee
+// below is scoped to `testVersionCode` and not `number` alone.
+model CivicsQuestion {
+  id String @id @default(uuid()) @db.Uuid
+
+  // onDelete: Restrict — same reasoning as `CivicsCategory.testVersion`.
+  testVersionCode String @map("test_version_code")
+
+  number Int
+
+  // onDelete: Restrict, per #97: deleting a category is BLOCKED while
+  // questions still reference it, so a category can only be removed once it
+  // is empty.
+  categoryId String @map("category_id") @db.Uuid
+
+  prompt String
+
+  // Whether this question is among the 20 an applicant aged 65+ with 20
+  // years of permanent residency may study exclusively (the "20/65" senior
+  // exemption `LearnerProfile.seniorExemption` already tracks).
+  seniorEligible Boolean @map("senior_eligible")
+
+  dynamicScope CivicsDynamicScope @default(none) @map("dynamic_scope")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  // Relations
+  testVersion CivicsTestVersion @relation(fields: [testVersionCode], references: [code], onDelete: Restrict)
+  category    CivicsCategory    @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  answers     CivicsAnswer[]
+
+  // The seed loader's stable upsert key: re-running a loader against the same
+  // (version, official number) must resolve to the same row, never create a
+  // duplicate.
+  @@unique([testVersionCode, number])
+  @@index([categoryId])
+  @@map("civics_questions")
+}
+
+// One row per accepted answer to a question. Many USCIS questions have
+// multiple simultaneously-correct answers ("Name one branch of government" →
+// legislative / executive / judicial) — that is what `sort` orders — and a
+// `dynamicScope: national` or `state` question's answer set changes over
+// time as officeholders change, which is what `stateCode`,
+// `effectiveFrom`/`effectiveTo` and `verifiedAt` exist to track.
+//
+// -----------------------------------------------------------------------------
+// THE PARTIAL UNIQUE INDEX LIVES ONLY IN THE MIGRATION, NOT HERE
+// -----------------------------------------------------------------------------
+// Following the same convention `Notification`'s comment above documents for
+// its own (unbuilt) partial index: Prisma's schema language cannot express a
+// partial index (a `WHERE` clause) or an expression index (a function over a
+// column) declaratively, so `civics_answers_open_slot_unique` is hand-added
+// to this table's migration.sql and is invisible here. It enforces, for every
+// question: at most one OPEN (`effective_to IS NULL`) answer per
+// `(state_code, sort)` slot — where a national answer's `state_code IS NULL`
+// is folded to `''` via `COALESCE` specifically so it is constrained too
+// (Postgres treats two NULLs as distinct in a unique index, which would
+// otherwise leave national dynamic answers, e.g. President, Speaker,
+// completely unconstrained — exactly the rows this lifecycle most needs to
+// keep singular). Regenerating this schema from the database will NOT
+// reproduce that index; see the migration for the exact DDL and reasoning.
+model CivicsAnswer {
+  id String @id @default(uuid()) @db.Uuid
+
+  // onDelete: Cascade — deliberately UNLIKE every `Restrict` relation
+  // elsewhere in this block. An answer has no identity independent of its
+  // question; removing the question should remove its answers, the same way
+  // `UserIdentity.user` and `LearnerProfile.user` cascade from their owning
+  // row.
+  questionId String @map("question_id") @db.Uuid
+
+  text String
+
+  // Orders multiple simultaneously-correct answers to the same question, and
+  // is one leg of the partial unique index above.
+  sort Int
+
+  // Null for a question with no per-state variation (`dynamicScope: none` or
+  // `national`). @db.Char(2), matching `LearnerProfile.stateCode` — MUST
+  // admit `DC`, `PR`, `GU`, `VI`, `AS`, `MP` alongside the 50 states, per the
+  // same constants file that field's comment names.
+  stateCode String? @map("state_code") @db.Char(2)
+
+  // When a human last confirmed this answer against the authoritative source
+  // (e.g. the current officeholder). Distinct from `effectiveFrom`: a fact
+  // can be re-verified without its effective date changing.
+  verifiedAt DateTime @map("verified_at") @db.Timestamptz
+
+  // The instant this answer became correct. For a `dynamicScope: none`
+  // question this is simply when the row was authored.
+  effectiveFrom DateTime @map("effective_from") @db.Timestamptz
+
+  // Null means "still correct" (an OPEN row) — the value the partial index
+  // above filters on. Set once a dynamic answer is superseded (a new
+  // President is sworn in), closing this row without deleting it, so the
+  // interview engine can still explain what was correct on a past date.
+  effectiveTo DateTime? @map("effective_to") @db.Timestamptz
+
+  // Free-text provenance for the verification above (e.g. a citation or URL).
+  // @db.Text is not used here — unlike `Credential.secret` or
+  // `NotificationDelivery.error`, this is short admin-authored commentary,
+  // not provider output or ciphertext with no natural bound.
+  sourceNote String? @map("source_note")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  // Relations
+  question CivicsQuestion @relation(fields: [questionId], references: [id], onDelete: Cascade)
+
+  @@index([questionId])
+  @@map("civics_answers")
 }
