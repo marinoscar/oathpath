@@ -15,33 +15,35 @@ datasource db {
 // =============================================================================
 
 model User {
-  id                      String    @id @default(uuid()) @db.Uuid
-  email                   String    @unique
-  displayName             String?   @map("display_name")
-  providerDisplayName     String?   @map("provider_display_name")
-  profileImageUrl         String?   @map("profile_image_url")
-  providerProfileImageUrl String?   @map("provider_profile_image_url")
-  isActive                Boolean   @default(true) @map("is_active")
-  createdAt               DateTime  @default(now()) @map("created_at") @db.Timestamptz
-  updatedAt               DateTime  @updatedAt @map("updated_at") @db.Timestamptz
+  id                      String   @id @default(uuid()) @db.Uuid
+  email                   String   @unique
+  displayName             String?  @map("display_name")
+  providerDisplayName     String?  @map("provider_display_name")
+  profileImageUrl         String?  @map("profile_image_url")
+  providerProfileImageUrl String?  @map("provider_profile_image_url")
+  isActive                Boolean  @default(true) @map("is_active")
+  createdAt               DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt               DateTime @updatedAt @map("updated_at") @db.Timestamptz
 
   // Relations
-  identities                UserIdentity[]
-  userRoles                 UserRole[]
-  userSettings              UserSettings?
-  auditEvents               AuditEvent[]     @relation("ActorEvents")
-  settingsUpdates           SystemSettings[] @relation("SettingsUpdater")
-  refreshTokens             RefreshToken[]   @relation("UserRefreshTokens")
-  allowlistEntriesAdded     AllowedEmail[]   @relation("AllowlistAddedBy")
-  allowlistEntry            AllowedEmail?    @relation("AllowlistClaimedBy")
-  deviceCodes               DeviceCode[]     @relation("UserDeviceCodes")
-  storageObjects            StorageObject[]  @relation("UserStorageObjects")
-  personalAccessTokens      PersonalAccessToken[] @relation("UserPersonalAccessTokens")
-  credentialUpdates         Credential[]     @relation("CredentialUpdatedBy")
-  notificationDeliveries    NotificationDelivery[] @relation("UserNotificationDeliveries")
-  notifications             Notification[]   @relation("UserNotifications")
-  aiUsageEvents             AiUsageEvent[]   @relation("UserAiUsageEvents")
-  learnerProfile            LearnerProfile?
+  identities             UserIdentity[]
+  userRoles              UserRole[]
+  userSettings           UserSettings?
+  auditEvents            AuditEvent[]           @relation("ActorEvents")
+  settingsUpdates        SystemSettings[]       @relation("SettingsUpdater")
+  refreshTokens          RefreshToken[]         @relation("UserRefreshTokens")
+  allowlistEntriesAdded  AllowedEmail[]         @relation("AllowlistAddedBy")
+  allowlistEntry         AllowedEmail?          @relation("AllowlistClaimedBy")
+  deviceCodes            DeviceCode[]           @relation("UserDeviceCodes")
+  storageObjects         StorageObject[]        @relation("UserStorageObjects")
+  personalAccessTokens   PersonalAccessToken[]  @relation("UserPersonalAccessTokens")
+  credentialUpdates      Credential[]           @relation("CredentialUpdatedBy")
+  notificationDeliveries NotificationDelivery[] @relation("UserNotificationDeliveries")
+  notifications          Notification[]         @relation("UserNotifications")
+  aiUsageEvents          AiUsageEvent[]         @relation("UserAiUsageEvents")
+  learnerProfile         LearnerProfile?
+  practiceSessions       PracticeSession[]      @relation("UserPracticeSessions")
+  practiceAttempts       PracticeAttempt[]      @relation("UserPracticeAttempts")
 
   @@map("users")
 }
@@ -66,8 +68,8 @@ model UserIdentity {
 // =============================================================================
 
 model Role {
-  id          String   @id @default(uuid()) @db.Uuid
-  name        String   @unique
+  id          String  @id @default(uuid()) @db.Uuid
+  name        String  @unique
   description String?
 
   // Relations
@@ -78,8 +80,8 @@ model Role {
 }
 
 model Permission {
-  id          String   @id @default(uuid()) @db.Uuid
-  name        String   @unique
+  id          String  @id @default(uuid()) @db.Uuid
+  name        String  @unique
   description String?
 
   // Relations
@@ -274,24 +276,24 @@ model DeviceCode {
 // =============================================================================
 
 enum StorageObjectStatus {
-  pending    // Upload initiated, awaiting chunks
-  uploading  // Chunks being uploaded
+  pending // Upload initiated, awaiting chunks
+  uploading // Chunks being uploaded
   processing // Post-upload processing in progress
-  ready      // Available for use
-  failed     // Upload or processing failed
+  ready // Available for use
+  failed // Upload or processing failed
 }
 
 model StorageObject {
   id              String              @id @default(uuid()) @db.Uuid
-  name            String              // Original filename
-  size            BigInt              // Total size in bytes (BigInt for GB-scale)
+  name            String // Original filename
+  size            BigInt // Total size in bytes (BigInt for GB-scale)
   mimeType        String              @map("mime_type")
   storageKey      String              @unique @map("storage_key") // S3 object key
   storageProvider String              @default("s3") @map("storage_provider")
   bucket          String?
   status          StorageObjectStatus @default(pending)
   s3UploadId      String?             @map("s3_upload_id") // S3 multipart upload ID
-  metadata        Json?               // JSONB for flexible metadata
+  metadata        Json? // JSONB for flexible metadata
   uploadedById    String?             @map("uploaded_by_id") @db.Uuid
   createdAt       DateTime            @default(now()) @map("created_at") @db.Timestamptz
   updatedAt       DateTime            @updatedAt @map("updated_at") @db.Timestamptz
@@ -311,7 +313,7 @@ model StorageObjectChunk {
   objectId   String   @map("object_id") @db.Uuid
   partNumber Int      @map("part_number") // S3 part number (1-10000)
   eTag       String   @map("e_tag") // S3 ETag for verification
-  size       BigInt   // Chunk size in bytes
+  size       BigInt // Chunk size in bytes
   uploadedAt DateTime @default(now()) @map("uploaded_at") @db.Timestamptz
 
   // Relations
@@ -554,7 +556,7 @@ model Notification {
   // NotificationDelivery.error: a rendered body has no meaningful length
   // bound, and silently truncating what a user was told is worse than storing
   // a long string. (Postgres `text` has no performance penalty over `varchar`.)
-  body String @db.Text
+  body  String @db.Text
 
   // Where the bell should send the user, as a ROOT-RELATIVE PATH ("/settings",
   // "/admin/users?id=…"), never an absolute URL.
@@ -789,9 +791,10 @@ model CivicsTestVersion {
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz
 
   // Relations
-  learnerProfiles LearnerProfile[]
-  categories      CivicsCategory[]
-  questions       CivicsQuestion[]
+  learnerProfiles  LearnerProfile[]
+  categories       CivicsCategory[]
+  questions        CivicsQuestion[]
+  practiceSessions PracticeSession[]
 
   @@map("civics_test_versions")
 }
@@ -918,8 +921,9 @@ model CivicsCategory {
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz
 
   // Relations
-  testVersion CivicsTestVersion @relation(fields: [testVersionCode], references: [code], onDelete: Restrict)
-  questions   CivicsQuestion[]
+  testVersion      CivicsTestVersion @relation(fields: [testVersionCode], references: [code], onDelete: Restrict)
+  questions        CivicsQuestion[]
+  practiceSessions PracticeSession[]
 
   // A category is addressed by its own code within one test version — 2008
   // and 2025 can each freely define (or redefine) the same `code`.
@@ -960,6 +964,7 @@ model CivicsQuestion {
   testVersion CivicsTestVersion @relation(fields: [testVersionCode], references: [code], onDelete: Restrict)
   category    CivicsCategory    @relation(fields: [categoryId], references: [id], onDelete: Restrict)
   answers     CivicsAnswer[]
+  attempts    PracticeAttempt[]
 
   // The seed loader's stable upsert key: re-running a loader against the same
   // (version, official number) must resolve to the same row, never create a
@@ -1043,4 +1048,318 @@ model CivicsAnswer {
 
   @@index([questionId])
   @@map("civics_answers")
+}
+
+// =============================================================================
+// Practice Sessions & Attempts (issue #66, epic #52)
+// =============================================================================
+//
+// The evidence ledger PRD.md's readiness model runs on. VISION.md is explicit
+// that OathPath "should never create artificial confidence after a few
+// successful questions" — readiness has to be reconstructed from repeated,
+// timestamped evidence, not read off a single mutable "score" column. These
+// two tables ARE that evidence: `PracticeSession` groups a run of practice
+// into one unit (a quick drill, a category focus, a weak-question review...),
+// and `PracticeAttempt` is one row per question answered, ever, regardless of
+// which (if any) session it belonged to.
+//
+// -----------------------------------------------------------------------------
+// WHY `PracticeAttempt` DOES NOT LIVE UNDER `PracticeSession` ALONE
+// -----------------------------------------------------------------------------
+// A naive design nests attempts inside sessions and stops there. That breaks
+// the moment E8's mock-interview engine exists: a mock interview asks
+// questions too, and its answers are exactly the same kind of evidence
+// ("has this learner demonstrated recall of this question?") the readiness
+// model needs to fold in alongside ordinary practice. Rather than a second,
+// parallel "mock_interview_attempts" table the readiness query would have to
+// UNION against this one, `PracticeAttempt.sessionId` is nullable and
+// `source` distinguishes the two origins on the SAME table. One evidence
+// table, one readiness query, one place a future "did they ever answer this
+// question correctly" check has to look.
+//
+// -----------------------------------------------------------------------------
+// FOUR COLUMNS THIS EPIC WRITES ONLY ONE VALUE OF, ON PURPOSE
+// -----------------------------------------------------------------------------
+// `source`, `promptMode`, `inputMode` and `hintUsed` are all real, typed
+// columns today even though E3 (this epic) only ever writes
+// `practice`/`read`/`typed`/`false` into them. Each is a documented future
+// reader, not a speculative one:
+//   - `source: mock_interview` — E8's realistic mock interviews (PRD.md:
+//     "performance in realistic mock interviews") write attempts through this
+//     same table with `source: mock_interview` and `sessionId: null`. Adding
+//     the value later would mean widening an enum AND retrofitting every
+//     historical row's assumed source — cheaper to declare the full set now
+//     while the table is empty.
+//   - `promptMode: heard` / `inputMode: spoken` — E9's spoken-answer practice
+//     (PRD.md: "spoken-answer practice", "ability to recall answers without
+//     hints" alongside "understand questions when they are spoken") is a
+//     DIFFERENT kind of evidence than reading a question and typing an
+//     answer — VISION.md lists retrieval, spoken response, and interview
+//     performance as distinct signals, not interchangeable ones. A readiness
+//     model that cannot tell a typed/read attempt from a spoken/heard one
+//     cannot honor that distinction, so the columns exist from the first
+//     attempt row ever written, not backfilled once E9 ships and every prior
+//     row has to be assumed to be `typed`/`read` after the fact.
+//   - `hintUsed` — PRD.md names "ability to recall answers without hints" as
+//     its own readiness signal, independent of whether the attempt was
+//     ultimately correct. A learner who reveals the answer before typing it
+//     and a learner who recalls it cold both may end up `outcome: correct`;
+//     only this column tells them apart. Recording it from day one avoids a
+//     hole in the historical record for every attempt made before the
+//     feature that reads it exists.
+// Backfilling any of the four later is not just a migration — it is
+// unrecoverable data loss about what evidence actually looked like, because
+// there is no way to reconstruct after the fact whether a hint was shown or a
+// response was typed vs. spoken. Better to carry an always-`false`/
+// always-`practice` column through this epic than to discover in E8/E9 that
+// none of the earlier evidence can be classified.
+//
+// -----------------------------------------------------------------------------
+// `sessionId` — nullable, and `onDelete: SetNull`, not `Cascade`
+// -----------------------------------------------------------------------------
+// Nullable because a mock-interview attempt (E8) has no practice session to
+// belong to — there is no session row for it to reference. `SetNull` rather
+// than `Cascade` because an attempt is EVIDENCE that a question was answered;
+// deleting the session it happened to occur under (a housekeeping purge of
+// old session summaries, say) must not silently delete the fact that the
+// learner answered a question. The attempt survives with `sessionId: null`,
+// exactly the same shape a mock-interview attempt already has.
+//
+// -----------------------------------------------------------------------------
+// `PracticeAttempt.questionId` — `onDelete: Restrict`, matching
+// `CivicsQuestion.testVersion`/`.category` above, not `CivicsAnswer.question`
+// -----------------------------------------------------------------------------
+// `CivicsAnswer` cascades from its question because an answer has no identity
+// independent of the question it answers. A `PracticeAttempt` is the reverse
+// relationship: the question is content the attempt is EVIDENCE ABOUT, and
+// that evidence must not vanish because content was reloaded or a bad row
+// removed. A question that has already been answered by a real learner
+// cannot be deleted — the same historical-integrity reasoning `AuditEvent`
+// and `NotificationDelivery` apply to their own subjects, applied here to
+// content instead of to a user.
+//
+// -----------------------------------------------------------------------------
+// `PracticeSession.testVersionCode` — `onDelete: Restrict`, matching
+// `LearnerProfile.testVersion`
+// -----------------------------------------------------------------------------
+// A session records which bank of questions it was drawn from; a test
+// version cannot be deleted out from under sessions (or profiles) still
+// referencing it.
+//
+// -----------------------------------------------------------------------------
+// `PracticeSession.categoryId` — nullable, `onDelete: SetNull`
+// -----------------------------------------------------------------------------
+// Only a `kind: category` session was started with a category filter — every
+// other kind leaves this null. `SetNull` (not `Restrict`) because the
+// category is a descriptive filter the session was started with, not a
+// dependency the session's own integrity rests on: if a category is ever
+// removed, the historical session record should keep existing with
+// `categoryId: null` rather than block the deletion or vanish itself.
+//
+// -----------------------------------------------------------------------------
+// `PracticeAttempt.userId` / `PracticeSession.userId` — both `onDelete: Cascade`
+// -----------------------------------------------------------------------------
+// Matches `AiUsageEvent.user` and `Notification.user` above: this is the
+// user's own practice history with no reader once the account is gone, both
+// columns are NOT NULL so `SetNull` is not expressible, and retaining a
+// deleted person's answer history serves nobody.
+//
+// -----------------------------------------------------------------------------
+// `gradingMethod` — a real enum, not a boolean or free string
+// -----------------------------------------------------------------------------
+// `exact` (typed-answer string match), `self` (learner self-reports "I knew
+// it" on a flashcard-style reveal) and `ai` (E9/AI-graded free response) are
+// three genuinely different grading pipelines with different trustworthiness
+// as evidence — a readiness model weighing "self-graded" against
+// "AI-graded" against "exact match" needs to tell them apart, the same
+// closed-set reasoning `CivicsDynamicScope` and `JourneyStage` already apply
+// above.
+//
+// -----------------------------------------------------------------------------
+// `PracticeSession.summary` — JSONB, nullable
+// -----------------------------------------------------------------------------
+// Computed once at completion (score, per-category breakdown, timing) and
+// persisted rather than recomputed from `attempts` on every read — the
+// session's attempts are immutable evidence rows that should not need a
+// live aggregation query every time a "past sessions" list renders. Null
+// while `status: in_progress`, because there is nothing to summarize yet.
+
+// The kind of run a session represents — a closed, code-owned set (the app's
+// own practice-mode picker), not an open registry: `quick` (a short mixed
+// drill), `category` (filtered to one `CivicsCategory`), `review` (spaced
+// re-practice of previously seen questions), `weak` (targeted at questions
+// with a poor attempt history), `mixed` (full-bank random draw).
+enum PracticeSessionKind {
+  quick
+  category
+  review
+  weak
+  mixed
+}
+
+// A session's own lifecycle — mirrors `DeviceCodeStatus`'s shape: a small,
+// closed state machine owned entirely by the practice service.
+// `abandoned` (as opposed to leaving it `in_progress` forever) matters
+// because "sessions currently in progress" must mean sessions the learner is
+// actually still in, not every session anyone ever navigated away from.
+enum PracticeSessionStatus {
+  in_progress
+  completed
+  abandoned
+}
+
+// See "FOUR COLUMNS THIS EPIC WRITES ONLY ONE VALUE OF" above.
+enum PracticeAttemptSource {
+  practice
+  mock_interview
+}
+
+// See "FOUR COLUMNS THIS EPIC WRITES ONLY ONE VALUE OF" above.
+enum PracticeInputMode {
+  typed
+  spoken
+}
+
+// See "FOUR COLUMNS THIS EPIC WRITES ONLY ONE VALUE OF" above.
+enum PracticePromptMode {
+  read
+  heard
+}
+
+// The result of one attempt. `partial` covers a multi-answer question (e.g.
+// "Name one branch of government") where the learner supplied a real but
+// incomplete answer — distinct from `incorrect` (a wrong answer given) and
+// `skipped` (no answer given at all), which a readiness model must be able
+// to tell apart from each other.
+enum PracticeOutcome {
+  correct
+  partial
+  incorrect
+  skipped
+}
+
+// See "gradingMethod" above.
+enum PracticeGradingMethod {
+  exact
+  self
+  ai
+}
+
+// One row per practice run. journey-shell.md and PRD.md's "Practicing" stage
+// are what this table backs: a learner drills a batch of questions, and this
+// row is the header record for that batch.
+model PracticeSession {
+  id String @id @default(uuid()) @db.Uuid
+
+  // onDelete: Cascade — see "userId ... both onDelete: Cascade" above.
+  userId String @map("user_id") @db.Uuid
+
+  kind PracticeSessionKind
+
+  status PracticeSessionStatus @default(in_progress)
+
+  // Which question bank this session was drawn from. onDelete: Restrict,
+  // matching `LearnerProfile.testVersion` — a test version cannot be deleted
+  // while sessions still reference it.
+  testVersionCode String @map("test_version_code")
+
+  // The category filter a `kind: category` session was started with.
+  // Nullable because only `category` sessions have one — see
+  // "PracticeSession.categoryId" above.
+  categoryId String? @map("category_id") @db.Uuid
+
+  plannedCount Int @map("planned_count")
+
+  startedAt DateTime @default(now()) @map("started_at") @db.Timestamptz
+
+  completedAt DateTime? @map("completed_at") @db.Timestamptz
+
+  // See "PracticeSession.summary" above.
+  summary Json?
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  // Relations
+  user        User              @relation("UserPracticeSessions", fields: [userId], references: [id], onDelete: Cascade)
+  testVersion CivicsTestVersion @relation(fields: [testVersionCode], references: [code], onDelete: Restrict)
+  category    CivicsCategory?   @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  attempts    PracticeAttempt[]
+
+  // The Recent-sessions query: this user's sessions, newest first.
+  @@index([userId, startedAt])
+  @@map("practice_sessions")
+}
+
+// One row per question answered, from EITHER a practice session or (from E8
+// onward) a mock interview. See the block comment above this model's enums
+// for why this table is not nested under `PracticeSession` alone.
+model PracticeAttempt {
+  id String @id @default(uuid()) @db.Uuid
+
+  // onDelete: Cascade — see "userId ... both onDelete: Cascade" above.
+  userId String @map("user_id") @db.Uuid
+
+  // onDelete: Restrict — see "PracticeAttempt.questionId" above: evidence
+  // must not vanish because content was reloaded, and a question that has
+  // been answered cannot be deleted.
+  questionId String @map("question_id") @db.Uuid
+
+  source PracticeAttemptSource @default(practice)
+
+  // Nullable — see "sessionId" above. Null for an E8 mock-interview attempt,
+  // which has no practice session; onDelete: SetNull so deleting a session
+  // never cascades away the evidence rows it produced.
+  sessionId String? @map("session_id") @db.Uuid
+
+  inputMode PracticeInputMode @default(typed) @map("input_mode")
+
+  promptMode PracticePromptMode @default(read) @map("prompt_mode")
+
+  // Null for a skip — there is no response to record.
+  responseText String? @map("response_text") @db.Text
+
+  outcome PracticeOutcome
+
+  gradingMethod PracticeGradingMethod @map("grading_method")
+
+  // Whether the correct answer was shown to the learner before (or instead
+  // of) them answering — a flashcard-style reveal. Distinct from `hintUsed`:
+  // a learner can reveal the full answer without ever seeing a partial hint,
+  // and vice versa.
+  revealed Boolean @default(false)
+
+  // See "FOUR COLUMNS THIS EPIC WRITES ONLY ONE VALUE OF" above — PRD.md's
+  // "ability to recall answers without hints" readiness signal.
+  hintUsed Boolean @default(false) @map("hint_used")
+
+  durationMs Int? @map("duration_ms")
+
+  answeredAt DateTime @map("answered_at") @db.Timestamptz
+
+  // The accepted answer(s) exactly as `CivicsAnswer` stood at grading time —
+  // NOT a live join. `CivicsAnswer`'s dynamic-answer lifecycle (this file's
+  // own comment on that model) means the correct answer to a `national` or
+  // `state` question can change after this attempt was graded; freezing the
+  // snapshot here is what lets a past attempt still be explained correctly
+  // even after the officeholder it named has left office.
+  answerSnapshot Json @map("answer_snapshot")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  // NO `updatedAt`. An attempt is an immutable record of something that
+  // already happened — same reasoning as `AiUsageEvent` above.
+
+  // Relations
+  user     User             @relation("UserPracticeAttempts", fields: [userId], references: [id], onDelete: Cascade)
+  question CivicsQuestion   @relation(fields: [questionId], references: [id], onDelete: Restrict)
+  session  PracticeSession? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+
+  // The readiness model's core query: this user's history with this
+  // question, in order — "has this learner ever answered this correctly,
+  // and how has that changed over time?"
+  @@index([userId, questionId, answeredAt])
+  // Session detail view: all attempts belonging to one session.
+  @@index([sessionId])
+  @@map("practice_attempts")
 }
