@@ -103,3 +103,12 @@ export type { TestSendActor } from './email-test-send.service';
 export type { UpdateEmailSettingsInput } from './dto/update-email-settings.dto';
 export type { EmailSettingsResponse } from './dto/email-settings-response.dto';
 export type { TestEmailResult } from './dto/test-email-result.dto';
+
+// `SecretRedactor` moved to `common/crypto/secret-redactor.ts` with #28 (epic
+// #25) so the AI providers can share it. It is re-exported from
+// `base-email.provider.ts` and therefore still reaches this barrel by its
+// original path — every existing import is unchanged.
+export {
+  MAX_PROVIDER_ERROR_LENGTH,
+  truncateProviderError,
+} from '../common/crypto/secret-redactor';
