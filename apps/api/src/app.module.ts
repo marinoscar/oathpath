@@ -7,6 +7,7 @@ import { ZodValidationPipe } from 'nestjs-zod';
 
 import { PrismaModule } from './prisma/prisma.module';
 import { CommonModule } from './common/common.module';
+import { ClockModule } from './common/clock/clock.module';
 import { AuthModule } from './auth/auth.module';
 import { UsersModule } from './users/users.module';
 import { SettingsModule } from './settings/settings.module';
@@ -51,6 +52,11 @@ import configuration from './config/configuration';
 
     // Feature modules
     CommonModule,
+    // The application's single notion of "now" (#63, epic #50). @Global, so
+    // later consumers inject `Clock` without importing this module; it also
+    // registers the non-production-only `X-Test-Clock` middleware from its
+    // own `configure()`.
+    ClockModule,
     AuthModule,
     UsersModule,
     SettingsModule,
