@@ -108,6 +108,15 @@ export const TAG_GROUPS: OpenApiTagGroup[] = [
           'encrypted credential store, is never returned, and submitting it empty preserves it.',
       },
       {
+        name: 'AI',
+        description:
+          'Each user\'s **own** OpenAI key, and the availability gate the app reads on every ' +
+          'navigation. All inference runs on the calling user\'s key, so each user sees and ' +
+          'pays for their own consumption. Every route here resolves the credential from the ' +
+          'authenticated session and **takes no user id** — nobody, administrators included, ' +
+          'can read another user\'s key through this API.',
+      },
+      {
         name: 'AI Settings',
         description:
           'Server-side AI configuration: which provider, the master switch, and which model serves ' +
