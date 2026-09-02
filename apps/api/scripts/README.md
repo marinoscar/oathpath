@@ -25,7 +25,7 @@ The script reads the following environment variables:
 | `POSTGRES_PORT` | `5432` | PostgreSQL server port |
 | `POSTGRES_USER` | `postgres` | Database user |
 | `POSTGRES_PASSWORD` | `postgres` | Database password |
-| `POSTGRES_DB` | `appdb` | Database name |
+| `POSTGRES_DB` | `oathpath` | Database name |
 | `POSTGRES_SSL` | `false` | Enable SSL connection (`true`/`false`) |
 
 ### Usage

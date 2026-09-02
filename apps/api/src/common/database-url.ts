@@ -66,7 +66,7 @@ export function buildDatabaseUrl(env: DatabaseEnv = process.env): string {
   const port = env.POSTGRES_PORT || '5432';
   const user = env.POSTGRES_USER || 'postgres';
   const password = env.POSTGRES_PASSWORD || 'postgres';
-  const database = env.POSTGRES_DB || 'appdb';
+  const database = env.POSTGRES_DB || 'oathpath';
 
   // Exact string comparison, deliberately: 'TRUE', '1' and 'yes' are NOT true
   // here, because that is the rule the other two builders already used and

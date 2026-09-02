@@ -1063,7 +1063,7 @@ POSTGRES_HOST=localhost
 POSTGRES_PORT=5432
 POSTGRES_USER=postgres
 POSTGRES_PASSWORD=postgres
-POSTGRES_DB=appdb
+POSTGRES_DB=oathpath
 
 # JWT
 JWT_SECRET=<min-32-character-secret>

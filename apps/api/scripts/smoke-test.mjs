@@ -33,7 +33,7 @@
 // RUN IT LOCALLY
 // -----------------------------------------------------------------------------
 //   docker run -d --name smoke-pg -e POSTGRES_PASSWORD=postgres \
-//     -e POSTGRES_DB=appdb -p 5432:5432 postgres:16-alpine
+//     -e POSTGRES_DB=oathpath -p 5432:5432 postgres:16-alpine
 //   cd apps/api && npm run build && npm run prisma:migrate && npm run prisma:seed
 //   node scripts/smoke-test.mjs
 //

@@ -36,7 +36,7 @@ function constructDatabaseUrl() {
   const port = process.env.POSTGRES_PORT || '5432';
   const user = process.env.POSTGRES_USER || 'postgres';
   const password = process.env.POSTGRES_PASSWORD || 'postgres';
-  const dbName = process.env.POSTGRES_DB || 'appdb';
+  const dbName = process.env.POSTGRES_DB || 'oathpath';
   const ssl = process.env.POSTGRES_SSL === 'true';
 
   // Construct URL-safe password
@@ -60,7 +60,7 @@ async function testConnection() {
   console.log(`  POSTGRES_HOST: ${process.env.POSTGRES_HOST || 'localhost (default)'}`);
   console.log(`  POSTGRES_PORT: ${process.env.POSTGRES_PORT || '5432 (default)'}`);
   console.log(`  POSTGRES_USER: ${process.env.POSTGRES_USER || 'postgres (default)'}`);
-  console.log(`  POSTGRES_DB: ${process.env.POSTGRES_DB || 'appdb (default)'}`);
+  console.log(`  POSTGRES_DB: ${process.env.POSTGRES_DB || 'oathpath (default)'}`);
   console.log(`  POSTGRES_SSL: ${process.env.POSTGRES_SSL || 'false (default)'}`);
   console.log('');
 

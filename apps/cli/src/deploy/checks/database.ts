@@ -48,7 +48,7 @@ export function databaseSettings(
     port: env.get('POSTGRES_PORT') ?? '5432',
     user: env.get('POSTGRES_USER') ?? 'postgres',
     password: env.get('POSTGRES_PASSWORD') ?? '',
-    database: env.get('POSTGRES_DB') ?? 'appdb',
+    database: env.get('POSTGRES_DB') ?? 'oathpath',
     ssl: env.get('POSTGRES_SSL') === 'true',
   };
 }

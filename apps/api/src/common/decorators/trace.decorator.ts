@@ -1,6 +1,11 @@
 import { trace, SpanKind, SpanStatusCode } from '@opentelemetry/api';
 
-const tracer = trace.getTracer('enterprise-app-api');
+// Kept in step with the `service.name` resource attribute set in
+// instrumentation.ts and with pino.config.ts's `service` field. This used to
+// be a bare literal, which meant OTEL_SERVICE_NAME renamed the service
+// everywhere EXCEPT this tracer's instrumentation scope — a split that is
+// invisible until someone filters a trace by name and finds half of it.
+const tracer = trace.getTracer(process.env.OTEL_SERVICE_NAME || 'oathpath-api');
 
 /**
  * Decorator to add tracing to a method

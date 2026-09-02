@@ -70,14 +70,14 @@ services:
       - POSTGRES_PORT=${POSTGRES_PORT:-5432}
       - POSTGRES_USER=${POSTGRES_USER:-postgres}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
-      - POSTGRES_DB=${POSTGRES_DB:-appdb}
+      - POSTGRES_DB=${POSTGRES_DB:-oathpath}
       - POSTGRES_SSL=${POSTGRES_SSL:-false}
       # JWT lifetimes (JWT_SECRET and COOKIE_SECRET arrive via env_file)
       - JWT_ACCESS_TTL_MINUTES=${JWT_ACCESS_TTL_MINUTES:-15}
       - JWT_REFRESH_TTL_DAYS=${JWT_REFRESH_TTL_DAYS:-14}
       # Observability: off unless asked for, so the otel overlay is opt-in
       - OTEL_ENABLED=${OTEL_ENABLED:-false}
-      - OTEL_SERVICE_NAME=${OTEL_SERVICE_NAME:-enterprise-app-api}
+      - OTEL_SERVICE_NAME=${OTEL_SERVICE_NAME:-oathpath-api}
       - LOG_LEVEL=${LOG_LEVEL:-info}
     networks:
       - app-network
