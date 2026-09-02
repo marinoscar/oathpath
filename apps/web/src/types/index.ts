@@ -1119,3 +1119,122 @@ export interface JourneyHome {
   dailyGoal: DailyGoal;
   nextAction: NextAction;
 }
+
+// =============================================================================
+// Civics — the admin dynamic-answer surface (#126, epic #51)
+// =============================================================================
+//
+// Mirrors `apps/api/src/civics/dto/civics-dynamic-answer.dto.ts` and
+// `update-civics-dynamic-answer.dto.ts`. Two properties of this shape are
+// load-bearing and easy to undo by accident:
+//
+//   1. THIS IS NOT THE LEARNER'S VIEW OF AN ANSWER. The learner-facing shape
+//      is resolved per caller and deliberately carries no effective dates. Here
+//      the dates ARE the subject: `effectiveTo: null` is the only "this is the
+//      current row" signal the table has, and a correction entered ahead of
+//      time opens a row that is not yet what a learner is served.
+//
+//   2. A CORRECTION IS A NEW ROW, NOT AN EDIT. Nothing in this file names an
+//      answer row to update; the address of a correction is the SLOT
+//      (`questionId` + `stateCode`). The response's `previous`/`current` pair
+//      is what lets the UI say the previous answer was closed rather than
+//      overwritten — see `civics-content.md` §4.
+// =============================================================================
+
+/**
+ * The two scopes this surface administers.
+ *
+ * `none` is absent on purpose, and its absence is load-bearing: a static answer
+ * is corrected through a reviewed content change, and `PUT` rejects a
+ * `none`-scope question with a 400 (`civics-content.md` §9).
+ */
+export type CivicsAdminScope = 'national' | 'state';
+
+/** One `civics_answers` row, as an administrator sees it. */
+export interface CivicsDynamicAnswer {
+  id: string;
+  /** The accepted answer, verbatim. */
+  text: string;
+  /** Which slot this row occupies. Always `0` for well-formed dynamic content. */
+  sort: number;
+  /** The state this answer is for, or null for a `national` answer. */
+  stateCode: string | null;
+  /** When a human last confirmed this text against the authoritative source. */
+  verifiedAt: string;
+  /** When this became correct IN THE REAL WORLD — not when the row was written. */
+  effectiveFrom: string;
+  /** When it stopped being correct, or null for the OPEN row. */
+  effectiveTo: string | null;
+  /** The citation this row's text and dates come from. */
+  sourceNote: string | null;
+}
+
+/** The question fields an administrator needs to recognise what they are editing. */
+export interface CivicsDynamicQuestion {
+  questionId: string;
+  testVersionCode: string;
+  /** The official question number within its version — how a reviewer names it. */
+  number: number;
+  prompt: string;
+  categoryId: string;
+  dynamicScope: CivicsAdminScope;
+}
+
+/** One question with every answer that is currently OPEN for it. */
+export interface CivicsDynamicAnswerItem extends CivicsDynamicQuestion {
+  /**
+   * The open row per slot — one for a `national` question, one per state that
+   * has an answer for a `state` question.
+   */
+  answers: CivicsDynamicAnswer[];
+  /**
+   * State codes with NO open answer — the gap list.
+   *
+   * Empty for a `national` question. A learner in one of these states currently
+   * has an unanswerable question, which is invisible anywhere else.
+   */
+  missingStateCodes: string[];
+}
+
+/** `GET /api/civics/dynamic-answers` — the flat paginated list body. */
+export interface CivicsDynamicAnswerPage {
+  items: CivicsDynamicAnswerItem[];
+  /** Counts QUESTIONS, not answer rows: a state question's 56 answers are one unit. */
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+}
+
+/** `PUT /api/civics/dynamic-answers` — the request body. */
+export interface CivicsAnswerCorrection {
+  questionId: string;
+  /** Required for a `state` question, REJECTED for a `national` one. */
+  stateCode?: string;
+  text: string;
+  /** REQUIRED. The citation the new text and its date come from. */
+  sourceNote: string;
+  /**
+   * `YYYY-MM-DD` or a full ISO timestamp — the real-world date of the change.
+   *
+   * Omitted, the server clock stands in, which is the honest value when no
+   * precise date is knowable. Never sent as `''`: an empty string is not a
+   * date, and the field is omitted instead.
+   */
+  effectiveFrom?: string;
+}
+
+/** `PUT /api/civics/dynamic-answers` — the closed row and the newly opened one. */
+export interface CivicsAnswerCorrectionResult extends CivicsDynamicQuestion {
+  stateCode: string | null;
+  /**
+   * The row this write CLOSED, already carrying its new `effectiveTo` — or null
+   * when the slot had no open row (the gap `missingStateCodes` reports).
+   *
+   * On the wire so the UI can say what was superseded rather than reading like
+   * the in-place edit the lifecycle refuses to perform.
+   */
+  previous: CivicsDynamicAnswer | null;
+  /** The row this write OPENED. Now the current answer. */
+  current: CivicsDynamicAnswer;
+}
