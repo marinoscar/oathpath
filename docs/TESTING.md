@@ -4,15 +4,42 @@ This document describes the testing strategy, frameworks, and conventions used i
 
 ## Table of Contents
 
-1. [Testing Framework Overview](#testing-framework-overview)
-2. [Test Structure](#test-structure)
-3. [Running Tests](#running-tests)
-4. [Test Patterns & Conventions](#test-patterns--conventions)
-5. [Mocking Strategies](#mocking-strategies)
-6. [Writing New Tests](#writing-new-tests)
-7. [Test Configuration](#test-configuration)
-8. [Best Practices](#best-practices)
-9. [Visual Regression Testing](#visual-regression-testing)
+1. [What Runs Where: CI vs. Local-Only](#what-runs-where-ci-vs-local-only)
+2. [Testing Framework Overview](#testing-framework-overview)
+3. [Test Structure](#test-structure)
+4. [Running Tests](#running-tests)
+5. [Test Patterns & Conventions](#test-patterns--conventions)
+6. [Mocking Strategies](#mocking-strategies)
+7. [Writing New Tests](#writing-new-tests)
+8. [Test Configuration](#test-configuration)
+9. [Best Practices](#best-practices)
+10. [Visual Regression Testing](#visual-regression-testing)
+
+## What Runs Where: CI vs. Local-Only
+
+This project has two disjoint groups of test suites, and it matters which
+group a given suite is in before you go looking for its results in a CI run.
+
+**In CI** (`.github/workflows/ci.yml`, three jobs — `api`, `web`, `cli`): each
+job typechecks, tests, and builds its workspace. No database, no other
+services, and no browser is started for any of them — see the "API tests
+never touch a database" rule below, which is the same rule at the unit/
+integration layer.
+
+**Local and manual only, never run in CI:**
+- `tests/e2e/` — Playwright, drives the real application against a running
+  Docker Compose stack.
+- `tests/visual/` — Playwright, pixel-level visual regression, run inside a
+  pinned container.
+
+This split is deliberate, not an oversight to eventually fix. Both Playwright
+suites need a live running application, and the application needs a live
+database — the CI jobs' hermetic, Prisma-mocked design exists specifically so
+that no test run can ever touch a database, and a browser suite driving the
+real app has no way to honor that. So rather than carve out an exception, the
+two suites that need a live app simply don't run in CI at all: run them
+yourself, locally, before a significant UI change, since nothing runs them
+for you.
 
 ## Testing Framework Overview
 
@@ -849,6 +876,12 @@ npm run test:ui
 
 The application supports end-to-end testing using Playwright with a dedicated test authentication mechanism that bypasses Google OAuth.
 
+**This suite is run manually, locally, against a running compose stack. It is
+not part of `.github/workflows/ci.yml` and nothing runs it for you.** It needs
+a live application and therefore a live database, and CI is deliberately
+hermetic (see [What Runs Where](#what-runs-where-ci-vs-local-only)). Run it
+yourself before a significant UI or auth-flow change.
+
 ### Test Authentication
 
 In development/test environments, a special login page at `/testing/login` allows Playwright tests to authenticate as any user with any role without going through Google OAuth.
@@ -1052,19 +1085,23 @@ A few settings in `tests/visual/playwright.config.ts` exist specifically because
 - **`maxDiffPixels: 4`** (an absolute count, not a ratio) — several specs screenshot a mostly-blank nav rail element where a real regression changes only a few hundred pixels out of roughly 47,000 total, comfortably under even a 1% ratio threshold. An absolute pixel count catches that; a percentage would not.
 - **pixelmatch `threshold: 0.05`** (down from Playwright's default of `0.2`) — the #105 caption-padding regression's visual delta is a subtle tint-edge shift on a near-black dark theme background. At the default perceptual threshold, pixelmatch does not register it as different at all, despite a large, real, confirmed RGB delta.
 
-Baselines are generated and verified **only** inside the pinned container, `mcr.microsoft.com/playwright:v1.62.1-noble` — never on a developer's host machine. Host Chromium's font hinting and antialiasing drift from CI's, and at this tight a pixel tolerance that drift alone is enough to fail a spec with no real regression present.
+Baselines are generated and verified **only** inside the pinned container, `mcr.microsoft.com/playwright:v1.62.1-noble` — never on a developer's host machine. Host Chromium's font hinting and antialiasing drift from one machine to the next, and at this tight a pixel tolerance that drift alone is enough to fail a spec with no real regression present. That's the entire point of the container: it exists so that **every developer produces the same pixels as every other developer**, regardless of host OS or locally installed fonts — which is what makes a single checked-in baseline meaningful across a whole team. Nothing about the container is CI-specific; it would matter exactly as much even if this repo had no CI at all.
 
-### CI Integration
+### This Suite Is Local and Manual Only
 
-A `visual` job in `.github/workflows/ci.yml` runs concurrently with the other CI jobs (no `needs:` dependency), inside `container: mcr.microsoft.com/playwright:v1.62.1-noble`. It invokes the pinned Playwright binary directly:
+**This suite is not part of `.github/workflows/ci.yml`.** That workflow has
+exactly three jobs — `api`, `web`, `cli` — and none of them starts a browser
+or a database. There is no `visual` job. This is deliberate, not a gap to
+close: the suite screenshots a real, running application, which needs a real
+database, and CI's hermetic design (Prisma mocked in full, no service
+containers) exists specifically to guarantee that no CI run ever touches one.
+Rather than make an exception for this suite, it simply runs outside CI —
+see [What Runs Where](#what-runs-where-ci-vs-local-only).
 
-```bash
-tests/visual/node_modules/.bin/playwright test --config=tests/visual/playwright.config.ts
-```
-
-It does **not** use `npx playwright`, which resolves a different, unpinned Playwright module instance from the repo root and throws a `"did not expect test() to be called here"` error from having two copies of the Playwright module loaded in the same process.
-
-The job uploads `tests/visual/playwright-report/` via `actions/upload-artifact@v4` unconditionally (`if: always()`), so a failing run's HTML report — which embeds the expected, actual, and diff PNGs for every failed assertion — is downloadable directly from the Actions run without needing to reproduce the failure locally.
+In practice this means: nobody is notified of a visual regression by a red
+check. Run this suite yourself, locally, before a significant UI change —
+particularly one touching `Layout`, `NavigationRail`, `AppBar`, or
+`SettingsHub` — and again before merging if the change is layout-sensitive.
 
 ### Running Tests Locally
 
@@ -1080,7 +1117,7 @@ npx playwright test --config=tests/visual/playwright.config.ts
 
 (Manually starting the harness dev server yourself, from `apps/web/visual/`, is only needed if you want to poke at the harness in a browser outside of a test run.)
 
-To generate or verify baselines, run the suite inside the exact pinned container instead — the point of the container is that the pixels it produces are the same pixels CI will produce. From the repo root:
+To generate or verify baselines, run the suite inside the exact pinned container instead — the point of the container is that the pixels it produces are the same pixels every other developer's container run will produce. From the repo root:
 
 ```bash
 REPO=$(git rev-parse --show-toplevel)
@@ -1102,7 +1139,7 @@ Three details in that command are load-bearing:
 
 To regenerate baselines after an intentional visual change, run the suite with `--update-snapshots` inside the same pinned container — `tests/visual/package.json` provides `npm run test:update` for this. As with the run command above, this must happen inside `mcr.microsoft.com/playwright:v1.62.1-noble`, not on a host machine.
 
-This is the most important paragraph in this section: **blessing a diff without opening the image and confirming the new pixels are the intended change is the standard failure mode of every snapshot-testing suite, and it would defeat the entire purpose of this one.** A rubber-stamped `--update-snapshots` run after a CI failure silently readmits the exact class of regression — #105 — that this suite exists to catch. Before running `test:update`, open the failing run's HTML report, look at the diff image for each failing spec, and understand specifically what changed and why. Only update the baseline once that change is confirmed intentional. If it isn't, the fix is to fix the code, not the baseline.
+This is the most important paragraph in this section: **blessing a diff without opening the image and confirming the new pixels are the intended change is the standard failure mode of every snapshot-testing suite, and it would defeat the entire purpose of this one.** A rubber-stamped `--update-snapshots` run after a failing local run silently readmits the exact class of regression — #105 — that this suite exists to catch. Before running `test:update`, open the failing run's HTML report (`tests/visual/playwright-report/`), look at the diff image for each failing spec, and understand specifically what changed and why. Only update the baseline once that change is confirmed intentional. If it isn't, the fix is to fix the code, not the baseline.
 
 ---
 
