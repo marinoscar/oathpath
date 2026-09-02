@@ -1,5 +1,10 @@
 import type { Logger } from '@nestjs/common';
 
+import {
+  SecretRedactor,
+  truncateProviderError,
+} from '../common/crypto/secret-redactor';
+
 import type { EmailMessage, EmailSendResult } from './email.types';
 import type { EmailProvider } from './providers/email-provider.interface';
 
@@ -27,82 +32,15 @@ import type { EmailProvider } from './providers/email-provider.interface';
 // =============================================================================
 
 /**
- * The maximum length of an error string we will return or log.
+ * Re-exported for path stability.
  *
- * AWS SDK errors in particular can carry a serialised response body; an SMTP
- * server can answer with an arbitrarily long banner. #124 renders this text in
- * an admin dialog, and it also goes into a delivery record (#125), so it is
- * capped at something a human can actually read.
+ * `SecretRedactor` now lives in `common/crypto/secret-redactor.ts` (moved by
+ * #28, epic #25, because the AI providers need the identical guarantee and an
+ * `ai/` module importing from this file would misdescribe the dependency).
+ * Every existing import path — this file, `../email` — still resolves, and no
+ * email call site moved.
  */
-const MAX_ERROR_LENGTH = 2000;
-
-/**
- * Shortest secret we will redact by substring.
- *
- * Below this a secret is indistinguishable from ordinary words in an error
- * ("smtp", "true"), and blanket-replacing it would corrupt the message into
- * uselessness while still not proving the secret is gone. Under the floor we
- * take the other branch — see {@link SecretRedactor.apply}.
- */
-const MIN_REDACTABLE_SECRET_LENGTH = 4;
-
-/**
- * Collects the secrets in play during one send so that ANY error raised
- * afterwards can be scrubbed before it is logged or returned.
- *
- * WHY THIS EXISTS RATHER THAN "just don't put the password in the error":
- * we do not write most of these errors. nodemailer builds its own error text,
- * and an SMTP server's rejection is echoed back to us verbatim; a server that
- * quotes the offending AUTH line, or a transport bug that stringifies its own
- * options, would put the password into a string we then hand to an admin
- * screen (#124) and a database row (#125). Registering the secret the moment
- * we hold it means the scrub happens even for errors from code we do not own.
- *
- * The plaintext lives in this object for the duration of one send. That is the
- * same lifetime the transport itself needs it for, so it adds no new exposure
- * window; it is dropped when the send returns.
- */
-export class SecretRedactor {
-  private readonly secrets: string[] = [];
-
-  /**
-   * Register a value that must never appear in an error string.
-   *
-   * Call this at the instant the secret is obtained — BEFORE the code that
-   * might throw while holding it, not in the failure path, where a throw
-   * would have skipped it.
-   */
-  protect(secret: string | null | undefined): void {
-    if (typeof secret === 'string' && secret.length > 0) {
-      this.secrets.push(secret);
-    }
-  }
-
-  /**
-   * Scrub every registered secret out of `text`.
-   *
-   * Long secrets are replaced in place, keeping the rest of the message —
-   * which is the whole point of showing the provider's real error. A secret
-   * too short to replace safely (see {@link MIN_REDACTABLE_SECRET_LENGTH})
-   * costs the caller the entire message instead: an unreadable error is a bad
-   * outcome, a leaked password is a worse one, and the choice is not close.
-   */
-  apply(text: string): string {
-    let out = text;
-
-    for (const secret of this.secrets) {
-      if (!out.includes(secret)) continue;
-
-      if (secret.length < MIN_REDACTABLE_SECRET_LENGTH) {
-        return '[error withheld: it contained the configured credential]';
-      }
-
-      out = out.split(secret).join('[redacted]');
-    }
-
-    return out;
-  }
-}
+export { SecretRedactor };
 
 /**
  * Base class for every email transport in this app.
@@ -203,11 +141,11 @@ export abstract class BaseEmailProvider implements EmailProvider {
    * truncate, then label with the transport.
    */
   private formatError(raw: string, redact: SecretRedactor): string {
-    const scrubbed = redact.apply(raw);
-    const truncated =
-      scrubbed.length > MAX_ERROR_LENGTH
-        ? `${scrubbed.slice(0, MAX_ERROR_LENGTH)}… (truncated)`
-        : scrubbed;
+    // Redact FIRST, then truncate. Reversing the two could cut a secret in
+    // half and leave the tail intact. The cap itself moved to
+    // `common/crypto/secret-redactor.ts` with #28 so `BaseAiProvider` shares
+    // it rather than declaring a second 2000 that can drift.
+    const truncated = truncateProviderError(redact.apply(raw));
 
     // Always prefixed with the transport: #124 shows this text with no other
     // context, and "Connection timeout" is a different problem depending on
