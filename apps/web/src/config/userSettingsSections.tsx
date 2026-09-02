@@ -23,6 +23,7 @@ import PersonIcon from '@mui/icons-material/Person';
 import PaletteIcon from '@mui/icons-material/Palette';
 import NotificationsIcon from '@mui/icons-material/Notifications';
 import VpnKeyIcon from '@mui/icons-material/VpnKey';
+import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome';
 import type { SettingsSectionDef } from './adminSections';
 
 /**
@@ -82,6 +83,25 @@ export const USER_SETTINGS_SECTIONS: SettingsSectionDef[] = [
   {
     label: 'Security',
     cards: [
+      {
+        // Issue #42, epic #25. Under `Security` beside Access Tokens, for the
+        // reason this group's own note gives: an OpenAI key is a long-lived
+        // credential, and grouping it with display name and theme would put
+        // "the credential everything you do runs on" one row below "pick a
+        // colour scheme".
+        //
+        // NO `permission`, like every card here. Every authenticated user owns
+        // their own credentials, and `AiUserKeyController` is `@Auth()` with no
+        // permissions for exactly that reason — gating this card would invent
+        // an authorization rule the API does not enforce, and since a keyless
+        // user is hard-blocked (#39) it would leave the gated role unable to
+        // use the app at all.
+        title: 'AI key',
+        description:
+          'Your own OpenAI key, which everything in OathPath runs on, and what it has been used for.',
+        Icon: AutoAwesomeIcon,
+        path: '/settings/ai',
+      },
       {
         title: 'Access Tokens',
         description: 'Create and revoke personal access tokens for API and CLI access.',

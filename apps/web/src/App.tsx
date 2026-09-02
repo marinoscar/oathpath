@@ -33,6 +33,8 @@ const UserNotificationsPage = lazy(
   () => import("./pages/UserNotificationsPage"),
 );
 const UserTokensPage = lazy(() => import("./pages/UserTokensPage"));
+// Issue #42, epic #25 — the user's own OpenAI key and what it has been used for.
+const UserAiKeyPage = lazy(() => import("./pages/UserAiKeyPage"));
 
 // Console — the hub (#93) plus one route per card in
 // `config/adminSections.tsx` (#92, epic #90).
@@ -172,6 +174,13 @@ function AppRoutes() {
                       path="/settings/tokens"
                       element={<UserTokensPage />}
                     />
+                    {/* Ungated like its siblings (#42, epic #25). The endpoints
+                        behind it are `@Auth()` with no permissions — every user
+                        owns their own credentials — and the registry card
+                        correspondingly declares no `permission`. A gate here
+                        would leave the gated role unable to use the app at all,
+                        since a keyless user is hard-blocked. */}
+                    <Route path="/settings/ai" element={<UserAiKeyPage />} />
                     {/* Route-level AUTHORIZATION, not just authentication.
                     `ProtectedRoute` above only establishes that someone is
                     logged in — before this, a Viewer typing `/admin/settings`
