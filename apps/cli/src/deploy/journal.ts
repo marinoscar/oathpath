@@ -1,6 +1,7 @@
 import { appendFileSync, mkdirSync, openSync, closeSync, readdirSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { CLI_NAME } from '../branding.js';
 import type { CommandResult } from './executor.js';
 
 // =============================================================================
@@ -15,7 +16,7 @@ import type { CommandResult } from './executor.js';
 // Two files per run, because they have two different readers:
 //
 //   <command>-<timestamp>.log    a human reading it over SSH
-//   <command>-<timestamp>.jsonl  a program, and `appctl deploy status --json`
+//   <command>-<timestamp>.jsonl  a program, and `oathpath deploy status --json`
 //
 // REDACTION IS THE SECURITY-CRITICAL PART AND IT IS STRUCTURAL. These logs are
 // written to be pasted into bug reports; that is their purpose. So every
@@ -113,6 +114,29 @@ export function timestampSlug(date: Date): string {
   return date.toISOString().replace(/[:.]/g, '-').replace(/Z$/, 'Z');
 }
 
+/**
+ * Filename prefix for every journal this module writes.
+ *
+ * The writer below and `journalNamePattern()` MUST stay in step: the writer
+ * names the files and the pattern is what retention uses to find them again.
+ * If they ever drift, old journals stop matching, are never pruned, and
+ * quietly disappear from `deploy status` — a failure with no error message.
+ * Deriving both from one constant is what makes that impossible.
+ */
+const JOURNAL_PREFIX = `${CLI_NAME}-`;
+
+/**
+ * Matches the journals `startJournal` writes, capturing the shared base name
+ * so a `.log`/`.jsonl` pair is pruned as one unit.
+ *
+ * Built fresh per call rather than held as a module-level RegExp because a
+ * literal with the `g` flag would carry `lastIndex` between calls; this has no
+ * flags, but constructing it here keeps it beside the prefix it depends on.
+ */
+function journalNamePattern(): RegExp {
+  return new RegExp(`^(${JOURNAL_PREFIX}.+?)\\.(log|jsonl)$`);
+}
+
 export function openJournal(options: OpenJournalOptions): Journal {
   const now = options.now ?? (() => new Date());
   const redact = createRedactor(options.secrets ?? []);
@@ -120,7 +144,7 @@ export function openJournal(options: OpenJournalOptions): Journal {
 
   const logsDir = join(options.deployRoot, 'logs');
   const slug = timestampSlug(now());
-  const base = `appctl-${options.command}-${slug}`;
+  const base = `${JOURNAL_PREFIX}${options.command}-${slug}`;
   const logPath = join(logsDir, `${base}.log`);
   const jsonlPath = join(logsDir, `${base}.jsonl`);
 
@@ -173,7 +197,7 @@ export function openJournal(options: OpenJournalOptions): Journal {
     write(logPath, redact(text) + '\n');
   }
 
-  human(`=== appctl deploy ${options.command} - ${now().toISOString()} ===`);
+  human(`=== ${CLI_NAME} deploy ${options.command} - ${now().toISOString()} ===`);
   event('run.start', { command: options.command, deployRoot: options.deployRoot });
 
   return {
@@ -240,7 +264,7 @@ export function pruneOldRuns(logsDir: string, retain: number): void {
 
   const bases = new Set<string>();
   for (const name of readdirSync(logsDir)) {
-    const match = /^(appctl-.+?)\.(log|jsonl)$/.exec(name);
+    const match = journalNamePattern().exec(name);
     if (match?.[1] !== undefined) bases.add(match[1]);
   }
 

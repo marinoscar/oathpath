@@ -40,7 +40,7 @@ function git(cwd: string, ...args: string[]): string {
 
 /** A repository whose default branch is deliberately NOT `main`. */
 function makeOrigin(defaultBranch = 'develop'): string {
-  const dir = mkdtempSync(join(tmpdir(), 'appctl-origin-'));
+  const dir = mkdtempSync(join(tmpdir(), 'oathpath-origin-'));
   git(dir, 'init', '--quiet', `--initial-branch=${defaultBranch}`);
   writeFileSync(join(dir, 'README.md'), 'one\n');
   git(dir, 'add', '.');
@@ -52,14 +52,14 @@ function makeOrigin(defaultBranch = 'develop'): string {
 }
 
 function makeClone(origin: string, defaultBranch = 'develop'): string {
-  const dir = mkdtempSync(join(tmpdir(), 'appctl-clone-'));
+  const dir = mkdtempSync(join(tmpdir(), 'oathpath-clone-'));
   const path = join(dir, 'checkout');
   git(dir, 'clone', '--quiet', '--branch', defaultBranch, origin, path);
   return path;
 }
 
 function deployRoot(): string {
-  return mkdtempSync(join(tmpdir(), 'appctl-deploy-'));
+  return mkdtempSync(join(tmpdir(), 'oathpath-deploy-'));
 }
 
 describe('normaliseRepoUrl', () => {
@@ -107,7 +107,7 @@ describe('findGitRoot', () => {
   });
 
   it('is undefined outside a checkout', () => {
-    expect(findGitRoot(mkdtempSync(join(tmpdir(), 'appctl-nogit-')))).toBeUndefined();
+    expect(findGitRoot(mkdtempSync(join(tmpdir(), 'oathpath-nogit-')))).toBeUndefined();
   });
 });
 
@@ -180,7 +180,7 @@ describe('resolveRepoTarget', () => {
   });
 
   it('names --repo when there is no checkout to read', async () => {
-    const outside = mkdtempSync(join(tmpdir(), 'appctl-nogit-'));
+    const outside = mkdtempSync(join(tmpdir(), 'oathpath-nogit-'));
 
     const error = await resolveRepoTarget({ cwd: outside, runCommand }).catch(
       (caught: unknown) => caught,
@@ -191,7 +191,7 @@ describe('resolveRepoTarget', () => {
   });
 
   it('names --repo when the checkout has no origin', async () => {
-    const orphan = mkdtempSync(join(tmpdir(), 'appctl-orphan-'));
+    const orphan = mkdtempSync(join(tmpdir(), 'oathpath-orphan-'));
     git(orphan, 'init', '--quiet');
 
     const error = await resolveRepoTarget({ cwd: orphan, runCommand }).catch(
@@ -210,6 +210,7 @@ describe('the template property', () => {
     const source = readFileSync(new URL('./repo.ts', import.meta.url), 'utf8');
 
     expect(source).not.toContain('EnterpriseAppBase');
+    expect(source).not.toContain('oathpath');
     expect(source).not.toContain('marinoscar');
     expect(source).not.toMatch(/github\.com\/[a-z]/i);
   });

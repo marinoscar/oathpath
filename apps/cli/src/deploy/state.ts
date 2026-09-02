@@ -12,10 +12,10 @@ import { CliError, EXIT, type ExitCode } from '../errors.js';
 // installed, where, and at which commit. `status` needs the same. This file is
 // where the answer lives.
 //
-// IT IS NOT IN ~/.appctl/config.json, AND THAT IS NOT A STYLE CHOICE.
+// IT IS NOT IN ~/.oathpath/config.json, AND THAT IS NOT A STYLE CHOICE.
 // `writeConfigFile` copies an ALLOW-LIST of fields and drops everything else on
 // every write (see config.ts). Deploy state placed there would survive until
-// the next `appctl login` and then vanish, turning a working deployment into
+// the next `oathpath login` and then vanish, turning a working deployment into
 // one the CLI believes was never installed. Its own file, next to the
 // deployment it describes, also means the state travels with the server rather
 // than with whichever operator's home directory happened to run the install.
@@ -24,7 +24,7 @@ import { CliError, EXIT, type ExitCode } from '../errors.js';
 /** Bumped only when a field changes meaning; unknown versions are refused. */
 export const DEPLOY_STATE_VERSION = 1;
 
-export const DEPLOY_STATE_FILENAME = '.appctl-deploy.json';
+export const DEPLOY_STATE_FILENAME = `.${CLI_NAME}-deploy.json`;
 
 export interface DeployState {
   version: typeof DEPLOY_STATE_VERSION;
@@ -42,8 +42,14 @@ export interface DeployState {
   installedAt: string;
   lastDeployedAt: string;
   lastCommand: 'install' | 'update';
-  /** Which appctl wrote this, for diagnosing a state file from the future. */
-  appctlVersion: string;
+  /**
+   * Which CLI version wrote this, for diagnosing a state file from the future.
+   *
+   * Deliberately NOT named after the binary. This is a persisted wire format,
+   * and a field keyed to the executable's name turns every future rename into
+   * a state-file migration for no benefit.
+   */
+  cliVersion: string;
   /** The revision this replaced, for a manual roll-back. */
   previousSha?: string | undefined;
   /**
@@ -111,7 +117,7 @@ export function readState(deployRoot: string): DeployState | undefined {
   if (version !== DEPLOY_STATE_VERSION) {
     // Refused rather than guessed. Misreading a state file means updating the
     // wrong checkout or reporting the wrong commit as deployed, and a newer
-    // appctl having written it is the likeliest cause.
+    // oathpath having written it is the likeliest cause.
     throw new DeployStateError(
       `${path} has state version ${String(version)}, but this ${CLI_NAME} understands ${DEPLOY_STATE_VERSION}. Upgrade ${CLI_NAME}, or remove the file to re-install.`,
     );

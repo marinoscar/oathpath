@@ -29,7 +29,7 @@ import { CliError, EXIT, PreconditionError, UsageError, type ExitCode } from '..
 import { shouldUseColour } from '../output.js';
 
 // =============================================================================
-// `appctl deploy`  (issue #178, epic #168)
+// `oathpath deploy`  (issue #178, epic #168)
 // =============================================================================
 //
 // The first user-facing surface of the deployment work, and the place the
@@ -39,7 +39,7 @@ import { shouldUseColour } from '../output.js';
 // Two rules inherited from program.ts, neither negotiable here:
 //
 //   - HUMAN OUTPUT GOES TO STDERR. stdout carries `--json` and nothing else,
-//     so `appctl deploy doctor --json | jq` is clean.
+//     so `oathpath deploy doctor --json | jq` is clean.
 //   - FAILURE IS NON-ZERO. A doctor that prints failures and exits 0 makes
 //     `doctor || provision-the-box` silently useless.
 // =============================================================================
@@ -406,7 +406,7 @@ function wrap(text: string, width: number): string[] {
 
 
 // ---------------------------------------------------------------------------
-// `appctl deploy status`  (issue #183)
+// `oathpath deploy status`  (issue #183)
 // ---------------------------------------------------------------------------
 
 export interface StatusCommandOptions {
@@ -524,7 +524,7 @@ export function renderHealth(
 
 
 // ---------------------------------------------------------------------------
-// `appctl deploy install`  (issue #180)
+// `oathpath deploy install`  (issue #180)
 // ---------------------------------------------------------------------------
 
 function collectGroup(value: string, previous: string[]): string[] {
@@ -624,7 +624,7 @@ export async function runInstallCommand(
 
 
 // ---------------------------------------------------------------------------
-// `appctl deploy update`  (issue #182)
+// `oathpath deploy update`  (issue #182)
 // ---------------------------------------------------------------------------
 
 export interface UpdateCommandOptions {

@@ -69,7 +69,7 @@ describe('the update pipeline', () => {
 
 describe('runUpdate preconditions', () => {
   it('refuses to run when nothing is installed, naming install', async () => {
-    const empty = mkdtempSync(join(tmpdir(), 'appctl-noinstall-'));
+    const empty = mkdtempSync(join(tmpdir(), 'oathpath-noinstall-'));
 
     const error = await runUpdate({ deployRoot: empty }).catch((caught: unknown) => caught);
 

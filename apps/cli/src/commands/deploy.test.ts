@@ -74,7 +74,7 @@ const HEALTHY: Check[] = [
   check('b', 'recommended', 'pass', 'fine'),
 ];
 
-describe('appctl deploy doctor', () => {
+describe('oathpath deploy doctor', () => {
   it('exits 0 when every required check passes', async () => {
     const result = await runDoctor([], HEALTHY);
 
@@ -88,7 +88,7 @@ describe('appctl deploy doctor', () => {
     ]);
 
     // A distinct code is the point: `doctor || provision-the-box` has to tell
-    // "not ready" apart from "appctl itself broke".
+    // "not ready" apart from "oathpath itself broke".
     expect(exitCodeFor(result.error)).toBe(EXIT.PRECONDITION);
     expect((result.error as Error).message).toContain('broken');
   });
@@ -148,7 +148,7 @@ describe('appctl deploy doctor', () => {
   });
 });
 
-describe('appctl deploy doctor --json', () => {
+describe('oathpath deploy doctor --json', () => {
   it('writes valid JSON on stdout and nothing on stderr', async () => {
     const result = await runDoctor(['--json'], HEALTHY);
 
@@ -261,11 +261,11 @@ describe('the deploy group', () => {
 
 
 // ---------------------------------------------------------------------------
-// `appctl deploy status`  (issue #183)
+// `oathpath deploy status`  (issue #183)
 // ---------------------------------------------------------------------------
 
 function installedRoot(): string {
-  const root = mkdtempSync(join(tmpdir(), 'appctl-status-'));
+  const root = mkdtempSync(join(tmpdir(), 'oathpath-status-'));
   const state: DeployState = {
     version: DEPLOY_STATE_VERSION,
     repoUrl: 'https://example.test/o/r',
@@ -276,7 +276,7 @@ function installedRoot(): string {
     installedAt: '2026-01-01T00:00:00.000Z',
     lastDeployedAt: '2026-01-02T00:00:00.000Z',
     lastCommand: 'install',
-    appctlVersion: '1.0.0',
+    cliVersion: '1.0.0',
   };
   writeFileSync(deployStatePath(root), JSON.stringify(state));
   return root;
@@ -335,7 +335,7 @@ async function runStatus(
   return { stdout: stdout.join(''), stderr: stderr.join(''), error };
 }
 
-describe('appctl deploy status', () => {
+describe('oathpath deploy status', () => {
   it('exits 0 and reports every section when healthy', async () => {
     const root = installedRoot();
 
@@ -381,7 +381,7 @@ describe('appctl deploy status', () => {
   });
 
   it('distinguishes "nothing installed" from "installed and unhealthy"', async () => {
-    const empty = mkdtempSync(join(tmpdir(), 'appctl-empty-'));
+    const empty = mkdtempSync(join(tmpdir(), 'oathpath-empty-'));
 
     const result = await runStatus(['--root', empty], {
       runCommand: composeRunCommand(ALL_RUNNING, 'Database schema is up to date!'),
