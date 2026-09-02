@@ -1,4 +1,5 @@
 import { Logger } from '@nestjs/common';
+import { z } from 'zod';
 
 import type { SecretRedactor } from '../common/crypto/secret-redactor';
 import { MAX_PROVIDER_ERROR_LENGTH } from '../common/crypto/secret-redactor';
@@ -7,10 +8,14 @@ import type { AiProviderKind } from './ai-settings.schema';
 import type { AiCapabilityFamily } from './ai-model-roles';
 import type { AiCapabilitySet } from './providers/ai-provider.interface';
 import type {
+  AiCompletionRequest,
   AiCompletionResult,
   AiConnectionTestResult,
   AiModelCatalogResult,
   AiReachabilityRequest,
+  AiStreamEvent,
+  AiStructuredCompletionRequest,
+  AiUsage,
 } from './ai.types';
 import type { AiUsageService } from './ai-usage.service';
 
@@ -26,16 +31,56 @@ import type { AiUsageService } from './ai-usage.service';
 // The other two claims tested here are capability gating (a provider that does
 // not declare a family cannot be selected for it) and that a key registered
 // with the redactor cannot escape in any error string this class emits.
+//
+// -----------------------------------------------------------------------------
+// #96 ADDS TWO MORE SURFACES WITH THE SAME GUARANTEE AND HARDER SHAPES
+// -----------------------------------------------------------------------------
+//
+// `completeStructured` has two failure modes that are not throws at all — a
+// reply that is not JSON, and a reply that is JSON of the wrong shape — and the
+// claim tested here is that neither becomes an exception and neither yields a
+// half-populated `data`.
+//
+// `stream` is an async generator, which has four exits rather than one: a throw
+// before the first chunk, a throw between chunks, normal completion, and being
+// ABANDONED when the consumer stops iterating. The tests below cover all four,
+// and assert the two invariants that make an SSE endpoint safe to build on top
+// — exactly one terminal event, always last, and exactly one usage row.
 // =============================================================================
 
-/** A stub whose two subclass hooks are supplied per test. */
+/** The inference hooks, supplied only by the tests that exercise them. */
+interface InferenceHooks {
+  onStructured?: (
+    apiKey: string,
+    request: AiStructuredCompletionRequest<unknown>,
+    jsonSchema: Record<string, unknown>,
+    redact: SecretRedactor,
+  ) => Promise<{ raw: string | null; usage: AiUsage }>;
+
+  onStream?: (
+    apiKey: string,
+    request: AiCompletionRequest,
+    redact: SecretRedactor,
+    signal?: AbortSignal,
+  ) => AsyncIterable<{ delta?: string; usage?: AiUsage }>;
+}
+
+/** A stub whose subclass hooks are supplied per test. */
 class StubProvider extends BaseAiProvider {
   protected readonly logger = new Logger('StubProvider');
   readonly kind: AiProviderKind = 'openai';
   protected readonly providerName = 'Stub';
-  // Recording is exercised in ai-usage.spec.ts; here it only has to exist.
+
+  /**
+   * The recorder, exposed so a test can assert on the row this class writes.
+   *
+   * Returning an id rather than `undefined` because that is what
+   * `AiUsageService.record` returns since #96 — a test double that returned
+   * nothing would let `usageEventId` be silently dropped everywhere.
+   */
+  readonly record = jest.fn().mockResolvedValue('usage-row-1');
   protected readonly usage = {
-    record: jest.fn().mockResolvedValue(undefined),
+    record: this.record,
   } as unknown as AiUsageService;
 
   constructor(
@@ -48,6 +93,7 @@ class StubProvider extends BaseAiProvider {
       probes: AiReachabilityRequest[],
       redact: SecretRedactor,
     ) => Promise<AiConnectionTestResult>,
+    private readonly hooks: InferenceHooks = {},
   ) {
     super();
   }
@@ -66,6 +112,30 @@ class StubProvider extends BaseAiProvider {
 
   protected async runCompletion(): Promise<AiCompletionResult> {
     throw new Error('not exercised here — see ai-usage.spec.ts');
+  }
+
+  protected runStructuredCompletion(
+    apiKey: string,
+    request: AiStructuredCompletionRequest<unknown>,
+    jsonSchema: Record<string, unknown>,
+    redact: SecretRedactor,
+  ): Promise<{ raw: string | null; usage: AiUsage }> {
+    if (!this.hooks.onStructured) {
+      throw new Error('this test did not supply a structured hook');
+    }
+    return this.hooks.onStructured(apiKey, request, jsonSchema, redact);
+  }
+
+  protected openStream(
+    apiKey: string,
+    request: AiCompletionRequest,
+    redact: SecretRedactor,
+    signal?: AbortSignal,
+  ): AsyncIterable<{ delta?: string; usage?: AiUsage }> {
+    if (!this.hooks.onStream) {
+      throw new Error('this test did not supply a stream hook');
+    }
+    return this.hooks.onStream(apiKey, request, redact, signal);
   }
 }
 
@@ -93,8 +163,19 @@ function provider(
     error: null,
   }),
   capabilities: AiCapabilitySet = ALL,
+  hooks: InferenceHooks = {},
 ) {
-  return new StubProvider(capabilities, onFetch, onProbe);
+  return new StubProvider(capabilities, onFetch, onProbe, hooks);
+}
+
+/** A provider whose only interesting hook is the structured one. */
+function structuredProvider(onStructured: InferenceHooks['onStructured']) {
+  return provider(async () => OK_CATALOG, undefined, ALL, { onStructured });
+}
+
+/** A provider whose only interesting hook is the streaming one. */
+function streamProvider(onStream: InferenceHooks['onStream']) {
+  return provider(async () => OK_CATALOG, undefined, ALL, { onStream });
 }
 
 const OK_CATALOG: AiModelCatalogResult = {
@@ -332,5 +413,640 @@ describe('BaseAiProvider — capability gating', () => {
     const chatOnly = provider(async () => OK_CATALOG, undefined, TEXT_ONLY);
 
     expect(chatOnly.supports('tts')).toBe(false);
+  });
+});
+
+// =============================================================================
+// completeStructured (issue #96, epic #53)
+// =============================================================================
+//
+// Three ways this can fail and only one of them is a throw. The other two — a
+// reply that is not JSON, and a reply that is JSON of the wrong shape — are
+// exactly the failures a hand-rolled `JSON.parse(response.text)` at a call site
+// turns into an exception or, worse, into a partially-populated object that
+// flows onward as if it were a grade.
+// =============================================================================
+
+const ALICE = '11111111-1111-4111-8111-111111111111';
+const USER_KEY = 'sk-user-abcdefghijklmnopqrst';
+
+/** The shape a grader would ask for: two required fields, no optionals. */
+const VERDICT = z.object({
+  correct: z.boolean(),
+  reason: z.string(),
+});
+
+function verdictRequest(): AiStructuredCompletionRequest<
+  z.infer<typeof VERDICT>
+> {
+  return {
+    roleKey: 'grader',
+    modelId: 'gpt-5.4',
+    messages: [{ role: 'user', content: 'grade this' }],
+    schemaName: 'civics_verdict',
+    schema: VERDICT,
+  };
+}
+
+const KNOWN_USAGE: AiUsage = {
+  promptTokens: 11,
+  completionTokens: 3,
+  totalTokens: 14,
+};
+
+describe('BaseAiProvider.completeStructured — the happy path', () => {
+  it('returns the parsed, validated value', async () => {
+    const p = structuredProvider(async () => ({
+      raw: '{"correct":true,"reason":"named the right war"}',
+      usage: KNOWN_USAGE,
+    }));
+
+    const result = await p.completeStructured(ALICE, USER_KEY, verdictRequest());
+
+    expect(result.success).toBe(true);
+    expect(result.data).toEqual({
+      correct: true,
+      reason: 'named the right war',
+    });
+    expect(result.errorCode).toBeNull();
+    expect(result.error).toBeNull();
+  });
+
+  it('sends the schema to the provider as JSON Schema, converted once', async () => {
+    // Converted by the base class, not by the subclass: two conversions with
+    // different options would mean the constraint the model was given and the
+    // contract the caller relies on are not the same object.
+    let seen: Record<string, unknown> | null = null;
+    const p = structuredProvider(async (_key, _request, jsonSchema) => {
+      seen = jsonSchema;
+      return { raw: '{"correct":true,"reason":"x"}', usage: KNOWN_USAGE };
+    });
+
+    await p.completeStructured(ALICE, USER_KEY, verdictRequest());
+
+    expect(seen).toMatchObject({
+      type: 'object',
+      properties: {
+        correct: { type: 'boolean' },
+        reason: { type: 'string' },
+      },
+    });
+  });
+
+  it('records one row and hands back its id', async () => {
+    // Issue #110 writes this id into `practice_attempts.ai_usage_event_id`. An
+    // id the provider discarded cannot be recovered without guessing at the
+    // most recent row, which races the learner's own next answer.
+    const p = structuredProvider(async () => ({
+      raw: '{"correct":true,"reason":"x"}',
+      usage: KNOWN_USAGE,
+    }));
+
+    const result = await p.completeStructured(ALICE, USER_KEY, verdictRequest());
+
+    expect(result.usageEventId).toBe('usage-row-1');
+    expect(p.record).toHaveBeenCalledTimes(1);
+    expect(p.record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: ALICE,
+        model: 'gpt-5.4',
+        roleKey: 'grader',
+        success: true,
+        usage: KNOWN_USAGE,
+      }),
+    );
+  });
+
+  it('reports a null usageEventId when the write failed, without failing the call', async () => {
+    // The user asked for a grade, not for bookkeeping. A nullable FK is the
+    // caller's half of the same trade.
+    const p = structuredProvider(async () => ({
+      raw: '{"correct":true,"reason":"x"}',
+      usage: KNOWN_USAGE,
+    }));
+    p.record.mockRejectedValue(new Error('database is down'));
+
+    const result = await p.completeStructured(ALICE, USER_KEY, verdictRequest());
+
+    expect(result.success).toBe(true);
+    expect(result.data).not.toBeNull();
+    expect(result.usageEventId).toBeNull();
+  });
+});
+
+describe('BaseAiProvider.completeStructured — a bad reply is a result, not a throw', () => {
+  it('reports invalid_json when the reply is not JSON at all', async () => {
+    const p = structuredProvider(async () => ({
+      raw: 'Sure! Here is the verdict:\n```json\n{"correct":true}\n```',
+      usage: KNOWN_USAGE,
+    }));
+
+    const result = await p.completeStructured(ALICE, USER_KEY, verdictRequest());
+
+    expect(result.success).toBe(false);
+    expect(result.errorCode).toBe('invalid_json');
+    // NEVER a partial object. A half-parsed grade is not a lenient grade.
+    expect(result.data).toBeNull();
+  });
+
+  it('reports invalid_json when the model returned no content at all', async () => {
+    // Shares the code deliberately: "the provider did not return the JSON we
+    // constrained it to" is one operational problem with one remedy.
+    const p = structuredProvider(async () => ({
+      raw: null,
+      usage: KNOWN_USAGE,
+    }));
+
+    const result = await p.completeStructured(ALICE, USER_KEY, verdictRequest());
+
+    expect(result.errorCode).toBe('invalid_json');
+    expect(result.data).toBeNull();
+  });
+
+  it('reports schema_validation_failed when the reply is JSON of the wrong shape', async () => {
+    // The failure `response_format` is supposed to prevent, and which a
+    // provider or a model that does not honour it will produce anyway.
+    const p = structuredProvider(async () => ({
+      raw: '{"correct":"maybe"}',
+      usage: KNOWN_USAGE,
+    }));
+
+    const result = await p.completeStructured(ALICE, USER_KEY, verdictRequest());
+
+    expect(result.success).toBe(false);
+    expect(result.errorCode).toBe('schema_validation_failed');
+    expect(result.data).toBeNull();
+  });
+
+  it('names the schema and the KINDS of issue, and nothing the model wrote', async () => {
+    // The obvious message quotes the received value, and on this surface the
+    // received value is a model's commentary on what a learner typed.
+    const p = structuredProvider(async () => ({
+      raw: '{"correct":"the learner said something private","reason":7}',
+      usage: KNOWN_USAGE,
+    }));
+
+    const result = await p.completeStructured(ALICE, USER_KEY, verdictRequest());
+
+    expect(result.error).toContain('civics_verdict');
+    expect(result.error).toContain('invalid_type');
+    expect(result.error).not.toContain('the learner said something private');
+  });
+
+  it('never quotes the reply into the error for an unparseable one either', async () => {
+    const p = structuredProvider(async () => ({
+      raw: 'I think the learner meant to say the Civil War, which is private',
+      usage: KNOWN_USAGE,
+    }));
+
+    const result = await p.completeStructured(ALICE, USER_KEY, verdictRequest());
+
+    expect(result.error).not.toContain('the learner meant');
+    expect(result.error).not.toContain('Civil War');
+  });
+
+  it('records the failed call, with the usage the provider did report', async () => {
+    const p = structuredProvider(async () => ({
+      raw: 'not json',
+      usage: KNOWN_USAGE,
+    }));
+
+    await p.completeStructured(ALICE, USER_KEY, verdictRequest());
+
+    expect(p.record).toHaveBeenCalledTimes(1);
+    expect(p.record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        success: false,
+        errorCode: 'invalid_json',
+        usage: KNOWN_USAGE,
+      }),
+    );
+  });
+});
+
+describe('BaseAiProvider.completeStructured — never throws', () => {
+  it('turns a thrown hook into a classified failure result', async () => {
+    const p = structuredProvider(async () => {
+      throw new Error('429 rate limit exceeded');
+    });
+
+    const result = await p.completeStructured(ALICE, USER_KEY, verdictRequest());
+
+    expect(result.success).toBe(false);
+    expect(result.errorCode).toBe('rate_limit');
+    expect(result.error).toBe('Stub: 429 rate limit exceeded');
+    expect(result.data).toBeNull();
+  });
+
+  it('turns a rejected hook into a failure result', async () => {
+    const p = structuredProvider(() => Promise.reject(new Error('async boom')));
+
+    await expect(
+      p.completeStructured(ALICE, USER_KEY, verdictRequest()),
+    ).resolves.toMatchObject({ success: false, error: 'Stub: async boom' });
+  });
+
+  it('turns a malformed hook return into a failure result', async () => {
+    const p = structuredProvider(
+      async () => undefined as unknown as { raw: string | null; usage: AiUsage },
+    );
+
+    await expect(
+      p.completeStructured(ALICE, USER_KEY, verdictRequest()),
+    ).resolves.toMatchObject({
+      success: false,
+      errorCode: 'malformed_result',
+      data: null,
+    });
+  });
+
+  it('turns a schema zod cannot convert into a failure result, not a crash', async () => {
+    // `z.toJSONSchema` throws on a transform. Built outside the try it would be
+    // the one line in the method that can take the never-throw guarantee away.
+    const p = structuredProvider(async () => ({
+      raw: '{"correct":true,"reason":"x"}',
+      usage: KNOWN_USAGE,
+    }));
+
+    const result = await p.completeStructured(ALICE, USER_KEY, {
+      ...verdictRequest(),
+      schema: z.string().transform((v) => v) as unknown as typeof VERDICT,
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.data).toBeNull();
+    expect(result.error).toContain('Stub:');
+  });
+
+  it('records NULL token counts, not zeros, when the hook throws', async () => {
+    // A throw may follow real consumption the provider never reported. Zero
+    // would state that it did not.
+    const p = structuredProvider(async () => {
+      throw new Error('exploded');
+    });
+
+    await p.completeStructured(ALICE, USER_KEY, verdictRequest());
+
+    expect(p.record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        usage: {
+          promptTokens: null,
+          completionTokens: null,
+          totalTokens: null,
+        },
+      }),
+    );
+  });
+
+  it('lets no key reach the error string', async () => {
+    const p = structuredProvider(async () => {
+      throw new Error(`401 Incorrect API key provided: ${USER_KEY}`);
+    });
+
+    const result = await p.completeStructured(ALICE, USER_KEY, verdictRequest());
+
+    expect(result.error).not.toContain(USER_KEY);
+    expect(result.error).toContain('[redacted]');
+  });
+});
+
+// =============================================================================
+// stream (issue #96, epic #53)
+// =============================================================================
+//
+// An async generator has four exits and three of them are easy to miss. The
+// invariant every test below is protecting is the one an SSE endpoint is built
+// on: exactly one terminal event, always last, and exactly one usage row.
+// =============================================================================
+
+/** An upstream stream built from a plain script of chunks. */
+function chunksOf(chunks: Array<{ delta?: string; usage?: AiUsage }>) {
+  return {
+    async *[Symbol.asyncIterator]() {
+      for (const chunk of chunks) yield chunk;
+    },
+  };
+}
+
+/** An upstream stream that throws partway, as a dropped connection does. */
+function chunksThenThrow(
+  chunks: Array<{ delta?: string; usage?: AiUsage }>,
+  err: unknown,
+) {
+  return {
+    async *[Symbol.asyncIterator]() {
+      for (const chunk of chunks) yield chunk;
+      throw err;
+    },
+  };
+}
+
+const STREAM_REQUEST: AiCompletionRequest = {
+  roleKey: 'tutor',
+  modelId: 'gpt-5.4',
+  messages: [{ role: 'user', content: 'why?' }],
+};
+
+/** Drain a stream into an array, so the ORDER of events can be asserted. */
+async function drain(
+  events: AsyncIterable<AiStreamEvent>,
+): Promise<AiStreamEvent[]> {
+  const out: AiStreamEvent[] = [];
+  for await (const event of events) out.push(event);
+  return out;
+}
+
+describe('BaseAiProvider.stream — the happy path', () => {
+  it('yields each delta, then exactly one done event, last', async () => {
+    const p = streamProvider(() =>
+      chunksOf([
+        { delta: 'The ' },
+        { delta: 'Civil ' },
+        { delta: 'War.' },
+        { usage: KNOWN_USAGE },
+      ]),
+    );
+
+    const events = await drain(p.stream(ALICE, USER_KEY, STREAM_REQUEST));
+
+    expect(events.map((e) => e.type)).toEqual([
+      'delta',
+      'delta',
+      'delta',
+      'done',
+    ]);
+    expect(events.filter((e) => e.type !== 'delta')).toHaveLength(1);
+    expect(events.at(-1)).toEqual({
+      type: 'done',
+      usage: KNOWN_USAGE,
+      usageEventId: 'usage-row-1',
+    });
+  });
+
+  it('drops empty deltas rather than forwarding them', async () => {
+    // The provider emits role-only and finish-only chunks; an SSE consumer
+    // appending those sends empty frames to a browser.
+    const p = streamProvider(() =>
+      chunksOf([{ delta: '' }, { delta: 'hi' }, {}, { usage: KNOWN_USAGE }]),
+    );
+
+    const events = await drain(p.stream(ALICE, USER_KEY, STREAM_REQUEST));
+
+    expect(events.filter((e) => e.type === 'delta')).toEqual([
+      { type: 'delta', text: 'hi' },
+    ]);
+  });
+
+  it('passes stream: true down to the provider hook', async () => {
+    // Set by this class, not left to the caller and not left to the subclass: a
+    // streamed call issued without it is a non-streamed call that happens to
+    // work, recorded under the streaming path's assumptions.
+    let seen: AiCompletionRequest | null = null;
+    const p = streamProvider((_key, request) => {
+      seen = request;
+      return chunksOf([{ delta: 'hi' }, { usage: KNOWN_USAGE }]);
+    });
+
+    await drain(p.stream(ALICE, USER_KEY, STREAM_REQUEST));
+
+    expect(seen).toMatchObject({ stream: true, modelId: 'gpt-5.4' });
+  });
+
+  it('hands the abort signal through to the provider', async () => {
+    // An abort that only breaks our loop leaves the provider generating — and
+    // billing — the rest of a response nobody will read.
+    const controller = new AbortController();
+    let seen: AbortSignal | undefined;
+    const p = streamProvider((_key, _request, _redact, signal) => {
+      seen = signal;
+      return chunksOf([{ delta: 'hi' }, { usage: KNOWN_USAGE }]);
+    });
+
+    await drain(
+      p.stream(ALICE, USER_KEY, STREAM_REQUEST, controller.signal),
+    );
+
+    expect(seen).toBe(controller.signal);
+  });
+
+  it('records exactly one row, with the usage the provider reported', async () => {
+    const p = streamProvider(() =>
+      chunksOf([{ delta: 'hi' }, { usage: KNOWN_USAGE }]),
+    );
+
+    await drain(p.stream(ALICE, USER_KEY, STREAM_REQUEST));
+
+    expect(p.record).toHaveBeenCalledTimes(1);
+    expect(p.record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: ALICE,
+        roleKey: 'tutor',
+        success: true,
+        usage: KNOWN_USAGE,
+      }),
+    );
+  });
+
+  it('records NULL, not zero, when the stream ends with no usage chunk', async () => {
+    // The shape of the bug `stream_options: { include_usage: true }` prevents.
+    // Even here the row is honest: we were not told, so we do not claim.
+    const p = streamProvider(() => chunksOf([{ delta: 'hi' }]));
+
+    const events = await drain(p.stream(ALICE, USER_KEY, STREAM_REQUEST));
+
+    expect(events.at(-1)).toMatchObject({
+      type: 'done',
+      usage: {
+        promptTokens: null,
+        completionTokens: null,
+        totalTokens: null,
+      },
+    });
+    expect(p.record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        usage: {
+          promptTokens: null,
+          completionTokens: null,
+          totalTokens: null,
+        },
+      }),
+    );
+  });
+});
+
+describe('BaseAiProvider.stream — a failure is an event, never a throw', () => {
+  it('ends a mid-stream failure with exactly one error event, last', async () => {
+    const p = streamProvider(() =>
+      chunksThenThrow([{ delta: 'The ' }], new Error('stream aborted')),
+    );
+
+    const events = await drain(p.stream(ALICE, USER_KEY, STREAM_REQUEST));
+
+    // The deltas already yielded stand — they were really received — but the
+    // completion is not whole and must not be presented as one.
+    expect(events.map((e) => e.type)).toEqual(['delta', 'error']);
+    expect(events.at(-1)).toMatchObject({
+      type: 'error',
+      errorCode: 'error',
+      error: 'Stub: stream aborted',
+    });
+  });
+
+  it('does not reject when the hook throws before the first chunk', async () => {
+    // A generator's body does not run until the first `next()`, so this is the
+    // exit a `try` written around the call site would never see.
+    const p = streamProvider(() => {
+      throw new Error('401 Incorrect API key provided');
+    });
+
+    const events = await drain(p.stream(ALICE, USER_KEY, STREAM_REQUEST));
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      type: 'error',
+      errorCode: 'invalid_key',
+    });
+  });
+
+  it('reports an aborted request as the terminal error event', async () => {
+    const controller = new AbortController();
+    const p = streamProvider(() =>
+      chunksThenThrow(
+        [{ delta: 'The ' }],
+        Object.assign(new Error('Request was aborted.'), {
+          name: 'AbortError',
+        }),
+      ),
+    );
+    controller.abort();
+
+    const events = await drain(
+      p.stream(ALICE, USER_KEY, STREAM_REQUEST, controller.signal),
+    );
+
+    expect(events.at(-1)!.type).toBe('error');
+    expect(p.record).toHaveBeenCalledTimes(1);
+  });
+
+  it('classifies the failure into a groupable code', async () => {
+    const p = streamProvider(() =>
+      chunksThenThrow([], new Error('429 rate limit exceeded')),
+    );
+
+    const events = await drain(p.stream(ALICE, USER_KEY, STREAM_REQUEST));
+
+    expect(events[0]).toMatchObject({ errorCode: 'rate_limit' });
+    expect(p.record).toHaveBeenCalledWith(
+      expect.objectContaining({ success: false, errorCode: 'rate_limit' }),
+    );
+  });
+
+  it('lets no key reach the terminal error event', async () => {
+    const p = streamProvider(() =>
+      chunksThenThrow(
+        [],
+        new Error(`Request failed with Authorization: Bearer ${USER_KEY}`),
+      ),
+    );
+
+    const events = await drain(p.stream(ALICE, USER_KEY, STREAM_REQUEST));
+    const terminal = events[0] as Extract<AiStreamEvent, { type: 'error' }>;
+
+    expect(terminal.error).not.toContain(USER_KEY);
+    expect(terminal.error).toContain('[redacted]');
+  });
+
+  it('records the counts it had been told, and nothing it had not', async () => {
+    // "Counts seen so far" — all-null unless the provider had already reported,
+    // never zero.
+    const p = streamProvider(() =>
+      chunksThenThrow([{ delta: 'The ' }], new Error('boom')),
+    );
+
+    await drain(p.stream(ALICE, USER_KEY, STREAM_REQUEST));
+
+    expect(p.record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        usage: {
+          promptTokens: null,
+          completionTokens: null,
+          totalTokens: null,
+        },
+      }),
+    );
+  });
+});
+
+describe('BaseAiProvider.stream — an abandoned stream still records (#120)', () => {
+  it('writes the usage row when the consumer breaks out early', async () => {
+    // A closed browser tab. The tokens were spent whether or not anyone read
+    // them, and only the generator's `finally` sees this exit.
+    const p = streamProvider(() =>
+      chunksOf([
+        { delta: 'The ' },
+        { delta: 'Civil ' },
+        { delta: 'War.' },
+        { usage: KNOWN_USAGE },
+      ]),
+    );
+
+    for await (const event of p.stream(ALICE, USER_KEY, STREAM_REQUEST)) {
+      if (event.type === 'delta') break;
+    }
+
+    expect(p.record).toHaveBeenCalledTimes(1);
+    expect(p.record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: ALICE,
+        success: false,
+        errorCode: 'client_disconnected',
+      }),
+    );
+  });
+
+  it('distinguishes an abandoned stream from a failed one in the row', async () => {
+    // Different problems: one is a user leaving, the other is the provider.
+    const p = streamProvider(() =>
+      chunksThenThrow([{ delta: 'hi' }], new Error('boom')),
+    );
+
+    await drain(p.stream(ALICE, USER_KEY, STREAM_REQUEST));
+
+    expect(p.record).toHaveBeenCalledWith(
+      expect.objectContaining({ errorCode: 'error' }),
+    );
+    expect(p.record).not.toHaveBeenCalledWith(
+      expect.objectContaining({ errorCode: 'client_disconnected' }),
+    );
+  });
+
+  it('writes exactly one row when the consumer breaks AFTER the terminal event', async () => {
+    // The `recorded` flag: the normal path wrote the row already, and the
+    // `finally` must not write a second.
+    const p = streamProvider(() =>
+      chunksOf([{ delta: 'hi' }, { usage: KNOWN_USAGE }]),
+    );
+
+    for await (const event of p.stream(ALICE, USER_KEY, STREAM_REQUEST)) {
+      if (event.type === 'done') break;
+    }
+
+    expect(p.record).toHaveBeenCalledTimes(1);
+    expect(p.record).toHaveBeenCalledWith(
+      expect.objectContaining({ success: true }),
+    );
+  });
+
+  it('never fails the abandoned path when the usage write rejects', async () => {
+    const p = streamProvider(() => chunksOf([{ delta: 'hi' }, { delta: 'ho' }]));
+    p.record.mockRejectedValue(new Error('database is down'));
+
+    await expect(
+      (async () => {
+        for await (const event of p.stream(ALICE, USER_KEY, STREAM_REQUEST)) {
+          if (event.type === 'delta') break;
+        }
+      })(),
+    ).resolves.toBeUndefined();
   });
 });

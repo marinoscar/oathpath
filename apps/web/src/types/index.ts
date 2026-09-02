@@ -881,6 +881,30 @@ export interface AiStatus {
   unboundRoles: string[];
 }
 
+/**
+ * Why an AI call was NOT ATTEMPTED — `AiUnavailableCause` on the API, closed.
+ *
+ * A CLOSED SET OF FOUR, and the closure is load-bearing: every consumer
+ * branches on it exhaustively, which is why `state_required` is its own
+ * terminal frame on the explanation stream rather than a fifth member here.
+ * That fact is not about AI at all (the learner has not set their state), it
+ * is answered on a different screen, and adding it would force a re-audit of
+ * every branch that reads this union.
+ *
+ * NOTHING WAS SPENT AND NOTHING IS BROKEN when one of these arrives. It is not
+ * an error, and it must never be rendered as one — see
+ * `components/ai/ExplainPanel.tsx`.
+ */
+export type AiUnavailableCause =
+  /** The caller has no personal key stored. THE ONLY ONE THAT IS THEIR DOING. */
+  | 'no_user_key'
+  /** An administrator turned the master switch off. */
+  | 'ai_disabled'
+  /** No model is bound to the role this feature needs. */
+  | 'role_unbound'
+  /** The configured provider cannot serve the role, or none is configured. */
+  | 'capability_unsupported';
+
 /** One row of a usage breakdown, by model or by role. */
 export interface AiUsageBreakdown {
   key: string;
@@ -1067,15 +1091,34 @@ export interface JourneyStage {
 }
 
 /**
- * Which of the three E1 recommendations the server picked.
+ * Which recommendation the server picked.
  *
  * A CLOSED UNION, mirroring `NEXT_ACTION_KINDS` on the server, and it exists
  * for presentation only — the title, reason and path all arrive already
  * written. A component branching on `kind` to choose COPY would be a second
  * declaration of what the recommender already decided, and the two would
  * disagree the first time the server's wording is edited.
+ *
+ * WIDENED BY EXACTLY ONE MEMBER IN E3 (#81, epic #52): `practice`.
+ * `docs/specs/practice-sessions.md` §12 specifies it — `NEXT_ACTION_PATHS`
+ * gains `practice: '/practice'` and the `interview_countdown` branch re-points
+ * at it now that Practice has real content to send a learner to. E5 and E8 add
+ * `review` and `interview` to the same contract later.
+ *
+ * **This being a closed union is a compile-time convenience, not a runtime
+ * guarantee.** The value arrives over the wire from a server that deploys
+ * independently of this bundle, so a browser holding an older build WILL see a
+ * `kind` that is not in this union the day a new one ships. That is exactly why
+ * `NextUpCard` looks its `kind` up with a fallback instead of indexing a total
+ * `Record` and rendering whatever comes back: a `TypeError` on the front page
+ * is a far worse outcome than a generic glyph beside copy that is already
+ * correct, because the server wrote every word of it.
  */
-export type NextActionKind = 'orientation' | 'interview_countdown' | 'explore';
+export type NextActionKind =
+  | 'orientation'
+  | 'interview_countdown'
+  | 'explore'
+  | 'practice';
 
 /** The one recommendation Home renders — `journey-shell.md` §4. */
 export interface NextAction {
@@ -1344,4 +1387,332 @@ export interface CivicsAnswerCorrectionResult extends CivicsDynamicQuestion {
   previous: CivicsDynamicAnswer | null;
   /** The row this write OPENED. Now the current answer. */
   current: CivicsDynamicAnswer;
+}
+
+// =============================================================================
+// Practice — sessions, attempts and the deterministic verdict (epic #52)
+// =============================================================================
+//
+// Hand-written mirrors of `apps/api/src/practice/dto/*.ts`. This application
+// generates no client, so these are transcriptions, and they are transcribed
+// FIELD BY FIELD against those Zod schemas rather than approximated — the same
+// discipline the civics and journey blocks above follow.
+//
+// -----------------------------------------------------------------------------
+// THE ONE PROPERTY OF THIS BLOCK THAT IS LOAD-BEARING
+// -----------------------------------------------------------------------------
+//
+// `PracticeQuestion` HAS NO ANSWER FIELD, and it must never grow one. The API
+// carries a compile-time proof of exactly that (`practice-question.dto.ts`'s
+// `PracticeQuestionCarriesNoAnswer`), because the failure is silent and total:
+// the endpoints keep returning 200, every test keeps passing, and the product
+// quietly stops being a practice product. `docs/specs/practice-sessions.md` and
+// `VISION.md` both put it plainly — if the accepted answer is in the payload
+// that carries the prompt, the exercise is multiple choice wearing a text box,
+// and recognition is not preparation.
+//
+// The web half of that promise is `PracticeSessionState.nextQuestion` being
+// this type and nothing wider, and `PracticeSessionPage` never fetching a
+// question detail. The answers appear in exactly two shapes, both of which
+// arrive only AFTER an attempt has been recorded:
+// `PracticeAttemptResult.acceptedAnswers` and `PracticeAttempt.answerSnapshot`.
+// =============================================================================
+
+/** How a question's answers vary. Same three values as `CivicsDynamicScope`. */
+export type PracticeDynamicScope = 'none' | 'national' | 'state';
+
+/**
+ * A question as practice serves it: THE PROMPT AND NOTHING ELSE.
+ *
+ * No answers, no `answerResolution`, no `verifiedAt`, no `testVersionCode` (the
+ * enclosing session already names exactly one). See this block's header.
+ */
+export interface PracticeQuestion {
+  id: string;
+  /** The official number within its version — `1..100` on `v2008`. */
+  number: number;
+  prompt: string;
+  categoryId: string;
+  dynamicScope: PracticeDynamicScope;
+}
+
+/** One accepted answer, frozen into an attempt's snapshot as it stood then. */
+export interface PracticeSnapshotAnswer {
+  id: string;
+  text: string;
+  /** The answer slot's order, as the server sent it. Never re-sorted here. */
+  sort: number;
+  /** Set when the answer is state-specific; null for a national one. */
+  stateCode: string | null;
+  verifiedAt: string;
+}
+
+/**
+ * What an attempt was graded AGAINST, frozen at the instant it was graded.
+ *
+ * Never re-resolved. A dynamic answer ("who is the Speaker of the House")
+ * changes by design (`civics-content.md` §4), and a debrief that re-resolved it
+ * would tell a learner they used to be wrong about something they still know.
+ */
+export interface PracticeAnswerSnapshot {
+  resolvedAt: string;
+  /** `state_required` means no answer could be resolved — NOT that there is none. */
+  answerResolution: CivicsAnswerResolution;
+  resolvedForStateCode: string | null;
+  answers: PracticeSnapshotAnswer[];
+}
+
+/** `correct` | `partial` | `incorrect` | `skipped`. `partial` is E4's. */
+export type PracticeOutcome = 'correct' | 'partial' | 'incorrect' | 'skipped';
+
+/**
+ * Who or what made the call. Read TOGETHER with `outcome`, never merged into it.
+ *
+ * "Was it right" and "how do we know" are independent facts: a summary tally
+ * needs only the first, and E5's mastery model must discount `self` against the
+ * other two (`practice-sessions.md` §9).
+ */
+export type PracticeGradingMethod = 'exact' | 'self' | 'ai';
+
+/**
+ * Why a response missed, when a grader actually ran — `PracticeFailureCause`.
+ *
+ * SIX VALUES, and this build renders all six even though only four can be
+ * produced today: `misheard` needs E9's transcription confidence and `nervous`
+ * needs E8's interview timing, so `grading.ts` coerces a model that offers
+ * either one to `unknown`. A row written by a later epic must still be
+ * readable by a browser holding this bundle — the same argument
+ * `components/practice/outcome.ts` makes for its own open-set lookups.
+ *
+ * NULL AND `unknown` ARE DIFFERENT ANSWERS and must never be collapsed. Null
+ * (the field's type on `PracticeAttempt`) means no grader ran at all —
+ * `gradingMethod: 'exact'` or `'self'`. `unknown` means one ran, returned a
+ * valid verdict, and honestly could not tell which of the other five this was.
+ * `ai-evaluation.md` §8: one is an absence of evidence, the other is evidence
+ * of ambiguity.
+ */
+export type PracticeFailureCause =
+  | 'not_known'
+  | 'not_recalled'
+  | 'expression'
+  | 'misheard'
+  | 'nervous'
+  | 'unknown';
+
+/**
+ * The grader's structured verdict, verbatim — `gradingVerdictSchema` on the
+ * API, and exactly three fields.
+ *
+ * NOT ONE OF THEM CAN CARRY AN ANSWER. There is no `correctAnswer`, no
+ * `alsoAccept`, no free-form field except `feedback`, which is one sentence for
+ * the learner and is never promoted to truth (`ai-evaluation.md` §7). The
+ * accepted answers on this screen come from the attempt's own frozen snapshot,
+ * never from anything a model said.
+ */
+export interface PracticeAiFeedback {
+  verdict: 'correct' | 'partial' | 'incorrect';
+  failureCause: PracticeFailureCause;
+  /** One short sentence, capped at 240 characters server-side. */
+  feedback: string;
+}
+
+/** One row of `practice_attempts` — the evidence every later epic reads. */
+export interface PracticeAttempt {
+  id: string;
+  /** Null for an attempt with no session (E8's mock-interview shape). */
+  sessionId: string | null;
+  questionId: string;
+  /** The prompt travels with the attempt, so a debrief needs no second read. */
+  question: PracticeQuestion;
+  source: 'practice' | 'mock_interview';
+  inputMode: 'typed' | 'spoken';
+  promptMode: 'read' | 'heard';
+  /** The learner's raw input, verbatim, or null for a skip. */
+  responseText: string | null;
+  outcome: PracticeOutcome;
+  gradingMethod: PracticeGradingMethod;
+  /** The learner had the accepted answer in front of them for this question. */
+  revealed: boolean;
+  hintUsed: boolean;
+  /** Milliseconds, or null when the client could not report one. Never 0. */
+  durationMs: number | null;
+
+  // ---------------------------------------------------------------------------
+  // The AI grading rung's output — ALL THREE NULL TOGETHER (issue #116, E4)
+  // ---------------------------------------------------------------------------
+  //
+  // A DETERMINISTICALLY GRADED ATTEMPT CARRIES NULL FOR ALL THREE, and that is
+  // the ordinary case rather than a degraded one: `gradingMethod: 'exact'` (a
+  // match, a skip, or a miss whose grading call was unavailable or failed) and
+  // `gradingMethod: 'self'` never produce any of these values.
+  //
+  // Nullable rather than optional, mirroring the DTO exactly, and for the
+  // reason the whole ladder exists: a client that received an ABSENT field
+  // could reasonably render a placeholder cause behind nothing, and the one
+  // thing this product must not do is show a learner a diagnosis of themselves
+  // that no grader ever made. `null` is a value a component can branch on.
+
+  /** Why the response missed, when a grader ran. Never a guess. */
+  failureCause: PracticeFailureCause | null;
+
+  /** The grader's verdict, verbatim. See {@link PracticeAiFeedback}. */
+  aiFeedback: PracticeAiFeedback | null;
+
+  /**
+   * The `ai_usage_events` row this attempt's grading call produced, for
+   * tracing a verdict to what it cost. Null when no call was made AND when the
+   * usage write itself failed — nothing on screen reads it.
+   */
+  aiUsageEventId: string | null;
+
+  answeredAt: string;
+  answerSnapshot: PracticeAnswerSnapshot;
+}
+
+/**
+ * The tally a completed session persists — computed by the server from the
+ * attempt rows that were actually written, never from anything a client sent.
+ *
+ * A cached rendering, so the summary screen need not re-aggregate. If it ever
+ * disagreed with the attempts, the attempts are right.
+ */
+export interface PracticeSessionSummary {
+  plannedCount: number;
+  answered: number;
+  correct: number;
+  partial: number;
+  incorrect: number;
+  skipped: number;
+  /** Of the correct ones, how many were the learner's own call. */
+  selfMarked: number;
+  revealed: number;
+  hintUsed: number;
+  /** Null — never 0 — when no attempt reported a duration. */
+  totalDurationMs: number | null;
+  /** How many attempts `totalDurationMs` covers, so a partial total reads as one. */
+  timedAttempts: number;
+}
+
+/**
+ * `quick` and `category` are the only kinds E3 produces.
+ *
+ * `review`, `weak` and `mixed` are declared in the database (and here) for E5's
+ * spaced-repetition scheduler; the create endpoint REFUSES them today with a
+ * 400. They are in this union because a session row read back could carry one
+ * once E5 ships, and a client that narrowed the union would fail to render its
+ * own history.
+ */
+export type PracticeSessionKind =
+  | 'quick'
+  | 'category'
+  | 'review'
+  | 'weak'
+  | 'mixed';
+
+export type PracticeSessionStatus = 'in_progress' | 'completed' | 'abandoned';
+
+export interface PracticeSession {
+  id: string;
+  kind: PracticeSessionKind;
+  status: PracticeSessionStatus;
+  testVersionCode: string;
+  /** Set only for a `category` session. */
+  categoryId: string | null;
+  plannedCount: number;
+  startedAt: string;
+  completedAt: string | null;
+  /** Null while `in_progress` — there is nothing to summarise yet. */
+  summary: PracticeSessionSummary | null;
+}
+
+/**
+ * A row of the recent-sessions list.
+ *
+ * Carries LIVE counts alongside the stored `summary`, because an `in_progress`
+ * or `abandoned` session has no summary and still has real attempts behind it:
+ * a learner who answered three of five and left should see three, not a blank
+ * row.
+ */
+export interface PracticeSessionListItem extends PracticeSession {
+  answeredCount: number;
+  correctCount: number;
+}
+
+/**
+ * How far through the session the learner is.
+ *
+ * `answered` is counted from the persisted attempts on EVERY response, never
+ * incremented in the browser — so two tabs and a resumed session all agree.
+ */
+export interface PracticeProgress {
+  answered: number;
+  planned: number;
+}
+
+/** What `POST /api/practice/sessions` answers with. */
+export interface PracticeSessionState {
+  session: PracticeSession;
+  /** Prompt only, and null once the session has nothing left to ask. */
+  nextQuestion: PracticeQuestion | null;
+  progress: PracticeProgress;
+}
+
+/** `GET /api/practice/sessions/:id` — resume, or review afterwards. */
+export interface PracticeSessionDetail extends PracticeSessionState {
+  /** Oldest first — the order they were answered in. */
+  attempts: PracticeAttempt[];
+}
+
+/** `GET /api/practice/sessions` — the flat pagination shape. */
+export interface PracticeSessionPage {
+  items: PracticeSessionListItem[];
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+}
+
+/**
+ * `POST /api/practice/sessions/:id/attempts` — the graded attempt.
+ *
+ * `acceptedAnswers` is here and NOWHERE EARLIER. This is the moment the answer
+ * has been earned: the learner has produced a response (or skipped, or
+ * revealed) and the attempt is already recorded, so showing them what was
+ * accepted is feedback rather than a hint.
+ */
+export interface PracticeAttemptResult {
+  attempt: PracticeAttempt;
+  /** What the grade was made against. Empty on `state_required`. */
+  acceptedAnswers: PracticeSnapshotAnswer[];
+  nextQuestion: PracticeQuestion | null;
+  progress: PracticeProgress;
+}
+
+/** `POST /api/practice/sessions` — the request body. */
+export interface CreatePracticeSessionInput {
+  /** Only these two are accepted; anything else is a 400. */
+  kind: 'quick' | 'category';
+  /** REQUIRED when `kind` is `category`, REJECTED otherwise. */
+  categoryId?: string;
+  /** Defaults to 5 server-side, and is clamped down to what is available. */
+  plannedCount?: number;
+}
+
+/**
+ * `POST /api/practice/sessions/:id/attempts` — the request body.
+ *
+ * THERE IS NO VERDICT FIELD, and there must never be one. The server re-runs
+ * the matcher itself; the only route by which a learner's own judgement enters
+ * the record is the separate self-mark endpoint, which stamps
+ * `gradingMethod: 'self'` precisely so E5 can weigh it differently.
+ */
+export interface RecordPracticeAttemptInput {
+  questionId: string;
+  /** OMITTED for a skip — a skip carrying text is a 400, not a silent choice. */
+  responseText?: string;
+  /** OMITTED, never `0`, when the client cannot measure it. */
+  durationMs?: number;
+  skipped?: boolean;
+  revealed?: boolean;
+  hintUsed?: boolean;
 }

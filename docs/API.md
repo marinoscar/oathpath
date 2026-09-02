@@ -1563,6 +1563,90 @@ state.
 
 ---
 
+#### POST /civics/questions/:id/explain
+Issue #120, E4 (epic #53). Streams a tutor's explanation of the answer to one
+question, **for this caller**, generated on **their own** stored AI key.
+`@Auth()`, no permissions — every authenticated learner owns their own
+explanations, and no route accepts a user id or state code (both resolve from
+the caller's own `learner_profiles` row, the same resolution
+`GET /civics/questions/{id}` uses). See
+[`docs/specs/ai-evaluation.md`](specs/ai-evaluation.md) for the dispatch and
+grounding design; this section documents the wire contract only.
+
+**Grounded, never consulted.** The question and the answers currently correct
+for this learner are read from the database and handed to the model as fact;
+it is asked what they *mean*, never what they *are*. That is what keeps a
+question whose answer changed after the model's training cutoff — who is
+President, who is your governor — from being explained as whoever the model
+remembers.
+
+**Language** is the caller's own `explanationLanguage` (their learner
+profile), defaulting to `en`. There is no language parameter — a
+per-request override would let a request disagree with the person's own
+saved setting.
+
+**Transport.** `200 text/event-stream`, hand-written rather than Nest's
+`@Sse()` (which hard-codes GET, and this route takes a body). The native
+`EventSource` cannot send an `Authorization` header and only ever issues a
+GET, so a client must use a fetch-based SSE reader — see
+`apps/web/src/services/explainStream.ts`. A `?token=` query parameter is
+deliberately unsupported: a bearer token in a URL lands in the nginx access
+log, browser history and `Referer`. Disconnecting aborts the upstream call —
+inference runs on the learner's own key, so an abandoned stream is money
+generating text no one will read — and the usage row is still written, from
+`BaseAiProvider.stream`'s own `finally`.
+
+**Parameters:**
+- `id` (uuid) — question id
+
+**Request Body** (optional; `POST` with no body is the ordinary call):
+```json
+{ "focus": "I always mix up the branches" }
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `focus` | string, trimmed, max 200 chars | No | What the learner finds confusing, in their own words. Treated strictly as data in the prompt, never as an instruction. |
+
+`z.strictObject` — an unknown key is a 400 naming it. There is no `stateCode`,
+`userId`, or `language` field; sending one is rejected rather than ignored.
+
+**Response.** An open `text/event-stream`. An opening `: connected` comment
+flushes the headers immediately (dropped by clients, never dispatched as a
+frame), then any number of `delta` frames, then **exactly one terminal frame,
+always last** — a client that never sees one should treat the connection as
+still open, not as failed.
+
+| Frame (`event:`) | `data` | Terminal? | Meaning |
+|---|---|---|---|
+| `delta` | `{"text": "…"}` | No | One chunk of the explanation. Never empty. Any number may arrive. |
+| `done` | `{"usage": {"promptTokens": 212, "completionTokens": 96, "totalTokens": 308}}` | Yes | The explanation is whole. `usage` fields may individually be `null` — never `0` for an unknown count. |
+| `unavailable` | `{"cause": "no_user_key" \| "ai_disabled" \| "role_unbound" \| "capability_unsupported"}` | Yes | No call was attempted — the caller has no stored key, or an administrator has not finished configuring AI. **Not a failure**: render the shared "AI is not set up" state, not an error. See `ai-evaluation.md` §4 for what each cause means and why they are checked in that order. |
+| `state_required` | `{"answerResolution": "state_required"}` | Yes | A `state`-scope question asked by a learner with no state set. **No model is called** — guessing a state would teach a confident, memorable, wrong governor. Echoes the same discriminator `GET /civics/questions/{id}` returns, so the client renders the prompt it already has. Not an `unavailable` cause — see `civics-explain.service.ts`'s `CivicsExplainFrame` for why this is deliberately a separate, fifth terminal frame rather than a member of that closed four-value set. |
+| `error` | `{"errorCode": "…", "error": "…"}` | Yes | The call was attempted and did not produce a usable answer. Deltas already delivered were really received; the explanation is not whole and must not be presented as one. |
+
+Example stream:
+```
+: connected
+
+event: delta
+data: {"text":"The Constitution "}
+
+event: delta
+data: {"text":"is the supreme law "}
+
+event: done
+data: {"usage":{"promptTokens":212,"completionTokens":96,"totalTokens":308}}
+
+```
+
+**Error Cases:**
+- 404 Not Found — unknown question id (thrown, and resolved, before the
+  stream opens — an unknown id is an ordinary 404 JSON envelope, never a
+  stream that opens and immediately breaks)
+
+---
+
 ### Civics Admin
 
 Issue #117. Corrects `national`- and `state`-scope answers at runtime — the
@@ -1688,6 +1772,476 @@ public exam material, so the diff itself is what a reviewer needs.
   `national` question, a missing `stateCode` on a `state` question, a missing
   `sourceNote`, or an `effectiveFrom` earlier than the answer being replaced
 - 404 Not Found — unknown question id
+
+---
+
+### Practice
+
+Issue #73, epic #52 (E3). The practice loop: open a session, be asked a
+question, answer it, be graded, and see a summary. Grading is a two-rung
+ladder — deterministic string matching first, then (E4, epic #53) a
+semantic AI grader on a miss — described below the attempts route; design
+rationale for the loop itself — the two-table shape, the normalisation
+pipeline, the answer-snapshot lifecycle, and self-mark — lives in
+[`docs/specs/practice-sessions.md`](specs/practice-sessions.md), and the
+grading ladder's own design lives in
+[`docs/specs/ai-evaluation.md`](specs/ai-evaluation.md) §6. This section
+covers only the wire contract.
+
+**Every route below is `@Auth()` with no permissions**, and every route is
+caller-scoped: the learner is resolved from `@CurrentUser('id')`, never from
+a path, query, or body parameter. Every authenticated user owns their own
+practice history, exactly as they own their own learner profile or their own
+AI key, so gating these routes would leave the default Viewer role unable to
+practise at all.
+
+**A session (or an attempt inside one) belonging to another learner is a
+404, not a 403.** Confirming that an id names a real session would itself be
+the leak — from the caller's position, another learner's session genuinely
+does not exist.
+
+**The question shape returned by session creation and by every `nextQuestion`
+carries no accepted answers**, on purpose: it is `{ id, number, prompt,
+categoryId, dynamicScope }` and nothing else — no `answers`, no
+`acceptedAnswers`, not even an empty array standing in for "not yet". This is
+a product constraint before it is a security one: recognizing an answer that
+arrived in the same payload as the prompt is not recall, and the whole point
+of practice is to make the learner produce an answer rather than recognise
+one. The answers become legitimate the instant an attempt is graded — they
+arrive on `POST .../attempts` as `acceptedAnswers`, never before.
+
+#### POST /practice/sessions
+Starts a session and returns it together with its first question, **prompt
+only**.
+
+**Request Body:**
+```json
+{
+  "kind": "quick",
+  "categoryId": null,
+  "plannedCount": 5
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `kind` | `"quick"` \| `"category"` | Yes | The two kinds this epic wires. `review`, `weak`, `mixed` exist in the database enum for E5's spaced-repetition scheduler and are **rejected here** — a 400 naming the field |
+| `categoryId` | uuid | Only for `kind: "category"` | **Required** when `kind` is `"category"`, **rejected** (400) otherwise — a `quick` session carrying one would otherwise silently ignore the only filter the client asked for |
+| `plannedCount` | integer, 1–20 | No (default 5) | How many questions this session intends to ask. Clamped down to the number actually available for the selection, so "4 of 5" on the summary screen is always honest |
+
+**Any session still `in_progress` for this learner is closed first** —
+`status: "abandoned"` — keeping every attempt it already produced. At most
+one session is open at a time.
+
+**Response:**
+```json
+{
+  "data": {
+    "session": {
+      "id": "uuid",
+      "kind": "quick",
+      "status": "in_progress",
+      "testVersionCode": "v2008",
+      "categoryId": null,
+      "plannedCount": 5,
+      "startedAt": "2026-09-02T14:00:00.000Z",
+      "completedAt": null,
+      "summary": null
+    },
+    "nextQuestion": {
+      "id": "uuid",
+      "number": 20,
+      "prompt": "Who is one of your state's U.S. Senators now?",
+      "categoryId": "uuid",
+      "dynamicScope": "state"
+    },
+    "progress": { "answered": 0, "planned": 5 }
+  }
+}
+```
+
+**Error Cases:**
+- 400 Bad Request — invalid body (see table above), or the caller has not
+  finished orientation, so no test version is resolved
+- 404 Not Found — unknown `categoryId` for this test version
+- 409 Conflict — no questions are available to practise for this selection
+  (e.g. a `category` session over a category the learner has fully exhausted)
+
+---
+
+#### GET /practice/sessions
+The caller's own sessions, newest first, paginated.
+
+**Query Parameters:**
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `page` | number | 1 | Page number |
+| `pageSize` | number | 20 | Items per page (max 100) |
+
+There are deliberately no filters — `?status=`, `?kind=`, `?userId=`
+included — a 400 naming the parameter. "Recent sessions, newest first" is
+the one question this endpoint answers.
+
+**Response:**
+```json
+{
+  "data": [
+    {
+      "id": "uuid",
+      "kind": "quick",
+      "status": "completed",
+      "testVersionCode": "v2008",
+      "categoryId": null,
+      "plannedCount": 5,
+      "startedAt": "2026-09-01T14:00:00.000Z",
+      "completedAt": "2026-09-01T14:06:00.000Z",
+      "summary": {
+        "plannedCount": 5,
+        "answered": 5,
+        "correct": 4,
+        "partial": 0,
+        "incorrect": 1,
+        "skipped": 0,
+        "selfMarked": 1,
+        "revealed": 1,
+        "hintUsed": 0,
+        "totalDurationMs": 42000,
+        "timedAttempts": 5
+      },
+      "answeredCount": 5,
+      "correctCount": 4
+    }
+  ],
+  "meta": { "total": 12, "page": 1, "pageSize": 20 }
+}
+```
+
+`answeredCount`/`correctCount` are counted live from the attempt rows on
+every request, not read from the stored `summary` (which is `null` until a
+session is `completed`) — a session abandoned after three of five still
+reports three.
+
+---
+
+#### GET /practice/sessions/:id
+Resume or review one session: every attempt recorded against it, and — while
+it is still `in_progress` with attempts remaining — the next unanswered
+question, prompt only. A `completed` or `abandoned` session returns
+`nextQuestion: null`.
+
+**Parameters:**
+- `id` (uuid) — session id
+
+**Response:**
+```json
+{
+  "data": {
+    "session": { "...": "same shape as POST /practice/sessions" },
+    "nextQuestion": null,
+    "progress": { "answered": 5, "planned": 5 },
+    "attempts": [
+      {
+        "id": "uuid",
+        "sessionId": "uuid",
+        "questionId": "uuid",
+        "question": {
+          "id": "uuid",
+          "number": 43,
+          "prompt": "Who is the Speaker of the House of Representatives now?",
+          "categoryId": "uuid",
+          "dynamicScope": "national"
+        },
+        "source": "practice",
+        "inputMode": "typed",
+        "promptMode": "read",
+        "responseText": "jane q doe",
+        "outcome": "correct",
+        "gradingMethod": "exact",
+        "revealed": false,
+        "hintUsed": false,
+        "durationMs": 8400,
+        "failureCause": null,
+        "aiFeedback": null,
+        "aiUsageEventId": null,
+        "answeredAt": "2026-09-01T14:01:00.000Z",
+        "answerSnapshot": {
+          "resolvedAt": "2026-09-01T14:01:00.000Z",
+          "answerResolution": "resolved",
+          "resolvedForStateCode": null,
+          "answers": [
+            {
+              "id": "uuid",
+              "text": "Jane Q. Doe",
+              "sort": 0,
+              "stateCode": null,
+              "verifiedAt": "2026-05-01T00:00:00.000Z"
+            }
+          ]
+        }
+      }
+    ]
+  }
+}
+```
+
+Attempts are oldest first — the order they were answered in.
+
+**The AI grading rung (issue #116, E4).** Three fields carry rung 2's
+output — `failureCause`, `aiFeedback`, `aiUsageEventId` — and they are
+**null together on every deterministically graded attempt**, which is the
+normal case, not a degraded one: a match, a skip, and a miss whose grading
+call was `unavailable` or `failed` all keep `gradingMethod: "exact"` with all
+three null. `gradingMethod: "self"` never produces them either. Only
+`gradingMethod: "ai"` populates them, and does so together — a row carrying
+some of the three would be one whose `failureCause` cannot be traced to the
+call that produced it. See [`docs/specs/ai-evaluation.md`](specs/ai-evaluation.md)
+§6 for the ladder that decides when a grader is even called.
+
+| Field | Type | Description |
+|---|---|---|
+| `failureCause` | string \| null | Why the response missed. One of `not_known`, `not_recalled`, `expression`, `misheard`, `nervous`, `unknown` — or `null`. `null` on a `correct` verdict (nothing failed, so nothing to explain) as well as on every non-AI-graded attempt. **`null` and `"unknown"` are different answers**: `null` means no grader ran; `"unknown"` means one ran and honestly could not classify the miss. `misheard` and `nervous` are declared in the enum but never produced by this ladder — they need E9's transcription confidence and E8's interview timing respectively; a model that names one is coerced to `"unknown"` before persistence. |
+| `aiFeedback` | object \| null | The grader's full structured verdict, verbatim — `{"verdict": "correct" \| "partial" \| "incorrect", "failureCause": "…", "feedback": "…"}` — the same object validated against the grading schema, stored whole rather than as the `feedback` sentence alone. `null` on every non-AI-graded attempt. Never the prompt, never a raw model completion. |
+| `aiUsageEventId` | uuid \| null | The `ai_usage_events` row this grading call wrote. `null` both when no grader ran and when the row write itself failed — the graded evidence is never held back for its own accounting. |
+
+Example of an AI-graded attempt (`gradingMethod: "ai"`, `outcome: "correct"`
+from rung 2 despite `matchAnswer` missing on rung 1):
+```json
+{
+  "outcome": "correct",
+  "gradingMethod": "ai",
+  "failureCause": null,
+  "aiFeedback": {
+    "verdict": "correct",
+    "failureCause": "unknown",
+    "feedback": "Congress is accepted — nice work phrasing it your own way."
+  },
+  "aiUsageEventId": "uuid"
+}
+```
+
+**`answerSnapshot` is frozen at grading time and never re-resolved.** It
+holds exactly the accepted answers as `civics/answer-resolution.ts` returned
+them the instant this attempt was graded — not a live join against
+`civics_answers`. A `national`- or `state`-scope answer's text can change
+later (an officeholder leaves office and the row is closed and replaced, per
+[`docs/specs/civics-content.md`](specs/civics-content.md) §4); if this route
+re-resolved answers at read time, a debrief opened a year later would show a
+learner who answered correctly being told they were wrong, for a question
+whose answer has simply since changed. `answerResolution: "state_required"`
+with an empty `answers` array is the one other value it takes — a
+`state`-scope question graded for a learner with no `stateCode` set at the
+time, recorded `skipped`, never `incorrect`. Note what the snapshot does
+**not** carry: which answer matched, or by which rule. Both are exactly
+recoverable at any time by re-running the pure `matchAnswer`
+(`docs/specs/practice-sessions.md` §7.1) over `responseText` and this frozen
+`answers` list, so the response you see on the graded-attempt call below
+(`matchedAnswerId`/`rule`, folded into `outcome`/`gradingMethod` on the
+stored row) is never duplicated a second time inside the JSON document.
+
+**Error Cases:**
+- 404 Not Found — no such session for this caller (including a session that
+  belongs to a different learner)
+
+---
+
+#### POST /practice/sessions/:id/attempts
+Grades one response and writes one `practice_attempts` row — the evidence
+every later epic (mastery, readiness, streaks) reads.
+
+**Rung 1 is deterministic and has no AI in it.** The response is compared
+against the question's currently accepted answers, first raw and
+case-sensitive, then after a documented seven-step normalisation (case,
+filler openings like "I think it's", possessives and punctuation, `U.S.` →
+`United States`, leading articles, number words to digits — the full table
+is `docs/specs/practice-sessions.md` §7). There is no fuzzy matching within
+this rung: a near miss is `incorrect` here.
+
+**Rung 2 (E4, epic #53) escalates a rung-1 miss to the `grader` AI role**,
+on the caller's own key, asking whether the response *means* one of the
+accepted answers even though it did not match one as a string — a
+paraphrase or non-idiomatic phrasing the exact matcher cannot recognise.
+The self-mark route below remains the learner's recourse for a rung-2 miss
+too. See the response shape below for what a rung-2 verdict adds to the
+row, and [`docs/specs/ai-evaluation.md`](specs/ai-evaluation.md) §6 for the
+full ladder, including why an unavailable or failed grading call falls back
+to rung 1's result rather than erroring the request.
+
+**Parameters:**
+- `id` (uuid) — session id
+
+**Request Body:**
+```json
+{
+  "questionId": "uuid",
+  "responseText": "jane q doe",
+  "skipped": false,
+  "revealed": false,
+  "hintUsed": false,
+  "durationMs": 8400
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `questionId` | uuid | Yes | Must belong to this session's test version (and category, if it has one) — otherwise 400 |
+| `responseText` | string (max 2000 chars) | No | The learner's raw, unmodified input. Rejected together with `skipped: true` — a skip carries no text |
+| `skipped` | boolean | No (default `false`) | The learner moved on without answering. Recorded as `outcome: "skipped"`, `responseText: null` — a skip is real evidence, not a dropped request |
+| `revealed` | boolean | No (default `false`) | The learner saw the accepted answer for this question. Changes no `outcome` by itself; it is the precondition for self-mark below |
+| `hintUsed` | boolean | No (default `false`) | The learner opened a hint before submitting. Changes no `outcome` |
+| `durationMs` | integer ≥ 0 | No | Milliseconds from question shown to submit. **Omit, never send `0`**, when the client cannot measure it — `0` would claim the learner answered instantly |
+
+There is no `outcome`, `gradingMethod`, or any other verdict field in this
+body — the client reports what happened, never the result. There is also no
+`selfMarkCorrect` flag: self-mark is a distinct, later call against the
+attempt this creates (below), never a value asserted in the same request
+that creates it.
+
+**Response:**
+```json
+{
+  "data": {
+    "attempt": { "...": "same shape as one attempts[] row above" },
+    "acceptedAnswers": [
+      { "id": "uuid", "text": "Jane Q. Doe", "sort": 0, "stateCode": null, "verifiedAt": "2026-05-01T00:00:00.000Z" }
+    ],
+    "nextQuestion": null,
+    "progress": { "answered": 5, "planned": 5 }
+  }
+}
+```
+
+`acceptedAnswers` is shown here for the **first time** — this is the moment
+it is earned, because the attempt is already recorded. It is the same list
+frozen into `attempt.answerSnapshot.answers`, so the screen and the
+permanent record cannot disagree. `nextQuestion` is prompt-only and `null`
+once the planned count is reached.
+
+**Error Cases:**
+- 400 Bad Request — invalid body, or a question outside this session's test
+  version or category
+- 404 Not Found — no such session for this caller, or no such question
+- 409 Conflict — the session is not `in_progress`, or this question was
+  already answered in it (one attempt per question per session — answering
+  it again means starting a new session)
+
+---
+
+#### POST /practice/sessions/:id/attempts/:attemptId/self-mark
+"I was right — the matcher just didn't recognise it." Flips a recorded
+`incorrect` or `skipped` attempt to `outcome: "correct"`, `gradingMethod:
+"self"`.
+
+**This is its own route, and its own `gradingMethod`, so the two stay
+distinguishable forever.** Deterministic matching will never accept a real
+paraphrase or an unanticipated synonym, so without this a learner who
+genuinely knew the answer would simply be told they were wrong. But a
+self-mark must never be indistinguishable from a verified match: it counts
+as correct going forward, and `gradingMethod: "self"` is the fact a later
+mastery computation reads to weigh it less than an `exact` or `ai` match.
+That is precisely why it can never be a field on the attempts body above —
+folding it into the same write would make "was it right" and "how do we
+know" inseparable on the one row that has to carry both facts independently.
+
+**Parameters:**
+- `id` (uuid) — session id
+- `attemptId` (uuid) — attempt id (resolved only within this caller's own
+  session — an attempt id can never be probed on its own)
+
+**Request Body:** none.
+
+**Response:**
+```json
+{
+  "data": {
+    "id": "uuid",
+    "sessionId": "uuid",
+    "questionId": "uuid",
+    "question": { "...": "prompt-only question shape" },
+    "source": "practice",
+    "inputMode": "typed",
+    "promptMode": "read",
+    "responseText": "the house",
+    "outcome": "correct",
+    "gradingMethod": "self",
+    "revealed": true,
+    "hintUsed": false,
+    "durationMs": 12000,
+    "failureCause": null,
+    "aiFeedback": null,
+    "aiUsageEventId": null,
+    "answeredAt": "2026-09-01T14:02:00.000Z",
+    "answerSnapshot": { "...": "unchanged from when the attempt was created" }
+  }
+}
+```
+
+**Reveal the accepted answer first — a 409 otherwise.** The claim being made
+is "my answer matched the accepted one," which is only checkable against the
+accepted one, not against the learner's memory of what they think it was.
+
+**Idempotent**: a second call on an already self-marked attempt returns the
+same state, unchanged.
+
+**Error Cases:**
+- 400 Bad Request — the attempt was already graded `correct` by `exact`
+  matching — there is nothing to grant, and overwriting `exact` with `self`
+  would downgrade a verified match to a learner's own claim
+- 404 Not Found — no such session for this caller, or no such attempt in it
+- 409 Conflict — the accepted answer has not been revealed yet
+
+---
+
+#### POST /practice/sessions/:id/complete
+Sets `status: "completed"`, stamps `completedAt`, and persists a `summary`
+computed entirely from the session's own `practice_attempts` rows — nothing
+the client sends contributes to it.
+
+**Parameters:**
+- `id` (uuid) — session id
+
+**Request Body:** none.
+
+**Response:**
+```json
+{
+  "data": {
+    "id": "uuid",
+    "kind": "quick",
+    "status": "completed",
+    "testVersionCode": "v2008",
+    "categoryId": null,
+    "plannedCount": 5,
+    "startedAt": "2026-09-01T14:00:00.000Z",
+    "completedAt": "2026-09-01T14:06:00.000Z",
+    "summary": {
+      "plannedCount": 5,
+      "answered": 5,
+      "correct": 4,
+      "partial": 0,
+      "incorrect": 1,
+      "skipped": 0,
+      "selfMarked": 1,
+      "revealed": 1,
+      "hintUsed": 0,
+      "totalDurationMs": 42000,
+      "timedAttempts": 5
+    }
+  }
+}
+```
+
+`totalDurationMs` is `null` — never `0` — when no attempt reported a
+duration; `timedAttempts` says how many attempts it covers, so a partial
+total can never be read as a complete one.
+
+**Idempotent**: completing an already-`completed` session returns the stored
+summary unchanged and does not move `completedAt`. The moment a learner
+finished stays the moment they finished.
+
+**Error Cases:**
+- 404 Not Found — no such session for this caller
+- 409 Conflict — the session is `abandoned` (it was closed by a later
+  session start and has no completion to record)
 
 ---
 

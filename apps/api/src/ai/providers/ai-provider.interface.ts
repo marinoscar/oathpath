@@ -1,9 +1,14 @@
 import type { AiCapabilityFamily } from '../ai-model-roles';
 import type { AiProviderKind } from '../ai-settings.schema';
 import type {
+  AiCompletionRequest,
   AiConnectionTestResult,
   AiModelCatalogResult,
   AiReachabilityRequest,
+  AiRecordedCompletionResult,
+  AiStreamEvent,
+  AiStructuredCompletionRequest,
+  AiStructuredCompletionResult,
 } from '../ai.types';
 
 // =============================================================================
@@ -26,14 +31,29 @@ import type {
 // SDK — comes back as a result object with `success: false` and a verbatim,
 // redacted `error`.
 //
-// WHY, concretely and specifically here: two of the three callers are
-// DIAGNOSTIC endpoints. `POST /api/ai-settings/test` and
-// `POST /api/ai/key/test` exist to answer "why is this not working", and this
-// app's error envelope (`HttpExceptionFilter`) suppresses detail in production
-// while the web client funnels a non-2xx into generic failure handling. A
-// thrown error would therefore discard the one fact the endpoint exists to
-// produce. The third caller is the model-catalog fetch behind an admin page,
-// where a throw takes down the only screen capable of fixing the problem.
+// WHY, concretely and specifically here: two of the three DIAGNOSTIC callers
+// are exactly that. `POST /api/ai-settings/test` and `POST /api/ai/key/test`
+// exist to answer "why is this not working", and this app's error envelope
+// (`HttpExceptionFilter`) suppresses detail in production while the web client
+// funnels a non-2xx into generic failure handling. A thrown error would
+// therefore discard the one fact the endpoint exists to produce. The third is
+// the model-catalog fetch behind an admin page, where a throw takes down the
+// only screen capable of fixing the problem.
+//
+// THE INFERENCE METHODS INHERIT THE SAME RULE FOR A DIFFERENT REASON (#96).
+// `complete`, `completeStructured` and `stream` run on a LEARNER's key during
+// ordinary use, and every way they fail is ordinary: an expired key, a
+// quota, a model the account cannot reach, a dropped connection. Each of those
+// must reach the user as a sentence they can act on, and each must leave an
+// `ai_usage_events` row behind — a throw skips the row, so the one call the
+// user was actually billed for is the one call the accounting does not know
+// about.
+//
+// `stream` CARRIES THE RULE ONE STEP FURTHER: it may not reject, AND its
+// iterator may not throw. A failure mid-stream is the terminal `error` event
+// (see `AiStreamEvent`), never an exception, because the consumer on the far
+// end is an SSE endpoint — a throw out of the iterator skips the terminal
+// event, and a browser waiting for one holds the connection open forever.
 //
 // THIS IS NOT ENFORCED BY DOCUMENTATION. Implementations extend
 // `../base-ai.provider.BaseAiProvider`, which implements each public method
@@ -113,4 +133,63 @@ export interface AiProvider {
     apiKey: string,
     probes: AiReachabilityRequest[],
   ): Promise<AiConnectionTestResult>;
+
+  /**
+   * Run one completion on the CALLER's key, and record it.
+   *
+   * On the interface rather than only on the base class (#96): it has been
+   * implemented since #37, and leaving it off meant a caller holding an
+   * `AiProvider` could not reach the one method the whole abstraction exists
+   * to serve — the type said "a provider lists models and tests keys", which
+   * is the settings surface, not the product.
+   *
+   * @param userId whose `ai_usage_events` row is written. The caller, always:
+   *        there is no path here that runs one user's inference against
+   *        another's accounting.
+   * @param apiKey the caller's own key, PASSED IN for the same reason
+   *        {@link testConnection} takes one — nothing under `providers/` reads
+   *        the credential store, so no provider method can reach for the
+   *        server key when it should be using a user's.
+   * @returns the completion, plus the id of the row recorded for it. NEVER
+   *        rejects; a failure is `{ success: false, errorCode, error }`.
+   */
+  complete(
+    userId: string,
+    apiKey: string,
+    request: AiCompletionRequest,
+  ): Promise<AiRecordedCompletionResult>;
+
+  /**
+   * Run one completion whose reply must satisfy a schema, and record it.
+   *
+   * The schema is sent to the provider as a constraint AND re-validated on the
+   * way back. A reply that fails either step is a FAILED RESULT with
+   * `data: null` — never a partial object, and never a throw.
+   *
+   * @returns the validated value, or a failure carrying `'invalid_json'` /
+   *        `'schema_validation_failed'`. NEVER rejects.
+   */
+  completeStructured<T>(
+    userId: string,
+    apiKey: string,
+    request: AiStructuredCompletionRequest<T>,
+  ): Promise<AiStructuredCompletionResult<T>>;
+
+  /**
+   * Stream one completion on the caller's key, and record it.
+   *
+   * NEITHER REJECTS NOR THROWS FROM THE ITERATOR. Exactly one terminal event
+   * (`done` or `error`) is emitted, always last — see {@link AiStreamEvent}
+   * for why an SSE consumer makes that a contract rather than a courtesy.
+   *
+   * @param signal aborts the upstream request. A consumer that stops iterating
+   *        — a closed browser tab — must still leave a usage row behind: the
+   *        tokens were spent whether or not anyone read them.
+   */
+  stream(
+    userId: string,
+    apiKey: string,
+    request: AiCompletionRequest,
+    signal?: AbortSignal,
+  ): AsyncIterable<AiStreamEvent>;
 }

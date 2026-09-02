@@ -32,6 +32,7 @@ import { Box, Divider, Stack, Typography } from '@mui/material';
 
 import type { CivicsQuestionDetail as CivicsQuestion } from '../../types';
 import { AnswerPanel } from './AnswerPanel';
+import { ExplainPanel } from '../ai/ExplainPanel';
 import {
   SENIOR_MARKER_DESCRIPTION,
   SeniorEligibleChip,
@@ -89,6 +90,22 @@ export function QuestionDetail({ question, stateName }: QuestionDetailProps) {
         stateName={stateName}
         headingComponent="h4"
         showSources
+      />
+
+      {/* The Explain action belongs HERE, at the leaf, and nowhere earlier in
+          `/learn`: this is the first screen where the learner has both the
+          question and the answer in front of them, which is the only point at
+          which "I still don't understand this" is a question with an answer.
+          It never starts by itself — see `ExplainPanel`; a category list that
+          streamed an explanation per card would spend the learner's own AI key
+          on everything they scrolled past.
+
+          `h4`, the same level as "Answer" above it, because both are sections
+          of this question rather than one being inside the other. */}
+      <ExplainPanel
+        questionId={question.id}
+        headingComponent="h4"
+        label="Explain this answer"
       />
     </Box>
   );

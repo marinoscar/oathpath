@@ -183,9 +183,15 @@ export const ALTERNATE_STAGES: JourneyStage[] = [
 ];
 
 /**
- * The three `nextAction`s `apps/api/src/journey/next-action.ts` produces,
- * copied from that file so a test asserting "the card renders what the server
- * sent" is asserting it against the real strings.
+ * The `nextAction`s `apps/api/src/journey/next-action.ts` produces, copied from
+ * that file so a test asserting "the card renders what the server sent" is
+ * asserting it against the real strings.
+ *
+ * `practice` is E3's addition (#81, `practice-sessions.md` §12) — the one
+ * member `NextActionKind` gains in this epic. Keyed as a TOTAL `Record` over
+ * the union on purpose: a widened union with no fixture for its new member
+ * fails to compile here, which is a better reminder than a suite that silently
+ * never exercises the new kind.
  */
 export const NEXT_ACTIONS: Record<NextAction['kind'], NextAction> = {
   orientation: {
@@ -206,6 +212,12 @@ export const NEXT_ACTIONS: Record<NextAction['kind'], NextAction> = {
     reason:
       "The learning and practice tools are on their way. For now, take a look at what's ready.",
     path: '/learn',
+  },
+  practice: {
+    kind: 'practice',
+    title: 'Practise five questions.',
+    reason: 'Answering in your own words is what makes an answer stick.',
+    path: '/practice',
   },
 };
 

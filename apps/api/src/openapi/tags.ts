@@ -171,6 +171,20 @@ export const TAG_GROUPS: OpenApiTagGroup[] = [
           "learner's answers. Read-only, and no permission gates it: this is the core study " +
           'material every signed-in learner needs.',
       },
+      {
+        name: 'Practice',
+        description:
+          'The practice loop: start a session, answer one question at a time without seeing ' +
+          'the options, get an immediate verdict, and finish with a summary. Grading here is ' +
+          '**deterministic** — exact match plus normalisation, with a self-mark escape hatch ' +
+          'recorded distinctly so "I was right" is never indistinguishable from a real match. ' +
+          'The question shape these routes return **carries no accepted answers**: they arrive ' +
+          'only in the response to the attempt itself, because an answer already on the page ' +
+          'turns recall into recognition. Every route resolves the learner from the ' +
+          'authenticated session and takes no user id; another learner\'s session is a **404**, ' +
+          'not a 403. No permission gates any of it — every signed-in learner owns their own ' +
+          'attempts.',
+      },
     ],
   },
   {

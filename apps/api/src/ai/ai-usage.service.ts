@@ -109,13 +109,37 @@ export class AiUsageService {
    * See the header: a failed usage write must not fail the request that
    * produced it.
    *
+   * -------------------------------------------------------------------------
+   * IT RETURNS THE ROW ID, AND THAT IS WHY IT IS NOT `void` (issue #96)
+   * -------------------------------------------------------------------------
+   *
+   * It was `Promise<void>` — the row was written and the id discarded, because
+   * nothing needed to point at it. Issue #110 adds
+   * `practice_attempts.ai_usage_event_id`, a foreign key from a graded attempt
+   * to the exact call that graded it, and a caller cannot write that key from
+   * an id this method threw away. Recovering it afterwards would mean guessing
+   * — "the most recent row for this user, this model, around this time" — which
+   * is a race against the user's own next call and wrong precisely when a
+   * learner is answering quickly.
+   *
+   * `null` means THE WRITE FAILED, not "no row". The distinction is
+   * load-bearing for the caller: an attempt whose grading call could not be
+   * recorded still happened and must still be saved, with a null FK, rather
+   * than being rejected because bookkeeping was unavailable. That is the same
+   * trade the swallowed catch below already makes, extended one step outward.
+   *
    * @param record token counts included. `null` in any count means UNKNOWN and
    *        is stored as NULL — never coerced to 0, which would be a claim, and
    *        a false one that understates consumption.
+   * @returns the `ai_usage_events` row id, or `null` when the write failed.
    */
-  async record(record: AiUsageRecord): Promise<void> {
+  async record(record: AiUsageRecord): Promise<string | null> {
     try {
-      await this.prisma.aiUsageEvent.create({
+      // `select: { id: true }` rather than the default full row: the id is the
+      // only thing any caller wants back, and every other column is either
+      // already in hand at the call site or something this table exists to
+      // keep away from the rest of the app.
+      const row = await this.prisma.aiUsageEvent.create({
         data: {
           userId: record.userId,
           provider: record.provider,
@@ -129,7 +153,10 @@ export class AiUsageService {
           success: record.success,
           errorCode: record.errorCode,
         },
+        select: { id: true },
       });
+
+      return row.id;
     } catch (err) {
       // Logged, not raised. The user id and the model are enough to find the
       // gap; nothing about the content of the call is available here to leak.
@@ -138,6 +165,10 @@ export class AiUsageService {
           err instanceof Error ? err.message : 'unknown error'
         }`,
       );
+
+      // NULL, NOT A THROW. See the doc comment: the caller links to this id if
+      // it can and carries on without it if it cannot.
+      return null;
     }
   }
 

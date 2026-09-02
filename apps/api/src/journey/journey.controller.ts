@@ -149,7 +149,11 @@ export class JourneyController {
       'today.\n\n' +
       '`nextAction` is produced by a pure function over the profile — no model call — so ' +
       'two consecutive loads give the same answer. Its `kind` is one of `orientation`, ' +
-      '`interview_countdown` or `explore`, and each maps to one fixed, real route.',
+      '`interview_countdown`, `practice` or `explore`, and each maps to one fixed, real ' +
+      'route — E3 (#52) added `practice` and re-pointed `interview_countdown` at ' +
+      '`/practice` once the practice loop existed to send a learner to. A client MUST ' +
+      'tolerate a `kind` it does not recognise rather than throwing: E5 and E8 add ' +
+      '`review` and `interview` to this same union.',
   })
   @ApiDataResponse(JourneyHomeResponseDto, {
     description: 'Stage, countdown, goal placeholder and the next action',

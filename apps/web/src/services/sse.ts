@@ -610,3 +610,151 @@ export function connectSse(options: SseOptions): SseConnection {
     },
   };
 }
+
+// =============================================================================
+// A ONE-SHOT REQUEST STREAM — the other kind of SSE this app opens (#125, E4)
+// =============================================================================
+//
+// `connectSse` above is a SUBSCRIPTION: a GET that should live as long as the
+// tab does, reconnecting with backoff forever because the thing on the other
+// end is a notification feed that will have more to say later.
+//
+// `POST /api/civics/questions/:id/explain` is the opposite kind of stream. It
+// is one answer to one question, delivered in pieces, and it is over when the
+// terminal frame arrives. Three properties of `connectSse` are actively wrong
+// for it, which is why this is a second function and NOT a `method` option
+// bolted onto the first:
+//
+//  1. **IT MUST NOT RECONNECT.** Every attempt spends the learner's own AI key.
+//     A backoff loop over a POST that costs money turns one failed explanation
+//     into an unbounded charge on somebody's card, silently, in a background
+//     tab. There is no retry here at all — a caller who wants another
+//     explanation asks for one, deliberately, by pressing a button.
+//  2. **IT MUST CARRY A BODY AND A METHOD.** `EventSource` cannot, and neither
+//     can `connectSse`, which is built around a GET whose only variable is the
+//     `Authorization` header.
+//  3. **IT ENDS.** `connectSse` treats end-of-stream as a fault to recover
+//     from; here it is the normal, expected finish, and the promise resolving
+//     is how the caller learns the stream is done.
+//
+// What it DOES share is the reason `services/sse.ts` exists at all: the native
+// `EventSource` cannot send an `Authorization` header, a token in the query
+// string would land in access logs and browser history, and the SSE framing
+// therefore has to be parsed here. It reuses {@link SseParser} verbatim rather
+// than re-deriving the grammar — a second framing implementation is a second
+// place for the CR/LF and mid-field split bugs to live.
+// =============================================================================
+
+export interface SseRequestOptions {
+  /** Absolute or root-relative URL. */
+  url: string;
+  /** Defaults to `POST` — the only method with a body today. */
+  method?: string;
+  /** A pre-serialised JSON body, or omitted for none. */
+  body?: string;
+  /** The `Authorization` header value, or `null`. Read per attempt. */
+  authorization: () => string | null;
+  /**
+   * The request returned 401. Renew credentials and report whether it worked.
+   *
+   * Consulted AT MOST ONCE. A 401 on a fresh request means the 15-minute
+   * access token expired between page load and this click, which is ordinary;
+   * a second 401 after a successful refresh means something is wrong that
+   * retrying cannot fix.
+   */
+  reauthenticate: () => Promise<boolean>;
+  /**
+   * Aborts the request. REQUIRED, not optional.
+   *
+   * The caller owns the lifetime of a stream that is being billed to somebody,
+   * so there is no way to open one without holding the handle that stops it.
+   * An unmounting component, a closed panel and a navigation all have to be
+   * able to end the generation, and a signal that could be forgotten is a
+   * signal that will be.
+   */
+  signal: AbortSignal;
+  /** Headers have arrived and the body is open. */
+  onOpen?: () => void;
+  /** One dispatched frame, in order. Comments (`: connected`) never reach here. */
+  onFrame: (frame: SseFrame) => void;
+}
+
+/**
+ * Open a streaming request, dispatch its frames, and resolve when it ends.
+ *
+ * Rejects on a transport failure, on a non-2xx status, and on abort (the
+ * `AbortError` the DOM raises). It never retries and never swallows: a caller
+ * distinguishing "the learner stopped this" from "the server refused" reads its
+ * own signal's `aborted` flag, which is the only source that cannot be wrong.
+ */
+export async function streamSseRequest(options: SseRequestOptions): Promise<void> {
+  const {
+    url,
+    method = 'POST',
+    body,
+    authorization,
+    reauthenticate,
+    signal,
+    onOpen,
+    onFrame,
+  } = options;
+
+  const attempt = async (): Promise<Response> => {
+    const headers: Record<string, string> = { Accept: 'text/event-stream' };
+    const auth = authorization();
+    if (auth) headers.Authorization = auth;
+    // Only when there IS a body: Fastify 5 rejects a declared content type with
+    // no bytes behind it, exactly as `ApiService.request` documents.
+    if (body !== undefined) headers['Content-Type'] = 'application/json';
+
+    return fetch(url, {
+      method,
+      headers,
+      body,
+      signal,
+      // The refresh cookie, matching `ApiService.request` and `connectSse`, so
+      // the three code paths cannot diverge in what they present.
+      credentials: 'include',
+      // A stream must never be served from cache: a cached copy of a completed
+      // body leaves the client "connected" to a response that ended long ago.
+      cache: 'no-store',
+    });
+  };
+
+  let response = await attempt();
+
+  if (response.status === 401) {
+    // The body is explicitly discarded — an unread body holds the connection in
+    // the pool until GC.
+    await response.body?.cancel().catch(() => {});
+    const renewed = await reauthenticate();
+    if (!renewed) throw new Error('Your session has expired. Sign in again.');
+    response = await attempt();
+  }
+
+  if (!response.ok || !response.body) {
+    await response.body?.cancel().catch(() => {});
+    throw new Error(`Stream responded ${response.status}`);
+  }
+
+  onOpen?.();
+
+  const parser = new SseParser();
+  const reader = response.body.getReader();
+  // `{ stream: true }` on every decode — see `SseParser.push`.
+  const decoder = new TextDecoder();
+
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      for (const frame of parser.push(decoder.decode(value, { stream: true }))) {
+        onFrame(frame);
+      }
+    }
+  } finally {
+    // Lets the body be collected even when the loop exits by abort rather than
+    // by end-of-stream.
+    reader.releaseLock();
+  }
+}

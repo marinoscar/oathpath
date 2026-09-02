@@ -37,6 +37,15 @@ export type {
 } from './ai-usage.service';
 export { AiSettingsService } from './ai-settings.service';
 // AiConnectionTestService is deliberately NOT exported — see ai.module.ts.
+//
+// AiDispatchService IS, and it is the symbol a FEATURE is meant to reach for:
+// `ai-evaluation.md` §3's rule is that a grading service, a tutor service or
+// any later consumer imports this one door and never a provider, so that no
+// call site re-implements role, model and key resolution — or gains the
+// ability to name a model the admin bound to a different, more expensive role.
+// The same file's §5 is why it is safe to hand out: it runs on the CALLING
+// user's own key and has no reachable path to the organisation's.
+export { AiDispatchService } from './ai-dispatch.service';
 export { BaseAiProvider } from './base-ai.provider';
 export { OpenAiProvider } from './providers/openai.provider';
 export {
@@ -113,10 +122,31 @@ export type {
   AiReachabilityRequest,
   AiMessage,
   AiReachabilityResult,
+  AiRecordedCompletionResult,
+  AiStreamEvent,
+  AiStructuredCompletionRequest,
+  AiStructuredCompletionResult,
   AiUsage,
 } from './ai.types';
 export type {
   AiCapabilitySet,
   AiProvider,
 } from './providers/ai-provider.interface';
+// The dispatcher's result types. EXPORTED AS A SET, because a consumer that
+// can call `run` and cannot name `AiRunUnavailable` has to widen its own
+// signatures to `any` to hold the answer — and the four `AiUnavailableCause`
+// members exist precisely so a point-of-use message can `switch` on them
+// exhaustively.
+export type {
+  AiRunFailed,
+  AiRunOk,
+  AiRunRequest,
+  AiRunResult,
+  AiRunUnavailable,
+  AiStreamRunResult,
+  AiStructuredRunOk,
+  AiStructuredRunRequest,
+  AiStructuredRunResult,
+  AiUnavailableCause,
+} from './ai-dispatch.service';
 export type { CatalogFilter } from './providers/model-classifier';

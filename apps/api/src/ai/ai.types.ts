@@ -1,3 +1,5 @@
+import type { z } from 'zod';
+
 import type { AiCapabilityFamily } from './ai-model-roles';
 
 // =============================================================================
@@ -252,3 +254,175 @@ export interface AiCompletionResult {
   /** The provider's verbatim message, redacted. Null on success. */
   error: string | null;
 }
+
+// -----------------------------------------------------------------------------
+// Structured output and streaming (issue #96, epic #53)
+// -----------------------------------------------------------------------------
+//
+// Epic #25 shipped one inference shape: ask for text, get text back, record the
+// row. That is enough for accounting and not enough for a product. The two
+// shapes below are what E4's features actually need, and each exists because
+// doing it at the call site would be done wrong:
+//
+//   * STRUCTURED OUTPUT. A grader must return a verdict an application can
+//     branch on, not a paragraph a regular expression is pointed at. Asking a
+//     model nicely for JSON and parsing the reply is the version that fails in
+//     production — a fenced code block, a preamble, a trailing apology, a field
+//     renamed on a whim — so the schema is sent to the provider as a
+//     constraint AND re-validated on the way back, and a reply that satisfies
+//     neither is a FAILED RESULT rather than a partially-populated object that
+//     flows onward as if it were a grade.
+//
+//   * STREAMING. A tutor explanation that appears a paragraph at a time reads
+//     as fast; the same explanation delivered whole after eight seconds reads
+//     as broken. The interesting part is not the deltas, it is what happens
+//     when the stream does not finish — see {@link AiStreamEvent}.
+
+/**
+ * A completion that has already been recorded, carrying its row id.
+ *
+ * WHY THE ID IS CARRIED OUT rather than left in the table: issue #110 adds
+ * `practice_attempts.ai_usage_event_id`, a foreign key from a graded attempt
+ * to the call that graded it. The alternative — finding the row afterwards by
+ * user, model and timestamp — is a guess that races the learner's own next
+ * answer, and it is wrong exactly when they are answering quickly.
+ */
+export interface AiRecordedCompletionResult extends AiCompletionResult {
+  /**
+   * The `ai_usage_events` row written for this call, or `null` when the write
+   * failed.
+   *
+   * `null` IS NOT "no row was needed" — every call writes one. It means the
+   * write did not succeed, and a caller holding a nullable FK stores null and
+   * carries on rather than failing a user's request over bookkeeping.
+   */
+  usageEventId: string | null;
+}
+
+/**
+ * A request for one completion whose reply must satisfy a schema.
+ *
+ * The schema is used TWICE, from this single field, and that is the point: it
+ * is converted to JSON Schema and sent to the provider as a hard constraint,
+ * and it validates the reply that comes back. Two declarations — one for the
+ * provider, one for the parse — would drift, and the drift would present as a
+ * model that "stopped following instructions".
+ */
+export interface AiStructuredCompletionRequest<T> extends AiCompletionRequest {
+  /**
+   * The JSON-schema name sent to the provider
+   * (`response_format.json_schema.name`).
+   *
+   * A stable identifier for the SHAPE, not for the call. It is also the only
+   * part of the schema that reaches a span attribute — see
+   * `BaseAiProvider.completeStructured`.
+   */
+  schemaName: string;
+
+  /**
+   * The zod (v4) schema the reply must satisfy.
+   *
+   * `z.toJSONSchema(schema)` builds the provider payload AND `schema.safeParse`
+   * validates the reply, so the constraint the model was given and the
+   * contract the caller relies on are the same object.
+   */
+  schema: z.ZodType<T>;
+}
+
+/**
+ * The outcome of one structured completion.
+ *
+ * NEVER THROWN, always returned — the same never-throw contract every other
+ * result type on this surface carries.
+ */
+export interface AiStructuredCompletionResult<T> {
+  success: boolean;
+
+  /**
+   * The parsed AND schema-validated value. `null` on any failure.
+   *
+   * NEVER A PARTIAL OBJECT. A reply that parsed as JSON but did not satisfy
+   * the schema is a failure, not a half-answer to be salvaged: a grader result
+   * missing its verdict field is not a lenient grade, it is no grade, and
+   * letting it through is how a learner is told they were wrong by a field
+   * that was never there.
+   */
+  data: T | null;
+
+  /** Token counts as the provider reported them. See {@link AiUsage}. */
+  usage: AiUsage;
+
+  /**
+   * A short, stable classification of the failure, for the usage row. Null on
+   * success.
+   *
+   * Beyond the codes a thrown provider error is classified into, this surface
+   * adds two of its own:
+   *
+   *   * `'invalid_json'` — the reply was not JSON at all (or was empty).
+   *   * `'schema_validation_failed'` — it was JSON, and it did not match.
+   *
+   * Distinct because the remedies are: the first says the provider ignored or
+   * could not honour `response_format`, the second says our schema and the
+   * model's idea of it disagree.
+   */
+  errorCode: string | null;
+
+  /**
+   * A diagnosable message, redacted. Null on success.
+   *
+   * NEVER THE MODEL'S REPLY. See `BaseAiProvider.completeStructured` — the
+   * text this result was built from is content about a learner's answer, and
+   * an error string is the one field on this type that reaches a log.
+   */
+  error: string | null;
+
+  /** The `ai_usage_events` row for this call. See {@link AiRecordedCompletionResult}. */
+  usageEventId: string | null;
+}
+
+/**
+ * One event from a streamed completion.
+ *
+ * -----------------------------------------------------------------------------
+ * A DISCRIMINATED UNION, NOT A BAG OF OPTIONAL FIELDS
+ * -----------------------------------------------------------------------------
+ *
+ * `{ text?, usage?, error? }` would compile at every call site and be wrong at
+ * most of them: a consumer would read `text` off the terminal event, append
+ * `undefined` to the transcript, and ship. Here the terminal events have no
+ * `text` to read, so the compiler asks the question instead of the incident
+ * report.
+ *
+ * -----------------------------------------------------------------------------
+ * EXACTLY ONE TERMINAL EVENT, ALWAYS LAST. THIS IS A CONTRACT.
+ * -----------------------------------------------------------------------------
+ *
+ * Every stream ends with exactly one `done` OR exactly one `error`, and
+ * nothing follows it. Not "usually", not "on the happy path": a provider
+ * timeout, a revoked key, an aborted request and a bug in the SDK all arrive
+ * as an `error` event, because the consumer on the other end is an SSE
+ * endpoint and a browser connection that never sees a terminal event stays
+ * open forever — a tab spinning on a response that already failed, and a
+ * server holding a socket for a request that is over.
+ */
+export type AiStreamEvent =
+  /** A chunk of assistant text. Never empty — empty chunks are dropped. */
+  | { type: 'delta'; text: string }
+  /** The stream completed. Usage is whatever the provider reported. */
+  | { type: 'done'; usage: AiUsage; usageEventId: string | null }
+  /**
+   * The stream failed. The deltas already yielded stand — they were really
+   * received — but the completion is not whole and must not be presented as
+   * one.
+   *
+   * `usage` here is what the provider had told us BEFORE the failure, which is
+   * usually all-null. NEVER ZERO: see {@link AiUsage}.
+   */
+  | {
+      type: 'error';
+      errorCode: string;
+      error: string;
+      usage: AiUsage;
+      usageEventId: string | null;
+    };

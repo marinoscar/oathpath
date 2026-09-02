@@ -21,6 +21,7 @@ import type {
   AiModelDescriptor,
   AiReachabilityRequest,
   AiReachabilityResult,
+  AiStructuredCompletionRequest,
   AiUsage,
 } from '../ai.types';
 import type { AiCapabilitySet } from './ai-provider.interface';
@@ -31,14 +32,19 @@ import { describeModelTraits } from './model-traits';
 // OpenAiProvider (issue #29, epic #25)
 // =============================================================================
 //
-// The one concrete provider. It does exactly two things, and deliberately no
-// third: it fetches and classifies the model catalog on the SERVER key, and it
-// proves a given key can reach the models the app is bound to.
+// The one concrete provider. Two of its jobs belong to the settings surface:
+// it fetches and classifies the model catalog on the SERVER key, and it proves
+// a given key can reach the models the app is bound to. The rest is inference
+// — one completion (#37), one schema-constrained completion and one stream
+// (#96, epic #53).
 //
-// IT RUNS NO INFERENCE. Epic #25, decision 4: every inference call runs on the
-// CALLING USER's own key, so a provider method that quietly used the server
-// key for real work would defeat the entire reason BYOK was chosen — each user
-// seeing and paying for their own consumption.
+// THE SERVER KEY IS READ IN EXACTLY ONE PLACE, `fetchModels`, AND NOWHERE
+// ELSE. Epic #25, decision 4: every inference call runs on the CALLING USER's
+// own key, which is why all three inference hooks below take `apiKey` as a
+// PARAMETER and never touch `this.credentials`. A hook that quietly reached
+// for the server key would defeat the entire reason BYOK was chosen — each
+// user seeing and paying for their own consumption — and it would do so
+// invisibly, because the call would still work.
 //
 // -----------------------------------------------------------------------------
 // THE OFFICIAL SDK RATHER THAN RAW `fetch`
@@ -395,6 +401,148 @@ export class OpenAiProvider extends BaseAiProvider {
       errorCode: null,
       error: null,
     };
+  }
+
+  /**
+   * Run one completion constrained to a JSON schema, on the caller's key.
+   *
+   * -------------------------------------------------------------------------
+   * `strict: true` IS THE WHOLE POINT
+   * -------------------------------------------------------------------------
+   *
+   * Without it `response_format: { type: 'json_schema' }` is a strong hint:
+   * the reply is JSON, and the schema is advice the model may take. With it
+   * OpenAI constrains decoding so the reply cannot violate the schema at all.
+   * The difference does not show up in testing — a capable model follows the
+   * hint most of the time — it shows up as a grader that works for weeks and
+   * then returns a field that is not there.
+   *
+   * `strict` has a cost the caller must know about: OpenAI requires every
+   * property to be required and `additionalProperties: false` throughout, so a
+   * schema with an `.optional()` field is rejected by the API rather than
+   * silently downgraded. `z.toJSONSchema(..., { target: 'draft-7' })` in the
+   * base class emits `additionalProperties: false` for an object schema, so
+   * the usual shapes pass; an optional field is expressed as a nullable one.
+   * That rejection arrives as an ordinary failed result — the base class
+   * catches it — which is the right outcome: it is a bug in our schema, and it
+   * fails on the first call rather than the thousandth.
+   *
+   * NEVER STREAMED. A structured reply is parsed as a whole and validated as a
+   * whole; there is no useful partial state, and a half-decoded object is not
+   * an early draft of a grade.
+   */
+  protected async runStructuredCompletion(
+    apiKey: string,
+    request: AiStructuredCompletionRequest<unknown>,
+    jsonSchema: Record<string, unknown>,
+    redact: SecretRedactor,
+  ): Promise<{ raw: string | null; usage: AiUsage }> {
+    // Re-registered defensively, as the other hooks do. The base class already
+    // did this before calling us.
+    redact.protect(apiKey);
+
+    const client = new OpenAI({ apiKey });
+
+    // THE SAME BUILDER as the probe and `runCompletion`. A structured call is
+    // an ordinary chat call with one extra field, and giving it its own
+    // request shape is how the instruction role and the reasoning-token floor
+    // come to disagree between the two — see {@link buildChatRequest}.
+    const base = buildChatRequest(request.modelId, request.messages, {
+      maxTokens: request.maxTokens,
+    });
+
+    const response = await client.chat.completions.create({
+      ...base,
+      stream: false,
+      response_format: {
+        type: 'json_schema',
+        json_schema: {
+          name: request.schemaName,
+          strict: true,
+          schema: jsonSchema,
+        },
+      },
+    });
+
+    // RAW, UNPARSED. The base class parses and validates once, where the two
+    // failure codes are classified and where the rule about not quoting the
+    // reply into an error string lives.
+    return {
+      raw: response.choices[0]?.message?.content ?? null,
+      usage: readUsage(response.usage),
+    };
+  }
+
+  /**
+   * Open a streamed completion on the caller's key.
+   *
+   * -------------------------------------------------------------------------
+   * `stream_options: { include_usage: true }` IS MANDATORY
+   * -------------------------------------------------------------------------
+   *
+   * OpenAI reports `usage` on a completed non-streaming response
+   * unconditionally, but on a STREAMED one only when this flag is set. Omit it
+   * and every streamed call records zero tokens — no error, no warning, no
+   * symptom of its own (#37). The only thing that ever notices is somebody
+   * eventually asking why the streaming feature appears to be free.
+   *
+   * That is why the flag is set HERE, in one of the only two places this
+   * provider constructs a streaming request, and why a test asserts it rather
+   * than trusting this comment.
+   *
+   * -------------------------------------------------------------------------
+   * `signal` REACHES THE SOCKET, NOT JUST THE LOOP
+   * -------------------------------------------------------------------------
+   *
+   * Passed in the SDK's request options rather than merely checked between
+   * chunks: an abort that only breaks our loop leaves OpenAI generating — and
+   * billing — the rest of a response nobody will read. Handing the signal to
+   * the request is what actually stops the work upstream when a learner closes
+   * the tab.
+   *
+   * THROWS FREELY, INCLUDING MID-ITERATION. `BaseAiProvider.stream` turns both
+   * into the single terminal `error` event and records the row.
+   */
+  protected async *openStream(
+    apiKey: string,
+    request: AiCompletionRequest,
+    redact: SecretRedactor,
+    signal?: AbortSignal,
+  ): AsyncGenerator<{ delta?: string; usage?: AiUsage }, void, undefined> {
+    redact.protect(apiKey);
+
+    const client = new OpenAI({ apiKey });
+
+    const base = buildChatRequest(request.modelId, request.messages, {
+      maxTokens: request.maxTokens,
+    });
+
+    const stream = await client.chat.completions.create(
+      {
+        ...base,
+        stream: true,
+        // THE FLAG. See above — without it every streamed call records zero
+        // tokens and nothing fails.
+        stream_options: { include_usage: true },
+      },
+      // The SDK's request options, which is where an abort has to go to reach
+      // the underlying request.
+      { signal },
+    );
+
+    for await (const chunk of stream) {
+      const delta = chunk.choices[0]?.delta?.content;
+      if (typeof delta === 'string' && delta.length > 0) {
+        yield { delta };
+      }
+
+      // The usage chunk arrives LAST, after the final content chunk, and only
+      // because `include_usage` was set. Yielded separately rather than merged
+      // into a delta: it is a fact about the whole call, not about a fragment.
+      if (chunk.usage) {
+        yield { usage: readUsage(chunk.usage) };
+      }
+    }
   }
 
   // ---------------------------------------------------------------------------

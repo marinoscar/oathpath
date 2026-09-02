@@ -472,12 +472,36 @@ material every authenticated learner reads, and no route accepts a caller-suppli
 user id or state code (resolution always reads the caller's own `learner_profiles`
 row). See [`docs/specs/civics-content.md`](docs/specs/civics-content.md) §8.
 
+### Civics (Per User, AI-generated)
+- `POST /api/civics/questions/{id}/explain` - Stream (SSE) a tutor's explanation of one question's answer, grounded in the caller's own resolved answers, on the caller's own AI key
+
+`@Auth()` with no permissions, for the same reason as the read routes above —
+no user id or state code is ever an input. Unlike them it is a `POST` (it
+carries an optional `focus` body field) and its response is
+`text/event-stream`, not JSON: a `delta` frame per chunk, then exactly one
+terminal frame (`done` / `unavailable` / `state_required` / `error`). See
+[`docs/API.md`](docs/API.md#post-civicsquestionsidexplain) for the full frame
+contract and [`docs/specs/ai-evaluation.md`](docs/specs/ai-evaluation.md) for
+the dispatch and grounding design.
+
 ### Civics (Admin)
 - `GET /api/civics/dynamic-answers` - `system_settings:read` — the `national`/`state` questions and their currently open answer(s)
 - `PUT /api/civics/dynamic-answers` - `system_settings:write` — correct one answer slot (closes the open row, opens a new one; never an in-place edit)
 
 Reused permissions, not invented — see [`docs/specs/civics-content.md`](docs/specs/civics-content.md)
 §9 and [`docs/runbooks/updating-civics-content.md`](docs/runbooks/updating-civics-content.md).
+
+### Practice (Per User)
+- `POST /api/practice/sessions` - Start a session (`quick` or `category`); closes any existing `in_progress` session for the caller first
+- `GET /api/practice/sessions` - List the caller's sessions, paginated, newest first
+- `GET /api/practice/sessions/{id}` - Resume or review one session: its attempts so far and the next unanswered question
+- `POST /api/practice/sessions/{id}/attempts` - Answer a question; graded by a two-rung ladder (deterministic match, then an AI grader on a miss) and recorded as one `practice_attempts` row
+- `POST /api/practice/sessions/{id}/attempts/{attemptId}/self-mark` - Flip a recorded `incorrect`/`skipped` attempt to `correct` after revealing the accepted answer
+- `POST /api/practice/sessions/{id}/complete` - Finish a session and compute its summary
+
+All six are `@Auth()` with no permissions, and another learner's session (or
+an attempt inside it) is a **404, not a 403**. See
+[`docs/specs/practice-sessions.md`](docs/specs/practice-sessions.md) §10.
 
 ### Health
 - `GET /api/health/live` - Liveness check
@@ -535,6 +559,14 @@ permissions, because every authenticated user owns their own credentials — and
 since a keyless user is hard-blocked, gating them would leave the gated role
 unable to use the app at all.
 
+**`AiDispatchService` (E4, epic #53) adds no controller and no permission
+string of its own either.** It has no HTTP surface — it is called from inside
+other services' code, never from a route it owns — so the grading ladder
+inside `POST /api/practice/sessions/{id}/attempts` and
+`POST /api/civics/questions/{id}/explain` inherit their own feature's
+already-`@Auth()`-with-no-permissions gate rather than adding a second one.
+See [`docs/specs/ai-evaluation.md`](docs/specs/ai-evaluation.md) §11.
+
 **Journey adds no permission strings either, for the same reason.** All four
 `/api/journey/*` routes are `@Auth()` with no permissions: every authenticated
 user owns their own learner profile, and `RequireOrientation` hard-blocks an
@@ -543,6 +575,12 @@ to clear the gate at all. No route accepts a user id — the caller is always
 resolved from the authenticated session — so there is no "read/write any
 learner's profile" permission to add in the first place. See
 [`docs/specs/journey-shell.md`](docs/specs/journey-shell.md) §4.1 and §5.
+
+**Practice adds no permission strings either, for the same reason.** All six
+`/api/practice/*` routes are `@Auth()` with no permissions: every
+authenticated learner owns their own practice attempts, exactly as they own
+their own learner profile and their own AI key, and no route accepts a user
+id. See [`docs/specs/practice-sessions.md`](docs/specs/practice-sessions.md) §10.
 
 ## Database Tables
 
@@ -565,6 +603,8 @@ learner's profile" permission to add in the first place. See
 - `civics_categories` - A test version's sections (e.g. "American Government"), in render order
 - `civics_questions` - One version's questions: number, category, prompt, `senior_eligible`, `dynamic_scope` (`none`/`national`/`state`)
 - `civics_answers` - Accepted answers per question/state/slot; `effective_to IS NULL` means currently correct (no `is_current` flag — see `docs/specs/civics-content.md` §3)
+- `practice_sessions` - One row per practice run (Quick 5 or by-category): kind, status, planned count, cached completion `summary`
+- `practice_attempts` - One row per question ever answered, from a session or (from E8) a mock interview — the single evidence table E5/E6/E7 read and E8 writes into. Three columns record the AI grading rung (E4, epic #53), null together on every deterministically-graded attempt: `failure_cause` (why it missed, from a closed six-value enum — `null` means no grader ran, `unknown` means one ran and honestly couldn't tell), `ai_feedback` (the grader's structured verdict, verbatim), `ai_usage_event_id` (the `ai_usage_events` row that call wrote)
 
 ## Access Control: Email Allowlist
 
@@ -637,6 +677,9 @@ Note: `DATABASE_URL` is constructed automatically from these variables at runtim
 - `DEVICE_TOKEN_EXPIRY_DAYS` - Token lifetime for device sessions in days (default: 7)
 - `DEVICE_PAT_EXPIRY_DAYS` - Lifetime of the PAT minted when a device (e.g. the CLI) requests `clientInfo.tokenType: "pat"`, in days; clamped to 1-999 (default: 90)
 - `SECRETS_ENCRYPTION_KEY` - Base64-encoded 32-byte AES-256 key (generate with `openssl rand -base64 32`) that encrypts runtime-configured credentials (e.g. an SMTP password an admin enters through the app) before they are stored in the `credentials` table. Optional until a credential is stored; see `docs/runbooks/rotate-secrets-encryption-key.md`. Note: credentials configured at runtime through the UI/API live encrypted in the database, not in the environment — unlike every other secret in this section.
+
+**AI (development/test only):**
+- `AI_PROVIDER_FAKE` - Set to exactly `true` to substitute a built-in `FakeAiProvider` for `OpenAiProvider` at the DI layer (`AiModule`'s `resolveAiProvider`), so the grading ladder, the tutor's stream, the admin model dropdowns and the usage table can be exercised with no OpenAI account, no API key, and no outbound network call. It does not add a new provider *kind* — `AI_PROVIDER_KINDS` stays `['openai']`, a test settings row still stores `provider: 'openai'`, and the substitution is invisible to every consumer that reads that value. **Inert under `NODE_ENV=production`** — the flag is ignored entirely there, so an inherited or copied `.env` cannot make a real deployment grade learners against a fixture while reporting itself healthy. See `docs/specs/ai-evaluation.md` §10.
 
 **Observability:**
 - `OTEL_ENABLED` - Enable OpenTelemetry (default: true)
@@ -796,6 +839,105 @@ Live examples: `apps/api/src/ai/ai-model-roles.ts` (the registry),
 capability family), and `apps/web/src/pages/Admin/AiSettingsPage.tsx` (the
 selects it drives). The design record, with the rejected alternatives, is
 [`docs/specs/ai-settings.md`](docs/specs/ai-settings.md).
+
+### Adding an AI feature
+
+Three steps, the same "one door" promise `ai-dispatch.service.ts`'s own
+header states (epic #53, E4; design in
+[`docs/specs/ai-evaluation.md`](docs/specs/ai-evaluation.md)).
+
+1. **Pick the role** from `AI_MODEL_ROLES` (see *Adding a New AI Model Role*
+   above) — `tutor` for a free-text or streamed answer, `grader` for a
+   machine-checkable verdict, or a new role if neither job fits.
+
+2. **Call `AiDispatchService.run(userId, role, request)`** — or
+   `runStructured<T>(userId, role, request)` for a zod-validated shape, or
+   `runStream(userId, role, request, signal)` for text as it is produced —
+   from a service whose module `imports: [AiModule]`. `request` carries only
+   `messages` (and `maxTokens`); there is no `modelId` field to pass, ever.
+
+3. **Handle the typed `unavailable` result — never a thrown exception.** All
+   three methods return a discriminated `status`: `'ok'`, `'failed'`, or
+   `'unavailable'` with a `cause` that is one of exactly four strings —
+   `no_user_key`, `ai_disabled`, `role_unbound`, `capability_unsupported`. A
+   `switch` on `status` (and, for `unavailable`, on `cause`) is how a caller
+   tells "the admin hasn't finished configuring AI" apart from "this specific
+   call failed" apart from "it worked" — wrapping every call site in a
+   `try`/`catch` gets none of that, because these methods never throw for an
+   AI reason.
+
+Two more rules, load-bearing enough to state outright rather than leave to
+the spec:
+
+- **Ground the prompt in content read from the database**, not from the
+  model's own knowledge. Build the prompt from rows your feature already
+  reads for its ordinary (non-AI) response — the accepted answers a grader
+  checks against, the resolved answer a tutor explains — never from what the
+  model might recall. `apps/api/src/practice/grading.ts`
+  (`buildGradingPrompt`) and `apps/api/src/civics/explain-prompt.ts`
+  (`buildExplainPrompt`) are the worked examples, including how each delimits
+  and neutralises the one untrusted input in the exchange — the text a
+  person typed.
+
+- **No feature resolves a credential or selects a provider.** `messages` and
+  `maxTokens` are the only fields a caller supplies; the model id, the
+  provider, and the key are resolved *inside* `AiDispatchService`, from the
+  admin's settings row and the caller's own credential. A caller that could
+  pass its own `modelId` could bind itself to whatever the admin configured
+  for a more expensive role — the exact failure the settings layer
+  (`docs/specs/ai-settings.md` §1) already closed, reopened one layer up if
+  this door had a bypass.
+
+  **And the server key at `('ai', 'openai')` is never used for inference.**
+  It exists for the model catalog and the admin's connection test only — see
+  `GET /api/ai-settings/models` and `POST /api/ai-settings/test`. The instant
+  one inference call runs on it instead of the caller's own key, every
+  per-user usage figure on `GET /api/ai/usage` becomes wrong from that call
+  onward, **silently**: `ai_usage_events.userId` still names the caller, but
+  the tokens were actually billed to the administrator's OpenAI account, with
+  nothing in `AiRunOk` to distinguish a fallback call from a normal one and
+  no compile error or failing test to catch it. `ai-dispatch.service.ts`'s
+  own tests assert this address never appears in that file's source, by name
+  — do not defeat that assertion by relocating the fallback elsewhere.
+
+**Render `AiNotReady` (`apps/web/src/components/ai/AiNotReady.tsx`, #43) in
+the web whenever `systemReady` is `false`** — the shared point-of-use
+component, not a bespoke message. It is what a caller renders for an
+`unavailable` result reaching the client (directly, or via an SSE
+`unavailable` frame): "AI is not set up here" is a state a learner can do
+nothing about, and every feature should say so the same way.
+
+Live examples: `PracticeService.escalateToGrader` (the `grader` role,
+`runStructured`) and `CivicsExplainService.explain` (the `tutor` role,
+`runStream`, turned into SSE frames by `civics.controller.ts`). Do not
+restate the dispatch design, the never-throw contract's mechanics, the
+grading ladder, or the failure-cause taxonomy here — all of it is
+[`docs/specs/ai-evaluation.md`](docs/specs/ai-evaluation.md).
+
+### Adding a practice session kind
+
+`practice_sessions.kind` is a five-value Postgres enum — `quick`, `category`,
+`review`, `weak`, `mixed` — declared all at once so a later kind never needs a
+migration over live session rows; `quick` and `category` are wired today.
+
+1. **The enum value must already exist** in `PracticeSessionKind`
+   (`apps/api/prisma/schema.prisma`). `review`, `weak`, and `mixed` are — a
+   genuinely new sixth kind needs its own migration first; widening from one
+   of the three already-declared values needs none.
+2. **Widen `createPracticeSessionSchema`'s `kind` enum**
+   (`apps/api/src/practice/dto/create-practice-session.dto.ts`) to accept it.
+   Until this ships, `POST /api/practice/sessions` rejects the value as a 400
+   even though the database enum already allows it.
+3. **Add the selector branch** in `PracticeService.createSession`
+   (`apps/api/src/practice/practice.service.ts`) — the same place the
+   `kind === 'category'` branch picks its questions — that selects the
+   question pool for the new kind.
+4. **Add the kind's entry to the picker on `/practice`**
+   (`apps/web/src/pages/PracticePage.tsx`).
+
+See [`docs/specs/practice-sessions.md`](docs/specs/practice-sessions.md) §4
+for which of the five kinds ship today and why the other three are declared
+unwired rather than added later.
 
 ## Specialized Subagents (MANDATORY)
 

@@ -15,6 +15,7 @@ import { HealthModule } from './health/health.module';
 import { AllowlistModule } from './allowlist/allowlist.module';
 import { JourneyModule } from './journey/journey.module';
 import { CivicsModule } from './civics/civics.module';
+import { PracticeModule } from './practice/practice.module';
 import { DeviceAuthModule } from './device-auth/device-auth.module';
 import { StorageModule } from './storage/storage.module';
 import { PatModule } from './pat/pat.module';
@@ -77,6 +78,14 @@ import configuration from './config/configuration';
     // `@Auth()` with no permissions — the same reasoning JourneyModule
     // records — and no route accepts a user id or a state code.
     CivicsModule,
+    // The practice loop (#73, epic #52): sessions, deterministically graded
+    // attempts, and the summary. Registered next to CivicsModule because it
+    // reads the same content — through `civics/answer-resolution.ts`, the pure
+    // module, not through `CivicsService`, whose question shape carries the
+    // answers practice must not have in hand while choosing what to ask. Every
+    // route is `@Auth()` with no permissions and resolves the learner from
+    // `@CurrentUser('id')`; another learner's session is a 404, not a 403.
+    PracticeModule,
     DeviceAuthModule,
     StorageModule,
     PatModule,

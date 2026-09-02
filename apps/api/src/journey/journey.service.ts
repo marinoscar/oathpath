@@ -47,7 +47,11 @@ import { filedFromFor, resolveTestVersionCode } from './test-version-resolution'
 // what keeps the interview countdown a server-computed integer rather than a
 // value derived ad hoc. `Date.UTC` appears below in the calendar-day
 // arithmetic, which is a pure function of two given dates and reads no clock
-// at all.
+// at all, and `Intl.DateTimeFormat` appears in {@link calendarDateOf}, which
+// reduces an instant THE DATABASE HANDED US to a calendar day in the learner's
+// timezone -- also a pure function of its argument, and the same mechanism
+// `Clock.calendarDateIn` uses on the one instant this module is allowed to ask
+// for.
 // =============================================================================
 
 /** Milliseconds in a calendar day, at UTC midnight. See {@link dayIndexOf}. */
@@ -107,8 +111,20 @@ export class JourneyService {
   async getHome(userId: string): Promise<JourneyHomeResponse> {
     const profile = await this.ensureProfile(userId);
 
+    // "Now", read ONCE per request, as a calendar day in the learner's own
+    // timezone. Both facts below are questions about that day -- how many days
+    // until the interview, and whether anything has been practised on it -- so
+    // reading the clock twice would let a request that straddles local midnight
+    // answer them from two different days.
+    const today = this.clock.calendarDateIn(profile.timezone);
+
     const interviewDate = toCalendarDate(profile.interviewDate);
-    const daysUntilInterview = this.daysUntil(interviewDate, profile.timezone);
+    const daysUntilInterview = daysBetween(today, interviewDate);
+    const hasPractisedToday = await this.hasPractisedOn(
+      userId,
+      today,
+      profile.timezone,
+    );
 
     return {
       stage: profile.stage,
@@ -126,6 +142,7 @@ export class JourneyService {
       nextAction: recommendNextAction({
         orientationCompletedAt: profile.orientationCompletedAt,
         daysUntilInterview,
+        hasPractisedToday,
       }),
     };
   }
@@ -336,33 +353,51 @@ export class JourneyService {
   }
 
   /**
-   * Whole calendar days from today, in `timeZone`, to `interviewDate`.
+   * Whether this learner has recorded a practice attempt on their own
+   * calendar day `today`.
    *
-   * NOT AN ELAPSED-MILLISECONDS DIVISION. Two instants 24 hours apart can fall
-   * on the same calendar day or on days two apart depending on where a DST
-   * boundary sits, and a countdown that is off by one on the week of a clock
-   * change is exactly the kind of quiet wrongness this whole `Clock` design
-   * exists to prevent. Both operands are reduced to a calendar day first —
-   * "today" through `Clock.calendarDateIn`, which is timezone-aware, and the
-   * interview through the `@db.Date` column that already IS a calendar day —
-   * and the subtraction happens between two day numbers.
+   * -------------------------------------------------------------------------
+   * WHY THIS READS THE LATEST ATTEMPT INSTEAD OF COUNTING A TIME WINDOW
+   * -------------------------------------------------------------------------
    *
-   * An unknown stored `timezone` makes `Clock.calendarDateIn` throw
-   * `RangeError`, and that is left to propagate deliberately. It cannot happen
-   * through this API — the write path rejects any zone `Intl` will not format
-   * in — and silently substituting UTC would hand the learner a countdown
-   * quietly off by one, which `Clock` itself refuses to do for the same
-   * reason.
+   * The obvious implementation is `count({ answeredAt: { gte: startOfDay, lt:
+   * endOfDay } })`. It is not used here, because building those two instants
+   * means converting the learner's local midnight into UTC, and the only
+   * offset this module can obtain without constructing a `Date` is the offset
+   * AT THE CURRENT INSTANT. On the two days a year the zone shifts, that
+   * offset is not the offset at local midnight, so the window would slide by
+   * an hour and an attempt made at 23:30 the previous local day would be
+   * counted as today's. That is exactly the quiet off-by-one
+   * {@link daysBetween} refuses to make about the countdown, and it would be
+   * no more acceptable here.
+   *
+   * Reducing an instant to a calendar day, in contrast, is exact in every
+   * zone and on every day: `Intl` already knows which offset applied at that
+   * instant. So this asks for the single most recent attempt -- attempts are
+   * never recorded in the future, so if the newest one is not on today's local
+   * day, none are -- and compares calendar days. One row, one comparison, no
+   * offset arithmetic.
+   *
+   * `select` is narrowed to the one column: an attempt row carries the
+   * learner's own response text and a frozen answer snapshot, and Home has no
+   * business loading either to answer a yes/no question.
    */
-  private daysUntil(
-    interviewDate: string | null,
+  private async hasPractisedOn(
+    userId: string,
+    today: string,
     timeZone: string,
-  ): number | null {
-    if (interviewDate === null) {
-      return null;
+  ): Promise<boolean> {
+    const latest = await this.prisma.practiceAttempt.findFirst({
+      where: { userId },
+      orderBy: { answeredAt: 'desc' },
+      select: { answeredAt: true },
+    });
+
+    if (!latest) {
+      return false;
     }
 
-    return dayIndexOf(interviewDate) - dayIndexOf(this.clock.calendarDateIn(timeZone));
+    return calendarDateOf(latest.answeredAt, timeZone) === today;
   }
 
   /**
@@ -462,6 +497,69 @@ function toTestVersionOption(
  */
 function toCalendarDate(value: Date | null): string | null {
   return value === null ? null : value.toISOString().slice(0, 10);
+}
+
+/**
+ * Whole calendar days from `today` to `interviewDate`, both `YYYY-MM-DD`.
+ *
+ * NOT AN ELAPSED-MILLISECONDS DIVISION. Two instants 24 hours apart can fall
+ * on the same calendar day or on days two apart depending on where a DST
+ * boundary sits, and a countdown that is off by one on the week of a clock
+ * change is exactly the kind of quiet wrongness this whole `Clock` design
+ * exists to prevent. Both operands are already reduced to a calendar day --
+ * "today" by the caller through `Clock.calendarDateIn`, which is
+ * timezone-aware, and the interview by the `@db.Date` column that already IS a
+ * calendar day -- and the subtraction happens between two day numbers.
+ *
+ * A pure function of its two strings: `today` is passed in rather than read
+ * here so that {@link JourneyService.getHome} reads the clock exactly once.
+ * An unknown stored `timezone` makes that single `Clock.calendarDateIn` call
+ * throw `RangeError`, and that is left to propagate deliberately. It cannot
+ * happen through this API -- the write path rejects any zone `Intl` will not
+ * format in -- and silently substituting UTC would hand the learner a
+ * countdown quietly off by one, which `Clock` itself refuses to do for the
+ * same reason.
+ */
+function daysBetween(today: string, interviewDate: string | null): number | null {
+  if (interviewDate === null) {
+    return null;
+  }
+
+  return dayIndexOf(interviewDate) - dayIndexOf(today);
+}
+
+/**
+ * An instant as the calendar day it fell on in `timeZone`, `YYYY-MM-DD`.
+ *
+ * The read-side counterpart to `Clock.calendarDateIn`, which answers the same
+ * question about NOW. It lives here rather than on `Clock` because it reads no
+ * clock at all: it is a pure function of the instant handed to it, which is
+ * always a value Postgres returned (`practice_attempts.answered_at`), never
+ * one this module made up.
+ *
+ * Assembled from `formatToParts` with an explicit `en-US` locale rather than
+ * `format()` under a locale that happens to emit ISO order, so the output
+ * shape is a property of this function and not of the runtime's locale data --
+ * the same construction `Clock` uses, for the same reason.
+ */
+function calendarDateOf(instant: Date, timeZone: string): string {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(instant);
+
+  const part = (type: Intl.DateTimeFormatPartTypes): string => {
+    const found = parts.find((p) => p.type === type);
+    /* istanbul ignore next -- Intl always emits the parts we requested */
+    if (!found) {
+      throw new Error(`Intl did not return a "${type}" part for ${timeZone}`);
+    }
+    return found.value;
+  };
+
+  return `${part('year')}-${part('month')}-${part('day')}`;
 }
 
 /**

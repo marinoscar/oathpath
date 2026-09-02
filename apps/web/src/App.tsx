@@ -27,6 +27,13 @@ const HomePage = lazy(() => import("./pages/HomePage"));
 const LearnPage = lazy(() => import("./pages/LearnPage"));
 const PracticePage = lazy(() => import("./pages/PracticePage"));
 const ProgressPage = lazy(() => import("./pages/ProgressPage"));
+// Issues #76 and #79, epic #52 — the two screens UNDER the Practice
+// destination. Both live at `/practice/...`, which `config/destinations.ts`
+// already owns through the `/practice` prefix (`owns` matches on segment
+// boundaries), so the rail keeps highlighting Practice inside a session and no
+// new `DESTINATION_ROUTES` entry is needed or wanted.
+const PracticeSessionPage = lazy(() => import("./pages/PracticeSessionPage"));
+const PracticeSummaryPage = lazy(() => import("./pages/PracticeSummaryPage"));
 const AiKeySetupPage = lazy(() => import("./pages/AiKeySetupPage"));
 // Issue #72, epic #50 — the orientation screen behind `RequireOrientation`.
 const OrientationPage = lazy(() => import("./pages/OrientationPage"));
@@ -209,6 +216,31 @@ function AppRoutes() {
                         reachability versus content. */}
                         <Route path="/learn" element={<LearnPage />} />
                         <Route path="/practice" element={<PracticePage />} />
+                        {/* The practice loop itself (#79, epic #52), INSIDE the
+                        same `RequireOrientation` group as `/practice` above and
+                        ungated beyond it. Every `/api/practice/*` route is
+                        `@Auth()` with no permission — a learner's own practice
+                        history is exactly as unconditionally theirs as their own
+                        journey profile — so there is no permission string a gate
+                        here could honestly mirror, and one would leave a Viewer,
+                        the default role, unable to practise at all.
+
+                        Both are real, mounted routes rather than views hidden in
+                        `/practice`'s query string, because each names a SERVER
+                        RESOURCE with an id: a session is a thing that exists,
+                        can be resumed from a reload in another tab, and can be
+                        linked to from the recent-sessions band weeks later. That
+                        is the opposite of `/learn`'s four views, which are four
+                        ways of looking at the same question bank and correctly
+                        live in the query string. */}
+                        <Route
+                          path="/practice/sessions/:id"
+                          element={<PracticeSessionPage />}
+                        />
+                        <Route
+                          path="/practice/sessions/:id/summary"
+                          element={<PracticeSummaryPage />}
+                        />
                         <Route path="/progress" element={<ProgressPage />} />
                         {/* The per-user settings surface (#96, epic #90) — the same
                         hub component `/admin/settings` renders, over

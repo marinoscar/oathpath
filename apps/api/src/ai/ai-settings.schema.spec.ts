@@ -173,5 +173,27 @@ describe('aiSettingsSchema', () => {
       // over live admin configuration.
       expect([...AI_PROVIDER_KINDS]).toEqual(['openai']);
     });
+
+    it('rejects `fake` as a provider an admin could select or a row could hold', () => {
+      // `FakeAiProvider` (#105) registers AS `kind: 'openai'` and is
+      // substituted at the DI layer; it deliberately adds no member here.
+      //
+      // THIS ENUM IS PERSISTED. A `'fake'` member would be a value the admin
+      // page's dropdown offers on a production deployment, a value every
+      // `Record<AiProviderKind, …>` in the settings and status paths needs a
+      // branch for, and — the part no later fix can undo — a value that
+      // SURVIVES IN THE DATABASE after the fake and its flag are deleted,
+      // leaving a settings row nothing can parse and an AI configuration that
+      // cannot be read or re-saved. See `ai-evaluation.md` §10 and §12.
+      expect([...AI_PROVIDER_KINDS]).not.toContain('fake');
+
+      expect(
+        aiSettingsSchema.safeParse({
+          provider: 'fake',
+          enabled: true,
+          models: {},
+        }).success,
+      ).toBe(false);
+    });
   });
 });
