@@ -1,4 +1,14 @@
-import { Body, Controller, Get, Headers, Put, Query } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Headers,
+  HttpCode,
+  HttpStatus,
+  Post,
+  Put,
+  Query,
+} from '@nestjs/common';
 import {
   ApiHeader,
   ApiOperation,
@@ -11,6 +21,8 @@ import { Auth } from '../auth/decorators/auth.decorator';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { PERMISSIONS } from '../common/constants/roles.constants';
 import { AiSettingsService } from './ai-settings.service';
+import { AiConnectionTestService } from './ai-connection-test.service';
+import { AiTestResultDto } from './dto/ai-test-result.dto';
 import { OpenAiProvider } from './providers/openai.provider';
 import type { AiCapabilityFamily } from './ai-model-roles';
 import { AI_CAPABILITY_FAMILIES, capabilityForRole } from './ai-model-roles';
@@ -27,8 +39,12 @@ import { UpdateAiSettingsDto } from './dto/update-ai-settings.dto';
 //   GET  /api/ai-settings          system_settings:read
 //   PUT  /api/ai-settings          system_settings:write
 //   GET  /api/ai-settings/models   system_settings:read
+//   POST /api/ai-settings/test     system_settings:WRITE
 //
-// #32 adds `/test` to this same controller.
+// The TEST endpoint is gated on WRITE, not read. It is a side-effecting
+// operation that causes the system to originate an outbound request on the
+// organisation's credential; `:read` is held by anyone who may look at
+// settings, and looking is not calling.
 //
 // `system_settings:*` RATHER THAN A NEW `ai_settings:*` PAIR, deliberately.
 // The permission set is seeded (see prisma/seed.ts) and a new string means a
@@ -62,6 +78,7 @@ export class AiSettingsController {
     // the shape `EmailTestSendService` already uses — a `Record` rather than a
     // `switch`, so adding a kind fails to compile until it is wired.
     private readonly openai: OpenAiProvider,
+    private readonly connectionTest: AiConnectionTestService,
   ) {}
 
   /**
@@ -211,6 +228,41 @@ export class AiSettingsController {
     const expectedVersion = Number.isInteger(parsed) ? parsed : undefined;
 
     return this.aiSettings.update(dto, userId, expectedVersion);
+  }
+
+  @Post('test')
+  @Auth({ permissions: [PERMISSIONS.SYSTEM_SETTINGS_WRITE] })
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Test the saved AI configuration (Admin only)',
+    description:
+      'Authenticates the stored **server** key with the configured provider, then checks ' +
+      'that each wired role’s bound model is actually reachable on it.\n\n' +
+      '**There is no target parameter.** It tests the saved configuration — a free-text ' +
+      'model id or base URL would make this a call-arbitrary-endpoint primitive on the ' +
+      'organisation’s credential.\n\n' +
+      '**This returns HTTP 200 even when the test failed.** A refused connection is a ' +
+      'successful diagnosis, and it is the reason this endpoint exists — read the ' +
+      '`success` field, and show `error`, which carries the provider’s actual message with ' +
+      'any credential redacted. Treating 200 as “AI works” reports success for every ' +
+      'misconfiguration there is.\n\n' +
+      '`authenticated` is reported separately from `success`: a key that authenticates but ' +
+      'cannot reach a bound model is a different problem with a different fix, and told ' +
+      'only “the test failed” an admin would replace a perfectly good key.\n\n' +
+      'The master switch is honoured — testing while AI is off reports that rather than ' +
+      'calling out anyway. Every attempt is audited, including refusals.',
+  })
+  @ApiResponse({
+    status: 200,
+    description:
+      'The outcome of the attempt. Check `success`; on failure `error` holds the ' +
+      "provider's verbatim message and `roles` holds per-role reachability.",
+    type: AiTestResultDto,
+  })
+  async testConnection(@CurrentUser('id') userId: string) {
+    // Nothing from the request reaches the provider — there is no body, and no
+    // parameter for one.
+    return this.connectionTest.runTest(userId);
   }
 }
 

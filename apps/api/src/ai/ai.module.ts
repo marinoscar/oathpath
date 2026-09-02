@@ -4,6 +4,7 @@ import { PrismaModule } from '../prisma/prisma.module';
 import { CredentialsModule } from '../credentials/credentials.module';
 import { AiSettingsController } from './ai-settings.controller';
 import { AiSettingsService } from './ai-settings.service';
+import { AiConnectionTestService } from './ai-connection-test.service';
 import { OpenAiProvider } from './providers/openai.provider';
 
 // =============================================================================
@@ -47,7 +48,18 @@ import { OpenAiProvider } from './providers/openai.provider';
     CredentialsModule,
   ],
   controllers: [AiSettingsController],
-  providers: [AiSettingsService, OpenAiProvider],
+  providers: [
+    AiSettingsService,
+    // The test path (#32). Registered here rather than in a module of its own
+    // because it is one method over the provider and settings this module
+    // already owns.
+    AiConnectionTestService,
+    OpenAiProvider,
+  ],
+  // AiConnectionTestService is deliberately NOT exported: running an outbound
+  // call on the organisation's key is an admin action reached through this
+  // module's controller, not a service other features should be able to
+  // invoke. Same posture as EmailTestSendService.
   exports: [AiSettingsService, OpenAiProvider],
 })
 export class AiModule {

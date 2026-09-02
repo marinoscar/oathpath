@@ -3,6 +3,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { AiSettingsController } from './ai-settings.controller';
 import { AiSettingsService } from './ai-settings.service';
 import { OpenAiProvider } from './providers/openai.provider';
+import { AiConnectionTestService } from './ai-connection-test.service';
 import {
   AI_SETTINGS_RESPONSE_CARRIES_NO_SECRET,
   aiSettingsResponseSchema,
@@ -33,6 +34,7 @@ describe('AiSettingsController', () => {
     describeCatalog: jest.Mock;
   };
   let openai: { supports: jest.Mock; listModels: jest.Mock };
+  let connectionTest: { runTest: jest.Mock };
 
   beforeEach(async () => {
     service = {
@@ -42,12 +44,14 @@ describe('AiSettingsController', () => {
       describeCatalog: jest.fn().mockResolvedValue({ models: [], roles: [] }),
     };
     openai = { supports: jest.fn(() => true), listModels: jest.fn() };
+    connectionTest = { runTest: jest.fn().mockResolvedValue({ success: true }) };
 
     const module: TestingModule = await Test.createTestingModule({
       controllers: [AiSettingsController],
       providers: [
         { provide: AiSettingsService, useValue: service },
         { provide: OpenAiProvider, useValue: openai },
+        { provide: AiConnectionTestService, useValue: connectionTest },
         // Not exercised: these methods are called directly, never through
         // `JwtAuthGuard` — which `@Auth()` attaches at the route level and
         // which Nest's DI graph still resolves at module-compile time, since
@@ -193,6 +197,29 @@ describe('AiSettingsController', () => {
     });
   });
 
+  describe('POST /test', () => {
+    it('passes nothing but the caller to the test service', async () => {
+      // There is no target parameter, and no body. A free-text model id would
+      // make this a call-arbitrary-endpoint primitive on the organisation's
+      // credential.
+      await controller.testConnection(USER_ID);
+
+      expect(connectionTest.runTest).toHaveBeenCalledWith(USER_ID);
+      expect(connectionTest.runTest).toHaveBeenCalledTimes(1);
+    });
+
+    it('answers 200 even for a failed test', () => {
+      // Declared with @HttpCode(200) rather than the POST default of 201, so a
+      // refused connection arrives as a readable payload instead of going
+      // through the error envelope, which suppresses detail in production.
+      const status = Reflect.getMetadata(
+        '__httpCode__',
+        AiSettingsController.prototype.testConnection,
+      );
+      expect(status).toBe(200);
+    });
+  });
+
   describe('permission strings the registry card must mirror', () => {
     // CLAUDE.md's Settings UI Pattern rule 3: the card's `permission` field
     // must be the exact string the controller enforces. Pinned here so the
@@ -209,6 +236,17 @@ describe('AiSettingsController', () => {
       const permissions = Reflect.getMetadata(
         PERMISSIONS_KEY,
         AiSettingsController.prototype.replaceSettings,
+      );
+      expect(permissions).toEqual([PERMISSIONS.SYSTEM_SETTINGS_WRITE]);
+    });
+
+    it('TESTS on system_settings:WRITE, not read', () => {
+      // A side-effecting operation: it causes the system to originate an
+      // outbound request on the organisation's credential. `:read` is held by
+      // anyone who may look at settings, and looking is not calling.
+      const permissions = Reflect.getMetadata(
+        PERMISSIONS_KEY,
+        AiSettingsController.prototype.testConnection,
       );
       expect(permissions).toEqual([PERMISSIONS.SYSTEM_SETTINGS_WRITE]);
     });
