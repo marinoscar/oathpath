@@ -62,12 +62,12 @@
 //    that move stays a `git mv`.
 //
 //    UPDATE (epic #161): that package now exists — `packages/shared`,
-//    published to the workspace as `@app/shared` — and it landed exactly as
+//    published to the workspace as `@oathpath/shared` — and it landed exactly as
 //    the paragraph above asks: as its own filed, reviewed change rather than
 //    as a side effect of a feature. Two things it says are now out of date:
 //    `workspaces` reads `["apps/*", "packages/*"]`, and there IS a cross-app
 //    import. The rest still holds, and **this registry deliberately did not
-//    move**. `@app/shared` carries rebrandable CONSTANTS — today a single
+//    move**. `@oathpath/shared` carries rebrandable CONSTANTS — today a single
 //    display-name string that all three apps render — and it is plain
 //    CommonJS with a hand-written `.d.ts` and no build step, which is what
 //    lets it satisfy Nest's `rootDir`, ts-jest's transform rules and Vite at

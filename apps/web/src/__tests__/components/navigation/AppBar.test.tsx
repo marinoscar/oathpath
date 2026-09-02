@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { act, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-// The wordmark assertions below derive the expected text from `@app/shared`
+// The wordmark assertions below derive the expected text from `@oathpath/shared`
 // rather than restating it (issue #164, epic #161): the point of the shared
 // constant is that renaming the product is a one-line change, and a suite that
 // hardcoded the old name would turn that rename into ~10 unrelated failures.
@@ -12,7 +12,7 @@ import userEvent from '@testing-library/user-event';
 // buried in a longer sentence. The negative drill-down assertions keep using
 // the same matcher via `queryByText`, so they still assert the wordmark is
 // absent and not merely that some looser pattern failed to match.
-import { APP_NAME } from '@app/shared';
+import { APP_NAME } from '@oathpath/shared';
 import { render, mockAdminUser } from '../../utils/test-utils';
 import { setViewportWidth } from '../../setup';
 import { AppBar } from '../../../components/navigation/AppBar';

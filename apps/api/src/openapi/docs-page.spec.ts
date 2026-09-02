@@ -1,4 +1,4 @@
-import { APP_NAME } from '@app/shared';
+import { APP_NAME } from '@oathpath/shared';
 import { SECURITY_SCHEMES } from './document';
 import {
   DEFAULT_SCALAR_CDN,

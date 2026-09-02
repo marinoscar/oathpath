@@ -35,7 +35,7 @@
     "test:ci": "vitest run --coverage --passWithNoTests --reporter=junit --outputFile=junit.xml"
   },
   "dependencies": {
-    "@app/shared": "*",
+    "@oathpath/shared": "*",
     "commander": "^14.0.2",
     "ink": "^7.1.1",
     "ink-select-input": "^6.2.0",

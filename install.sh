@@ -412,7 +412,7 @@ mkdir -p "$APP_DIR"
 
 # Copy only the built artifacts + package manifest (not the full repo).
 # Most of apps/cli's runtime deps (commander, ink, react, ...) are ordinary
-# public npm packages. @app/shared is not: it is an internal workspace package
+# public npm packages. @oathpath/shared is not: it is an internal workspace package
 # (epic #161) that is `private: true` and never published, so the `npm install`
 # below — which runs OUTSIDE the monorepo, with no workspace to link against —
 # would go looking for it on the public registry and fail the whole install.
@@ -440,8 +440,8 @@ if [[ -d "$TMP_DIR/packages" ]]; then
     let count = 0;
     for (const field of ["dependencies", "optionalDependencies"]) {
       for (const name of Object.keys(pkg[field] || {})) {
-        if (!name.startsWith("@app/")) continue;
-        const dir = name.slice("@app/".length);
+        if (!name.startsWith("@oathpath/")) continue;
+        const dir = name.slice("@oathpath/".length);
         if (!fs.existsSync(path.join(vendor, dir))) {
           console.error("no vendored copy of " + name + " at vendor/" + dir);
           process.exit(1);

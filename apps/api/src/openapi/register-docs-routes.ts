@@ -1,4 +1,4 @@
-import { APP_NAME } from '@app/shared';
+import { APP_NAME } from '@oathpath/shared';
 import { Logger } from '@nestjs/common';
 import type { NestFastifyApplication } from '@nestjs/platform-fastify';
 import type { OpenAPIObject } from '@nestjs/swagger';

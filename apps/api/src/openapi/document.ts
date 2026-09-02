@@ -10,7 +10,7 @@
 // alike, so the document CI lints is the document users get.
 // =============================================================================
 
-import { APP_NAME } from '@app/shared';
+import { APP_NAME } from '@oathpath/shared';
 import type { INestApplication } from '@nestjs/common';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import type { OpenAPIObject } from '@nestjs/swagger';

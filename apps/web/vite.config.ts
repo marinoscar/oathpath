@@ -1,9 +1,9 @@
 import { defineConfig, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
-import { APP_NAME } from '@app/shared';
+import { APP_NAME } from '@oathpath/shared';
 
 /**
- * Substitutes `%APP_NAME%` in `index.html` with `APP_NAME` from `@app/shared`
+ * Substitutes `%APP_NAME%` in `index.html` with `APP_NAME` from `@oathpath/shared`
  * (issue #164, epic #161).
  *
  * `index.html` is static markup: it carries the <title> and the description
@@ -13,7 +13,7 @@ import { APP_NAME } from '@app/shared';
  *
  *   - An env var (`VITE_APP_NAME`), which Vite would interpolate into `%...%`
  *     for free. Rejected: it makes the deployment environment a SECOND source
- *     of truth for the name. `@app/shared` exists precisely so a fork renames
+ *     of truth for the name. `@oathpath/shared` exists precisely so a fork renames
  *     the product in one line; a build that also has to set an env var can
  *     silently disagree with the wordmark the React tree renders.
  *   - Setting `document.title` at runtime from `main.tsx`. Rejected: the
@@ -41,7 +41,7 @@ function appName(): Plugin {
 
 export default defineConfig({
   plugins: [react(), appName()],
-  // `@app/shared` is CommonJS, and it reaches us as an npm WORKSPACE SYMLINK.
+  // `@oathpath/shared` is CommonJS, and it reaches us as an npm WORKSPACE SYMLINK.
   // Vite treats a linked package as project source rather than as a dependency,
   // so it skips dep pre-bundling for it and serves `index.js` to the browser as
   // raw ESM — where `exports.APP_NAME = ...` provides no named export and the
@@ -56,7 +56,7 @@ export default defineConfig({
   // help, which is precisely why the failure surfaces in the dev-server-backed
   // visual harness and nowhere else. See `visual/vite.config.ts`, which needs
   // the same line for the same reason.
-  optimizeDeps: { include: ['@app/shared'] },
+  optimizeDeps: { include: ['@oathpath/shared'] },
   server: {
     port: 5173,
     host: true,

@@ -29,7 +29,7 @@ FROM base AS deps
 COPY package.json package-lock.json ./
 COPY apps/api/package.json ./apps/api/
 COPY apps/web/package.json ./apps/web/
-# `@app/shared` is a real dependency of this app, so `npm ci` has to resolve it
+# `@oathpath/shared` is a real dependency of this app, so `npm ci` has to resolve it
 # and the workspace symlink it creates has to point at a populated directory.
 # The whole package is copied rather than just its manifest so the build stage
 # inherits it through `COPY --from=deps /app ./` — Vite inlines the constant

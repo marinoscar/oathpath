@@ -1,4 +1,4 @@
-# `@app/shared`
+# `@oathpath/shared`
 
 Constants that more than one app needs. Today that is exactly one thing: the
 application's display name.
@@ -71,7 +71,7 @@ Keep this list current when you add one.
 Add the package to `optimizeDeps.include` in that app's Vite config:
 
 ```ts
-optimizeDeps: { include: ['@app/shared'] },
+optimizeDeps: { include: ['@oathpath/shared'] },
 ```
 
 This is **not** optional and it is not a performance tweak. The package is

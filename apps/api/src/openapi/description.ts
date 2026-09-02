@@ -14,7 +14,7 @@
 // that is missing.
 // =============================================================================
 
-import { APP_NAME } from '@app/shared';
+import { APP_NAME } from '@oathpath/shared';
 
 /**
  * Builds the Markdown intro.

@@ -23,7 +23,7 @@
 // deployment that wants to self-host the bundle behind its own nginx.
 // =============================================================================
 
-import { APP_NAME } from '@app/shared';
+import { APP_NAME } from '@oathpath/shared';
 
 /** Where the standalone Scalar bundle is loaded from. */
 export const DEFAULT_SCALAR_CDN = 'https://cdn.jsdelivr.net/npm/@scalar/api-reference';
