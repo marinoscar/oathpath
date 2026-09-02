@@ -60,6 +60,10 @@ export default defineConfig({
   server: {
     port: 5173,
     host: true,
+    // The dev VPS proxies oathpath.dev.marin.cr to this server; without this
+    // entry Vite 5+'s Host header check rejects the request and every page
+    // load is blocked.
+    allowedHosts: ['oathpath.dev.marin.cr', 'localhost', '.localhost'],
     proxy: {
       '/api': {
         target: 'http://localhost:3000',
