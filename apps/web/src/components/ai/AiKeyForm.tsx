@@ -322,7 +322,14 @@ export function AiKeyForm({
       )}
 
       {/* SUCCESS IS UNAMBIGUOUS, and per role — a first-time user has to read
-          it as "done" without knowing what a role is. */}
+          it as "done" without knowing what a role is.
+
+          THE ROLE KEY ALONE IS ENOUGH HERE, deliberately (issue #177). The
+          ambiguity that fix addresses is two rows that look identical; these
+          chips carry the role key, which is unique per role, and no model id,
+          so two chips can never collide. Adding the model id would put a
+          technical token in front of a user in the one place there is nothing
+          to act on. */}
       {verified && (
         <Alert
           severity="success"
@@ -363,7 +370,18 @@ export function AiKeyForm({
           {FAILURE_COPY[failure].body}
 
           {/* PER-ROLE RESULTS, not one boolean. A key can authenticate and
-              still have no access to the grader's model. */}
+              still have no access to the grader's model.
+
+              EACH ROW NAMES THE JOB AS WELL AS THE MODEL (issue #177). Two
+              wired roles bound to the SAME model is the common case, and a row
+              that showed only the model id rendered twice as two identical
+              lines with identical errors — indistinguishable from one entry
+              duplicated by a bug. The job is set in the surrounding body
+              weight; the model id is monospace, because it is a technical
+              token the user will match character-for-character against their
+              OpenAI dashboard. Both are real text, so the live region
+              announces "not available, grader uses gpt-5.4-mini" rather than
+              leaning on a `title` or on colour. */}
           {testResult?.roles.map((role) => (
             <Box key={role.roleKey} sx={{ mt: 1 }}>
               <Chip
@@ -372,7 +390,17 @@ export function AiKeyForm({
                 label={role.reachable ? 'working' : 'not available'}
                 sx={{ mr: 1 }}
               />
-              <Typography variant="body2" component="span">
+              <Typography variant="body2" component="span" sx={{ fontWeight: 600 }}>
+                {role.roleKey}
+              </Typography>
+              <Typography variant="body2" component="span" color="text.secondary">
+                {' uses '}
+              </Typography>
+              <Typography
+                variant="body2"
+                component="span"
+                sx={{ fontFamily: 'monospace' }}
+              >
                 {role.modelId}
               </Typography>
               {role.error && (
