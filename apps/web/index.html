@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      `%APP_NAME%` is substituted at build/serve time by the `appName()` plugin
+      in `vite.config.ts`, which reads the value from `@app/shared`. Static HTML
+      cannot import TypeScript, and neither of the two obvious alternatives is
+      acceptable here — see that plugin's comment for why not.
+    -->
+    <meta name="description" content="%APP_NAME%" />
+    <title>%APP_NAME%</title>
+    <!--
+      Issue #111: `src/theme/index.ts` declares Inter as the first family in
+      `typography.fontFamily`, so the app has to actually LOAD it — before this
+      link existed it did not, and every user saw the Arial/Helvetica/DejaVu
+      fallback instead of the typeface the UI was designed in.
+
+      The @font-face itself lives in `public/fonts/inter.css` rather than in a
+      <style> block here, because it is shared verbatim with the visual
+      regression harness (`visual/index.html`, issue #107). One declaration,
+      one font file: a harness with its own copy would be screenshotting a
+      font-loading path the application does not use. See that file's header
+      for the full rationale on self-hosting, `font-display: swap`, and the
+      variable-weight range.
+
+      Served from `public/`, so Vite copies it into `dist/` untouched and
+      nginx's static-asset cache rule (`apps/web/nginx.conf`) already covers
+      both the .css and the .woff2.
+    -->
+    <link rel="stylesheet" href="/fonts/inter.css" />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
