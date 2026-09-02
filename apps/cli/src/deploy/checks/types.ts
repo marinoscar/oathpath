@@ -3,6 +3,7 @@ import { createServer } from 'node:net';
 import { totalmem } from 'node:os';
 
 import type { runCommand } from '../executor.js';
+import { CLI_NAME } from '../../branding.js';
 
 // =============================================================================
 // The doctor check contract  (issue #176, epic #168)
@@ -194,7 +195,7 @@ export async function runChecks(
         : await check.run(context).catch((error: unknown) => ({
             status: 'fail' as const,
             detail: error instanceof Error ? error.message : String(error),
-            remedy: 'This check itself failed; the problem may be with appctl.',
+            remedy: `This check itself failed; the problem may be with ${CLI_NAME}.`,
           }));
 
     const completed: CompletedCheck = {
