@@ -1,0 +1,608 @@
+// =============================================================================
+// Prisma Schema - Enterprise App Foundation
+// =============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// =============================================================================
+// User & Identity
+// =============================================================================
+
+model User {
+  id                      String    @id @default(uuid()) @db.Uuid
+  email                   String    @unique
+  displayName             String?   @map("display_name")
+  providerDisplayName     String?   @map("provider_display_name")
+  profileImageUrl         String?   @map("profile_image_url")
+  providerProfileImageUrl String?   @map("provider_profile_image_url")
+  isActive                Boolean   @default(true) @map("is_active")
+  createdAt               DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt               DateTime  @updatedAt @map("updated_at") @db.Timestamptz
+
+  // Relations
+  identities                UserIdentity[]
+  userRoles                 UserRole[]
+  userSettings              UserSettings?
+  auditEvents               AuditEvent[]     @relation("ActorEvents")
+  settingsUpdates           SystemSettings[] @relation("SettingsUpdater")
+  refreshTokens             RefreshToken[]   @relation("UserRefreshTokens")
+  allowlistEntriesAdded     AllowedEmail[]   @relation("AllowlistAddedBy")
+  allowlistEntry            AllowedEmail?    @relation("AllowlistClaimedBy")
+  deviceCodes               DeviceCode[]     @relation("UserDeviceCodes")
+  storageObjects            StorageObject[]  @relation("UserStorageObjects")
+  personalAccessTokens      PersonalAccessToken[] @relation("UserPersonalAccessTokens")
+  credentialUpdates         Credential[]     @relation("CredentialUpdatedBy")
+  notificationDeliveries    NotificationDelivery[] @relation("UserNotificationDeliveries")
+  notifications             Notification[]   @relation("UserNotifications")
+
+  @@map("users")
+}
+
+model UserIdentity {
+  id              String   @id @default(uuid()) @db.Uuid
+  userId          String   @map("user_id") @db.Uuid
+  provider        String
+  providerSubject String   @map("provider_subject")
+  providerEmail   String?  @map("provider_email")
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  // Relations
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerSubject])
+  @@map("user_identities")
+}
+
+// =============================================================================
+// RBAC - Roles & Permissions
+// =============================================================================
+
+model Role {
+  id          String   @id @default(uuid()) @db.Uuid
+  name        String   @unique
+  description String?
+
+  // Relations
+  rolePermissions RolePermission[]
+  userRoles       UserRole[]
+
+  @@map("roles")
+}
+
+model Permission {
+  id          String   @id @default(uuid()) @db.Uuid
+  name        String   @unique
+  description String?
+
+  // Relations
+  rolePermissions RolePermission[]
+
+  @@map("permissions")
+}
+
+model RolePermission {
+  roleId       String @map("role_id") @db.Uuid
+  permissionId String @map("permission_id") @db.Uuid
+
+  // Relations
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+  @@map("role_permissions")
+}
+
+model UserRole {
+  userId String @map("user_id") @db.Uuid
+  roleId String @map("role_id") @db.Uuid
+
+  // Relations
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@id([userId, roleId])
+  @@map("user_roles")
+}
+
+// =============================================================================
+// Settings
+// =============================================================================
+
+model SystemSettings {
+  id              String   @id @default(uuid()) @db.Uuid
+  key             String   @unique
+  value           Json
+  version         Int      @default(1)
+  updatedByUserId String?  @map("updated_by_user_id") @db.Uuid
+  updatedAt       DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  // Relations
+  updatedByUser User? @relation("SettingsUpdater", fields: [updatedByUserId], references: [id], onDelete: SetNull)
+
+  @@map("system_settings")
+}
+
+model UserSettings {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @unique @map("user_id") @db.Uuid
+  value     Json
+  version   Int      @default(1)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  // Relations
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_settings")
+}
+
+// =============================================================================
+// Audit
+// =============================================================================
+
+model AuditEvent {
+  id          String   @id @default(uuid()) @db.Uuid
+  actorUserId String?  @map("actor_user_id") @db.Uuid
+  action      String
+  targetType  String   @map("target_type")
+  targetId    String   @map("target_id")
+  meta        Json?
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  // Relations
+  actorUser User? @relation("ActorEvents", fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@index([actorUserId])
+  @@index([targetType, targetId])
+  @@index([createdAt])
+  @@map("audit_events")
+}
+
+// =============================================================================
+// Refresh Tokens (for token rotation)
+// =============================================================================
+
+model RefreshToken {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @map("user_id") @db.Uuid
+  tokenHash String    @unique @map("token_hash")
+  expiresAt DateTime  @map("expires_at") @db.Timestamptz
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  revokedAt DateTime? @map("revoked_at") @db.Timestamptz
+
+  // Relations
+  user User @relation("UserRefreshTokens", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("refresh_tokens")
+}
+
+// =============================================================================
+// Personal Access Tokens (PAT)
+// =============================================================================
+
+enum PatDurationUnit {
+  minutes
+  days
+  months
+}
+
+model PersonalAccessToken {
+  id            String          @id @default(uuid()) @db.Uuid
+  userId        String          @map("user_id") @db.Uuid
+  name          String
+  tokenHash     String          @unique @map("token_hash")
+  tokenPrefix   String          @map("token_prefix")
+  durationValue Int             @map("duration_value")
+  durationUnit  PatDurationUnit @map("duration_unit")
+  expiresAt     DateTime        @map("expires_at") @db.Timestamptz
+  lastUsedAt    DateTime?       @map("last_used_at") @db.Timestamptz
+  createdAt     DateTime        @default(now()) @map("created_at") @db.Timestamptz
+  revokedAt     DateTime?       @map("revoked_at") @db.Timestamptz
+
+  // Relations
+  user User @relation("UserPersonalAccessTokens", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("personal_access_tokens")
+}
+
+// =============================================================================
+// Allowlist (Email Access Control)
+// =============================================================================
+
+model AllowedEmail {
+  id          String    @id @default(uuid()) @db.Uuid
+  email       String    @unique
+  addedById   String?   @map("added_by_id") @db.Uuid
+  addedAt     DateTime  @default(now()) @map("added_at") @db.Timestamptz
+  claimedById String?   @unique @map("claimed_by_id") @db.Uuid
+  claimedAt   DateTime? @map("claimed_at") @db.Timestamptz
+  notes       String?
+
+  // Relations
+  addedBy   User? @relation("AllowlistAddedBy", fields: [addedById], references: [id], onDelete: SetNull)
+  claimedBy User? @relation("AllowlistClaimedBy", fields: [claimedById], references: [id], onDelete: SetNull)
+
+  @@map("allowed_emails")
+}
+
+// =============================================================================
+// Device Authorization Flow (RFC 8628)
+// =============================================================================
+
+enum DeviceCodeStatus {
+  pending
+  approved
+  denied
+  expired
+}
+
+model DeviceCode {
+  id         String           @id @default(uuid()) @db.Uuid
+  deviceCode String           @unique @map("device_code")
+  userCode   String           @unique @map("user_code")
+  userId     String?          @map("user_id") @db.Uuid
+  status     DeviceCodeStatus @default(pending)
+  clientInfo Json?            @map("client_info")
+  scopes     String[]
+  expiresAt  DateTime         @map("expires_at") @db.Timestamptz
+  createdAt  DateTime         @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt  DateTime         @updatedAt @map("updated_at") @db.Timestamptz
+
+  // Relations
+  user User? @relation("UserDeviceCodes", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([deviceCode])
+  @@index([userCode])
+  @@index([status, expiresAt])
+  @@index([userId])
+  @@map("device_codes")
+}
+
+// =============================================================================
+// Storage Objects
+// =============================================================================
+
+enum StorageObjectStatus {
+  pending    // Upload initiated, awaiting chunks
+  uploading  // Chunks being uploaded
+  processing // Post-upload processing in progress
+  ready      // Available for use
+  failed     // Upload or processing failed
+}
+
+model StorageObject {
+  id              String              @id @default(uuid()) @db.Uuid
+  name            String              // Original filename
+  size            BigInt              // Total size in bytes (BigInt for GB-scale)
+  mimeType        String              @map("mime_type")
+  storageKey      String              @unique @map("storage_key") // S3 object key
+  storageProvider String              @default("s3") @map("storage_provider")
+  bucket          String?
+  status          StorageObjectStatus @default(pending)
+  s3UploadId      String?             @map("s3_upload_id") // S3 multipart upload ID
+  metadata        Json?               // JSONB for flexible metadata
+  uploadedById    String?             @map("uploaded_by_id") @db.Uuid
+  createdAt       DateTime            @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt       DateTime            @updatedAt @map("updated_at") @db.Timestamptz
+
+  // Relations
+  uploadedBy User?                @relation("UserStorageObjects", fields: [uploadedById], references: [id], onDelete: SetNull)
+  chunks     StorageObjectChunk[]
+
+  @@index([uploadedById])
+  @@index([status])
+  @@index([createdAt])
+  @@map("storage_objects")
+}
+
+model StorageObjectChunk {
+  id         String   @id @default(uuid()) @db.Uuid
+  objectId   String   @map("object_id") @db.Uuid
+  partNumber Int      @map("part_number") // S3 part number (1-10000)
+  eTag       String   @map("e_tag") // S3 ETag for verification
+  size       BigInt   // Chunk size in bytes
+  uploadedAt DateTime @default(now()) @map("uploaded_at") @db.Timestamptz
+
+  // Relations
+  object StorageObject @relation(fields: [objectId], references: [id], onDelete: Cascade)
+
+  @@unique([objectId, partNumber])
+  @@index([objectId])
+  @@map("storage_object_chunks")
+}
+
+// =============================================================================
+// Encrypted Credential Store  (issue #115, epic #108)
+// =============================================================================
+//
+// Runtime-configured secrets (an SMTP password, an OAuth client secret, a
+// second bucket's S3 key, ...) addressed by (purpose, name) rather than one
+// column per consumer, so every future secret reuses this table instead of
+// inventing its own column, its own encrypt call, and its own chance to leak.
+//
+// `secret` holds ONLY the opaque base64 ciphertext produced by
+// `encryptSecret()` in `common/crypto/secret-cipher.ts`, encrypted under
+// `purpose` as the sub-key derivation label — a ciphertext lifted from one
+// row cannot be decrypted under a different purpose. This model stores
+// ciphertext and non-secret metadata only; it never sees plaintext, and
+// Prisma performs no encryption of its own.
+//
+// NEVER select `secret` into anything that reaches an API response or a log
+// line. `CredentialsService` is the sole reader/writer and is what actually
+// enforces that split (a plaintext-returning method for server-side
+// consumers, a metadata-only method for presentation) — this comment is the
+// signpost, not the guarantee.
+model Credential {
+  id              String   @id @default(uuid()) @db.Uuid
+  purpose         String
+  name            String
+  // Opaque [iv][authTag][ciphertext] payload, base64-encoded by
+  // encryptSecret(). @db.Text (not the default `varchar`) because a base64
+  // AES-GCM payload has no meaningful bound: encrypted key material,
+  // passwords, or tokens of arbitrary length must never be truncated.
+  secret          String   @db.Text
+  // Non-secret display aid for the admin UI (e.g. last 4 chars, or a fixed
+  // mask like '••••'). Nullable: a credential can exist before anyone has
+  // decided how to hint it, and some secrets have no meaningful suffix to show.
+  hint            String?
+  // Human-readable description for the admin UI. Nullable for the same reason.
+  label           String?
+  updatedByUserId String?  @map("updated_by_user_id") @db.Uuid
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt       DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  // Relations
+  //
+  // onDelete: SetNull — deliberately NOT Cascade. A credential is
+  // infrastructure shared by whatever consumer looks it up by (purpose,
+  // name); the admin who last set it is provenance, not an owner the
+  // credential's lifetime should depend on. Offboarding the user who last
+  // typed in the SMTP password must not silently delete a working SMTP
+  // configuration — that failure mode (email breaks because someone left
+  // the company) is exactly what this FK behaviour avoids. The credential
+  // outliving its last editor is correct; losing it is not.
+  updatedByUser User? @relation("CredentialUpdatedBy", fields: [updatedByUserId], references: [id], onDelete: SetNull)
+
+  @@unique([purpose, name])
+  @@map("credentials")
+}
+
+// =============================================================================
+// Notification Deliveries (issue #125, epic #109)
+// =============================================================================
+//
+// One row per delivery ATTEMPT of an event (#121, `notification-events.ts`)
+// over a channel, to a recipient. This is the answer to "did the user
+// actually get it?" — the first question asked when something goes wrong,
+// and epic #109's own success criterion 7: a delivery record exists for
+// every attempt, with the provider's message id or error.
+//
+// -----------------------------------------------------------------------------
+// eventKey — plain string, NOT a foreign key
+// -----------------------------------------------------------------------------
+// Events are declared in code (`notification-events.ts`, #121), not in a
+// database table — `findEvent()` there returns `undefined` rather than
+// throwing for a key it doesn't recognize, precisely because callers may be
+// holding a key that came from persisted data written before the event was
+// renamed or removed. An FK into an "events" table would force a migration
+// (and a backfill, or a placeholder row) every time the registry changes,
+// which is exactly the coupling #121 built the registry to avoid. A delivery
+// record must outlive the event definition that produced it.
+//
+// -----------------------------------------------------------------------------
+// channel — ALSO a plain string, not a Prisma enum (deliberately asymmetric
+// with `status` below)
+// -----------------------------------------------------------------------------
+// `NotificationChannel` in `notification-events.ts` is explicitly derived
+// from a plain array (`NOTIFICATION_CHANNELS`) so that adding `'push'` later
+// (epic #109 reserves it) costs one edit to that array, not a migration. A
+// Postgres enum on this column would quietly reintroduce that migration: the
+// set of valid channels would live in two places — the code registry and
+// this column's type — and adding one would require updating both. The
+// registry is the single source of truth for what channels exist; this
+// column just records which one a given attempt used.
+//
+// -----------------------------------------------------------------------------
+// status — IS a Prisma enum
+// -----------------------------------------------------------------------------
+// Unlike eventKey/channel, `status` is not registry data — it is this
+// table's own delivery state machine, owned entirely by the dispatcher, and
+// nothing outside this table grows it. It follows the convention this schema
+// already uses for exactly this shape of field (`DeviceCodeStatus`,
+// `StorageObjectStatus`): a small, closed, code-owned set of states is a
+// Postgres enum here, so the database itself rejects a delivery row written
+// with anything other than queued/sent/failed.
+//
+// -----------------------------------------------------------------------------
+// userId — nullable; recipient — the actual destination used
+// -----------------------------------------------------------------------------
+// `allowlist.invitation` (#121) is sent to an email address with no user
+// account yet (#128) — there is no user row to point to, so `userId` must be
+// nullable. `recipient` is what makes that case complete: it is the actual
+// destination address used for THIS delivery, captured independently of the
+// user relation, so the record stands on its own with `userId` null, and
+// stays historically accurate even if the user's email later changes.
+//
+// -----------------------------------------------------------------------------
+// onDelete: SetNull on the user relation
+// -----------------------------------------------------------------------------
+// Matches the audit-trail precedent this schema already sets for
+// `AuditEvent.actorUserId` and `Credential.updatedByUser`: a delivery record
+// is a history of what the application sent, and deleting a user account
+// should not retroactively erase the evidence of what was sent to them —
+// particularly for `security.*` events (#121), which are exactly the ones an
+// incident review is most likely to need after the account in question no
+// longer exists. Nothing is lost by nulling the FK: `recipient` already
+// carries the actual destination independently of it. A GDPR-style request
+// to purge one user's PII is a deliberate, targeted scrub of these rows (and
+// `recipient` specifically) — not something an ON DELETE clause should do
+// silently and irreversibly as a side effect of an unrelated user-deletion
+// path elsewhere in the app.
+//
+// -----------------------------------------------------------------------------
+// Indexes — exactly the two queries this table is known to serve
+// -----------------------------------------------------------------------------
+// Every index is a write cost on a table that grows with every notification
+// sent, so nothing speculative is added beyond what #125 itself names:
+//   - [userId, eventKey]: "did this user get this event?" — an equality
+//     filter on both columns, from an account's delivery history view.
+//   - [status, createdAt]: "what failed recently?" — status = 'failed'
+//     filtered and ordered by recency, for on-call triage.
+model NotificationDelivery {
+  id                String                     @id @default(uuid()) @db.Uuid
+  eventKey          String                     @map("event_key")
+  userId            String?                    @map("user_id") @db.Uuid
+  recipient         String
+  channel           String
+  status            NotificationDeliveryStatus @default(queued)
+  providerMessageId String?                    @map("provider_message_id")
+  // Provider errors (SMTP rejections, SES API errors, ...) have no useful
+  // length bound — @db.Text, same reasoning as Credential.secret above.
+  error             String?                    @db.Text
+  createdAt         DateTime                   @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt         DateTime                   @updatedAt @map("updated_at") @db.Timestamptz
+
+  // Relations
+  user User? @relation("UserNotificationDeliveries", fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId, eventKey])
+  @@index([status, createdAt])
+  @@map("notification_deliveries")
+}
+
+enum NotificationDeliveryStatus {
+  queued
+  sent
+  failed
+}
+
+// =============================================================================
+// Notifications — the in-app notification centre store (issue #127, epic #109)
+// =============================================================================
+//
+// THE PRIMARY SURFACE OF THE BROWSER CHANNEL, NOT A CACHE OF WHAT SSE SENT.
+//
+// That ordering is the whole reason this table exists. `Notification`
+// permission is denied by a large share of users, and once denied it is
+// effectively permanent — the page cannot re-prompt. A browser channel that
+// existed only as an OS toast would therefore not exist at all for those
+// accounts. So the durable, per-user list is the feature; the SSE stream
+// (`notification-stream.service.ts`) makes it live, and the native toast is a
+// decoration on top that degrades to nothing.
+//
+// Read the second consequence too: SSE IS NOT A DELIVERY GUARANTEE. Events
+// published while a tab is disconnected are lost — `EventSource` reconnects
+// but replays nothing, and the per-process subscriber registry does not fan
+// out across replicas. Because rows land here first and the stream is
+// published second, a client that refetches this table on (re)connect sees
+// everything regardless. That is the designed recovery path, and it is why
+// there is no event-replay machinery anywhere in #127.
+//
+// -----------------------------------------------------------------------------
+// HOW THIS DIFFERS FROM `notification_deliveries` (#125), WHICH IS NOT THE SAME
+// TABLE WITH A DIFFERENT NAME
+// -----------------------------------------------------------------------------
+//
+// `notification_deliveries` is the OPERATOR's record: one row per ATTEMPT, per
+// channel, answering "did we try, and what did the provider say?". It records
+// email attempts too, it keeps rows for recipients with no account, and it is
+// never shown to the user it is about.
+//
+// `notifications` is the USER's inbox: one row per thing they should see, only
+// for the browser channel, only for real accounts, with read state they own.
+// An email send writes a delivery row and no row here — there is nothing for
+// the bell to show about a message that went to their mailbox.
+//
+// Merging the two would mean either showing users provider error strings, or
+// filtering an operator table by channel on every bell render. They answer
+// different questions for different audiences and are kept apart.
+// =============================================================================
+
+model Notification {
+  id     String @id @default(uuid()) @db.Uuid
+  // NOT NULL, unlike NotificationDelivery.userId. An inbox belongs to an
+  // account by definition; there is no "notification centre" for a recipient
+  // with no login (#128's `allowlist.invitation` case), which is exactly why
+  // the browser channel's resolveTo returns null for them.
+  userId String @map("user_id") @db.Uuid
+
+  // Plain string, NOT a foreign key — the same reasoning written out at length
+  // on NotificationDelivery.eventKey. Events are declared in code
+  // (`notification-events.ts`, #121) and `findEvent` returns undefined rather
+  // than throwing precisely because persisted rows outlive their definitions.
+  // An FK would force a migration every time the registry changed.
+  eventKey String @map("event_key")
+
+  // RENDERED AT WRITE TIME, not at read time. The alternative — store the
+  // event payload as JSONB and render in the bell — means an old row renders
+  // through today's template, so editing copy silently rewrites history and a
+  // removed event's rows become unrenderable. What the user was told is a
+  // fact; it is frozen here.
+  title String
+  // @db.Text for the same reason as Credential.secret and
+  // NotificationDelivery.error: a rendered body has no meaningful length
+  // bound, and silently truncating what a user was told is worse than storing
+  // a long string. (Postgres `text` has no performance penalty over `varchar`.)
+  body String @db.Text
+
+  // Where the bell should send the user, as a ROOT-RELATIVE PATH ("/settings",
+  // "/admin/users?id=…"), never an absolute URL.
+  //
+  // THIS IS A SECURITY BOUNDARY, ENFORCED IN CODE AT WRITE TIME
+  // (`browser-notification.channel.ts`). The web client will put this value in
+  // an href or a router navigation; an absolute URL makes every notification a
+  // potential open redirect, and a `javascript:` scheme makes it script
+  // execution in the app's own origin. The column cannot express that
+  // constraint, so the writer enforces it and drops a link it cannot vouch
+  // for rather than storing it and hoping the client is careful.
+  //
+  // Nullable: most notifications have nowhere specific to go.
+  link String?
+
+  // A TIMESTAMP, NOT A BOOLEAN. `readAt IS NULL` answers "is it unread?" just
+  // as well as `read = false` does, and additionally answers "when did they
+  // see it?" — which is the question asked when someone reports acting late on
+  // a security alert. A boolean would have to grow this column later anyway.
+  readAt DateTime? @map("read_at") @db.Timestamptz
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  // NO `updatedAt`. The only mutation this row ever undergoes is being marked
+  // read, and `readAt` already timestamps that with more precision than an
+  // `updatedAt` would carry. A second, redundant answer to "when did this
+  // change?" is a second thing to keep consistent for no reader.
+
+  // Relations
+  //
+  // onDelete: Cascade — deliberately the OPPOSITE of
+  // NotificationDelivery.user's SetNull, and the contrast is the point. A
+  // delivery record is an audit trail that must outlive the account it
+  // describes ("did we email this person before they were offboarded?"). An
+  // inbox is personal data with no reader once the account is gone: keeping
+  // orphaned rows would retain rendered titles and bodies about a deleted user
+  // forever, and `userId` is NOT NULL here so SetNull is not even expressible.
+  user User @relation("UserNotifications", fields: [userId], references: [id], onDelete: Cascade)
+
+  // The two queries this table actually serves, and nothing speculative.
+  //
+  // 1. THE UNREAD BADGE: `where { userId, readAt: null }`, run on every bell
+  //    render and on every SSE (re)connect — by far the hottest query here.
+  //    (Ideally a partial index `WHERE read_at IS NULL`, which Prisma cannot
+  //    express declaratively; the composite covers the same predicate and
+  //    stays in one place the schema owns.)
+  @@index([userId, readAt])
+  // 2. THE RECENT LIST: `where { userId } orderBy { createdAt: desc }`.
+  //    `sort: Desc` matters — a plain ascending index makes Postgres walk it
+  //    backwards for the newest page, which is the only page anyone loads.
+  @@index([userId, createdAt(sort: Desc)])
+  @@map("notifications")
+}
