@@ -66,6 +66,7 @@ import {
   FormControlLabel,
   FormHelperText,
   FormLabel,
+  Paper,
   Stack,
   TextField,
   Typography,
@@ -338,19 +339,27 @@ export function JourneyProfileForm({
           />
 
           {/* The resolution, said out loud. Silently choosing what a learner
-              will be asked to study is the failure this prevents. */}
-          <Box sx={{ mt: 1.5 }} aria-live="polite">
+              will be asked to study is the failure this prevents.
+
+              A `status` region and NOT an `Alert`: nothing has gone wrong, and
+              an assertive role here would interrupt a screen reader mid-form
+              every time a date digit changed. Announced politely, so the answer
+              still reaches someone who cannot see it appear. */}
+          <Box sx={{ mt: 1.5 }} role="status" aria-live="polite">
             {previewVersion ? (
-              <Alert severity="info" icon={false}>
-                <AlertTitle sx={{ mb: 0.5 }}>
+              <Paper
+                variant="outlined"
+                sx={{ p: 1.5, bgcolor: 'action.hover' }}
+              >
+                <Typography variant="subtitle2" component="p">
                   Your test: {previewVersion.label}
-                </AlertTitle>
-                <Typography variant="body2">
+                </Typography>
+                <Typography variant="body2" color="text.secondary">
                   {seniorExemption
                     ? `${previewVersion.seniorQuestionsAsked} questions at the interview, and ${previewVersion.seniorPassThreshold} correct to pass, with the accommodation below.`
                     : `${previewVersion.questionsAsked} questions at the interview, and ${previewVersion.passThreshold} correct to pass.`}
                 </Typography>
-              </Alert>
+              </Paper>
             ) : (
               <Typography variant="body2" color="text.secondary">
                 Once you add your filing date, we will show you here which test
