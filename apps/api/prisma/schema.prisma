@@ -41,6 +41,7 @@ model User {
   notificationDeliveries    NotificationDelivery[] @relation("UserNotificationDeliveries")
   notifications             Notification[]   @relation("UserNotifications")
   aiUsageEvents             AiUsageEvent[]   @relation("UserAiUsageEvents")
+  learnerProfile            LearnerProfile?
 
   @@map("users")
 }
@@ -726,4 +727,139 @@ model AiUsageEvent {
   // the same leading `userId` before grouping.
   @@index([userId, createdAt(sort: Desc)])
   @@map("ai_usage_events")
+}
+
+// =============================================================================
+// Journey Shell: Learner Profile & Civics Test Versions (issue #62, epic #50)
+// =============================================================================
+//
+// Full design: docs/specs/journey-shell.md §3. This comment is the pointer,
+// not a restatement — read that section (and §11's rejected alternatives)
+// before changing anything here.
+
+// -----------------------------------------------------------------------------
+// stage — a REAL Postgres enum, unlike `NotificationDelivery.eventKey` or
+// `AiUsageEvent.roleKey`/`provider`/`model`, which are all plain strings on
+// purpose.
+// -----------------------------------------------------------------------------
+//
+// Those columns are open sets a code registry is meant to extend with no
+// migration, and a historical row must keep reading correctly after the
+// registry entry that produced it is renamed or removed. The eight journey
+// stages are the opposite: `VISION.md`'s named, CLOSED sequence. A ninth
+// stage is a product decision on the order of rewriting the journey model,
+// not a routine registry addition — it should cost the migration a real enum
+// requires, and the database should refuse a value no stage machine emits
+// rather than accept whatever an application bug happens to write.
+// journey-shell.md §1, §3.2, §11.
+enum JourneyStage {
+  uncertain
+  oriented
+  learning
+  remembering
+  speaking
+  practicing
+  performing
+  ready
+}
+
+// A lookup table with real, seeded content-shape rows — not a settings
+// value, because `LearnerProfile.testVersionCode` needs a foreign key target,
+// and E8's interview engine reads pass rules FROM A ROW, not from a constant
+// duplicated at each call site. journey-shell.md §3.1.
+//
+// `code` is a real primary key, not a Prisma enum: the seed already gives
+// referential integrity through the foreign key, and a future test revision
+// is a row insert here, not a schema-level `ALTER TYPE`.
+model CivicsTestVersion {
+  code  String @id
+  label String
+
+  questionsAsked       Int @map("questions_asked")
+  passThreshold        Int @map("pass_threshold")
+  seniorQuestionsAsked Int @map("senior_questions_asked")
+  seniorPassThreshold  Int @map("senior_pass_threshold")
+
+  // Nullable — populated once E2 loads the versioned, provenance-tracked
+  // question content and hashes it. Null immediately after E1's seed,
+  // because E1 seeds the test-version *shape*, not the question bank.
+  contentHash String? @map("content_hash")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  // Relations
+  learnerProfiles LearnerProfile[]
+
+  @@map("civics_test_versions")
+}
+
+// One row per user, created at account creation (or lazily on first
+// orientation read) with every field at its default until orientation is
+// completed. Shape mirrors `UserSettings`'s `userId @unique … onDelete:
+// Cascade` pattern above. journey-shell.md §3.2.
+model LearnerProfile {
+  id String @id @default(uuid()) @db.Uuid
+
+  // One profile per user; deleting the user deletes the profile — this IS a
+  // real foreign key (unlike `Credential`'s `(purpose, name)` address), so
+  // there is no orphaned-row hazard to design around.
+  userId String @unique @map("user_id") @db.Uuid
+
+  stage JourneyStage @default(uncertain)
+
+  // A calendar date, not a moment — an interview is booked for a day, not an
+  // instant, and shifting the learner's `timezone` later must not silently
+  // move which day this is. `@db.Date`, deliberately not `@db.Timestamptz`.
+  interviewDate DateTime? @map("interview_date") @db.Date
+
+  // Nullable until orientation. MUST admit `DC`, `PR`, `GU`, `VI`, `AS`, `MP`
+  // alongside the 50 states — the 2008 test's accepted answer for "who are
+  // your state's senators" covers residents of these territories explicitly
+  // (they have none), so this column has to hold a real value for them from
+  // day one. See `apps/api/src/common/constants/us-states.constants.ts`.
+  stateCode String? @map("state_code") @db.Char(2)
+
+  // Nullable, and null means "not yet resolved" — not knowable before the
+  // learner supplies a filing date, so a non-null column would force a
+  // default onto every profile that is an unverified claim about that
+  // learner (§10's honesty rule). Resolved once, at orientation submit time,
+  // from the filing date the learner enters — never recomputed live.
+  // `onDelete: Restrict` — a test version cannot be deleted while any
+  // profile still references it.
+  testVersionCode String? @map("test_version_code")
+
+  seniorExemption Boolean @default(false) @map("senior_exemption")
+
+  // "Five minutes should matter" is the product's stated floor, not a
+  // placeholder default nobody chose on purpose.
+  dailyGoalMinutes Int @default(5) @map("daily_goal_minutes")
+
+  // A BCP-47 tag. Governs only AI *explanations* — localizing the
+  // application chrome itself is out of scope; questions and official
+  // answers stay in English.
+  explanationLanguage String @default("en") @map("explanation_language")
+
+  // An IANA zone name, captured at orientation (from the browser,
+  // confirmable by the learner). Default is `UTC`, not null: a lazily
+  // created profile still needs a defined zone for E7's local-day rule, and
+  // `UTC` is the honest "nobody has told us yet" value that orientation
+  // replaces — unlike `stateCode` or `testVersionCode`, there is no learner
+  // claim being fabricated here, since every instant genuinely does fall on
+  // some UTC calendar day.
+  timezone String @default("UTC")
+
+  // Null until orientation is submitted. This is the literal field
+  // `RequireOrientation` checks.
+  orientationCompletedAt DateTime? @map("orientation_completed_at") @db.Timestamptz
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  // Relations
+  user        User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  testVersion CivicsTestVersion? @relation(fields: [testVersionCode], references: [code], onDelete: Restrict)
+
+  @@index([testVersionCode])
+  @@map("learner_profiles")
 }
