@@ -20,7 +20,10 @@ services:
   nginx:
     image: nginx:1.30-alpine
     ports:
-      - "3535:80"
+      # Overridable per deployment when several apps share one VPS host
+      # (each app picks its own slot in the shared nginx map). Defaults to
+      # 3535 for local development.
+      - "${NGINX_PORT:-3535}:80"
     volumes:
       - ../nginx/nginx.conf:/etc/nginx/nginx.conf:ro
     depends_on:
@@ -81,6 +84,12 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-info}
     networks:
       - app-network
+      # Shared external network carrying the central postgres container
+      # (reachable as hostname `postgres`) on VPS deployments where several
+      # apps share one Postgres instance. Required wherever .env sets
+      # POSTGRES_HOST=postgres. Unused for local development, where
+      # POSTGRES_HOST typically points elsewhere.
+      - devnet
 
   # ---------------------------------------------------------------------------
   # Web - React Frontend
@@ -98,4 +107,10 @@ services:
 networks:
   app-network:
     driver: bridge
+  # Created once per host with `docker network create devnet`. The central
+  # postgres container shared with other apps on that host lives here and
+  # resolves as hostname `postgres`.
+  devnet:
+    external: true
+    name: devnet
 
