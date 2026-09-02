@@ -5,8 +5,10 @@ import {
 } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 
+import { AiDispatchService } from '../ai/ai-dispatch.service';
 import { Clock } from '../common/clock/clock';
 import { PrismaService } from '../prisma/prisma.service';
+import { GRADING_SCHEMA_NAME } from './grading';
 import { computeSummary, PracticeService } from './practice.service';
 import type { CreatePracticeSessionInput } from './dto/create-practice-session.dto';
 import type { RecordAttemptInput } from './dto/record-attempt.dto';
@@ -149,6 +151,16 @@ describe('PracticeService', () => {
   let service: PracticeService;
   let prisma: any;
   let clock: { now: jest.Mock; calendarDateIn: jest.Mock };
+  /**
+   * The grading ladder's second rung, as a double.
+   *
+   * DEFAULTS TO `unavailable`, which is the state of every deployment whose
+   * admin has not configured AI and of every learner without a personal key —
+   * and therefore the state every test written before #116 was implicitly
+   * asserting against. Rung 3 keeps the deterministic result, so those tests go
+   * on asserting exactly what they always did.
+   */
+  let dispatch: { runStructured: jest.Mock };
 
   beforeEach(async () => {
     prisma = {
@@ -195,11 +207,22 @@ describe('PracticeService', () => {
       calendarDateIn: jest.fn(),
     };
 
+    dispatch = {
+      runStructured: jest
+        .fn()
+        .mockResolvedValue({ status: 'unavailable', cause: 'ai_disabled' }),
+    };
+
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         PracticeService,
         { provide: PrismaService, useValue: prisma },
         { provide: Clock, useValue: clock },
+        // THE DISPATCHER, NOT A PROVIDER AND NOT A CREDENTIAL STORE. The service
+        // can only be constructed with this one AI dependency, which is the
+        // module-level property `ai-evaluation.md` §3 asks for, checked by the
+        // compiler on every test that stands the service up.
+        { provide: AiDispatchService, useValue: dispatch },
       ],
     }).compile();
 

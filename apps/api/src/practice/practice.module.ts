@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 
+import { AiModule } from '../ai/ai.module';
 import { PrismaModule } from '../prisma/prisma.module';
 import { PracticeController } from './practice.controller';
 import { PracticeService } from './practice.service';
@@ -28,6 +29,21 @@ import { PracticeService } from './practice.service';
  * this module, so there is no second controller with a different gate the way
  * `CivicsModule` needs one.
  *
+ * `AiModule` IS imported, and the import line is the point (issue #116, E4).
+ * That module is deliberately not `@Global()` — its own header says why: it can
+ * reach a plaintext-returning credential service, so the set of modules able to
+ * reach it should stay a list a person can read, which means every consumer
+ * writes this import and shows up in a diff. This is that diff.
+ *
+ * What that import buys is `AiDispatchService` and nothing else. `AiModule`
+ * exports the provider token too, and `PracticeService` must never inject it:
+ * a caller holding a provider resolves its own model id and its own key, which
+ * reopens both holes `ai-evaluation.md` §3 closed — a per-answer grading call
+ * bound to whatever model an admin configured for a costlier role, and an
+ * inference path that could read a credential other than the caller's own. The
+ * grading ladder asks for a ROLE and gets whatever the administrator bound to
+ * it.
+ *
  * No `NotificationsModule` and no `AuditModule`-equivalent write: answering a
  * civics question notifies nobody and is not a privileged act
  * (practice-sessions.md §10). `PracticeService` is exported because E4 (#53)
@@ -35,7 +51,7 @@ import { PracticeService } from './practice.service';
  * are a service injection, not a new copy of the loop.
  */
 @Module({
-  imports: [PrismaModule],
+  imports: [PrismaModule, AiModule],
   controllers: [PracticeController],
   providers: [PracticeService],
   exports: [PracticeService],

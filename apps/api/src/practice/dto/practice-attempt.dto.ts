@@ -1,6 +1,7 @@
 import { createZodDto } from 'nestjs-zod';
 import { z } from 'zod';
 
+import { gradingVerdictSchema, GRADING_FAILURE_CAUSES } from '../grading';
 import { practiceQuestionSchema } from './practice-question.dto';
 
 // =============================================================================
@@ -165,6 +166,58 @@ export const practiceAttemptSchema = z.object({
 
   /** Milliseconds, or null when the client could not report one. Never 0. */
   durationMs: z.number().int().nullable(),
+
+  // ---------------------------------------------------------------------------
+  // The AI grading rung's output — all three NULL TOGETHER (issue #116, E4)
+  // ---------------------------------------------------------------------------
+  //
+  // A DETERMINISTICALLY GRADED ATTEMPT CARRIES NULL FOR ALL THREE. That is the
+  // normal case, not a degraded one: `gradingMethod: 'exact'` (a match, a skip,
+  // or a miss whose grading call was unavailable or failed) and
+  // `gradingMethod: 'self'` never produce any of these values.
+  //
+  // Nullable rather than optional, for the reason the whole ladder exists: a
+  // client that received an ABSENT field could reasonably render a placeholder
+  // cause or a "why did I miss this?" panel with nothing behind it, and the one
+  // thing this product must not do is show a learner a diagnosis of themselves
+  // that no grader ever made. `null` is a value a client can branch on; a
+  // missing key is a shape it has to guess about.
+
+  /**
+   * Why the response missed, when a grader ran — never a guess.
+   *
+   * NULL AND `unknown` ARE DIFFERENT ANSWERS, and both reach the wire. Null
+   * means no grader ran; `unknown` means one ran and honestly could not tell
+   * (schema.prisma, `PracticeFailureCause`). A client collapsing them would be
+   * treating "never asked" and "asked and told nothing conclusive" as the same
+   * fact about a learner.
+   *
+   * All six values are declared because the column has six. `misheard` and
+   * `nervous` are E9's and E8's — nothing in this epic writes either, and
+   * `grading.ts` coerces a model that offers one to `unknown` — but a row from
+   * a later epic must not be unrenderable by a client built today.
+   */
+  failureCause: z.enum(GRADING_FAILURE_CAUSES).nullable(),
+
+  /**
+   * The grader's structured verdict, verbatim, and nothing else.
+   *
+   * THE SAME SCHEMA THE MODEL'S REPLY WAS VALIDATED AGAINST — imported, not
+   * restated — so the shape stored, the shape validated and the shape served
+   * cannot drift into three shapes. Never the prompt, never a raw completion:
+   * see the column's own comment in schema.prisma.
+   */
+  aiFeedback: gradingVerdictSchema.nullable(),
+
+  /**
+   * The `ai_usage_events` row this attempt's grading call produced.
+   *
+   * Present so a verdict can be traced to what it cost. Null both when no call
+   * was made and when the usage write itself failed — the attempt is the
+   * evidence, the usage row is accounting for it, and the evidence is never
+   * held back for the accounting.
+   */
+  aiUsageEventId: z.uuid().nullable(),
 
   /** When the attempt resolved, from the server's own `Clock`. */
   answeredAt: z.iso.datetime(),

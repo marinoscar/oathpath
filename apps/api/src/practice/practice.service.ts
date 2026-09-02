@@ -7,6 +7,8 @@ import {
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 
+import { AiDispatchService } from '../ai/ai-dispatch.service';
+import type { AiModelRole } from '../ai/ai-model-roles';
 import {
   currentAnswerWhere,
   resolveAnswerScope,
@@ -17,6 +19,15 @@ import {
 import { Clock } from '../common/clock/clock';
 import { PrismaService } from '../prisma/prisma.service';
 import { matchAnswer, type AnswerMatch } from './answer-matching';
+import {
+  buildGradingPrompt,
+  gradingVerdictSchema,
+  groundVerdict,
+  persistedFailureCause,
+  GRADING_SCHEMA_NAME,
+  type GradingVerdict,
+  type PersistableFailureCause,
+} from './grading';
 import { selectQuestions } from './question-selection';
 import type { CreatePracticeSessionInput } from './dto/create-practice-session.dto';
 import type { RecordAttemptInput } from './dto/record-attempt.dto';
@@ -82,6 +93,43 @@ import type {
 // rather than sleeping through one (practice-sessions.md §11).
 //
 // -----------------------------------------------------------------------------
+// THE GRADING LADDER, AND WHY ITS TOP RUNG CAN NEVER BREAK A PRACTICE SESSION
+// -----------------------------------------------------------------------------
+//
+// Grading is three rungs, cheapest first (docs/specs/ai-evaluation.md §6):
+//
+//   1. `matchAnswer` — free, deterministic, tried first, and a HIT
+//      SHORT-CIRCUITS: no AI call is made at all. `gradingMethod: 'exact'`.
+//   2. On a miss, one `AiDispatchService.runStructured(userId, 'grader', ...)`
+//      call with the grounded prompt from `grading.ts`. On a schema-valid
+//      reply: `gradingMethod: 'ai'`, the outcome from the model's verdict, and
+//      `failureCause` / `aiFeedback` / `aiUsageEventId` persisted with it.
+//   3. Anything else — `unavailable`, `failed`, a reply that did not satisfy
+//      the schema — keeps rung 1's verdict, writes `gradingMethod: 'exact'`,
+//      writes none of the three AI columns, and returns a NORMAL 200 with the
+//      accepted answers.
+//
+// Rung 3 is the rung with the product decision in it. An administrator who has
+// not finished configuring AI, a learner who has not stored a personal key, and
+// an OpenAI account that has run out of quota must all produce the SAME thing a
+// learner saw before this epic existed: "not matched, here is the answer." A
+// grading path that 500s the moment a key expires turns a billing event into an
+// outage, mid-session, for someone practising for an interview.
+//
+// -----------------------------------------------------------------------------
+// THIS MODULE TOUCHES NO KEY AND NO CREDENTIAL
+// -----------------------------------------------------------------------------
+//
+// It holds an `AiDispatchService` and nothing else: no provider, no model id, no
+// `CredentialsService`, no API key in any form. Which model serves the `grader`
+// role is the administrator's setting, whose key is spent is the caller's own
+// credential, and both are resolved inside the dispatcher — `ai-evaluation.md`
+// §3's rule that a caller cannot name its own model, so that a per-answer
+// grading call can never be bound to the expensive model an admin configured for
+// something else. `practice.service.spec.ts` asserts the absence by reading this
+// directory's own sources.
+//
+// -----------------------------------------------------------------------------
 // NO AUDIT ROWS
 // -----------------------------------------------------------------------------
 //
@@ -123,6 +171,36 @@ interface PracticeProfile {
   seniorExemption: boolean;
 }
 
+/**
+ * The role this module dispatches under, and the ONLY one it may.
+ *
+ * Typed as `AiModelRole` rather than left as a bare string so that removing or
+ * renaming the role in `ai-model-roles.ts` fails this file's build. The
+ * alternative — a string that no longer names a declared role — resolves to
+ * `capability_unsupported` at runtime, which reads as "the provider cannot do
+ * this" and would send every grading call down rung 3 with a plausible-looking
+ * reason nobody would question.
+ */
+const GRADER_ROLE: AiModelRole = 'grader';
+
+/**
+ * What a completed grading call contributes to the attempt row.
+ *
+ * FOUR FIELDS, WRITTEN TOGETHER OR NOT AT ALL. They describe one event — a
+ * grader ran and answered — and a row carrying some of them would be a row
+ * whose `failureCause` cannot be traced to the call that produced it.
+ */
+interface AiGrading {
+  /** The model's verdict, as the attempt's `outcome`. */
+  outcome: GradingVerdict['verdict'];
+  /** Null on a `correct` verdict — nothing failed, so nothing to explain. */
+  failureCause: PersistableFailureCause | null;
+  /** The structured reply, coerced, and nothing else. */
+  aiFeedback: GradingVerdict;
+  /** The `ai_usage_events` row this call wrote, when the write succeeded. */
+  aiUsageEventId: string | null;
+}
+
 @Injectable()
 export class PracticeService {
   private readonly logger = new Logger(PracticeService.name);
@@ -130,6 +208,9 @@ export class PracticeService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly clock: Clock,
+    // THE ONE DOOR TO A MODEL. Injected as the dispatcher, never as a provider:
+    // see the header, and `ai-evaluation.md` §3.
+    private readonly dispatch: AiDispatchService,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -439,20 +520,28 @@ export class PracticeService {
   /**
    * Grade one response and record it.
    *
-   * The grading path is exactly practice-sessions.md §7: resolve the question's
+   * The grading path is practice-sessions.md §7 and, since #116,
+   * ai-evaluation.md §6's second rung on top of it: resolve the question's
    * currently accepted answers through `civics/answer-resolution.ts` — the same
    * pure functions the civics read API uses, never a second derivation of
-   * "which answers are current" — and hand them to `matchAnswer`, which is the
-   * ENTIRE grading decision this epic makes. No edit distance, no similarity
-   * score, no substring containment; a near miss is `incorrect` here and it is
-   * E4's grader that is entitled to overturn that with reasoning (§8).
+   * "which answers are current" — hand them to `matchAnswer`, and escalate a
+   * MISS (and only a miss) to the semantic grader. No edit distance and no
+   * similarity score is added to the deterministic rung to do it: a near miss
+   * is still `incorrect` there, and it is the grader, holding the question and
+   * the accepted answers, that is entitled to overturn that with reasoning.
    *
-   * Four columns are written with one value each, and each is a fact that
+   * Three columns are written with one value each, and each is a fact that
    * cannot be reconstructed later if it is not captured now (§2.2):
    * `source: 'practice'` (E8 writes `mock_interview` into this same table),
    * `inputMode: 'typed'` and `promptMode: 'read'` (E9 wires spoken and heard —
    * nothing can tell after the fact whether an old typed answer was typed or
-   * transcribed), and `gradingMethod: 'exact'`.
+   * transcribed).
+   *
+   * `gradingMethod` is the column that stopped having one value: `'ai'` when
+   * the grader ran and answered, `'exact'` for every other attempt — including
+   * one whose grading call was unavailable or failed. Rung 3 writes `'exact'`
+   * rather than an "attempted-and-failed" value (§6) because it is the truth
+   * about the row: the deterministic matcher is what decided this outcome.
    *
    * **`gradingMethod: 'exact'` on a skip deserves its own sentence**, because
    * §9.1's prose says a skip has `gradingMethod: null` and the shipped column
@@ -538,6 +627,18 @@ export class PracticeService {
 
     const { outcome, responseText } = this.grade(input, status, answers);
 
+    // RUNG 2, AND ONLY WHEN RUNG 1 MISSED. `escalateToGrader` returns null for
+    // every attempt that must not reach a model — including a match, which is
+    // the short-circuit `ai-evaluation.md` §6 rung 1 requires — and null for
+    // every way the call can fail, which is rung 3's fallback. Either way the
+    // deterministic result below still stands.
+    const aiGrading = await this.escalateToGrader(
+      userId,
+      question.prompt,
+      answers,
+      { status, outcome, responseText },
+    );
+
     const attempt = await this.prisma.practiceAttempt.create({
       data: {
         userId,
@@ -547,8 +648,31 @@ export class PracticeService {
         inputMode: 'typed',
         promptMode: 'read',
         responseText,
-        outcome,
-        gradingMethod: 'exact',
+        // The model's verdict when one was reached, rung 1's otherwise. The two
+        // are read together with `gradingMethod` and never merged: "was it
+        // right" and "how do we know" stay independent facts (§9).
+        outcome: aiGrading?.outcome ?? outcome,
+        gradingMethod: aiGrading ? 'ai' : 'exact',
+        // THE THREE AI COLUMNS ARE OMITTED ENTIRELY WHEN NO GRADER RAN, rather
+        // than written as null. Both leave the same NULL in Postgres, but a
+        // nullable `Json` column takes `Prisma.DbNull` rather than `null`, and a
+        // conditional spread keeps this write free of a Prisma-specific null
+        // sentinel that a reader would have to decode. The absence IS the
+        // meaning here: null in all three says no grader ever looked at this
+        // response, which is a different fact from `failureCause: 'unknown'`
+        // (schema.prisma, `PracticeFailureCause`).
+        ...(aiGrading
+          ? {
+              failureCause: aiGrading.failureCause,
+              // THE PARSED VERDICT ONLY — never the prompt, never a raw
+              // completion. The prompt is reconstructable from `responseText`
+              // plus `answerSnapshot` at any time, and a raw completion is
+              // exactly the unbounded provider text this column's own comment
+              // excludes.
+              aiFeedback: aiGrading.aiFeedback as unknown as Prisma.InputJsonValue,
+              aiUsageEventId: aiGrading.aiUsageEventId,
+            }
+          : {}),
         revealed: input.revealed,
         hintUsed: input.hintUsed,
         // Absent stays absent. `0` would be a claim that the learner answered
@@ -961,6 +1085,136 @@ export class PracticeService {
 
     return { outcome: match.outcome, responseText };
   }
+
+  /**
+   * Rung 2 of the ladder: ask the `grader` role whether the response MEANS one
+   * of the accepted answers.
+   *
+   * Returns `null` for "keep the deterministic result", which is both the
+   * short-circuit (rung 1 matched, so no call is made) and every failure (rung
+   * 3). One return value for both because from the row's point of view they are
+   * the same fact: no AI opinion is attached to this attempt.
+   *
+   * ---------------------------------------------------------------------------
+   * FOUR REASONS NOT TO CALL A MODEL AT ALL, CHECKED BEFORE ANY OF THEM IS
+   * ---------------------------------------------------------------------------
+   *
+   *  1. **The deterministic rung already said `correct`.** `ai-evaluation.md`
+   *     §6's short-circuit, and the reason it is a rule rather than an
+   *     optimisation: a verified string match is a stronger verdict than a
+   *     model's opinion, so there is nothing to ask, and asking anyway would
+   *     spend a learner's own API credit on every right answer they give.
+   *
+   *  2. **The attempt was `skipped`.** There is no sentence to read. A grader
+   *     handed an empty response can only report `not_known`, which the skip
+   *     already says more accurately and for free.
+   *
+   *  3. **`state_required`.** The answer list is EMPTY — the learner has no
+   *     state on their profile, so nothing could be resolved — and a prompt
+   *     with no accepted answers asks a model to judge correctness from its own
+   *     knowledge of U.S. civics, which is the one thing §7 forbids. The
+   *     grounding rule is not a wording; it is the presence of the answers.
+   *
+   *  4. **A blank response.** Whitespace is not a sentence either, and
+   *     `matchAnswer` has already reported it `incorrect`.
+   *
+   * ---------------------------------------------------------------------------
+   * NOTHING THROWN FROM HERE EVER REACHES THE LEARNER
+   * ---------------------------------------------------------------------------
+   *
+   * `runStructured` never throws — it returns `unavailable` / `failed` values
+   * (`ai-evaluation.md` §3) — so the `try` is not there for it. It is there for
+   * THIS method's own code: `buildGradingPrompt` throws on an empty answer list,
+   * and a future edit to the guards above could reopen that path. Rung 3 already
+   * has an answer for every other way this can go wrong, and a 500 on a practice
+   * screen because a prompt builder disagreed with a guard would be the one
+   * failure mode §6 exists to prevent, arriving through the back door.
+   *
+   * ---------------------------------------------------------------------------
+   * WHAT IS LOGGED: A CODE. NEVER THE RESPONSE, NEVER THE FEEDBACK.
+   * ---------------------------------------------------------------------------
+   *
+   * The material on this path is a person's practice answer and a model's
+   * commentary on it. `AiDispatchService` holds the same line one layer down;
+   * this file holds it because a log line is the easiest place to lose it.
+   */
+  private async escalateToGrader(
+    userId: string,
+    questionPrompt: string,
+    answers: readonly PracticeSnapshotAnswer[],
+    deterministic: {
+      status: AnswerResolutionStatus;
+      outcome: 'correct' | 'incorrect' | 'skipped';
+      responseText: string | null;
+    },
+  ): Promise<AiGrading | null> {
+    if (deterministic.outcome !== 'incorrect') return null;
+    if (deterministic.status !== 'resolved') return null;
+    if (answers.length === 0) return null;
+
+    const responseText = deterministic.responseText ?? '';
+
+    if (responseText.trim().length === 0) return null;
+
+    try {
+      const result = await this.dispatch.runStructured(userId, GRADER_ROLE, {
+        // THE ONLY THREE THINGS A CALLER SUPPLIES. No model id, no provider, no
+        // key — see `ai-evaluation.md` §3 and this file's header.
+        messages: buildGradingPrompt({
+          questionPrompt,
+          // The frozen snapshot's answers, which are the answers this attempt
+          // was graded against a few lines ago. Not a second query: a
+          // `national`/`state` question's answer can change, and a prompt built
+          // from a fresh read could ask about answers the learner was never
+          // shown (practice-sessions.md §6).
+          acceptedAnswers: answers,
+          responseText,
+        }),
+        schemaName: GRADING_SCHEMA_NAME,
+        schema: gradingVerdictSchema,
+        // NO `maxTokens`. The schema already bounds the answer — three fields,
+        // one of them capped at 240 characters — and a cap tuned for that size
+        // would truncate a model that thinks before it answers. A truncated
+        // reply is not a short verdict; it is invalid JSON, which becomes a
+        // `failed` result and silently sends every grading call down rung 3.
+      });
+
+      if (result.status !== 'ok') {
+        // `unavailable` and `failed` are both rung 3, and both are ordinary. The
+        // cause/code is logged at debug because a deployment with no AI
+        // configured would otherwise warn on every missed answer, training
+        // whoever reads the logs to ignore them.
+        this.logger.debug(
+          `Grader unavailable for user ${userId}; keeping the deterministic result (${
+            result.status === 'unavailable' ? result.cause : result.errorCode
+          })`,
+        );
+        return null;
+      }
+
+      // COERCED BEFORE ANYTHING IS PERSISTED. `misheard` and `nervous` cannot be
+      // grounded in a typed attempt; see `grading.ts`.
+      const verdict = groundVerdict(result.data);
+
+      return {
+        outcome: verdict.verdict,
+        failureCause: persistedFailureCause(verdict),
+        aiFeedback: verdict,
+        // Null when the usage WRITE failed, never "no call was made" — the row
+        // is owed on every call. The attempt is still recorded either way: the
+        // evidence outlives its accounting (schema.prisma's `SetNull` on this
+        // column makes the same point for the other direction).
+        aiUsageEventId: result.usageEventId,
+      };
+    } catch (err) {
+      this.logger.error(
+        `Grading escalation failed for user ${userId}: ${
+          err instanceof Error ? err.message : 'unknown error'
+        }`,
+      );
+      return null;
+    }
+  }
 }
 
 // -----------------------------------------------------------------------------
@@ -1024,6 +1278,14 @@ function toAttemptResponse(attempt: any): PracticeAttemptResponse {
     revealed: attempt.revealed,
     hintUsed: attempt.hintUsed,
     durationMs: attempt.durationMs,
+    // The three AI-grading columns, `null` together on every attempt no grader
+    // ran for. `?? null` rather than a bare read because a row selected without
+    // these columns — an older fixture, a narrowed `select` — would otherwise
+    // put `undefined` on the wire, and "absent" and "no grader ran" would stop
+    // being the same answer to a client.
+    failureCause: attempt.failureCause ?? null,
+    aiFeedback: (attempt.aiFeedback as GradingVerdict | null) ?? null,
+    aiUsageEventId: attempt.aiUsageEventId ?? null,
     answeredAt: attempt.answeredAt.toISOString(),
     // Read back whole, exactly as frozen. Never re-resolved, never merged with
     // whatever `civics_answers` says today — that is the entire point of the
