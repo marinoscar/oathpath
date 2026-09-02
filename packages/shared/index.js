@@ -75,4 +75,4 @@
  * change, so the baselines must be regenerated in the pinned container — see
  * this folder's README for the exact command.
  */
-exports.APP_NAME = 'My App';
+exports.APP_NAME = 'OathPath';

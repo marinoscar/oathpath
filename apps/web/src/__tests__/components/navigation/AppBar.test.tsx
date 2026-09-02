@@ -7,8 +7,8 @@ import userEvent from '@testing-library/user-event';
 // hardcoded the old name would turn that rename into ~10 unrelated failures.
 //
 // `getByText(APP_NAME)` is an exact, case-SENSITIVE match on the element's own
-// text, which is deliberately stricter than the `/enterprise app/i` regex it
-// replaces — that one would have passed on "ENTERPRISE APP" or on a wordmark
+// text. That is deliberately stricter than a case-insensitive regex over the
+// name, which would have passed on a differently-cased wordmark or on one
 // buried in a longer sentence. The negative drill-down assertions keep using
 // the same matcher via `queryByText`, so they still assert the wordmark is
 // absent and not merely that some looser pattern failed to match.
