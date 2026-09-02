@@ -69,6 +69,14 @@ const FIXTURE: Array<[string, AiCapabilityFamily]> = [
   ['omni-moderation-latest', 'other'],
   ['text-moderation-latest', 'other'],
 
+  // Audio-in/audio-out chat models. They answer on the chat endpoint, so
+  // without an explicit rule they classify as text and are offered as a
+  // `tutor` — a role that would then send them a text-only request.
+  ['gpt-4o-audio-preview', 'other'],
+  ['gpt-4o-mini-audio-preview', 'other'],
+  ['gpt-audio', 'other'],
+  ['gpt-audio-mini', 'other'],
+
   // --- other: ids the classifier is NOT expected to recognise ----------------
   // The behaviour that matters most. These must be classifiable-as-other and
   // reachable under show-all, never dropped.
@@ -102,6 +110,25 @@ describe('classifyModel', () => {
 
   it('puts transcribe before text', () => {
     expect(classifyModel('gpt-4o-transcribe')).not.toBe('text');
+  });
+
+  it('puts audio before text, so an audio chat model is never a tutor', () => {
+    expect(classifyModel('gpt-4o-audio-preview')).not.toBe('text');
+    expect(classifyModel('gpt-audio')).not.toBe('text');
+  });
+
+  it('leaves the realtime, transcribe and TTS rules ahead of the audio one', () => {
+    // The audio rule sits after them on purpose: a model that genuinely
+    // belongs to one of those families must keep it rather than being swept
+    // into `other` by a name that mentions audio.
+    expect(classifyModel('gpt-realtime')).toBe('realtime');
+    expect(classifyModel('gpt-4o-transcribe')).toBe('transcribe');
+    expect(classifyModel('gpt-4o-mini-tts')).toBe('tts');
+  });
+
+  it('does not match `audio` inside an unrelated word', () => {
+    // Anchored to segment boundaries, as the tts rule is.
+    expect(classifyModel('gpt-4-audiophile')).toBe('text');
   });
 });
 

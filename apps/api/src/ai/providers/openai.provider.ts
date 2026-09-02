@@ -16,6 +16,7 @@ import type {
   AiCompletionRequest,
   AiCompletionResult,
   AiConnectionTestResult,
+  AiMessage,
   AiModelCatalogResult,
   AiModelDescriptor,
   AiReachabilityRequest,
@@ -24,6 +25,7 @@ import type {
 } from '../ai.types';
 import type { AiCapabilitySet } from './ai-provider.interface';
 import { classifyModel, parseGeneration } from './model-classifier';
+import { describeModelTraits } from './model-traits';
 
 // =============================================================================
 // OpenAiProvider (issue #29, epic #25)
@@ -54,9 +56,13 @@ import { classifyModel, parseGeneration } from './model-classifier';
 // -----------------------------------------------------------------------------
 //
 // It extends `BaseAiProvider`, which implements the public never-throw methods
-// once and calls the `protected` ones below inside a try/catch. There is no
-// try/catch in this file, and adding one would produce a worse message than
-// the base class already builds — see base-ai.provider.ts.
+// once and calls the `protected` ones below inside a try/catch. No try/catch in
+// this file guards against a throw — one that did would produce a worse message
+// than the base class already builds (see base-ai.provider.ts). The few that
+// exist all SHAPE A RESULT the base class could not have produced: which of the
+// two test steps failed, which role is unreachable, whether an outcome is
+// actually a reachable model, and whether to retry once without our own
+// optional parameters. Each says so at the catch.
 //
 // THE KEY IS REGISTERED WITH THE REDACTOR AT THE INSTANT IT IS OBTAINED, on
 // the line after the `getSecret` that returns it and before the client is
@@ -85,8 +91,15 @@ const CATALOG_CACHE_TTL_MS = 5 * 60 * 1000;
  */
 const PROBE_TIMEOUT_MS = 20_000;
 
-/** Tokens requested by the reachability probe. */
-const PROBE_MAX_TOKENS = 1;
+/**
+ * The probe's prompt.
+ *
+ * A USER TURN, deliberately — it is the one role every chat shape accepts,
+ * from `gpt-3.5-turbo` through `o1-mini` (which rejects both `system` and
+ * `developer`) to `gpt-5`. The probe is testing the key, not the model's
+ * instruction handling, so it has no reason to send the role that varies.
+ */
+const PROBE_MESSAGES: AiMessage[] = [{ role: 'user', content: 'ping' }];
 
 /**
  * The families this provider can serve.
@@ -303,6 +316,19 @@ export class OpenAiProvider extends BaseAiProvider {
    * counts it has mid-stream are not the call's consumption, and reporting
    * them as such would understate what the user was actually billed for by an
    * unknowable amount.
+   *
+   * -------------------------------------------------------------------------
+   * THE REQUEST IS BUILT FROM THE MODEL'S TRAITS, NOT FROM ONE FIXED SHAPE
+   * -------------------------------------------------------------------------
+   *
+   * `system`/`developer`/`user` for the instruction turn, and a floor under the
+   * caller's token budget, both come from `model-traits.ts` — see
+   * {@link buildChatRequest}. The same builder serves the probe, so the two
+   * cannot drift into disagreeing about what a `gpt-5` request looks like.
+   *
+   * NO `reasoning_effort` HERE. The probe pins the minimum because it is
+   * buying proof rather than an answer; a real completion takes the model's own
+   * default, which is what the role was bound for.
    */
   protected async runCompletion(
     apiKey: string,
@@ -313,16 +339,9 @@ export class OpenAiProvider extends BaseAiProvider {
 
     const client = new OpenAI({ apiKey });
 
-    const base = {
-      model: request.modelId,
-      messages: request.messages.map((message) => ({
-        role: message.role,
-        content: message.content,
-      })),
-      ...(request.maxTokens !== undefined
-        ? { max_completion_tokens: request.maxTokens }
-        : {}),
-    };
+    const base = buildChatRequest(request.modelId, request.messages, {
+      maxTokens: request.maxTokens,
+    });
 
     if (!request.stream) {
       const response = await client.chat.completions.create({
@@ -388,7 +407,8 @@ export class OpenAiProvider extends BaseAiProvider {
    * THE PROBE IS A REAL REQUEST OF THE KIND THE ROLE MAKES, not a catalog
    * lookup. `GET /v1/models` lists what the account could have access to;
    * only issuing the request proves the key may issue it. The smallest
-   * possible completion is the cheapest thing that proves it.
+   * completion THE MODEL CAN ACTUALLY PRODUCE is the cheapest thing that
+   * proves it — see {@link probeTextModel} for why "smallest" is not 1.
    *
    * Never throws — every failure becomes `{ reachable: false, error }`, so one
    * unreachable model does not abandon the remaining probes and leave the user
@@ -400,11 +420,7 @@ export class OpenAiProvider extends BaseAiProvider {
   ): Promise<AiReachabilityResult> {
     try {
       if (probe.family === 'text') {
-        await client.chat.completions.create({
-          model: probe.modelId,
-          messages: [{ role: 'user', content: 'ping' }],
-          max_completion_tokens: PROBE_MAX_TOKENS,
-        });
+        await this.probeTextModel(client, probe.modelId);
       } else if (probe.family === 'embedding') {
         await client.embeddings.create({
           model: probe.modelId,
@@ -428,6 +444,26 @@ export class OpenAiProvider extends BaseAiProvider {
         error: null,
       };
     } catch (err) {
+      // AN OUTPUT-LIMIT OUTCOME IS A REACHABLE MODEL (#176).
+      //
+      // Reachability is the question "may this key issue this request against
+      // this model". A model that accepted the request, ran, and stopped
+      // against the output ceiling has answered it YES — the error is proof of
+      // reach, not a denial of it. Reporting it as unreachable told admins to
+      // rotate a working key, and no rotation could have fixed it.
+      //
+      // Kept here, in the catch, rather than only inside the text branch: it is
+      // a property of the OUTCOME, not of how the request was built, so a
+      // future probe shape gets the same reading for free.
+      if (isOutputLimitOutcome(err)) {
+        return {
+          roleKey: probe.roleKey,
+          modelId: probe.modelId,
+          reachable: true,
+          error: null,
+        };
+      }
+
       return {
         roleKey: probe.roleKey,
         modelId: probe.modelId,
@@ -438,6 +474,64 @@ export class OpenAiProvider extends BaseAiProvider {
         // organisation must be verified to use this model".
         error: describeError(err),
       };
+    }
+  }
+
+  /**
+   * Issue the probe completion, with ONE retry stripped of everything optional.
+   *
+   * -------------------------------------------------------------------------
+   * WHY THE BUDGET IS NOT 1
+   * -------------------------------------------------------------------------
+   *
+   * It was, and that was #176. A reasoning model spends its whole completion
+   * budget on hidden reasoning tokens before it can emit a visible one, so
+   * `max_completion_tokens: 1` is not a cheap probe but a guaranteed 400. The
+   * budget now comes from the model's traits, which know the difference; see
+   * model-traits.ts.
+   *
+   * -------------------------------------------------------------------------
+   * THE RETRY, AND WHY THERE IS EXACTLY ONE
+   * -------------------------------------------------------------------------
+   *
+   * Model naming and parameter surfaces are not ours to control. A model that
+   * lands in the wrong traits rule — a new line, a renamed one, a third-party
+   * OpenAI-compatible endpoint — will reject a flag we sent, and reporting a
+   * working key as broken because of OUR request shape is the same class of
+   * failure as #176 itself. So on an unsupported-parameter rejection the probe
+   * degrades to the request every chat model accepts: a model and messages,
+   * nothing else.
+   *
+   * ONE retry, not a loop. This runs on a real key against a real account, and
+   * a loop here is a way to spend someone's money on a diagnostic. The stripped
+   * request has nothing left to strip anyway, so a second attempt could only
+   * repeat the first.
+   *
+   * A throw from either attempt propagates to {@link probeModel}, where the
+   * output-limit rule reads it — so a retry that ends at the output ceiling is
+   * still a reachable model.
+   */
+  private async probeTextModel(client: OpenAI, modelId: string): Promise<void> {
+    const traits = describeModelTraits(modelId);
+
+    try {
+      await client.chat.completions.create(
+        buildChatRequest(modelId, PROBE_MESSAGES, {
+          maxTokens: traits.minCompletionTokens,
+          // The probe buys proof, not an answer: the cheapest effort tier the
+          // model admits is the one that proves the key may issue the request.
+          useMinimumReasoningEffort: true,
+        }),
+      );
+    } catch (err) {
+      // NOT a never-throw guard — the base class owns that. This catch exists
+      // to make one decision, and it rethrows everything else untouched.
+      if (!isUnsupportedParameterError(err)) throw err;
+
+      await client.chat.completions.create({
+        model: modelId,
+        messages: PROBE_MESSAGES,
+      });
     }
   }
 
@@ -472,6 +566,191 @@ export function describeModel(
         ? new Date(created * 1000)
         : null,
   };
+}
+
+/** A chat request body, in the subset of the shape this provider ever sends. */
+interface ChatRequestBody {
+  model: string;
+  messages: Array<{
+    role: 'system' | 'developer' | 'user' | 'assistant';
+    content: string;
+  }>;
+  max_completion_tokens?: number;
+  reasoning_effort?: 'minimal' | 'low';
+}
+
+/**
+ * Build a chat request body for one model id.
+ *
+ * THE ONE PLACE A CHAT REQUEST IS SHAPED, used by both the reachability probe
+ * and `runCompletion`. Two builders would drift, and the drift would be
+ * invisible: the probe would keep passing on a model the real call cannot use,
+ * which is a worse version of #176 rather than a fix for it.
+ *
+ * What comes from the traits, and why:
+ *
+ *   * THE INSTRUCTION ROLE. `system` is a 400 on the o-series, which wants
+ *     `developer`, and on `o1-mini`/`o1-preview`, which accept neither and want
+ *     `user`. `user` and `assistant` turns pass through untouched — only the
+ *     instruction turn varies.
+ *   * THE TOKEN FLOOR, for reasoning models only. A reasoning model burns its
+ *     budget on hidden reasoning before it can emit anything visible, so a
+ *     caller's small `maxTokens` is not a cheap call but a silent
+ *     empty-completion generator — a successful response, no error, no text.
+ *     Raising the ceiling does not raise the bill: only tokens actually used
+ *     are charged.
+ *
+ * NO SAMPLING PARAMETERS ARE SENT. That omission is exactly what makes this
+ * request portable across both lines today — reasoning models reject
+ * `temperature` and `top_p`. `OpenAiModelTraits.supportsSampling` exists for
+ * the request builder that will need them once a feature exposes them, so the
+ * knowledge lives with the rest of the model's shape rather than being
+ * rediscovered at that call site.
+ */
+export function buildChatRequest(
+  modelId: string,
+  messages: AiMessage[],
+  options: {
+    maxTokens?: number;
+    /**
+     * Pin `reasoning_effort` to the model's floor.
+     *
+     * The probe sets this: it is buying proof that the key may issue the
+     * request, not an answer worth reading. A real completion leaves it unset
+     * and gets the model's own default, which is what the role was bound for.
+     */
+    useMinimumReasoningEffort?: boolean;
+  } = {},
+): ChatRequestBody {
+  const traits = describeModelTraits(modelId);
+
+  const budget =
+    options.maxTokens === undefined
+      ? undefined
+      : traits.reasoning
+        ? Math.max(options.maxTokens, traits.minCompletionTokens)
+        : options.maxTokens;
+
+  const effort =
+    options.useMinimumReasoningEffort === true &&
+    traits.supportsReasoningEffort &&
+    traits.minimumReasoningEffort !== null
+      ? traits.minimumReasoningEffort
+      : undefined;
+
+  return {
+    model: modelId,
+    messages: messages.map((message) => ({
+      role: message.role === 'system' ? traits.instructionRole : message.role,
+      content: message.content,
+    })),
+    ...(budget !== undefined ? { max_completion_tokens: budget } : {}),
+    ...(effort !== undefined ? { reasoning_effort: effort } : {}),
+  };
+}
+
+/**
+ * Did this failure mean "the model ran and hit its output ceiling"?
+ *
+ * WHICH IS A REACHABLE MODEL (#176). The request was accepted, authorised,
+ * routed to the model and executed; it stopped against a limit WE set. Reading
+ * that as "this key cannot reach this model" is how a probe reported a working
+ * key as broken and sent admins off to rotate it.
+ *
+ * The successful-response counterpart needs no code: a completion that returns
+ * with `finish_reason: 'length'` and empty content does not throw, and the
+ * probe deliberately asserts nothing about the content it got back — proof of
+ * reach is the whole question, and a visible token was never part of it.
+ *
+ * Pure, exported, and matched on signals rather than on an SDK error class, so
+ * a test can state the real 400 verbatim.
+ */
+export function isOutputLimitOutcome(err: unknown): boolean {
+  const signals = errorSignals(err);
+
+  // An exact code, not a substring: `content_length_exceeded` is a different
+  // failure and must not be read as a reachable model.
+  if (signals.codes.has('length')) return true;
+
+  return (
+    signals.text.includes('max_tokens or model output limit was reached') ||
+    signals.text.includes('could not finish the message because')
+  );
+}
+
+/**
+ * Did this failure mean "I do not know that parameter"?
+ *
+ * The signal that OUR request shape, not the key, is the problem — a new model
+ * line, a rename, a third-party OpenAI-compatible endpoint. See
+ * `OpenAiProvider.probeTextModel` for what is done about it and why exactly
+ * once.
+ */
+export function isUnsupportedParameterError(err: unknown): boolean {
+  const { text } = errorSignals(err);
+
+  return (
+    text.includes('unsupported_parameter') ||
+    text.includes('unknown_parameter') ||
+    text.includes('unsupported_value') ||
+    text.includes('unsupported parameter') ||
+    text.includes('unrecognized request argument')
+  );
+}
+
+/**
+ * The strings a thrown value carries, lowercased, for the two predicates above.
+ *
+ * NAMED FIELDS ONLY, NEVER `JSON.stringify(err)` — an OpenAI SDK error holds a
+ * `request` context built from the client's options, which include the API key.
+ * Nothing collected here is ever emitted: these strings are read to make a
+ * boolean decision and discarded, and `describeError` remains the only path
+ * from an error to text this provider returns.
+ *
+ * @param depth guards a self-referential `error` chain, which the SDK's nested
+ *        error shape makes cheap to construct by accident.
+ */
+function errorSignals(
+  err: unknown,
+  depth = 0,
+): { text: string; codes: Set<string> } {
+  if (typeof err === 'string') {
+    return { text: err.toLowerCase(), codes: new Set() };
+  }
+
+  if (err === null || typeof err !== 'object' || depth > 3) {
+    return { text: '', codes: new Set() };
+  }
+
+  const source = err as Record<string, unknown>;
+  const parts: string[] = [];
+  const codes = new Set<string>();
+
+  if (typeof source.message === 'string') parts.push(source.message);
+
+  // The short, machine-readable fields. Collected as exact values too, so a
+  // predicate can require equality where a substring would be too loose.
+  for (const field of ['code', 'param', 'type', 'finish_reason'] as const) {
+    const value = source[field];
+    if (typeof value === 'string') {
+      parts.push(value);
+      codes.add(value.toLowerCase());
+    }
+  }
+
+  // The SDK nests the provider's own error body under `error`, and a
+  // `finish_reason` arrives under `choices[0]`.
+  const nested = errorSignals(source.error, depth + 1);
+  parts.push(nested.text);
+  for (const code of nested.codes) codes.add(code);
+
+  if (Array.isArray(source.choices)) {
+    const first = errorSignals(source.choices[0], depth + 1);
+    parts.push(first.text);
+    for (const code of first.codes) codes.add(code);
+  }
+
+  return { text: parts.join(' ').toLowerCase(), codes };
 }
 
 /**

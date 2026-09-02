@@ -370,6 +370,60 @@ describe('AiKeyForm — the four failure classes', () => {
     expect(within(alert).getByText('working')).toBeInTheDocument();
     expect(within(alert).getByText('not available')).toBeInTheDocument();
     expect(within(alert).getByText('gpt-5.4-mini')).toBeInTheDocument();
+    // Each row NAMES THE JOB too, not just the model it is bound to.
+    expect(within(alert).getByText('tutor')).toBeInTheDocument();
+    expect(within(alert).getByText('grader')).toBeInTheDocument();
+  });
+
+  it('keeps two roles bound to the SAME model apart', async () => {
+    // Issue #177, and the common case: both wired roles pointing at one model.
+    // Showing only the model id rendered two byte-identical lines with
+    // identical errors, which reads as one entry duplicated by a bug rather
+    // than as two different jobs failing. The role name is what disambiguates
+    // them, and it has to be real text — the alert is a live region.
+    const user = userEvent.setup();
+    const sameModel = 'gpt-5.4-mini';
+    const sameError = 'OpenAI: you do not have access to this model';
+    mockTest({
+      success: false,
+      authenticated: true,
+      roles: [
+        { roleKey: 'tutor', modelId: sameModel, reachable: false, error: sameError },
+        { roleKey: 'grader', modelId: sameModel, reachable: false, error: sameError },
+      ],
+      providerKind: 'openai',
+      error: 'OpenAI: cannot reach the models bound to tutor and grader',
+    });
+    render(<AiKeyForm />);
+
+    await user.type(await screen.findByLabelText(/OpenAI API key/i), VALID_KEY);
+    await user.click(screen.getByRole('button', { name: /Save and test/i }));
+
+    const alert = (await screen.findAllByRole('alert')).find((a) =>
+      /Your key is fine/.test(a.textContent ?? ''),
+    ) as HTMLElement;
+
+    // BOTH jobs are named…
+    const tutor = within(alert).getByText('tutor');
+    const grader = within(alert).getByText('grader');
+    expect(tutor).toBeInTheDocument();
+    expect(grader).toBeInTheDocument();
+
+    // …in two SEPARATE rows, each carrying its own model id, so neither row
+    // can be mistaken for a repeat of the other.
+    const tutorRow = tutor.parentElement as HTMLElement;
+    const graderRow = grader.parentElement as HTMLElement;
+    expect(tutorRow).not.toBe(graderRow);
+    expect(within(tutorRow).getByText(sameModel)).toBeInTheDocument();
+    expect(within(graderRow).getByText(sameModel)).toBeInTheDocument();
+    expect(tutorRow.textContent).toMatch(/tutor.*gpt-5\.4-mini/);
+    expect(graderRow.textContent).toMatch(/grader.*gpt-5\.4-mini/);
+    expect(within(graderRow).queryByText('tutor')).not.toBeInTheDocument();
+
+    // The role name is TEXT, not a tooltip or colour alone — the alert is a
+    // live region, and a `title` attribute is not announced content.
+    expect(tutorRow.textContent).toContain('tutor');
+    expect(graderRow.textContent).toContain('grader');
   });
 });
 

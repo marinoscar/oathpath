@@ -89,6 +89,16 @@ const CLASSIFICATION_RULES: ClassificationRule[] = [
   // application has no role for them today.
   { family: 'other', test: /(^dall-e|^gpt-image|moderation)/i },
 
+  // `gpt-4o-audio-preview`, `gpt-audio`. Audio-in/audio-out chat models: they
+  // answer on the chat endpoint but expect and return audio parts, so a text
+  // role bound to one gets a runtime error on a user's first request. Placed
+  // AFTER realtime/transcribe/tts so a model that genuinely belongs to one of
+  // those keeps its family (`gpt-realtime` is already claimed above), and
+  // BEFORE the text rule, which would otherwise claim them for `gpt-`.
+  // Anchored to segment boundaries so `audio` inside an unrelated word does
+  // not match.
+  { family: 'other', test: /(^gpt-audio|-audio-|-audio$)/i },
+
   // ---- The generic text family, last ----------------------------------------
   //
   // Chat and reasoning models share one family because they share one API
