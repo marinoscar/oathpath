@@ -56,8 +56,16 @@ const KEY_ENV_VAR = 'SECRETS_ENCRYPTION_KEY';
  * for ever changing the derivation scheme: bumping it changes every derived
  * key, which makes existing ciphertexts undecryptable, so it must only move
  * together with a re-encryption migration.
+ *
+ * The product half of this string is NOT derived from `APP_NAME`, and must
+ * never be. It is a cryptographic domain separator that has to stay byte-for-
+ * byte stable for the life of the stored ciphertexts; wiring it to a constant
+ * whose entire purpose is to be editable would turn a rebrand into silent,
+ * unrecoverable data loss. It was changed exactly once, during the OathPath
+ * rename (#8), while no database and therefore no encrypted credential had
+ * ever existed. That window is closed.
  */
-const SUBKEY_LABEL_PREFIX = 'enterpriseappbase:secret-cipher:v1:';
+const SUBKEY_LABEL_PREFIX = 'oathpath:secret-cipher:v1:';
 
 /**
  * Strict base64 (standard alphabet, canonical padding). We validate the *text*
