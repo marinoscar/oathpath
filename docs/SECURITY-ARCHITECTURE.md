@@ -959,43 +959,69 @@ STORAGE_ALLOWED_MIME_TYPES=application/pdf,image/jpeg,image/png,application/zip
 
 ### Access Control
 
-The storage system enforces strict ownership and permission-based access:
+The storage system enforces **ownership-based** access, checked in the
+service layer. `ObjectsController`
+(`apps/api/src/storage/objects/objects.controller.ts`) is decorated `@Auth()`
+with **no `permissions`** — every authenticated user reaches every route
+regardless of which of the three `storage:*` strings their role holds. The
+three permissions below are defined, seeded, and assigned to roles, but
+**no route guard and no service check currently reads them.**
 
-**Owner-Only Access (Default):**
-- Users can only access their own uploaded files
-- Object queries filtered by `owner_id = current_user.id`
-- Download URLs only generated for owned objects
-- Delete operations restricted to owner
+**Owner-Only Access (What Is Actually Enforced):**
+- Every object, upload-status, download, delete, and metadata-update call
+  runs an ownership check in `objects.service.ts`
+  (`getObjectWithAuthCheck` and the equivalent inline checks in the upload
+  methods): `if (object.uploadedById !== userId) throw new
+  ForbiddenException(...)`.
+- There is **no admin bypass** in that check. A user who is not the uploader
+  is forbidden, full stop — including an Admin.
+- Consequence: **`storage:delete_any` does not currently do anything.** It is
+  seeded and granted to the admin role in `apps/api/prisma/seed.ts`, but
+  nothing in the codebase checks for it, so no user — Admin or otherwise —
+  can delete another user's object today. Implementing the override this
+  permission's name promises is tracked separately and is not part of this
+  document's claims.
 
-**Admin Override:**
-- Users with `storage:delete_any` permission can access all objects
-- Useful for moderation and content management
-- All admin operations logged to audit trail
-
-**Permission Model:**
-| Permission | Description | Granted To |
+**Permission Model (defined and seeded, not currently enforced by any route
+or service check):**
+| Permission | Description | Granted To (role seed) |
 |------------|-------------|------------|
-| `storage:read` | View own storage objects | All authenticated users |
-| `storage:write` | Upload and update own objects | All authenticated users |
-| `storage:delete` | Delete own storage objects | All authenticated users |
-| `storage:read_any` | View all storage objects | Admin |
-| `storage:write_any` | Update any storage object | Admin |
-| `storage:delete_any` | Delete any storage object | Admin |
+| `storage:read` | Read object metadata, get download URLs | Admin, Contributor, Viewer |
+| `storage:write` | Upload, update metadata | Admin, Contributor |
+| `storage:delete_any` | Admin: delete any object (unimplemented — see above) | Admin |
 
-**Ownership Validation Example:**
+These are the only three storage permission strings that exist
+(`apps/api/src/common/constants/roles.constants.ts`). `storage:delete`,
+`storage:read_any`, and `storage:write_any` are not defined anywhere in the
+codebase.
+
+**Ownership Validation — What The Code Actually Does:**
 ```typescript
-// Controller method enforces ownership
-async getObject(objectId: string, userId: string) {
-  const object = await this.objectsService.findById(objectId);
+// apps/api/src/storage/objects/objects.service.ts
+// Helper method to get object with ownership check
+private async getObjectWithAuthCheck(
+  id: string,
+  userId: string,
+): Promise<any> {
+  const object = await this.prisma.storageObject.findUnique({
+    where: { id },
+  });
 
-  // Check ownership (or admin permission)
-  if (object.ownerId !== userId && !user.hasPermission('storage:read_any')) {
-    throw new ForbiddenException('Access denied');
+  if (!object) {
+    throw new NotFoundException('Object not found');
+  }
+
+  // Check ownership
+  if (object.uploadedById !== userId) {
+    throw new ForbiddenException('You do not have access to this object');
   }
 
   return object;
 }
 ```
+No permission is consulted here or anywhere else in the storage module —
+this ownership check, alone, is the entire access-control mechanism for
+storage objects.
 
 ### Signed URLs
 

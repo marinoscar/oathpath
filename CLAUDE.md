@@ -478,8 +478,20 @@ itself, logout, and the `/admin/*` subtree for a caller holding
 - `users:read/write` - User management
 - `rbac:manage` - Role assignment
 - `allowlist:read/write` - Allowlist management (Admin only)
-- `storage:read/write/delete` - Storage object access (own objects)
-- `storage:read_any/write_any/delete_any` - Storage object access (all objects, Admin only)
+- `storage:read` - Read object metadata, get download URLs
+- `storage:write` - Upload, update metadata
+- `storage:delete_any` - Admin: delete any object
+
+**Storage permissions are seeded and role-assigned but not enforced by any
+route.** `apps/api/src/storage/objects/objects.controller.ts` is `@Auth()`
+with no `permissions` — holding or lacking any of the three strings above
+changes nothing about what a request can do. Actual access control is
+ownership-based, checked in `apps/api/src/storage/objects/objects.service.ts`
+(`ForbiddenException` at the "You do not own this upload" /
+"You do not have access to this object" checks): a user may act only on
+objects they uploaded. There is no admin-override check anywhere in the
+service, so `storage:delete_any` — despite its name and its assignment to the
+admin role in `apps/api/prisma/seed.ts` — currently grants nothing.
 
 **AI adds no permission strings.** Admin AI settings gate on
 `system_settings:read`/`:write`; the per-user AI routes are `@Auth()` with no

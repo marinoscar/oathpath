@@ -1634,7 +1634,9 @@ The storage system provides file upload and management capabilities with support
 
 **Error Cases:**
 - 404 Not Found - Object not found
-- 403 Forbidden - User does not own object (non-admin)
+- 403 Forbidden - User does not own the object. This check applies to every
+  user, including Admin — there is no admin override (see
+  [SECURITY-ARCHITECTURE.md](SECURITY-ARCHITECTURE.md#access-control)).
 
 ---
 
