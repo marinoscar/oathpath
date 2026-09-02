@@ -13,6 +13,7 @@ import { UsersModule } from './users/users.module';
 import { SettingsModule } from './settings/settings.module';
 import { HealthModule } from './health/health.module';
 import { AllowlistModule } from './allowlist/allowlist.module';
+import { JourneyModule } from './journey/journey.module';
 import { DeviceAuthModule } from './device-auth/device-auth.module';
 import { StorageModule } from './storage/storage.module';
 import { PatModule } from './pat/pat.module';
@@ -62,6 +63,13 @@ import configuration from './config/configuration';
     SettingsModule,
     HealthModule,
     AllowlistModule,
+    // The journey shell's API (#65, epic #50): the learner profile, the
+    // orientation write, Home's deterministic next action, and the stage
+    // registry the web reads rather than duplicating. Every route is
+    // `@Auth()` with no permissions and resolves the learner from
+    // `@CurrentUser('id')` — no new permission string, and no route that
+    // accepts a user id.
+    JourneyModule,
     DeviceAuthModule,
     StorageModule,
     PatModule,
