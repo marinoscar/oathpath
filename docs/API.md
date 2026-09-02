@@ -1230,6 +1230,189 @@ Returns totals plus breakdowns by model and by the role each call served.
 
 ---
 
+### Journey
+
+Issue #65, epic #50. Everything behind the learner's own onboarding, home
+screen, and stage registry. Design rationale lives in
+[`docs/specs/journey-shell.md`](specs/journey-shell.md) — this section covers
+only the wire contract.
+
+**Every route below is `@Auth()` with no permissions**, and every route is
+caller-scoped: the learner is resolved from the authenticated session, never
+from a path, query, or body parameter, so there is no input that could name
+another user's profile. Every authenticated user owns their own learner
+profile, and `RequireOrientation` hard-blocks an unoriented learner on the
+web, so gating these routes with a permission would leave the gated role
+unable to clear the gate at all — the same reasoning `/ai/key` above is gated
+on nothing.
+
+#### GET /journey/profile
+The caller's own `learner_profiles` row, plus the two reference lists the
+orientation form needs to render: every civics test version, and the 56 US
+states and territories.
+
+**This `GET` writes on its first call for a user.** A learner with no
+`learner_profiles` row yet has one upserted at every column default
+(`stage: "uncertain"`, no state, no test version) rather than being sent a
+404 on the first screen of a first login.
+
+**Response:**
+```json
+{
+  "data": {
+    "profile": {
+      "stage": "uncertain",
+      "interviewDate": null,
+      "stateCode": null,
+      "testVersionCode": null,
+      "seniorExemption": false,
+      "dailyGoalMinutes": 5,
+      "explanationLanguage": "en",
+      "timezone": "UTC",
+      "orientationCompletedAt": null
+    },
+    "testVersions": [
+      {
+        "code": "v2008",
+        "label": "2008 Civics Test",
+        "questionsAsked": 10,
+        "passThreshold": 6,
+        "seniorQuestionsAsked": 10,
+        "seniorPassThreshold": 6,
+        "filedFrom": null
+      }
+    ],
+    "states": [
+      { "code": "CA", "name": "California" }
+    ]
+  }
+}
+```
+
+The response is `{ profile, testVersions, states }` — **never a bare
+profile** — because one orientation form renders all three together, and
+fetching them as three separate round trips could let a test version added
+between two calls disagree with what the form validates against.
+
+---
+
+#### PUT /journey/profile
+Apply an orientation or settings save to the caller's own profile. Both
+`/setup/journey` (orientation) and `/settings/journey` write here.
+
+**Every field is optional and merges: an absent key leaves that field
+unchanged.** The one exception is `interviewDate`, where an explicit `null`
+clears a booked interview — the one field where clearing has to be
+expressible.
+
+**Request Body (all fields optional):**
+```json
+{
+  "interviewDate": "2026-03-15",
+  "stateCode": "CA",
+  "filingDate": "2025-09-01",
+  "seniorExemption": false,
+  "dailyGoalMinutes": 15,
+  "explanationLanguage": "en",
+  "timezone": "America/Los_Angeles"
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `interviewDate` | `YYYY-MM-DD`, or explicit `null` to clear it |
+| `stateCode` | One of the 56 US state/territory codes; uppercased before validation |
+| `testVersionCode` | A known `civics_test_versions.code` — mutually exclusive with `filingDate` |
+| `filingDate` | `YYYY-MM-DD`. The **server** resolves the applicable test version from this date; the browser never learns the cutoff rule |
+| `seniorExemption` | Self-attested 65/20 accommodation |
+| `dailyGoalMinutes` | Integer, 1–480 |
+| `explanationLanguage` | A well-formed BCP-47 tag (structure checked, not registry membership) |
+| `timezone` | An IANA zone name `Intl` can format in |
+
+**`filingDate` and `testVersionCode` are alternatives — sending both is a
+400.** Unknown state code, unknown test version, a malformed timezone or
+language tag, or a `dailyGoalMinutes` outside 1–480 is also a 400.
+
+**Orientation completion is inferred server-side, never a client flag.**
+There is no `completeOrientation` parameter to send: once the merged profile
+holds a test version, a state, a timezone, a daily goal and an explanation
+language, the server sets `orientationCompletedAt` and moves `stage` from
+`uncertain` to `oriented`, once. A later save that re-supplies the same
+fields changes neither again. There is likewise no `stage` field in the
+request — the transition is a consequence, never something a caller
+requests.
+
+**Response:** the same shape as `GET /journey/profile`, reflecting the write.
+
+Every successful call records an `audit_events` row with
+`action: "journey:profile_update"`, `targetType: "learner_profile"`, and
+`meta: { fields: string[], orientationCompleted: boolean }` — the names of
+the fields that changed, never their values, since this profile can hold
+where a learner lives and when their naturalization interview is.
+
+---
+
+#### GET /journey/home
+The caller's home-screen data: where they are, how long they have, and the
+one thing to do next.
+
+**Response:**
+```json
+{
+  "data": {
+    "stage": "oriented",
+    "interviewDate": "2026-03-15",
+    "daysUntilInterview": 12,
+    "interviewPast": false,
+    "dailyGoal": { "minutes": 15, "tracked": false },
+    "nextAction": {
+      "kind": "interview_countdown",
+      "title": "12 days until your interview",
+      "reason": "Start with the material, then build up to full practice.",
+      "path": "/learn"
+    }
+  }
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `daysUntilInterview` | Whole **calendar** days in the learner's own timezone, computed through `Clock`, not an elapsed-milliseconds division. Negative once the date has passed; `null` when no interview is booked |
+| `interviewPast` | Sent as its own fact rather than left for a client to derive from a negative count. Today is NOT past |
+| `dailyGoal.tracked` | Literally `false` for the whole of this release — nothing measures practice time yet, and there is deliberately no `minutesToday`: a displayed `0` would be indistinguishable from a learner who did nothing today |
+| `nextAction` | Produced by a pure function over the profile — no model call — so two consecutive loads return the same answer |
+
+`nextAction.kind` is one of exactly three values in this release —
+`orientation`, `interview_countdown`, `explore` — and each maps to one fixed,
+non-redirecting route. A later epic adding practice, review, or the
+interview stage widens this set; nothing else does.
+
+---
+
+#### GET /journey/stages
+The eight journey stages, in journey order, with the display copy the UI
+renders. Readable by any authenticated user.
+
+**Response:**
+```json
+{
+  "data": [
+    {
+      "key": "uncertain",
+      "label": "Just starting",
+      "description": "You're just getting started — that's the whole point of being here."
+    }
+  ]
+}
+```
+
+This describes what stages *exist*; it says nothing about which one the
+caller is in — that is `profile.stage` from `GET /journey/profile`. The two
+are separate endpoints because they have different audiences (the registry
+is static; a learner's own stage is not) and different cache lifetimes.
+
+---
+
 ### Storage Objects
 
 The storage system provides file upload and management capabilities with support for large files (GB scale) through resumable multipart uploads.

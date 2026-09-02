@@ -573,7 +573,31 @@ apps/api/src/storage/
 │ created_at         │
 │ updated_at         │
 └────────────────────┘
+
+┌──────────────────────────────────┐       ┌────────────────────────┐
+│         learner_profiles         │       │  civics_test_versions  │
+├──────────────────────────────────┤       ├────────────────────────┤
+│ id (PK, UUID)                    │       │ code (PK)              │
+│ user_id (FK, UNIQUE)             │       │ label                  │
+│ stage (enum, default uncertain)  │       │ questions_asked        │
+│ interview_date                   │       │ pass_threshold         │
+│ state_code                       │       │ senior_questions_asked │
+│ test_version_code (FK, RESTRICT) │──────▶│ senior_pass_threshold  │
+│ senior_exemption                 │       │ content_hash           │
+│ daily_goal_minutes               │       │ created_at             │
+│ explanation_language             │       │ updated_at             │
+│ timezone                         │       └────────────────────────┘
+│ orientation_completed_at         │
+│ created_at                       │
+│ updated_at                       │
+└──────────────────────────────────┘
 ```
+
+`learner_profiles` and `civics_test_versions` were added by epic #50 (issue
+#61) for the journey shell: one row per user tracking onboarding progress and
+the eight-stage `JourneyStage` enum, and a small seeded table of civics test
+revisions a profile's `test_version_code` resolves against. Full design in
+[`docs/specs/journey-shell.md`](specs/journey-shell.md) §3.
 
 ### 6.2 JSONB Schema Definitions
 
@@ -792,6 +816,7 @@ Before OAuth authentication completes:
 | **Settings** | `/api/user-settings/*` | Yes | User preferences |
 | **System Settings** | `/api/system-settings/*` | Yes (Admin) | App configuration |
 | **Allowlist** | `/api/allowlist/*` | Yes (Admin) | Access control |
+| **Journey** | `/api/journey/*` | Yes | Learner profile, home screen, stage registry (epic #50) |
 
 ### 8.2 Complete Endpoint Reference
 
@@ -846,6 +871,20 @@ Before OAuth authentication completes:
 | `GET` | `/api/allowlist` | `allowlist:read` | List allowlisted emails |
 | `POST` | `/api/allowlist` | `allowlist:write` | Add email |
 | `DELETE` | `/api/allowlist/:id` | `allowlist:write` | Remove email (if pending) |
+
+#### Journey (Per User)
+
+| Method | Path | Auth | Purpose |
+|--------|------|------|---------|
+| `GET` | `/api/journey/profile` | `@Auth()`, no permissions | Caller's profile + test versions + states (lazily creates the row) |
+| `PUT` | `/api/journey/profile` | `@Auth()`, no permissions | Merge-update the caller's profile; orientation completion is server-inferred |
+| `GET` | `/api/journey/home` | `@Auth()`, no permissions | Stage, interview countdown, daily-goal placeholder, next action |
+| `GET` | `/api/journey/stages` | `@Auth()`, no permissions | The eight journey stages, in order |
+
+No route takes a user id anywhere — path, query, or body — so there is no
+permission that could gate "read/write *any* learner's profile" to add;
+`docs/specs/journey-shell.md` §4.1 and §5 have the full argument, mirrored by
+CLAUDE.md's RBAC Model section.
 
 #### Health
 
@@ -904,7 +943,12 @@ for genuinely parallel content only.
 |------|-------|------|------------|---------|
 | Login | `/login` | Public | - | OAuth provider selection |
 | Auth Callback | `/auth/callback` | Public | - | Token handling |
-| Home | `/` | Required | Any | Dashboard |
+| AI Key Setup | `/setup/ai-key` | Required | Any (authenticated) | `RequireAiKey`'s exempt destination; blocks a user with no saved AI key |
+| Orientation | `/setup/journey` | Required | Any (authenticated) | `RequireOrientation`'s exempt destination; blocks a learner who has not finished onboarding |
+| Home | `/` | Required | Any | The four-destination bar's first stop — stage, countdown, next action (epic #50) |
+| Learn | `/learn` | Required | Any | Bar destination (epic #50) |
+| Practice | `/practice` | Required | Any | Bar destination (epic #50) |
+| Progress | `/progress` | Required | Any | Bar destination (epic #50) |
 | User Settings hub | `/settings` | Required | Any (authenticated) | Searchable hub over the user's own settings |
 | — Profile | `/settings/profile` | Required | Any (authenticated) | Display name, avatar, email |
 | — Appearance | `/settings/appearance` | Required | Any (authenticated) | Personal theme preference |
@@ -991,6 +1035,52 @@ enforces — so the hub card, the Console rail row, and the route itself
 cannot disagree about who may go where. See
 [`docs/specs/settings-ui.md`](specs/settings-ui.md) for the full registry
 pattern this route belongs to.
+
+### 9.5 Navigation & the Destination Model
+
+`apps/web/src/config/destinations.ts` is the **single source of truth** for
+the app's navigation targets — which routes exist, which one owns a given
+path, and which permission (if any) makes it reachable. Before it existed the
+same routes were spelled out separately in the rail, the bottom bar, the user
+menu, and quick actions, each with its own idea of who could see them; the
+file's own header calls this the "three gates, three answers" failure.
+
+Two structures live in that one file, and epic #50 (issue #69) is what pulled
+them apart:
+
+- **`DESTINATION_ROUTES`** — six keys (`home`, `learn`, `practice`,
+  `progress`, `settings`, `console`), answering "what lights up" (which
+  destination is active for a given path). All six routes are still real and
+  still owned by exactly one destination.
+- **`DESTINATIONS`** — exactly **four** entries (`home`, `learn`, `practice`,
+  `progress`), answering "what is in the bar" the learner uses day to day.
+  `settings` and `console` keep their keys and route ownership but are no
+  longer bar destinations; they are exported individually
+  (`SETTINGS_DESTINATION` for the user menu, `RAIL_PINNED_DESTINATIONS` for
+  the rail's pinned foot) so the one surface that still draws each has to name
+  it explicitly.
+
+None of the four bar destinations carries a `permission` — an unoriented,
+keyless, freshly created account still needs to see all four. Whether a
+*destination* exists to navigate to and whether the *route* behind it is
+reachable are different questions: `RequireAiKey` and `RequireOrientation`
+(both layout routes wrapping `<Outlet />` in `App.tsx`) answer the second one,
+hard-blocking a user who has not cleared onboarding regardless of what the bar
+shows. Full rationale, including the accepted UX cost on narrow screens, is in
+[`docs/specs/journey-shell.md`](specs/journey-shell.md) §2 and §5.
+
+### 9.6 The Journey Stage Registry Lives in the API
+
+The eight journey stages (`apps/api/src/journey/journey-stages.ts`,
+`JOURNEY_STAGES`) are declared once, in the API, and the web reads them over
+`GET /api/journey/stages` — **there is no copy of this list in
+`apps/web/src/config`.** This is the same one-registry choice
+`apps/api/src/notifications/notification-events.ts` and
+`apps/api/src/ai/ai-model-roles.ts` make on their own axes: a duplicated list
+with a test asserting the two agree only *detects* drift after it has already
+happened in a working tree, a branch, or a build where the test did not run —
+it does not prevent it. `docs/specs/journey-shell.md` §11 records the
+duplicate-in-`apps/web` alternative and why it lost.
 
 ---
 
