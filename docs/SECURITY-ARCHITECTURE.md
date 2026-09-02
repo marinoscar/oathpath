@@ -959,36 +959,58 @@ STORAGE_ALLOWED_MIME_TYPES=application/pdf,image/jpeg,image/png,application/zip
 
 ### Access Control
 
-The storage system enforces **ownership-based** access, checked in the
-service layer. `ObjectsController`
-(`apps/api/src/storage/objects/objects.controller.ts`) is decorated `@Auth()`
-with **no `permissions`** — every authenticated user reaches every route
-regardless of which of the three `storage:*` strings their role holds. The
-three permissions below are defined, seeded, and assigned to roles, but
-**no route guard and no service check currently reads them.**
+Storage access is **ownership-based**, checked in the service layer, with a
+single deliberate exception: **delete honours `storage:delete_any`**.
 
-**Owner-Only Access (What Is Actually Enforced):**
-- Every object, upload-status, download, delete, and metadata-update call
-  runs an ownership check in `objects.service.ts`
-  (`getObjectWithAuthCheck` and the equivalent inline checks in the upload
-  methods): `if (object.uploadedById !== userId) throw new
+`ObjectsController` (`apps/api/src/storage/objects/objects.controller.ts`) is
+decorated `@Auth()` with **no `permissions`**, so no route guard gates any
+storage route on a `storage:*` string. That is intentional rather than an
+oversight: every authenticated user may act on their own objects, so a
+`PermissionsGuard` on these routes would reject the ordinary case.
+Authorization is a per-object decision, and it is made in
+`objects.service.ts`.
+
+**Owner-Only Access (read and write):**
+- `getById`, `getDownloadUrl`, `updateMetadata` and the upload lifecycle
+  (`getUploadStatus`, `completeUpload`, `abortUpload`) run an ownership check
+  and nothing else — `getObjectWithAuthCheck`, plus the equivalent inline
+  checks in the upload methods: `if (object.uploadedById !== userId) throw new
   ForbiddenException(...)`.
-- There is **no admin bypass** in that check. A user who is not the uploader
-  is forbidden, full stop — including an Admin.
-- Consequence: **`storage:delete_any` does not currently do anything.** It is
-  seeded and granted to the admin role in `apps/api/prisma/seed.ts`, but
-  nothing in the codebase checks for it, so no user — Admin or otherwise —
-  can delete another user's object today. Implementing the override this
-  permission's name promises is tracked separately and is not part of this
-  document's claims.
+- There is **no admin bypass on these paths.** A user who is not the uploader
+  is forbidden, full stop — including an Admin holding `storage:delete_any`.
+  That permission is scoped to deletion by its name and by its implementation;
+  see "Why delete has its own path" below.
 
-**Permission Model (defined and seeded, not currently enforced by any route
-or service check):**
-| Permission | Description | Granted To (role seed) |
-|------------|-------------|------------|
-| `storage:read` | Read object metadata, get download URLs | Admin, Contributor, Viewer |
-| `storage:write` | Upload, update metadata | Admin, Contributor |
-| `storage:delete_any` | Admin: delete any object (unimplemented — see above) | Admin |
+**The delete override (`storage:delete_any`):**
+- A caller holding `storage:delete_any` may delete an object they did not
+  upload. Admin is the only seeded role that holds it
+  (`apps/api/prisma/seed.ts`). This exists so an abusive upload, a departed
+  user's files, or a GDPR erasure request can be handled through the API
+  rather than only through direct database and object-store access.
+- The controller resolves the caller's permissions to a single capability and
+  passes it down; the service makes the decision, because only it knows the
+  object's owner. There is one check, not one per layer.
+- **A cross-user delete is audited distinctly.** `delete()` has always written
+  a `storage:object:delete` row to `audit_events`; when the override is what
+  admitted the call, that row's `meta` additionally carries `ownerUserId` (the
+  uploader) and `overridePermission` (`storage:delete_any`), alongside the
+  `actorUserId` that names the deleter. A self-delete writes exactly the meta
+  it always did and never claims an override.
+- **The override does not change 404 behaviour.** Existence is resolved before
+  ownership, so an absent id is a 404 for holder and non-holder alike and the
+  permission is not an existence oracle.
+
+**Permission Model:**
+| Permission | Description | Granted To (role seed) | Enforced? |
+|------------|-------------|------------|------------|
+| `storage:read` | Read object metadata, get download URLs | Admin, Contributor, Viewer | **No** — ownership governs reads |
+| `storage:write` | Upload, update metadata | Admin, Contributor | **No** — ownership governs writes, and any authenticated user can upload |
+| `storage:delete_any` | Admin: delete any object | Admin | **Yes** — `ObjectsService.delete` |
+
+`storage:read` and `storage:write` remain **defined, seeded, and read by
+nothing.** A Viewer can upload today, because no check consults
+`storage:write`. Whether those two should gate their routes or be removed is
+deliberately still open (issue #199); only the delete override was decided.
 
 These are the only three storage permission strings that exist
 (`apps/api/src/common/constants/roles.constants.ts`). `storage:delete`,
@@ -998,7 +1020,7 @@ codebase.
 **Ownership Validation — What The Code Actually Does:**
 ```typescript
 // apps/api/src/storage/objects/objects.service.ts
-// Helper method to get object with ownership check
+// Backs every read and write path. No permission is consulted here.
 private async getObjectWithAuthCheck(
   id: string,
   userId: string,
@@ -1019,9 +1041,40 @@ private async getObjectWithAuthCheck(
   return object;
 }
 ```
-No permission is consulted here or anywhere else in the storage module —
-this ownership check, alone, is the entire access-control mechanism for
-storage objects.
+
+**Why delete has its own path:**
+```typescript
+// apps/api/src/storage/objects/objects.service.ts
+// Used by delete() alone. `canDeleteAny` is the caller's storage:delete_any.
+private async getObjectForDelete(
+  id: string,
+  userId: string,
+  canDeleteAny: boolean,
+): Promise<any> {
+  const object = await this.prisma.storageObject.findUnique({
+    where: { id },
+  });
+
+  if (!object) {
+    throw new NotFoundException('Object not found');
+  }
+
+  if (object.uploadedById !== userId && !canDeleteAny) {
+    throw new ForbiddenException('You do not have access to this object');
+  }
+
+  return object;
+}
+```
+The duplication is the point. `getObjectWithAuthCheck` is shared by every read
+and write path, so threading a permission argument through it would turn
+`storage:delete_any` into a read *and* write bypass in a single edit — a
+holder could suddenly read, download and modify other users' objects, which
+the permission's name does not promise. Keeping the two resolvers separate
+means widening the override has to be a deliberate change to this code rather
+than a side effect of touching shared code. Integration tests assert an Admin
+still receives 403 on GET, download, and PATCH-metadata for another user's
+object.
 
 ### Signed URLs
 

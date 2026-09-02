@@ -478,20 +478,38 @@ itself, logout, and the `/admin/*` subtree for a caller holding
 - `users:read/write` - User management
 - `rbac:manage` - Role assignment
 - `allowlist:read/write` - Allowlist management (Admin only)
-- `storage:read` - Read object metadata, get download URLs
-- `storage:write` - Upload, update metadata
-- `storage:delete_any` - Admin: delete any object
+- `storage:read` - Read object metadata, get download URLs (**not enforced**)
+- `storage:write` - Upload, update metadata (**not enforced**)
+- `storage:delete_any` - Admin: delete any object (enforced, delete only)
 
-**Storage permissions are seeded and role-assigned but not enforced by any
-route.** `apps/api/src/storage/objects/objects.controller.ts` is `@Auth()`
-with no `permissions` — holding or lacking any of the three strings above
-changes nothing about what a request can do. Actual access control is
-ownership-based, checked in `apps/api/src/storage/objects/objects.service.ts`
-(`ForbiddenException` at the "You do not own this upload" /
-"You do not have access to this object" checks): a user may act only on
-objects they uploaded. There is no admin-override check anywhere in the
-service, so `storage:delete_any` — despite its name and its assignment to the
-admin role in `apps/api/prisma/seed.ts` — currently grants nothing.
+**No storage route is gated by a route guard.**
+`apps/api/src/storage/objects/objects.controller.ts` is `@Auth()` with no
+`permissions`, and that is deliberate: every authenticated user may act on
+their own objects, so a `PermissionsGuard` there would reject the ordinary
+case. Access control is a per-object decision made in
+`apps/api/src/storage/objects/objects.service.ts`.
+
+**Ownership governs read and write.** A user may read, download and update
+metadata only on objects they uploaded — the `ForbiddenException` at the "You
+do not own this upload" / "You do not have access to this object" checks. There
+is **no admin bypass on those paths**, and `storage:read` / `storage:write` are
+still **seeded, role-assigned, and read by nothing**: holding or lacking either
+changes nothing about what a request can do, and a Viewer can upload today.
+Whether those two should gate their routes or be removed is still open
+(issue #199).
+
+**`storage:delete_any` is enforced, for delete only.** A caller holding it may
+delete an object they did not upload, so an abusive upload or a departed user's
+files can be removed through the API. `delete()` takes its own resolver
+(`getObjectForDelete`) rather than a flag on the `getObjectWithAuthCheck`
+helper that every read and write path shares — threading the permission through
+the shared helper would make it a read and write bypass in the same edit.
+Widening it must therefore be a deliberate edit, and an integration test named
+"storage:delete_any does not widen read or write" holds that line. A cross-user
+delete is audited distinctly: the `storage:object:delete` row gains
+`ownerUserId` and `overridePermission` in its `meta`, so an admin removing
+someone else's data is attributable rather than indistinguishable from a
+self-delete. A missing object still 404s for holder and non-holder alike.
 
 **AI adds no permission strings.** Admin AI settings gate on
 `system_settings:read`/`:write`; the per-user AI routes are `@Auth()` with no
