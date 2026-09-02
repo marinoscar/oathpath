@@ -1,9 +1,11 @@
 import { Module } from '@nestjs/common';
 
+import { AiModule } from '../ai/ai.module';
 import { PrismaModule } from '../prisma/prisma.module';
 import { CivicsAdminController } from './civics-admin.controller';
 import { CivicsAdminService } from './civics-admin.service';
 import { CivicsController } from './civics.controller';
+import { CivicsExplainService } from './civics-explain.service';
 import { CivicsService } from './civics.service';
 
 /**
@@ -31,11 +33,30 @@ import { CivicsService } from './civics.service';
  * answer notifies nobody (a learner sees the new answer the next time they
  * read the question) and carries no secret. The audit row is written through
  * `PrismaService` inside the same transaction as the correction.
+ *
+ * `AiModule` IS imported (#120), and it is the one import here worth
+ * justifying. `ai-evaluation.md` §3's rule is that a feature imports that
+ * module and never a provider: what this module gains is `AiDispatchService`,
+ * which resolves the model from the admin's settings row and spends the
+ * CALLING USER's own key, and nothing else. `OpenAiProvider` is exported from
+ * there too and is deliberately not injected anywhere in this module — a
+ * civics service holding a provider could name its own model, which is exactly
+ * the door §3 exists to be.
+ *
+ * That import is also why `AiModule` is not `@Global()`: the set of modules
+ * that can reach a plaintext-credential path stays a list a person can read,
+ * and this line is how this module appears on it.
+ *
+ * `CivicsExplainService` is NOT exported. Nothing outside this module should
+ * be able to start a tutor stream on a learner's key without going through the
+ * route that has the learner's own request in front of it — same posture as
+ * `CivicsAdminService`, for a different reason: that one is about writes, this
+ * one is about spend.
  */
 @Module({
-  imports: [PrismaModule],
+  imports: [PrismaModule, AiModule],
   controllers: [CivicsController, CivicsAdminController],
-  providers: [CivicsService, CivicsAdminService],
+  providers: [CivicsService, CivicsAdminService, CivicsExplainService],
   exports: [CivicsService],
 })
 export class CivicsModule {}
