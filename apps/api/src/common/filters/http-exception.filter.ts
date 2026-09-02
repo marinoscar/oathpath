@@ -6,14 +6,14 @@ import {
   HttpStatus,
   Logger,
 } from '@nestjs/common';
+import type { IncomingMessage, ServerResponse } from 'node:http';
 import { hasVerbatimErrorBody } from '../exceptions/verbatim-error-body.exception';
 
 /**
  * The standard error envelope every failing request returns.
  *
- * Exported so `TestClockMiddleware` — which must write its own 400 rather than
- * throw, see the comment there — is compile-time bound to this shape instead of
- * hand-rolling a copy that could drift.
+ * Exported so anything that has to name the shape is compile-time bound to it
+ * rather than hand-rolling a copy that could drift.
  */
 export interface ErrorResponse {
   statusCode: number;
@@ -24,6 +24,33 @@ export interface ErrorResponse {
   path: string;
 }
 
+/** The one method of a Fastify reply this filter needs, and uses to recognise one. */
+interface FastifyLikeReply {
+  code(status: number): { send(body: unknown): unknown };
+}
+
+/**
+ * The request path to report in the envelope.
+ *
+ * `req.url` alone is not it. Nest mounts middleware through middie, which
+ * rewrites `url` relative to the mount point, so an exception thrown from
+ * middleware reports `path: "/"` for every request in the application. Middie
+ * preserves the real path on `originalUrl`, and Fastify's own request exposes
+ * an `originalUrl` getter defined as `raw.originalUrl || raw.url` -- so on the
+ * ordinary (non-middleware) path this returns exactly what `request.url`
+ * returned before, and on the middleware path it returns the URL the client
+ * actually asked for.
+ *
+ * Exported because it describes a fact about this application's request
+ * pipeline, not about this filter, and the next thing that needs the real URL
+ * from a raw Node request should import it rather than rediscover middie.
+ */
+export function originalUrlOf(
+  request: Partial<IncomingMessage> & { originalUrl?: string },
+): string {
+  return request.originalUrl ?? request.url ?? '';
+}
+
 @Catch()
 export class HttpExceptionFilter implements ExceptionFilter {
   private readonly logger = new Logger(HttpExceptionFilter.name);
@@ -32,6 +59,7 @@ export class HttpExceptionFilter implements ExceptionFilter {
     const ctx = host.switchToHttp();
     const response = ctx.getResponse();
     const request = ctx.getRequest();
+    const path = originalUrlOf(request);
 
     let status = HttpStatus.INTERNAL_SERVER_ERROR;
     let code = 'INTERNAL_ERROR';
@@ -69,13 +97,23 @@ export class HttpExceptionFilter implements ExceptionFilter {
         exceptionResponse !== null
       ) {
         this.logOutcome(
-          request,
+          request.method,
+          path,
           status,
           this.summarize(exceptionResponse as Record<string, unknown>),
           exception,
         );
 
-        response.code(status).send(exceptionResponse);
+        // Sent through the same writer as the envelope below, not through a
+        // bare `response.code(...)`. A verbatim body is not a "less likely to
+        // come from middleware" case — it is exactly as likely, because a
+        // middleware is a perfectly ordinary place to reject a protocol
+        // request, and the device-flow endpoints this brand exists for are
+        // precisely the sort of thing a future rate-limiting or client-auth
+        // middleware would guard. Leaving this line calling `.code()` directly
+        // would have left half of #183's defect in place, in the half nobody
+        // would think to test.
+        this.send(response, status, exceptionResponse);
         return;
       }
 
@@ -128,17 +166,88 @@ export class HttpExceptionFilter implements ExceptionFilter {
       code,
       message,
       timestamp: new Date().toISOString(),
-      path: request.url,
+      path,
     };
 
     if (details) {
       errorResponse.details = details;
     }
 
-    this.logOutcome(request, status, message, exception);
+    this.logOutcome(request.method, path, status, message, exception);
 
-    // Fastify response - use code() and send()
-    response.code(status).send(errorResponse);
+    this.send(response, status, errorResponse);
+  }
+
+  /**
+   * Writes the response, whatever kind of response object this filter was handed.
+   *
+   * ---------------------------------------------------------------------------
+   * WHY THIS IS NOT JUST `response.code(status).send(body)` (#183)
+   * ---------------------------------------------------------------------------
+   * For an exception thrown from a guard, pipe, interceptor or controller the
+   * arguments host holds a Fastify reply, and `.code().send()` is correct.
+   *
+   * For an exception thrown from **middleware** it does not. Nest runs
+   * middleware through middie under the Fastify adapter and, when middleware
+   * throws, hands this filter the raw Node `IncomingMessage`/`ServerResponse`
+   * (see `MiddlewareModule`'s `new ExecutionContextHost([req, res, next])`).
+   * `ServerResponse` has no `.code()`, so the filter itself threw
+   * `TypeError: response.code is not a function`, nothing was ever written to
+   * the socket, and the request hung until the client gave up — no status, no
+   * body, no clue, and a stack trace pointing at a global filter the author of
+   * the middleware never touched.
+   *
+   * The shape is detected by CAPABILITY rather than by `NODE_ENV`, an adapter
+   * flag or an `instanceof`. The question being asked really is "can this
+   * object take a status the Fastify way?", the answer is knowable from the
+   * object itself, and a capability check keeps the existing unit spec's plain
+   * `{ code, send }` mock — which is neither a Fastify reply nor a
+   * `ServerResponse` — on the Fastify branch where it belongs.
+   */
+  private send(response: unknown, status: number, body: unknown): void {
+    const reply = response as Partial<FastifyLikeReply>;
+
+    if (typeof reply.code === 'function') {
+      reply.code(status).send(body);
+      return;
+    }
+
+    const raw = response as ServerResponse;
+
+    // Already answered: a second write would throw ERR_HTTP_HEADERS_SENT from
+    // inside the filter, which is the same class of failure this method exists
+    // to remove. The likeliest way to get here is a middleware that answered
+    // the request itself and then threw; the client already has its response,
+    // so there is nothing to do but say so in the log.
+    if (raw.headersSent || raw.writableEnded) {
+      this.logger.warn(
+        `Cannot write a ${status} error response — the response was already sent`,
+      );
+      return;
+    }
+
+    // Serialised before `writeHead`, so a body that cannot be stringified (a
+    // circular `details`, say) degrades to a smaller envelope instead of
+    // throwing between the head and the body and hanging the request again.
+    let payload: string;
+    try {
+      payload = JSON.stringify(body);
+    } catch (error) {
+      this.logger.error('Failed to serialize the error response body', error);
+      payload = JSON.stringify({
+        statusCode: status,
+        code: this.getCodeFromStatus(status),
+        message: 'An unexpected error occurred',
+        timestamp: new Date().toISOString(),
+        path: '',
+      } satisfies ErrorResponse);
+    }
+
+    // `charset=utf-8` matches what Fastify puts on every other JSON response,
+    // so a middleware rejection is indistinguishable from any other error on
+    // the wire — headers included.
+    raw.writeHead(status, { 'content-type': 'application/json; charset=utf-8' });
+    raw.end(payload);
   }
 
   /**
@@ -146,22 +255,24 @@ export class HttpExceptionFilter implements ExceptionFilter {
    * responses. Extracted so the verbatim early-return above cannot silently
    * skip logging — a device-flow `slow_down` storm has to be visible in the
    * logs like any other 4xx.
+   *
+   * Takes the resolved path rather than the request, so the log line and the
+   * envelope can never disagree about which URL failed.
    */
   private logOutcome(
-    request: { method: string; url: string },
+    method: string,
+    path: string,
     status: number,
     summary: string,
     exception: unknown,
   ): void {
     if (status >= 500) {
       this.logger.error(
-        `${request.method} ${request.url} - ${status}`,
+        `${method} ${path} - ${status}`,
         exception instanceof Error ? exception.stack : exception,
       );
     } else {
-      this.logger.warn(
-        `${request.method} ${request.url} - ${status}: ${summary}`,
-      );
+      this.logger.warn(`${method} ${path} - ${status}: ${summary}`);
     }
   }
 
