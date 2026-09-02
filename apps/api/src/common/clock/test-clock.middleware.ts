@@ -7,7 +7,8 @@ export const TEST_CLOCK_HEADER = 'x-test-clock';
 
 /**
  * A strict ISO-8601 instant: a date, a time, and a zone designator (`Z` or a
- * numeric offset).
+ * numeric offset). Capture groups feed the range checks in
+ * {@link parseIsoInstant}; the shape alone is not enough.
  *
  * The offset is required on purpose. `new Date('2026-01-15T09:00:00')` -- no
  * designator -- is interpreted in the *server's* local timezone, so the same
@@ -16,7 +17,7 @@ export const TEST_CLOCK_HEADER = 'x-test-clock';
  * eliminate, so it is rejected rather than guessed at.
  */
 const ISO_INSTANT =
-  /^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}(:\d{2}(\.\d{1,9})?)?([Zz]|[+-]\d{2}:\d{2})$/;
+  /^(\d{4})-(\d{2})-(\d{2})[Tt](\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,9})?)?(?:[Zz]|([+-])(\d{2}):(\d{2}))$/;
 
 /**
  * Reads the `X-Test-Clock` header and runs the rest of the request with that
@@ -67,17 +68,59 @@ export class TestClockMiddleware implements NestMiddleware {
 }
 
 function parseIsoInstant(value: string): Date | null {
-  if (!ISO_INSTANT.test(value)) {
+  const match = ISO_INSTANT.exec(value);
+  if (!match) {
+    return null;
+  }
+
+  // Optional groups are `undefined` at runtime even though the array type says
+  // otherwise; absent seconds and an absent offset both mean zero.
+  const n = (index: number): number => {
+    const part: string | undefined = match[index];
+    return part === undefined ? 0 : Number(part);
+  };
+
+  const [year, month, day, hour, minute, second] = [1, 2, 3, 4, 5, 6].map(n);
+  const [offsetHour, offsetMinute] = [8, 9].map(n);
+
+  // Every field is range-checked by hand, because `Date` is not strict enough
+  // to be trusted here. `new Date('2026-02-31T00:00:00Z')` does not produce an
+  // `Invalid Date` -- it silently rolls the day over into March 3rd. Accepting
+  // that would pin a test to an instant three days from the one it asked for,
+  // which is the precise failure this header exists to make impossible.
+  if (
+    month < 1 ||
+    month > 12 ||
+    day < 1 ||
+    day > daysInMonth(year, month) ||
+    hour > 23 ||
+    minute > 59 ||
+    second > 59 ||
+    offsetHour > 23 ||
+    offsetMinute > 59
+  ) {
     return null;
   }
 
   const parsed = new Date(value);
 
-  // The regex admits shapes the calendar does not, such as 2026-02-31.
-  // `Date` turns those into `Invalid Date` rather than throwing.
+  /* istanbul ignore next -- the range checks above already reject every shape
+     V8 would refuse, so this is a belt-and-braces guard only. */
   if (Number.isNaN(parsed.getTime())) {
     return null;
   }
 
   return parsed;
+}
+
+function daysInMonth(year: number, month: number): number {
+  const lengths = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  if (month === 2 && isLeapYear(year)) {
+    return 29;
+  }
+  return lengths[month - 1];
+}
+
+function isLeapYear(year: number): boolean {
+  return (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
 }
