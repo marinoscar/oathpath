@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import type { z } from 'zod';
 
 import {
@@ -284,11 +284,18 @@ export class AiDispatchService {
   constructor(
     private readonly aiSettings: AiSettingsService,
     private readonly credentials: CredentialsService,
-    // Injected by its class token. Under `AI_PROVIDER_FAKE` that token
-    // resolves to `FakeAiProvider` instead (see `AiModule`), and THIS FILE
-    // CONTAINS NO BRANCH ON WHICH ONE IT GOT — which is the entire point of
-    // substituting at the DI layer rather than with a flag read here.
-    openai: OpenAiProvider,
+    // ADDRESSED BY THE `OpenAiProvider` TOKEN, TYPED AS `AiProvider`.
+    //
+    // Under `AI_PROVIDER_FAKE` that token resolves to a `FakeAiProvider`
+    // instead (see `AiModule`), and THIS FILE CONTAINS NO BRANCH ON WHICH ONE
+    // IT GOT — which is the entire point of substituting at the DI layer
+    // rather than reading a flag here. The parameter type is the INTERFACE for
+    // the same reason: typing it as the concrete class would be a claim this
+    // file cannot check and, on a fake-provider deployment, a false one. The
+    // explicit `@Inject` is what keeps the token unambiguous once the declared
+    // type is no longer the class — `emitDecoratorMetadata` would otherwise
+    // emit `Object` for an interface and Nest would have nothing to resolve.
+    @Inject(OpenAiProvider) openai: AiProvider,
   ) {
     this.providers = { openai };
   }
