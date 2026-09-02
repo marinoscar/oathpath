@@ -1,9 +1,9 @@
 <#
 .SYNOPSIS
-    EnterpriseAppBase Development Script for Windows
+    OathPath Development Script for Windows
 
 .DESCRIPTION
-    Manages the EnterpriseAppBase development environment using Docker Compose.
+    Manages the OathPath development environment using Docker Compose.
     Supports starting, stopping, rebuilding, viewing logs, running tests, and Prisma operations.
 
 .PARAMETER Action
@@ -89,13 +89,13 @@ $WebDir = Join-Path $RepoRoot "apps\web"
 # Verify compose files exist
 if (-not (Test-Path $BaseCompose)) {
     Write-Err "ERROR: Base compose file not found at $BaseCompose"
-    Write-Err "Make sure you're running this script from the EnterpriseAppBase repository."
+    Write-Err "Make sure you're running this script from the OathPath repository."
     exit 1
 }
 
 function Show-Help {
     Write-Host ""
-    Write-Info "EnterpriseAppBase Development Script"
+    Write-Info "OathPath Development Script"
     Write-Host "====================================="
     Write-Host ""
     Write-Host "Usage: .\dev.ps1 <action> [service/option] [-Otel]"
@@ -179,7 +179,7 @@ function Invoke-DockerCompose {
 }
 
 function Start-Services {
-    Write-Info "Starting EnterpriseAppBase services..."
+    Write-Info "Starting OathPath services..."
     if ($Otel) {
         Write-Info "Including OpenTelemetry observability stack..."
     }
@@ -198,7 +198,7 @@ function Start-Services {
 }
 
 function Stop-Services {
-    Write-Info "Stopping EnterpriseAppBase services..."
+    Write-Info "Stopping OathPath services..."
     if ($Service) {
         Invoke-DockerCompose @("stop", $Service)
     } else {
@@ -208,7 +208,7 @@ function Stop-Services {
 }
 
 function Restart-Services {
-    Write-Info "Restarting EnterpriseAppBase services..."
+    Write-Info "Restarting OathPath services..."
     if ($Service) {
         Invoke-DockerCompose @("restart", $Service)
     } else {
@@ -219,7 +219,7 @@ function Restart-Services {
 }
 
 function Rebuild-Services {
-    Write-Info "Rebuilding EnterpriseAppBase services (no cache)..."
+    Write-Info "Rebuilding OathPath services (no cache)..."
     if ($Otel) {
         Write-Info "Including OpenTelemetry observability stack..."
     }
@@ -257,7 +257,7 @@ function Clean-Services {
     Write-Warn "WARNING: This will stop all services and DELETE all data (database, volumes)!"
     $confirmation = Read-Host "Are you sure? Type 'yes' to confirm"
     if ($confirmation -eq "yes") {
-        Write-Info "Cleaning up EnterpriseAppBase services and volumes..."
+        Write-Info "Cleaning up OathPath services and volumes..."
         Invoke-DockerCompose @("down", "-v")
         Write-Success "Cleanup complete! All data has been removed."
     } else {
