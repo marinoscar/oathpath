@@ -13,8 +13,11 @@
 
 import type {
   CivicsTestVersionOption,
+  JourneyHome,
   JourneyProfile,
   JourneyProfileResponse,
+  JourneyStage,
+  NextAction,
   UsStateOption,
 } from '../../types';
 
@@ -90,6 +93,137 @@ export function profileResponse(
     profile,
     testVersions: TEST_VERSIONS,
     states: STATES,
+    ...overrides,
+  };
+}
+
+// =============================================================================
+// Home screen fixtures (issue #74, epic #50)
+// =============================================================================
+//
+// Shaped from `apps/api/src/journey/dto/journey-home.dto.ts` and
+// `dto/journey-stage.dto.ts`, and from `journey-stages.ts`'s registry.
+//
+// A WORD ON `JOURNEY_STAGES` BELOW, BECAUSE IT LOOKS LIKE THE DUPLICATE
+// REGISTRY THE SPEC REJECTS AND IS NOT ONE. §6 forbids a copy in
+// `apps/web/src/config` — a copy the APPLICATION reads, which can disagree with
+// the server in a running build. This is a fixture: it is what a TEST pretends
+// the server said, it is never imported by application code, and the suite that
+// uses it deliberately serves a DIFFERENT list (`ALTERNATE_STAGES`) to prove the
+// page renders whatever arrives rather than anything it knows.
+// =============================================================================
+
+/** The eight stages, as `GET /api/journey/stages` sends them. */
+export const JOURNEY_STAGES: JourneyStage[] = [
+  {
+    key: 'uncertain',
+    label: 'Just starting',
+    description:
+      "You're just getting started — that's the whole point of being here.",
+  },
+  {
+    key: 'oriented',
+    label: 'Oriented',
+    description:
+      "You've told us where you stand, so we can show you the right test and a real countdown.",
+  },
+  {
+    key: 'learning',
+    label: 'Learning',
+    description: "You're meeting the material for the first time.",
+  },
+  {
+    key: 'remembering',
+    label: 'Remembering',
+    description: 'Answers are starting to stick.',
+  },
+  {
+    key: 'speaking',
+    label: 'Speaking',
+    description:
+      "You're practicing saying answers out loud, not just typing them.",
+  },
+  {
+    key: 'practicing',
+    label: 'Practicing',
+    description:
+      "You're building real, repeated evidence toward the interview.",
+  },
+  {
+    key: 'performing',
+    label: 'Performing',
+    description:
+      "You're consistently doing well, including under realistic conditions.",
+  },
+  {
+    key: 'ready',
+    label: 'Ready',
+    description: 'The evidence says you’re ready.',
+  },
+];
+
+/**
+ * A registry that is NOT the real one — different keys, different labels, a
+ * different length.
+ *
+ * This is the whole structural argument that the stage list is not hardcoded in
+ * the web app: served from MSW, the page must render THESE five stages and mark
+ * THIS current one. A component holding its own eight cannot pass.
+ */
+export const ALTERNATE_STAGES: JourneyStage[] = [
+  { key: 'alpha', label: 'Alpha stage', description: 'The first invented one.' },
+  { key: 'beta', label: 'Beta stage', description: 'The second invented one.' },
+  { key: 'gamma', label: 'Gamma stage', description: 'The third invented one.' },
+  { key: 'delta', label: 'Delta stage', description: 'The fourth invented one.' },
+  {
+    key: 'epsilon',
+    label: 'Epsilon stage',
+    description: 'The fifth invented one.',
+  },
+];
+
+/**
+ * The three `nextAction`s `apps/api/src/journey/next-action.ts` produces,
+ * copied from that file so a test asserting "the card renders what the server
+ * sent" is asserting it against the real strings.
+ */
+export const NEXT_ACTIONS: Record<NextAction['kind'], NextAction> = {
+  orientation: {
+    kind: 'orientation',
+    title: 'Finish setting up your plan.',
+    reason: "A couple of quick questions, then you're ready to start.",
+    path: '/setup/journey',
+  },
+  interview_countdown: {
+    kind: 'interview_countdown',
+    title: '12 days until your interview',
+    reason: 'Start with the material, then build up to full practice.',
+    path: '/learn',
+  },
+  explore: {
+    kind: 'explore',
+    title: "See what's here so far.",
+    reason:
+      "The learning and practice tools are on their way. For now, take a look at what's ready.",
+    path: '/learn',
+  },
+};
+
+/**
+ * A `GET /api/journey/home` body.
+ *
+ * `dailyGoal.tracked` is `false` and there is NO `minutesToday`, because the
+ * real payload has neither — a fixture that invented one would let a component
+ * that renders a fabricated number pass.
+ */
+export function homeResponse(overrides: Partial<JourneyHome> = {}): JourneyHome {
+  return {
+    stage: 'oriented',
+    interviewDate: '2026-11-04',
+    daysUntilInterview: 12,
+    interviewPast: false,
+    dailyGoal: { minutes: 15, tracked: false },
+    nextAction: NEXT_ACTIONS.interview_countdown,
     ...overrides,
   };
 }

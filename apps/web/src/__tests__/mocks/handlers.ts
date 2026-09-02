@@ -1,5 +1,7 @@
 import { http, HttpResponse } from 'msw';
 
+import { JOURNEY_STAGES, homeResponse } from '../utils/journey-fixtures';
+
 // Use wildcard pattern to match relative URLs
 const API_BASE = '*/api';
 
@@ -241,5 +243,26 @@ export const handlers = [
           : 'Device access denied.',
       },
     });
+  }),
+
+  // ---------------------------------------------------------------------------
+  // Journey (epic #50)
+  //
+  // Home renders on the default route, so EVERY suite that mounts the app tree
+  // hits these two. Without defaults they fall through to a real fetch, and the
+  // page under test shows its error state for reasons that have nothing to do
+  // with that test.
+  //
+  // `GET /journey/profile` is deliberately NOT defaulted here. It decides
+  // whether `RequireOrientation` lets a render through, so a default would
+  // silently change what several existing suites are testing; the suites that
+  // care override it themselves, and the gate fails open otherwise.
+  // ---------------------------------------------------------------------------
+  http.get(`${API_BASE}/journey/home`, () => {
+    return HttpResponse.json({ data: homeResponse() });
+  }),
+
+  http.get(`${API_BASE}/journey/stages`, () => {
+    return HttpResponse.json({ data: JOURNEY_STAGES });
   }),
 ];
