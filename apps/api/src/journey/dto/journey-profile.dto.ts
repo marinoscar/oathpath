@@ -41,7 +41,7 @@ export const journeyProfileSchema = z.object({
    * same edit instead of making the endpoint publish a value its own
    * documentation calls impossible.
    */
-  stage: z.enum(JOURNEY_STAGE_KEYS as unknown as [string, ...string[]]),
+  stage: z.enum(JOURNEY_STAGE_KEYS),
 
   /**
    * `YYYY-MM-DD`, or null when the learner has no interview booked yet.

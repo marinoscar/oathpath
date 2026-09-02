@@ -66,7 +66,7 @@ export const nextActionSchema = z.object({
 
 export const journeyHomeResponseSchema = z.object({
   /** One of the eight stage keys. The answer to "Where am I?". */
-  stage: z.enum(JOURNEY_STAGE_KEYS as unknown as [string, ...string[]]),
+  stage: z.enum(JOURNEY_STAGE_KEYS),
 
   /** `YYYY-MM-DD`, or null when no interview is booked. */
   interviewDate: z.string().nullable(),
