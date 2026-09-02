@@ -19,6 +19,12 @@ const LoginPage = lazy(() => import("./pages/LoginPage"));
 const AuthCallbackPage = lazy(() => import("./pages/AuthCallbackPage"));
 const ActivateDevicePage = lazy(() => import("./pages/ActivateDevicePage"));
 const HomePage = lazy(() => import("./pages/HomePage"));
+// The three bar destinations E1 ships as designed empty states (#69, epic #50).
+// Lazy like every other page here: each is two sentences, but a static import
+// would pull them into the entry chunk that a first-run user waits on.
+const LearnPage = lazy(() => import("./pages/LearnPage"));
+const PracticePage = lazy(() => import("./pages/PracticePage"));
+const ProgressPage = lazy(() => import("./pages/ProgressPage"));
 const AiKeySetupPage = lazy(() => import("./pages/AiKeySetupPage"));
 // User settings — the hub (#96) plus one route per card in
 // `config/userSettingsSections.tsx` (#91, epic #90). These replace the single
@@ -137,6 +143,27 @@ function AppRoutes() {
                     }
                   >
                     <Route path="/" element={<HomePage />} />
+
+                    {/* The other three bar destinations (#69, epic #50,
+                    `docs/specs/journey-shell.md` §2.3). REAL, MOUNTED ROUTES
+                    from the day the bar names them — not redirects to `/`, not
+                    404s, and not placeholders. The rail and the bottom bar draw
+                    all four at every width for every authenticated user, so a
+                    destination whose route did not exist would be navigation
+                    that lies; §4's `nextAction` contract points learners at
+                    these exact paths as well, and a stub that bounced to `/`
+                    would make every one of those values false the moment E1
+                    shipped.
+
+                    UNGATED, like the `/settings/*` block below and unlike
+                    `/admin/*`: `ProtectedRoute` above establishes that someone
+                    is signed in, which is the only question these pages have.
+                    `config/destinations.ts` declares no `permission` on any of
+                    the four for the same reason — see the array's comment on
+                    reachability versus content. */}
+                    <Route path="/learn" element={<LearnPage />} />
+                    <Route path="/practice" element={<PracticePage />} />
+                    <Route path="/progress" element={<ProgressPage />} />
                     {/* The per-user settings surface (#96, epic #90) — the same
                     hub component `/admin/settings` renders, over
                     `USER_SETTINGS_SECTIONS`, plus one route per card.

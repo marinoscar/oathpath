@@ -76,6 +76,7 @@ import { usePermissions } from '../../hooks/usePermissions';
 import { useNavigationPrefs } from '../../hooks/useNavigationPrefs';
 import {
   DESTINATIONS,
+  RAIL_PINNED_DESTINATIONS,
   isDestinationVisible,
   owns,
   resolveActiveDestination,
@@ -270,28 +271,30 @@ export function NavigationRail() {
   // compared against the row's own `path` — see `config/destinations.ts`.
   const activeDestination = resolveActiveDestination(pathname);
 
+  // TWO GROUPS, ONE MODEL (#105, #69). Console is a MODE, not a peer of the
+  // library destinations, and its POSITION at the rail's foot is what says so —
+  // inline as the last row it read as a fifth bar destination. Since #69 the
+  // split is a MEMBERSHIP one: the bar's four destinations are `DESTINATIONS`
+  // and the pinned foot is `RAIL_PINNED_DESTINATIONS`, which this component is
+  // the only reader of. Neither list is filtered by `key === 'console'` here —
+  // see `config/destinations.ts` for why the render must not hold its own
+  // opinion about which destination is the admin one.
+  //
   // `usePermissions`' predicates are memoized, so keying on `hasPermission` is
   // safe: this recomputes when the user's permission set changes, not per render.
   // `isDestinationVisible`, never an inline `destination.permission` check:
   // `console` is gated on EITHER `system_settings:read` OR `users:read` (#92),
   // and an inline check would have shown that row to everyone.
-  const visibleDestinations = DESTINATIONS.filter((destination) =>
+  //
+  // Both lists run through that same gate, so a user who cannot reach Console
+  // gets an EMPTY pinned list and the foot section below renders nothing at all
+  // — no row, and no orphan divider hanging above the collapse toggle.
+  const listDestinations = DESTINATIONS.filter((destination) =>
     isDestinationVisible(destination, hasPermission),
   );
-
-  // TWO GROUPS, ONE MODEL (#105). Console is a MODE, not a peer of the library
-  // destinations, and its POSITION at the rail's foot is what says so — inline
-  // as the last row it read as a third library destination. The split is driven
-  // by `destination.pinned`, never by `key === 'console'`: see the flag's
-  // comment in `config/destinations.ts` for why the render must not hold its
-  // own opinion about which destination is the admin one.
-  //
-  // Both lists are derived from `visibleDestinations`, so the permission gate
-  // has already run. A user who cannot reach Console gets an EMPTY pinned list,
-  // and the foot section below renders nothing at all — no row, and no orphan
-  // divider hanging above the collapse toggle.
-  const listDestinations = visibleDestinations.filter((destination) => !destination.pinned);
-  const pinnedDestinations = visibleDestinations.filter((destination) => destination.pinned);
+  const pinnedDestinations = RAIL_PINNED_DESTINATIONS.filter((destination) =>
+    isDestinationVisible(destination, hasPermission),
+  );
 
   // No `query` argument: the RAIL is not searchable, the HUB is (#93). A search
   // field cannot live in 220px beside the rows it filters, and the rail is
@@ -462,8 +465,8 @@ export function NavigationRail() {
         </Box>
       )}
 
-      {/* PINNED AT THE FOOT (#105) — Console, and anything else the model marks
-          `pinned`. It sits BELOW the flex-grow region above and above the
+      {/* PINNED AT THE FOOT (#105) — Console, and anything else
+          `RAIL_PINNED_DESTINATIONS` holds. It sits BELOW the flex-grow region above and above the
           collapse toggle, separated by its own divider, because that position
           is the whole point: a mode you switch into, not a third library
           destination you page between.
