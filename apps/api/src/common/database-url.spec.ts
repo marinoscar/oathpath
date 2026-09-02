@@ -72,7 +72,7 @@ describe('buildDatabaseUrl', () => {
 
   it('applies the documented defaults', () => {
     expect(buildDatabaseUrl(envFor({}))).toBe(
-      'postgresql://postgres:postgres@localhost:5432/appdb',
+      'postgresql://postgres:postgres@localhost:5432/oathpath',
     );
   });
 
@@ -100,7 +100,7 @@ describe('buildDatabaseUrl', () => {
 
   it('ignores an empty DATABASE_URL rather than returning it', () => {
     expect(buildDatabaseUrl(envFor({ DATABASE_URL: '' }))).toBe(
-      'postgresql://postgres:postgres@localhost:5432/appdb',
+      'postgresql://postgres:postgres@localhost:5432/oathpath',
     );
   });
 
@@ -132,7 +132,7 @@ describe('parity with scripts/prisma-env.js', () => {
       POSTGRES_PORT: '6432',
       POSTGRES_USER: 'app',
       POSTGRES_PASSWORD: 'wF3/kZ+9aQ==',
-      POSTGRES_DB: 'appdb',
+      POSTGRES_DB: 'oathpath',
       POSTGRES_SSL: 'true',
     },
     { DATABASE_URL: 'postgresql://explicit@host:5432/db' },

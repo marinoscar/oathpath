@@ -21,7 +21,7 @@ const TEMPLATE = [
   'POSTGRES_HOST=localhost',
   'POSTGRES_USER=postgres',
   'POSTGRES_PASSWORD=postgres',
-  'POSTGRES_DB=appdb',
+  'POSTGRES_DB=oathpath',
   '',
   '# ------------------------------------------------------------',
   '# JWT / Session',

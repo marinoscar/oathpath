@@ -35,7 +35,7 @@ const ENV = new Map([
   ['POSTGRES_PORT', '5432'],
   ['POSTGRES_USER', 'appuser'],
   ['POSTGRES_PASSWORD', 'p@ss/word#1'],
-  ['POSTGRES_DB', 'appdb'],
+  ['POSTGRES_DB', 'oathpath'],
 ]);
 
 function context(overrides: Partial<CheckContext> = {}): CheckContext {
@@ -64,7 +64,7 @@ describe('databaseSettings', () => {
       port: '5432',
       user: 'appuser',
       password: 'p@ss/word#1',
-      database: 'appdb',
+      database: 'oathpath',
       ssl: false,
     });
   });
@@ -125,7 +125,7 @@ describe('database checks', () => {
       context({
         runCommand: fakeRunCommand(() => ({
           exitCode: 2,
-          stderr: 'psql: error: FATAL:  database "appdb" does not exist',
+          stderr: 'psql: error: FATAL:  database "oathpath" does not exist',
         })),
       }),
     );

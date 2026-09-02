@@ -5,7 +5,7 @@ export default () => {
   const port = process.env.POSTGRES_PORT || '5432';
   const user = process.env.POSTGRES_USER || 'postgres';
   const password = process.env.POSTGRES_PASSWORD || 'postgres';
-  const dbName = process.env.POSTGRES_DB || 'appdb';
+  const dbName = process.env.POSTGRES_DB || 'oathpath';
   const ssl = process.env.POSTGRES_SSL === 'true';
 
   // Built by the shared helper, NOT interpolated here. This module used to do
@@ -90,7 +90,7 @@ export default () => {
   otel: {
     enabled: process.env.OTEL_ENABLED === 'true',
     endpoint: process.env.OTEL_EXPORTER_OTLP_ENDPOINT,
-    serviceName: process.env.OTEL_SERVICE_NAME || 'enterprise-app-api',
+    serviceName: process.env.OTEL_SERVICE_NAME || 'oathpath-api',
   },
 
   // Storage Configuration

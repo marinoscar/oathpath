@@ -65,7 +65,7 @@ function constructDatabaseUrl(env = process.env) {
   const port = env.POSTGRES_PORT || '5432';
   const user = env.POSTGRES_USER || 'postgres';
   const password = env.POSTGRES_PASSWORD || 'postgres';
-  const dbName = env.POSTGRES_DB || 'appdb';
+  const dbName = env.POSTGRES_DB || 'oathpath';
   const ssl = env.POSTGRES_SSL === 'true';
 
   // Both the user and the password are encoded. The password is the one that

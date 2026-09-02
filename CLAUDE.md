@@ -505,7 +505,7 @@ Key variables (see `infra/compose/.env.example` for full list):
 - `POSTGRES_PORT` - Database port (default: 5432)
 - `POSTGRES_USER` - Database user (default: postgres)
 - `POSTGRES_PASSWORD` - Database password (default: postgres)
-- `POSTGRES_DB` - Database name (default: appdb)
+- `POSTGRES_DB` - Database name (default: oathpath)
 - `POSTGRES_SSL` - Enable SSL connection (default: false)
 
 Note: `DATABASE_URL` is constructed automatically from these variables at runtime.

@@ -1343,10 +1343,10 @@ MICROSOFT_CALLBACK_URL=http://localhost:3535/api/auth/microsoft/callback
 
 **Database:**
 ```bash
-DATABASE_URL=postgresql://postgres:postgres@db:5432/appdb
+DATABASE_URL=postgresql://postgres:postgres@db:5432/oathpath
 POSTGRES_USER=postgres
 POSTGRES_PASSWORD=your-strong-password-here
-POSTGRES_DB=appdb
+POSTGRES_DB=oathpath
 ```
 
 **Admin Bootstrap:**

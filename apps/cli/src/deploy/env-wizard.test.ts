@@ -79,7 +79,7 @@ const TEMPLATE = [
   'POSTGRES_HOST=localhost',
   'POSTGRES_USER=postgres',
   'POSTGRES_PASSWORD=postgres',
-  'POSTGRES_DB=appdb',
+  'POSTGRES_DB=oathpath',
   '',
   '# ------------------------------------------------------------',
   '# JWT / Session',
@@ -104,7 +104,7 @@ const ESSENTIAL_ANSWERS = [
   'db.example.test', // POSTGRES_HOST
   'appuser', // POSTGRES_USER
   'sup3rs3cret-password', // POSTGRES_PASSWORD (secret)
-  'appdb', // POSTGRES_DB
+  'oathpath', // POSTGRES_DB
   'y', // JWT_SECRET: generate one?
   'y', // review: write this environment?
 ];
@@ -180,7 +180,7 @@ describe('runEnvWizard', () => {
       'db.example.test',
       'appuser',
       'pw-that-is-fine',
-      'appdb',
+      'oathpath',
       'n', // decline generation for JWT_SECRET
       'too-short', // rejected: under 32 characters
       'a-perfectly-long-replacement-secret-value',
@@ -231,7 +231,7 @@ describe('runEnvWizard', () => {
       'db.example.test', // POSTGRES_HOST
       'appuser', // POSTGRES_USER
       '', // POSTGRES_PASSWORD: essential, blank keeps the existing value
-      'appdb', // POSTGRES_DB
+      'oathpath', // POSTGRES_DB
       '', // JWT_SECRET: essential too, so still asked; blank keeps it
       'y', // review
     ]);
@@ -272,7 +272,7 @@ describe('runEnvWizard', () => {
       'db.example.test',
       'appuser',
       'pw-that-is-fine',
-      'appdb',
+      'oathpath',
       'n', // decline generation
       'a-perfectly-long-replacement-secret-value',
       'bucket-name',
@@ -345,7 +345,7 @@ describe('runEnvWizard --non-interactive', () => {
         ['POSTGRES_HOST', 'db.example.test'],
         ['POSTGRES_USER', 'appuser'],
         ['POSTGRES_PASSWORD', 'pw-that-is-fine'],
-        ['POSTGRES_DB', 'appdb'],
+        ['POSTGRES_DB', 'oathpath'],
         // Straight from .env.example, which is not a configured value.
         ['JWT_SECRET', 'your-super-secret-key-min-32-characters-long'],
       ]),
@@ -363,7 +363,7 @@ describe('runEnvWizard --non-interactive', () => {
         ['POSTGRES_HOST', 'db.example.test'],
         ['POSTGRES_USER', 'appuser'],
         ['POSTGRES_PASSWORD', 'pw-that-is-fine'],
-        ['POSTGRES_DB', 'appdb'],
+        ['POSTGRES_DB', 'oathpath'],
         ['JWT_SECRET', 'a-perfectly-long-replacement-secret-value'],
       ]),
     });

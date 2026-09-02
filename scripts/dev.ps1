@@ -347,7 +347,7 @@ function Run-E2ETests {
         $env:POSTGRES_PORT = "5433"
         $env:POSTGRES_USER = "postgres"
         $env:POSTGRES_PASSWORD = "postgres"
-        $env:POSTGRES_DB = "enterprise_app_test"
+        $env:POSTGRES_DB = "oathpath_test"
         $env:POSTGRES_SSL = "false"
         npm run test:e2e
     } finally {

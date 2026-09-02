@@ -554,7 +554,7 @@ const response = await request(app.getHttpServer())
    separately and is reached via the `POSTGRES_HOST`/`POSTGRES_PORT` values
    in `.env`. Connect to it directly:
    ```bash
-   psql -h $POSTGRES_HOST -p $POSTGRES_PORT -U postgres -d appdb
+   psql -h $POSTGRES_HOST -p $POSTGRES_PORT -U postgres -d oathpath
    \dt              # List tables
    SELECT * FROM roles;
    SELECT * FROM permissions;
