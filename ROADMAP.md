@@ -77,8 +77,8 @@ a v2.
 | — | AI configuration | Server model-role bindings (admin) plus mandatory per-user BYOK OpenAI keys; the one door (`AiDispatchService`) every later AI feature calls through | Foundation — required before E4, E8, E9, E10, E11 | done | [#25](https://github.com/marinoscar/oathpath/issues/25) |
 | E1 | Journey shell | Four-destination navigation (Home, Learn, Practice, Progress), the `Clock` provider, the learner profile (test version, senior exemption, interview date, state, goal), orientation, and home's `nextAction` contract | — | done | [#50](https://github.com/marinoscar/oathpath/issues/50) |
 | E2 | Civics content | The versioned, provenance-tracked USCIS question bank for both test versions, dynamic answers with effective dates, and the Learn page | E1 | done<sup>†</sup> | [#51](https://github.com/marinoscar/oathpath/issues/51) |
-| E3 | Practice sessions | Deterministic (exact-match + normalisation) practice loop and `practice_attempts`, the one evidence table every later epic reads | E1, E2 | not started | [#52](https://github.com/marinoscar/oathpath/issues/52) |
-| E4 | AI Evaluator and Teacher | `AiDispatchService.run`, the `FakeAiProvider`, semantic grading with failure causes, streaming explanations — the first AI feature | #25, E2, E3 | not started | [#53](https://github.com/marinoscar/oathpath/issues/53) |
+| E3 | Practice sessions | Deterministic (exact-match + normalisation) practice loop and `practice_attempts`, the one evidence table every later epic reads | E1, E2 | in progress<sup>‡</sup> | [#52](https://github.com/marinoscar/oathpath/issues/52) |
+| E4 | AI Evaluator and Teacher | `AiDispatchService.run`, the `FakeAiProvider`, semantic grading with failure causes, streaming explanations — the first AI feature | #25, E2, E3 | in progress<sup>‡</sup> | [#53](https://github.com/marinoscar/oathpath/issues/53) |
 | E5 | Memory | Spaced repetition (`question_mastery`), verified mastery (correct on ≥3 distinct days), the deterministic Study Coach recommender, Progress v1 | E1, E3 | not started | [#54](https://github.com/marinoscar/oathpath/issues/54) |
 | E6 | Readiness and Progress | The explainable, capped readiness score (`readiness_snapshots`), Progress v2, the readiness-vs-engagement separation | E3, E5 | not started | [#55](https://github.com/marinoscar/oathpath/issues/55) |
 | E7 | Habit | Daily goal, streaks with protection, session-end celebrations, three reminder notification events on an hourly cron | E1, E3, E5 | not started | [#56](https://github.com/marinoscar/oathpath/issues/56) |
@@ -114,7 +114,33 @@ record of what a later reader should not assume was verified:
    [`docs/runbooks/updating-civics-content.md`](docs/runbooks/updating-civics-content.md).
 
 Both were closed as a deliberate call rather than an oversight, and #101 and
-#132 can be reopened if either is picked up. Nothing downstream should read
+#132 can be reopened if either is picked up.
+
+<sup>‡</sup> **E3 and E4 have every child issue implemented and merged, and are
+`in progress` rather than `done` for one reason: nobody has run their
+Playwright specs.** `tests/e2e/specs/practice-session.spec.ts` (#84) and
+`ai-evaluation.spec.ts` (#131) were written against the real component
+sources, they typecheck, and all 17 specs register under `playwright test
+--list` — but the environment they were authored in had no Docker daemon, so
+neither has ever walked the loop against the compose stack. That is the
+human check §6 requires, and it is the only thing outstanding.
+
+Two smaller facts a later reader should not have to discover:
+
+1. **Both migrations were hand-authored, not generated.** `prisma migrate dev`
+   needs a live database and there was none. `20260903000000_add_practice_sessions_and_attempts`
+   and `20260903010000_add_practice_attempt_ai_grading` are written in Prisma's
+   exact emission style and `prisma validate` and `prisma generate` both
+   succeed, but neither has been applied to a real Postgres.
+2. **Running `ai-evaluation.spec.ts` needs `AI_PROVIDER_FAKE=true` on the API
+   service.** It is inert under `NODE_ENV=production` by construction, and it
+   substitutes for the OpenAI provider rather than adding a provider kind, so
+   `AI_PROVIDER_KINDS` gains nothing an admin could select.
+
+E4's grader and tutor also inherit E2's content caveat above in full: they
+ground every judgement and every explanation in `civics_answers` rows, so
+"grounded in the database" is exactly as true as the database is.
+ Nothing downstream should read
 E2's `done` as meaning the civics content has been verified against the
 official source — E4's grader and E8's interview engine ground their judgments
 in these rows, so that distinction matters to them specifically.
