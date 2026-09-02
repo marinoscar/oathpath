@@ -16,7 +16,7 @@ import {
 import { DEPLOY_STATE_VERSION, writeState, type DeployState } from './state.js';
 
 function installedRoot(): string {
-  const root = mkdtempSync(join(tmpdir(), 'appctl-install-'));
+  const root = mkdtempSync(join(tmpdir(), 'oathpath-install-'));
   const state: DeployState = {
     version: DEPLOY_STATE_VERSION,
     repoUrl: 'https://example.test/o/r',
@@ -27,7 +27,7 @@ function installedRoot(): string {
     installedAt: '2026-01-01T00:00:00.000Z',
     lastDeployedAt: '2026-01-01T00:00:00.000Z',
     lastCommand: 'install',
-    appctlVersion: '1.0.0',
+    cliVersion: '1.0.0',
   };
   writeState(state);
   return root;

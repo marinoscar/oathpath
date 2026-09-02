@@ -42,7 +42,7 @@ function fakeRunCommand(
 }
 
 function makeProxyRoot(): string {
-  const root = mkdtempSync(join(tmpdir(), 'appctl-proxy-'));
+  const root = mkdtempSync(join(tmpdir(), 'oathpath-proxy-'));
   mkdirSync(join(root, 'nginx', 'conf.d'), { recursive: true });
   mkdirSync(join(root, 'webroot'), { recursive: true });
   return root;
@@ -191,7 +191,7 @@ describe('installVhost', () => {
   it('restores the previous contents when it overwrote one', async () => {
     const root = makeProxyRoot();
     const path = vhostPath(target(root));
-    const previous = '# Managed by appctl deploy\n# an older version\n';
+    const previous = '# Managed by oathpath deploy\n# an older version\n';
     writeFileSync(path, previous);
 
     await installVhost(target(root), {
@@ -315,7 +315,7 @@ describe('issueCertificate', () => {
 });
 
 describe('removeVhost', () => {
-  it('refuses to remove a vhost appctl did not write', async () => {
+  it('refuses to remove a vhost oathpath did not write', async () => {
     const root = makeProxyRoot();
     const path = vhostPath(target(root));
     writeFileSync(path, 'server { listen 80; } # somebody else wrote this\n');

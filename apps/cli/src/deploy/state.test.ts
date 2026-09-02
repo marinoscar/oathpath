@@ -17,7 +17,7 @@ import {
 } from './state.js';
 
 function makeRoot(): string {
-  return mkdtempSync(join(tmpdir(), 'appctl-state-'));
+  return mkdtempSync(join(tmpdir(), 'oathpath-state-'));
 }
 
 function sample(deployRoot: string): DeployState {
@@ -32,7 +32,7 @@ function sample(deployRoot: string): DeployState {
     installedAt: '2026-01-01T00:00:00.000Z',
     lastDeployedAt: '2026-01-02T00:00:00.000Z',
     lastCommand: 'install',
-    appctlVersion: '1.0.0',
+    cliVersion: '1.0.0',
   };
 }
 

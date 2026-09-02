@@ -20,7 +20,7 @@ import { metadataFor } from './env-metadata.js';
 import type { PromptContext } from '../prompt.js';
 
 // =============================================================================
-// `appctl deploy install`  (issue #180, epic #168)
+// `oathpath deploy install`  (issue #180, epic #168)
 // =============================================================================
 //
 // Takes a prepared VPS from nothing to a running, migrated, seeded, healthy,
@@ -469,7 +469,7 @@ export async function runInstall(options: InstallOptions): Promise<InstallResult
     installedAt: existingState?.installedAt ?? now,
     lastDeployedAt: now,
     lastCommand: 'install',
-    appctlVersion: CLI_VERSION,
+    cliVersion: CLI_VERSION,
     completedSteps: result.completed,
   } as DeployState);
 

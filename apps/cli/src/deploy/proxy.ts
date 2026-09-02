@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { CLI_NAME } from '../branding.js';
 import { UsageError } from '../errors.js';
 import type { runCommand } from './executor.js';
 import type { DeployHooks } from './hooks.js';
@@ -83,13 +84,23 @@ export function livePath(target: ProxyTarget, file: string): string {
  * add_header REPLACES the inherited set rather than merging with it - so
  * adding any header here would silently delete the application's CSP.
  */
+/**
+ * Ownership marker written as the first line of every vhost this tool
+ * generates, and the exact string `removeVhost` checks before deleting one.
+ *
+ * Writer and check derive from this single constant on purpose. Were they two
+ * literals, a rename would produce a tool that refuses to manage the vhosts it
+ * wrote itself, and says so in an error naming a binary that no longer exists.
+ */
+const VHOST_MARKER = `# Managed by ${CLI_NAME} deploy`;
+
 export function renderVhost(target: ProxyTarget, options?: { maxBodyBytes?: number | undefined }): string {
   assertValidDomain(target.domain);
 
   const maxBody = options?.maxBodyBytes;
   const clientMaxBody = maxBody === undefined ? '100m' : `${Math.ceil(maxBody / (1024 * 1024))}m`;
 
-  return `# Managed by appctl deploy. Edits will be overwritten.
+  return `${VHOST_MARKER}. Edits will be overwritten.
 # Application: ${target.domain}
 
 server {
@@ -348,9 +359,9 @@ export async function removeVhost(
   // Only ever a file this tool wrote: the header is the marker, and a vhost
   // without it belongs to somebody else.
   const contents = readFileSync(path, 'utf8');
-  if (!contents.startsWith('# Managed by appctl deploy')) {
+  if (!contents.startsWith(VHOST_MARKER)) {
     throw new UsageError(
-      `${path} was not written by appctl, so it will not be removed. Remove it by hand if that is really what you want.`,
+      `${path} was not written by ${CLI_NAME}, so it will not be removed. Remove it by hand if that is really what you want.`,
     );
   }
 

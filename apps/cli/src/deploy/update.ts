@@ -20,7 +20,7 @@ import { composeArgv, composeCwd, secretsFrom } from './install.js';
 import type { PromptContext } from '../prompt.js';
 
 // =============================================================================
-// `appctl deploy update`  (issue #182, epic #168)
+// `oathpath deploy update`  (issue #182, epic #168)
 // =============================================================================
 //
 // Installing is the rare operation; updating is the one performed weekly, often
@@ -462,7 +462,7 @@ export async function runUpdate(options: UpdateOptions): Promise<UpdateResult> {
     previousSha: context.previousSha,
     lastDeployedAt: new Date().toISOString(),
     lastCommand: 'update',
-    appctlVersion: CLI_VERSION,
+    cliVersion: CLI_VERSION,
   } as DeployState);
 
   journal.finish('success');
