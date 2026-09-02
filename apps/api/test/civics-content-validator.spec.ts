@@ -180,15 +180,16 @@ describe('validateContent — the real shipped content files', () => {
     expect(report.structurallyValid).toBe(true);
     expect(file.questions).toHaveLength(128);
     expect(file.questions.filter((q) => q.seniorEligible)).toHaveLength(20);
-    // Transcribed from the hashed official source, but no human has verified it
-    // page-by-page yet — it must still not be mistaken for trustworthy content.
-    expect(file.provenance.transcription.status).toBe('UNVERIFIED_MODEL_DRAFT');
+    // Transcribed from the hashed official source and signed off by the
+    // repository owner (#212, PR #214), so this file — unlike civics-2008.json —
+    // is the one content file cleared to reach a production database.
+    expect(file.provenance.transcription.status).toBe('HUMAN_VERIFIED');
     expect(typeof file.provenance.sha256).toBe('string');
     expect(file.provenance.sha256).not.toBeNull();
-    // The question-count gap is gone now that the bank is fully transcribed —
-    // only the human-verification gap remains, so it must never resurface here.
-    expect(report.knownGaps.map((g) => g.code)).not.toContain('count.questionCount');
-    expect(report.releaseReady).toBe(false);
+    // Both gaps are closed: the question-count gap went when the bank was
+    // transcribed, the trust gap when it was verified. Neither may resurface.
+    expect(report.knownGaps).toEqual([]);
+    expect(report.releaseReady).toBe(true);
   });
 
   it('every state-scope question in the real files covers all 56 state/territory codes', () => {
