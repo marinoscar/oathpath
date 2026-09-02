@@ -1,26 +1,27 @@
 #!/usr/bin/env bash
-# install.sh — appctl CLI installer / updater  (issue #166, epic #110)
+# install.sh — oathpath CLI installer / updater  (issue #166, epic #110)
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/marinoscar/EnterpriseAppBase/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/marinoscar/oathpath/main/install.sh | bash
 #   # or, locally:
 #   bash install.sh
 #   bash install.sh --uninstall
 #   bash install.sh --help
 #
 # Configuration (set via environment variables before running):
-#   APPCTL_REPO     Git repo URL (default: https://github.com/marinoscar/EnterpriseAppBase.git)
-#   APPCTL_REF      Branch/tag/commit to install (default: main)
-#   APPCTL_HOME     App install root (default: $HOME/.appctl — the same directory
-#                   the CLI itself already stores config.json in, see branding.ts)
-#   APPCTL_BIN_DIR  Directory for the `appctl` shim (default: $HOME/.local/bin)
-#   GITHUB_TOKEN    Optional GitHub PAT for private-repo clones
-#   APPCTL_SRC      Optional: local directory to install from (skips git clone).
-#                   Useful for offline installs and local testing:
-#                     APPCTL_SRC=/path/to/repo bash install.sh
+#   OATHPATH_REPO     Git repo URL (default: https://github.com/marinoscar/oathpath.git)
+#   OATHPATH_REF      Branch/tag/commit to install (default: main)
+#   OATHPATH_HOME     App install root (default: $HOME/.oathpath — the same
+#                     directory the CLI itself already stores config.json in,
+#                     see branding.ts)
+#   OATHPATH_BIN_DIR  Directory for the `oathpath` shim (default: $HOME/.local/bin)
+#   GITHUB_TOKEN      Optional GitHub PAT for private-repo clones
+#   OATHPATH_SRC      Optional: local directory to install from (skips git clone).
+#                     Useful for offline installs and local testing:
+#                       OATHPATH_SRC=/path/to/repo bash install.sh
 #
 # NOTE: The public `curl | bash` flow requires the repository to be public (or
-# GITHUB_TOKEN set for private repos). The APPCTL_SRC path lets you verify
+# GITHUB_TOKEN set for private repos). The OATHPATH_SRC path lets you verify
 # installer logic locally without any network access.
 #
 set -euo pipefail
@@ -113,15 +114,15 @@ detect_shell_rc() {
 # ---------------------------------------------------------------------------
 # Defaults
 # ---------------------------------------------------------------------------
-APPCTL_REPO="${APPCTL_REPO:-https://github.com/marinoscar/EnterpriseAppBase.git}"
-APPCTL_REF="${APPCTL_REF:-main}"
-APPCTL_HOME="${APPCTL_HOME:-$HOME/.appctl}"
-APPCTL_BIN_DIR="${APPCTL_BIN_DIR:-$HOME/.local/bin}"
-APPCTL_SRC="${APPCTL_SRC:-}"
+OATHPATH_REPO="${OATHPATH_REPO:-https://github.com/marinoscar/oathpath.git}"
+OATHPATH_REF="${OATHPATH_REF:-main}"
+OATHPATH_HOME="${OATHPATH_HOME:-$HOME/.oathpath}"
+OATHPATH_BIN_DIR="${OATHPATH_BIN_DIR:-$HOME/.local/bin}"
+OATHPATH_SRC="${OATHPATH_SRC:-}"
 GITHUB_TOKEN="${GITHUB_TOKEN:-}"
 
-APP_DIR="$APPCTL_HOME/app"
-BIN_SHIM="$APPCTL_BIN_DIR/appctl"
+APP_DIR="$OATHPATH_HOME/app"
+BIN_SHIM="$OATHPATH_BIN_DIR/oathpath"
 
 # ---------------------------------------------------------------------------
 # Read the "version" field from a package.json using node (a hard dependency).
@@ -157,7 +158,7 @@ done
 show_help() {
   cat <<EOF
 
-$(_c $BOLD "appctl CLI Installer")
+$(_c $BOLD "oathpath CLI Installer")
 
 USAGE
   bash install.sh [options]
@@ -169,17 +170,17 @@ OPTIONS
   --no-color    Disable ANSI colors
 
 ENVIRONMENT VARIABLES
-  APPCTL_REPO      Git clone URL  (default: $APPCTL_REPO)
-  APPCTL_REF       Branch/tag     (default: $APPCTL_REF)
-  APPCTL_HOME      Install root   (default: \$HOME/.appctl)
-  APPCTL_BIN_DIR   Shim directory (default: \$HOME/.local/bin)
-  GITHUB_TOKEN     GitHub PAT for private repos (optional)
-  APPCTL_SRC       Local source directory — skip git clone (optional)
-                   Example: APPCTL_SRC=/path/to/repo bash install.sh
+  OATHPATH_REPO      Git clone URL  (default: $OATHPATH_REPO)
+  OATHPATH_REF       Branch/tag     (default: $OATHPATH_REF)
+  OATHPATH_HOME      Install root   (default: \$HOME/.oathpath)
+  OATHPATH_BIN_DIR   Shim directory (default: \$HOME/.local/bin)
+  GITHUB_TOKEN       GitHub PAT for private repos (optional)
+  OATHPATH_SRC       Local source directory — skip git clone (optional)
+                     Example: OATHPATH_SRC=/path/to/repo bash install.sh
 
 NOTE
   The public curl | bash flow requires the repo to be public (or GITHUB_TOKEN
-  set). Use APPCTL_SRC for offline / local testing.
+  set). Use OATHPATH_SRC for offline / local testing.
 
 EOF
 }
@@ -193,7 +194,7 @@ fi
 # Uninstall
 # ---------------------------------------------------------------------------
 do_uninstall() {
-  step "Uninstalling appctl CLI"
+  step "Uninstalling oathpath CLI"
 
   if [[ -d "$APP_DIR" ]]; then
     rm -rf "$APP_DIR"
@@ -209,8 +210,8 @@ do_uninstall() {
     warn "Shim not found: $BIN_SHIM"
   fi
 
-  info "Config and credentials at $APPCTL_HOME/config.json (if any) are left in place."
-  ok "appctl CLI uninstalled."
+  info "Config and credentials at $OATHPATH_HOME/config.json (if any) are left in place."
+  ok "oathpath CLI uninstalled."
 }
 
 if [[ "$ACTION" == "uninstall" ]]; then
@@ -225,9 +226,9 @@ fi
 # Print header
 printf '\n'
 if _use_color; then
-  printf '\033[36m  appctl CLI Installer\033[0m\n'
+  printf '\033[36m  oathpath CLI Installer\033[0m\n'
 else
-  printf '  appctl CLI Installer\n'
+  printf '  oathpath CLI Installer\n'
 fi
 printf '\n'
 
@@ -239,7 +240,7 @@ if [[ -d "$APP_DIR" ]]; then
   info "Updating existing installation at $APP_DIR"
   [[ -n "$PREV_VERSION" && "$PREV_VERSION" != "unknown" ]] && dim "Currently installed: v$PREV_VERSION"
 else
-  info "Installing appctl CLI to $APP_DIR"
+  info "Installing oathpath CLI to $APP_DIR"
 fi
 
 # ---------------------------------------------------------------------------
@@ -290,11 +291,11 @@ check_tool npm
 check_tool git
 check_tool curl
 
-# Warn (don't fail) if the install target looks low on free space. appctl has
+# Warn (don't fail) if the install target looks low on free space. oathpath has
 # no native modules, so the footprint is small — a few tens of MB for
 # commander/ink/react and their transitive deps.
 if command -v df &>/dev/null; then
-  avail_kb="$(df -Pk "$APPCTL_HOME" 2>/dev/null || df -Pk "$HOME" 2>/dev/null)"
+  avail_kb="$(df -Pk "$OATHPATH_HOME" 2>/dev/null || df -Pk "$HOME" 2>/dev/null)"
   avail_kb="$(printf '%s\n' "$avail_kb" | awk 'NR==2 {print $4}')"
   if [[ -n "${avail_kb:-}" && "$avail_kb" =~ ^[0-9]+$ ]]; then
     if (( avail_kb < 51200 )); then
@@ -319,31 +320,31 @@ cleanup() {
 }
 trap cleanup EXIT
 
-if [[ -n "$APPCTL_SRC" ]]; then
-  if [[ ! -d "$APPCTL_SRC" ]]; then
-    err "APPCTL_SRC directory not found: $APPCTL_SRC"
+if [[ -n "$OATHPATH_SRC" ]]; then
+  if [[ ! -d "$OATHPATH_SRC" ]]; then
+    err "OATHPATH_SRC directory not found: $OATHPATH_SRC"
     exit 1
   fi
-  info "Using local source: $APPCTL_SRC"
+  info "Using local source: $OATHPATH_SRC"
   # Copy to a temp dir so we don't pollute the working tree
   TMP_DIR="$(mktemp -d)"
-  cp -r "$APPCTL_SRC/." "$TMP_DIR/"
+  cp -r "$OATHPATH_SRC/." "$TMP_DIR/"
   ok "Copied source to temp dir"
 else
   TMP_DIR="$(mktemp -d)"
-  local_repo="$APPCTL_REPO"
+  local_repo="$OATHPATH_REPO"
 
   # Inject GitHub token for private-repo support
   if [[ -n "$GITHUB_TOKEN" ]]; then
     # Replace https://github.com/ with https://<token>@github.com/
-    local_repo="${APPCTL_REPO/https:\/\/github.com\//https:\/\/$GITHUB_TOKEN@github.com\/}"
+    local_repo="${OATHPATH_REPO/https:\/\/github.com\//https:\/\/$GITHUB_TOKEN@github.com\/}"
     info "Using GITHUB_TOKEN for authentication"
   fi
 
-  info "Cloning $APPCTL_REPO @ $APPCTL_REF …"
-  git clone --depth 1 --branch "$APPCTL_REF" "$local_repo" "$TMP_DIR" 2>&1 \
+  info "Cloning $OATHPATH_REPO @ $OATHPATH_REF …"
+  git clone --depth 1 --branch "$OATHPATH_REF" "$local_repo" "$TMP_DIR" 2>&1 \
     | grep -v "^$" | while IFS= read -r line; do dim "$line"; done || {
-    err "Git clone failed. If the repo is private, set GITHUB_TOKEN or use APPCTL_SRC."
+    err "Git clone failed. If the repo is private, set GITHUB_TOKEN or use OATHPATH_SRC."
     exit 1
   }
   ok "Cloned repository"
@@ -356,11 +357,11 @@ fi
 SRC_VERSION="$(read_pkg_version "$TMP_DIR/apps/cli/package.json")"
 if [[ -n "$SRC_VERSION" && "$SRC_VERSION" != "unknown" ]]; then
   if [[ -z "$PREV_VERSION" || "$PREV_VERSION" == "unknown" ]]; then
-    ok "Installing appctl CLI $(_c $BOLD "v$SRC_VERSION")"
+    ok "Installing oathpath CLI $(_c $BOLD "v$SRC_VERSION")"
   elif [[ "$PREV_VERSION" == "$SRC_VERSION" ]]; then
-    ok "Reinstalling appctl CLI $(_c $BOLD "v$SRC_VERSION") (same version)"
+    ok "Reinstalling oathpath CLI $(_c $BOLD "v$SRC_VERSION") (same version)"
   else
-    ok "Updating appctl CLI $(_c $BOLD "v$PREV_VERSION") → $(_c $BOLD "v$SRC_VERSION")"
+    ok "Updating oathpath CLI $(_c $BOLD "v$PREV_VERSION") → $(_c $BOLD "v$SRC_VERSION")"
   fi
 else
   warn "Could not determine the version from the source manifest"
@@ -480,7 +481,7 @@ ok "Runtime dependencies installed"
 # ---------------------------------------------------------------------------
 step "Installing CLI shim"
 
-mkdir -p "$APPCTL_BIN_DIR"
+mkdir -p "$OATHPATH_BIN_DIR"
 
 # apps/cli's package.json points bin at ./dist/cli.js directly (it already
 # carries a shebang and is chmod'd 0755 by the build's postbuild step) — there
@@ -497,7 +498,7 @@ ok "Shim written: $BIN_SHIM"
 # Step 6: PATH check
 # ---------------------------------------------------------------------------
 BIN_ON_PATH=0
-if echo ":$PATH:" | grep -q ":$APPCTL_BIN_DIR:"; then
+if echo ":$PATH:" | grep -q ":$OATHPATH_BIN_DIR:"; then
   BIN_ON_PATH=1
 fi
 
@@ -505,11 +506,11 @@ fi
 # call-out box printed after the completion summary (see below), so we skip
 # this generic block for them to avoid duplicate messaging.
 if [[ "$BIN_ON_PATH" != "1" ]] && ! is_wsl; then
-  warn "$APPCTL_BIN_DIR is not on your PATH"
+  warn "$OATHPATH_BIN_DIR is not on your PATH"
   printf '\n'
   info "Add the following line to your shell config (~/.bashrc or ~/.zshrc):"
   printf '\n'
-  printf '    %s\n' "export PATH=\"\$PATH:$APPCTL_BIN_DIR\""
+  printf '    %s\n' "export PATH=\"\$PATH:$OATHPATH_BIN_DIR\""
   printf '\n'
   info "Then reload: source ~/.bashrc  (or source ~/.zshrc)"
   printf '\n'
@@ -551,15 +552,15 @@ print_box "Installation Complete" \
   "Shim        : $BIN_SHIM" \
   "" \
   "Get started:" \
-  "  appctl login" \
-  "  appctl api GET /api/auth/me" \
-  "  appctl --help"
+  "  oathpath login" \
+  "  oathpath api GET /api/auth/me" \
+  "  oathpath --help"
 
 # ---------------------------------------------------------------------------
 # Step 8: Windows / WSL PATH call-out
 # ---------------------------------------------------------------------------
 # On Windows 11 + WSL the default shell rarely has ~/.local/bin on PATH, so the
-# freshly-installed `appctl` command is "not found" until the user appends it.
+# freshly-installed `oathpath` command is "not found" until the user appends it.
 # Print an explicit, copy-pasteable box with the exact two commands.
 if is_wsl && [[ "$BIN_ON_PATH" != "1" ]]; then
   RC_FILE="$(detect_shell_rc)"
@@ -568,17 +569,17 @@ if is_wsl && [[ "$BIN_ON_PATH" != "1" ]]; then
   print_box "Windows 11 · WSL — one more step" \
     "Detected Windows Subsystem for Linux (WSL)." \
     "" \
-    "The 'appctl' command was installed to:" \
-    "$APPCTL_BIN_DIR" \
+    "The 'oathpath' command was installed to:" \
+    "$OATHPATH_BIN_DIR" \
     "but that directory is not on your PATH yet, so" \
     "your shell reports 'command not found'." \
     "" \
     "Run these two commands to finish setup:" \
     "" \
-    "echo 'export PATH=\"\$PATH:$APPCTL_BIN_DIR\"' >> $RC_SHORT" \
+    "echo 'export PATH=\"\$PATH:$OATHPATH_BIN_DIR\"' >> $RC_SHORT" \
     "source $RC_SHORT" \
     "" \
     "Then verify it works:" \
-    "appctl --version"
+    "oathpath --version"
   printf '\n'
 fi
