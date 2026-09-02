@@ -49,6 +49,24 @@ export interface TestAppOptions {
    * overrides only that spec knows about.
    */
   overrideProviders?: Array<{ provide: unknown; useValue: unknown }>;
+
+  /**
+   * Extra modules imported alongside the real `AppModule`.
+   *
+   * Exists for behaviour that can only be exercised by adding something to the
+   * pipeline rather than by replacing part of it. Issue #183's regression spec
+   * is the first user: it has to prove that an exception thrown from
+   * *middleware* produces a real response, and middleware can only reach the
+   * pipeline through a module's `configure(consumer)` -- there is no way to
+   * add one from outside a module, and `app.use()` bypasses the Nest
+   * middleware wrapper that routes the error to `HttpExceptionFilter` in the
+   * first place, so it would test nothing.
+   *
+   * Everything the app normally wires stays wired: this adds, it does not
+   * replace.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  imports?: any[];
 }
 
 /**
@@ -66,7 +84,7 @@ export async function createTestApp(
   if (shouldUseMock) {
     // Create test module with mocked PrismaService
     let builder = Test.createTestingModule({
-      imports: [AppModule],
+      imports: [AppModule, ...(options.imports ?? [])],
     })
       .overrideProvider(PrismaService)
       .useValue(prismaMock);
@@ -79,7 +97,7 @@ export async function createTestApp(
   } else {
     // Create test module with real database (for true E2E tests)
     moduleFixture = await Test.createTestingModule({
-      imports: [AppModule],
+      imports: [AppModule, ...(options.imports ?? [])],
     }).compile();
   }
 

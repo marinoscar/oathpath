@@ -1,5 +1,6 @@
 import { ArgumentsHost, HttpException, HttpStatus } from '@nestjs/common';
-import { HttpExceptionFilter } from './http-exception.filter';
+import type { ServerResponse } from 'node:http';
+import { HttpExceptionFilter, originalUrlOf } from './http-exception.filter';
 import { withVerbatimErrorBody } from '../exceptions/verbatim-error-body.exception';
 import { DatabaseSeedException } from '../exceptions/database-seed.exception';
 
@@ -456,6 +457,165 @@ describe('HttpExceptionFilter', () => {
         missingData: 'Role "default"',
         seedCommand: 'npm run prisma:seed',
       });
+    });
+  });
+  /**
+   * The raw-response branch (#183).
+   *
+   * Everything above drives the filter with a `{ code, send }` reply — what
+   * the framework hands it for an exception from a guard, pipe, interceptor or
+   * controller. Middleware is the other case: Nest runs it through middie
+   * under the Fastify adapter and, when it throws, hands the filter the raw
+   * Node `IncomingMessage`/`ServerResponse`. `ServerResponse` has no `.code()`,
+   * so the filter used to throw `TypeError` at itself, write nothing, and hang
+   * the request until the client gave up.
+   *
+   * `test/middleware-exception.integration.spec.ts` proves this end to end over
+   * a booted app, which is the assertion that matters. These cases pin the
+   * branch's details — the guards that keep the filter from throwing a SECOND
+   * time — which a live server cannot easily be made to produce on demand.
+   */
+  describe('raw ServerResponse handling (#183)', () => {
+    const rawResponse = () => {
+      const recorder = {
+        headersSent: false,
+        writableEnded: false,
+        status: undefined as number | undefined,
+        headers: undefined as Record<string, string> | undefined,
+        body: undefined as string | undefined,
+        writeHead(status: number, headers: Record<string, string>) {
+          recorder.status = status;
+          recorder.headers = headers;
+          recorder.headersSent = true;
+          return recorder;
+        },
+        end(chunk?: string) {
+          recorder.body = chunk;
+          recorder.writableEnded = true;
+        },
+      };
+
+      return recorder;
+    };
+
+    const hostFor = (
+      res: ReturnType<typeof rawResponse>,
+      req: Record<string, unknown> = { url: '/', method: 'GET' },
+    ) =>
+      ({
+        switchToHttp: () => ({
+          getResponse: () => res as unknown as ServerResponse,
+          getRequest: () => req,
+        }),
+      }) as ArgumentsHost;
+
+    it('writes the envelope with writeHead/end when there is no code()', () => {
+      const res = rawResponse();
+
+      filter.catch(
+        new HttpException('middleware said no', HttpStatus.BAD_REQUEST),
+        hostFor(res),
+      );
+
+      expect(res.status).toBe(400);
+      expect(res.headers).toEqual({
+        'content-type': 'application/json; charset=utf-8',
+      });
+      expect(JSON.parse(res.body ?? '{}')).toMatchObject({
+        statusCode: 400,
+        code: 'BAD_REQUEST',
+        message: 'middleware said no',
+      });
+    });
+
+    it('prefers originalUrl over the middie-rewritten url for `path`', () => {
+      const res = rawResponse();
+
+      filter.catch(
+        new HttpException('nope', HttpStatus.BAD_REQUEST),
+        hostFor(res, {
+          // What middie leaves behind: `url` relative to the mount point, the
+          // real path preserved on `originalUrl`.
+          url: '/',
+          originalUrl: '/api/health/live?x=1',
+          method: 'GET',
+        }),
+      );
+
+      expect(JSON.parse(res.body ?? '{}').path).toBe('/api/health/live?x=1');
+    });
+
+    it('sends a verbatim body raw too, with no envelope keys', () => {
+      const res = rawResponse();
+
+      filter.catch(
+        withVerbatimErrorBody(
+          new HttpException(
+            { error: 'slow_down', error_description: 'back off' },
+            HttpStatus.BAD_REQUEST,
+          ),
+        ),
+        hostFor(res),
+      );
+
+      expect(res.status).toBe(400);
+      expect(JSON.parse(res.body ?? '{}')).toEqual({
+        error: 'slow_down',
+        error_description: 'back off',
+      });
+    });
+
+    it('writes nothing when the response was already sent', () => {
+      const res = rawResponse();
+      res.headersSent = true;
+
+      // A middleware that answered the request itself and then threw. Writing
+      // again would throw ERR_HTTP_HEADERS_SENT from inside the filter, which
+      // is the same class of failure this branch exists to remove.
+      expect(() =>
+        filter.catch(new Error('too late'), hostFor(res)),
+      ).not.toThrow();
+
+      expect(res.status).toBeUndefined();
+      expect(res.body).toBeUndefined();
+    });
+
+    it('still answers when the body cannot be serialized', () => {
+      const res = rawResponse();
+      const circular: Record<string, unknown> = {};
+      circular.self = circular;
+
+      filter.catch(
+        new HttpException(
+          { message: 'bad', details: circular },
+          HttpStatus.BAD_REQUEST,
+        ),
+        hostFor(res),
+      );
+
+      // Degrades to a smaller envelope rather than throwing between the head
+      // and the body and hanging the request all over again.
+      expect(res.status).toBe(400);
+      expect(JSON.parse(res.body ?? '{}')).toMatchObject({
+        statusCode: 400,
+        code: 'BAD_REQUEST',
+      });
+    });
+  });
+
+  describe('originalUrlOf', () => {
+    it('returns originalUrl when middie set one', () => {
+      expect(originalUrlOf({ url: '/', originalUrl: '/api/users' })).toBe(
+        '/api/users',
+      );
+    });
+
+    it('falls back to url when there is none', () => {
+      expect(originalUrlOf({ url: '/api/users' })).toBe('/api/users');
+    });
+
+    it('never returns undefined', () => {
+      expect(originalUrlOf({})).toBe('');
     });
   });
 });
