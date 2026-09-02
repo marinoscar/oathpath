@@ -1,33 +1,160 @@
-import { Box, Container, Typography, Grid } from '@mui/material';
-import { UserProfileCard } from '../components/user/UserProfileCard';
-import { QuickActions } from '../components/home/QuickActions';
+/**
+ * Home (`/`) — the journey.
+ *
+ * Issue #74, epic #50, from `docs/specs/journey-shell.md` §9 and its two
+ * mockups (`journey-shell/home-{360,600}.svg`).
+ *
+ * =============================================================================
+ * WHAT THIS PAGE REPLACED, AND WHY
+ * =============================================================================
+ *
+ * Until this issue Home was the starter template's dashboard: a
+ * `UserProfileCard` and the `QuickActions` shortcut grid. It told a learner
+ * their own display name and offered them their settings — and answered none of
+ * the three questions `VISION.md` says the home screen must answer every time it
+ * opens: *Where am I? What should I do next? Am I becoming more ready?*
+ *
+ * It is also the screen a learner lands on the instant orientation finishes, so
+ * it was the first thing the product said after asking six personal questions.
+ *
+ * Both components come OFF this page and neither is deleted; their destinations
+ * stay reachable. `UserProfileCard`'s content lives on `/settings/profile`, and
+ * the identity it displayed (name, email, avatar) is in the AppBar's user menu
+ * on every screen. `QuickActions`' two targets are `SETTINGS_DESTINATION` and
+ * `CONSOLE_DESTINATION`: the first is the user menu's one navigation row, the
+ * second is `RAIL_PINNED_DESTINATIONS`, which the navigation rail draws.
+ *
+ * =============================================================================
+ * EVERY ANSWER ON THIS PAGE COMES FROM THE SERVER
+ * =============================================================================
+ *
+ * `GET /api/journey/home` and `GET /api/journey/stages` (#65). The stage
+ * registry is NOT re-declared in `apps/web/src/config` — §6 puts the one
+ * declaration in the API, exactly as `notification-events.ts` and
+ * `ai-model-roles.ts` do — and the Next-up card's title, reason and path are
+ * rendered as they arrive, with no local table of copy keyed on `kind`. §4's
+ * recommender already decided what to say; a second copy in the browser would
+ * disagree with it the first time either was edited, and both would still
+ * render something plausible.
+ *
+ * =============================================================================
+ * THE HONESTY RULE (§10) IS WHY THE LOADING AND ERROR STATES LOOK LIKE THIS
+ * =============================================================================
+ *
+ * Nothing journey-shaped renders until BOTH requests have settled. Painting a
+ * stage path before the home payload arrives would show eight dots with none
+ * marked; painting the Next-up card first would show a recommendation with no
+ * stage to place it against. Either is a screen a learner cannot tell from a
+ * finished one, which is §10's failure mode in a different costume — so
+ * `useJourneyHome` keeps one loading flag over both reads and this page waits
+ * for it.
+ *
+ * On failure the page says so and offers a retry. It does NOT fall back to a
+ * local stage list or a guessed countdown: an unavailable API is a visible,
+ * recoverable problem, and an invented journey is neither.
+ *
+ * The trust footer renders in ALL THREE states. §9.3 says "always visible on
+ * Home", and it is as true while loading as it is afterwards.
+ *
+ * =============================================================================
+ * WIDTH
+ * =============================================================================
+ *
+ * One column at every width, in a `maxWidth="md"` container — the mockups
+ * differ only in how the prose wraps. Every responsive value here steps at `sm`
+ * (600px), never `md`, agreeing with the five coupled gates named in
+ * `CLAUDE.md` without touching or duplicating any of them.
+ */
+
+import { Alert, Box, Button, Container, Typography } from '@mui/material';
+
+import { DailyGoalRing } from '../components/journey/DailyGoalRing';
+import { InterviewCountdown } from '../components/journey/InterviewCountdown';
+import { JourneyPath } from '../components/journey/JourneyPath';
+import { NextUpCard } from '../components/journey/NextUpCard';
+import { TrustFooter } from '../components/journey/TrustFooter';
+import { LoadingSpinner } from '../components/common/LoadingSpinner';
 import { useAuth } from '../contexts/AuthContext';
+import { useJourneyHome } from '../hooks/useJourneyHome';
 
 export default function HomePage() {
   const { user } = useAuth();
+  const { home, stages, isLoading, error, refresh } = useJourneyHome();
+
+  // A greeting, not a status. It is the only thing on this page that does not
+  // come from the journey API, and it is safe to render immediately because it
+  // makes no claim about the learner's progress — unlike everything below it.
+  const greeting = user?.displayName
+    ? `Welcome back, ${user.displayName}`
+    : 'Welcome back';
 
   return (
-    <Container maxWidth="lg">
-      <Box sx={{ py: 4 }}>
-        {/* Welcome Header */}
-        <Typography variant="h4" component="h1" gutterBottom>
-          Welcome back{user?.displayName ? `, ${user.displayName}` : ''}
+    <Container maxWidth="md" disableGutters>
+      {/* `<main>` already supplies `p: 3`; this is the page's own vertical
+          rhythm on top of it, not its gutters. */}
+      <Box sx={{ py: { xs: 1, sm: 2 } }}>
+        <Typography
+          variant="h4"
+          component="h1"
+          sx={{
+            fontWeight: 600,
+            // Legible rather than cramped at 360px: `h4` is 2.125rem, which
+            // wraps a two-word name onto a third line on a phone.
+            fontSize: { xs: '1.75rem', sm: '2.125rem' },
+          }}
+        >
+          {greeting}
         </Typography>
-        <Typography color="text.secondary" sx={{ mb: 2 }}>
-          Your dashboard overview
+        <Typography color="text.secondary" sx={{ mt: 1, mb: { xs: 3, sm: 4 } }}>
+          Here&rsquo;s where you are and what to do next.
         </Typography>
 
-        <Grid container spacing={3}>
-          {/* User Profile Card */}
-          <Grid size={{ xs: 12, md: 4 }}>
-            <UserProfileCard />
-          </Grid>
+        {isLoading && (
+          // A spinner, not a skeleton of the finished page: a greyed-out ring
+          // and eight grey dots are precisely the "is this loaded or is this my
+          // data?" ambiguity §10 is about.
+          <Box role="status" aria-live="polite" aria-label="Loading your journey">
+            <LoadingSpinner />
+          </Box>
+        )}
 
-          {/* Quick Actions */}
-          <Grid size={{ xs: 12, md: 8 }}>
-            <QuickActions />
-          </Grid>
-        </Grid>
+        {!isLoading && error && (
+          <Alert
+            severity="error"
+            action={
+              <Button color="inherit" size="small" onClick={() => void refresh()}>
+                Try again
+              </Button>
+            }
+          >
+            {/* The failure is named plainly and NOTHING is guessed in its
+                place. A stage path drawn from a local fallback would look
+                identical to a real one. */}
+            We couldn&rsquo;t load your journey just now. {error}
+          </Alert>
+        )}
+
+        {!isLoading && !error && home && stages && (
+          <>
+            <JourneyPath
+              stages={stages}
+              currentStageKey={home.stage}
+              headingId="journey-path-heading"
+            />
+
+            <NextUpCard
+              nextAction={home.nextAction}
+              headingId="next-up-heading"
+            />
+
+            <InterviewCountdown home={home} headingId="interview-heading" />
+
+            {/* Takes no data on purpose — see the component's header. */}
+            <DailyGoalRing headingId="daily-goal-heading" />
+          </>
+        )}
+
+        <TrustFooter />
       </Box>
     </Container>
   );
