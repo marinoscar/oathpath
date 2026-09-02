@@ -1,3 +1,4 @@
+import { BadRequestException } from '@nestjs/common';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
 import { Clock, clockOverrideStorage } from './clock';
@@ -9,29 +10,17 @@ const request = (headers: Record<string, string | string[]>) =>
   ({ headers }) as unknown as IncomingMessage;
 
 /**
- * A recording stand-in for the raw Node `ServerResponse` the middleware writes
- * to directly. It must not be a Fastify reply: writing to the raw response is
- * the whole point of the rejection path (see `TestClockMiddleware.reject`).
+ * The middleware never touches the response: it rejects by throwing a
+ * `BadRequestException` like every other input check in the codebase, and
+ * `HttpExceptionFilter` writes the 400 (#183). A stand-in with nothing on it
+ * is therefore the strongest possible assertion — any write would be a
+ * `TypeError` here.
+ *
+ * `middleware-exception.integration.spec.ts` and `clock.integration.spec.ts`
+ * are what prove the throw turns into a real 400 over the wire; this file
+ * asserts only what `use()` itself does.
  */
-const response = () => {
-  const recorder = {
-    statusCode: 200,
-    headers: {} as Record<string, string>,
-    body: undefined as string | undefined,
-    setHeader(name: string, value: string) {
-      recorder.headers[name.toLowerCase()] = value;
-    },
-    end(chunk?: string) {
-      recorder.body = chunk;
-    },
-  };
-
-  return recorder;
-};
-
-/** The raw-response cast the middleware's signature expects. */
-const asServerResponse = (recorder: ReturnType<typeof response>) =>
-  recorder as unknown as ServerResponse;
+const response = () => ({}) as unknown as ServerResponse;
 
 describe('TestClockMiddleware', () => {
   let middleware: TestClockMiddleware;
@@ -54,7 +43,7 @@ describe('TestClockMiddleware', () => {
         observedStore = clockOverrideStorage.getStore();
       });
 
-      middleware.use(request({}), asServerResponse(response()), next);
+      middleware.use(request({}), response(), next);
 
       expect(next).toHaveBeenCalledTimes(1);
       expect(observedStore).toBeUndefined();
@@ -62,7 +51,7 @@ describe('TestClockMiddleware', () => {
 
     it('leaves the Clock on real wall-clock time', () => {
       let observed = 0;
-      middleware.use(request({}), asServerResponse(response()), () => {
+      middleware.use(request({}), response(), () => {
         observed = clock.now().getTime();
       });
 
@@ -76,7 +65,7 @@ describe('TestClockMiddleware', () => {
 
       middleware.use(
         request({ [TEST_CLOCK_HEADER]: '2026-01-15T09:00:00Z' }),
-        asServerResponse(response()),
+        response(),
         () => {
           observed = clock.now().toISOString();
         },
@@ -95,7 +84,7 @@ describe('TestClockMiddleware', () => {
     ])('accepts %s', (_label, header, expected) => {
       let observed = '';
 
-      middleware.use(request({ [TEST_CLOCK_HEADER]: header }), asServerResponse(response()), () => {
+      middleware.use(request({ [TEST_CLOCK_HEADER]: header }), response(), () => {
         observed = clock.now().toISOString();
       });
 
@@ -108,7 +97,7 @@ describe('TestClockMiddleware', () => {
 
       middleware.use(
         request({ [TEST_CLOCK_HEADER]: '2026-01-15T09:00:00Z' }),
-        asServerResponse(response()),
+        response(),
         () => {
           handled = (async () => {
             observed.push(clock.now().toISOString());
@@ -137,7 +126,7 @@ describe('TestClockMiddleware', () => {
       const dispatch = (label: string, header: string): Promise<void> => {
         let handled: Promise<void> = Promise.resolve();
 
-        middleware.use(request({ [TEST_CLOCK_HEADER]: header }), asServerResponse(response()), () => {
+        middleware.use(request({ [TEST_CLOCK_HEADER]: header }), response(), () => {
           handled = (async () => {
             observed[label].push(clock.now().toISOString());
             await tick();
@@ -175,7 +164,7 @@ describe('TestClockMiddleware', () => {
 
       middleware.use(
         request({ [TEST_CLOCK_HEADER]: '2020-03-01T00:00:00Z' }),
-        asServerResponse(response()),
+        response(),
         () => {
           pinnedHandled = (async () => {
             await tick();
@@ -186,7 +175,7 @@ describe('TestClockMiddleware', () => {
         },
       );
 
-      middleware.use(request({}), asServerResponse(response()), () => {
+      middleware.use(request({}), response(), () => {
         unpinnedHandled = (async () => {
           unpinnedObserved.push(clock.now().getTime());
           await tick();
@@ -208,14 +197,14 @@ describe('TestClockMiddleware', () => {
     it('reports real time again on the next request after a pinned one', () => {
       middleware.use(
         request({ [TEST_CLOCK_HEADER]: '2020-03-01T00:00:00Z' }),
-        asServerResponse(response()),
+        response(),
         () => {
           expect(clock.now().toISOString()).toBe('2020-03-01T00:00:00.000Z');
         },
       );
 
       let observed = 0;
-      middleware.use(request({}), asServerResponse(response()), () => {
+      middleware.use(request({}), response(), () => {
         observed = clock.now().getTime();
       });
 
@@ -252,25 +241,28 @@ describe('TestClockMiddleware', () => {
       ['trailing junk', '2026-01-15T09:00:00Z junk'],
     ];
 
-    it.each(malformed)('rejects %s with a written 400', (_label, header) => {
+    it.each(malformed)('rejects %s with a BadRequestException', (_label, header) => {
       const next = jest.fn();
-      const res = response();
 
-      // It must NOT throw. A `BadRequestException` from middleware reaches
+      // A throw, not a hand-written response. This used to be the opposite
+      // assertion: before #183 a throw from middleware reached
       // `HttpExceptionFilter` holding a raw `ServerResponse`, whose missing
-      // `.code()` makes the filter itself throw and the request hang forever.
-      // `clock-http.integration.spec.ts` is what proves that end to end; this
-      // asserts the local contract the fix depends on.
-      expect(() =>
-        middleware.use(
-          request({ [TEST_CLOCK_HEADER]: header }),
-          asServerResponse(res),
-          next,
-        ),
-      ).not.toThrow();
+      // `.code()` made the filter itself throw and the request hang forever,
+      // so this middleware wrote its own 400. The filter now handles both
+      // response shapes, so the workaround is gone and this is an ordinary
+      // rejection again.
+      let thrown: unknown;
+      try {
+        middleware.use(request({ [TEST_CLOCK_HEADER]: header }), response(), next);
+      } catch (error) {
+        thrown = error;
+      }
 
-      expect(res.statusCode).toBe(400);
-      expect(res.headers['content-type']).toBe('application/json; charset=utf-8');
+      expect(thrown).toBeInstanceOf(BadRequestException);
+      expect((thrown as BadRequestException).getStatus()).toBe(400);
+      expect((thrown as BadRequestException).message).toContain(
+        TEST_CLOCK_HEADER,
+      );
 
       // The critical half of the assertion: it must not fall through to real
       // time. A test asserting against a wrong time it believes is a pinned
@@ -279,60 +271,36 @@ describe('TestClockMiddleware', () => {
       expect(clockOverrideStorage.getStore()).toBeUndefined();
     });
 
-    it('writes the standard error envelope, matching HttpExceptionFilter', () => {
-      const res = response();
-
-      middleware.use(
-        request({ [TEST_CLOCK_HEADER]: 'not-a-date' }),
-        asServerResponse(res),
-        jest.fn(),
-      );
-
-      const body = JSON.parse(res.body ?? '{}');
-      expect(body).toEqual({
-        statusCode: 400,
-        code: 'BAD_REQUEST',
-        message: expect.stringContaining(TEST_CLOCK_HEADER),
-        timestamp: expect.any(String),
-        path: expect.any(String),
-      });
-      expect(body.message).toContain('ISO-8601');
-      expect(new Date(body.timestamp).toString()).not.toBe('Invalid Date');
-    });
-
-    it('reports the pre-middie request path, not the rewritten one', () => {
-      const res = response();
-      const req = request({ [TEST_CLOCK_HEADER]: 'not-a-date' });
-      // middie rewrites `url` relative to the mount point and preserves the
-      // real path on `originalUrl`; the envelope must carry the latter.
-      (req as unknown as { url: string; originalUrl: string }).url = '/';
-      (req as unknown as { originalUrl: string }).originalUrl =
-        '/api/health/live?x=1';
-
-      middleware.use(req, asServerResponse(res), jest.fn());
-
-      expect(JSON.parse(res.body ?? '{}').path).toBe('/api/health/live?x=1');
+    it('names ISO-8601 in the message, so the fix is obvious from the response', () => {
+      expect(() =>
+        middleware.use(
+          request({ [TEST_CLOCK_HEADER]: 'not-a-date' }),
+          response(),
+          jest.fn(),
+        ),
+      ).toThrow(/ISO-8601/);
     });
 
     it('rejects a repeated header rather than picking one of two instants', () => {
       const next = jest.fn();
-      const res = response();
-
-      middleware.use(
-        request({
-          [TEST_CLOCK_HEADER]: ['2020-03-01T00:00:00Z', '2031-11-30T12:00:00Z'],
-        }),
-        asServerResponse(res),
-        next,
-      );
 
       // Same path as a malformed value: it fails for the same reason, so it
       // must not fail differently on the wire.
-      expect(res.statusCode).toBe(400);
-      expect(JSON.parse(res.body ?? '{}')).toMatchObject({
-        code: 'BAD_REQUEST',
-        message: expect.stringContaining('at most once'),
-      });
+      expect(() =>
+        middleware.use(
+          request({
+            [TEST_CLOCK_HEADER]: [
+              '2020-03-01T00:00:00Z',
+              '2031-11-30T12:00:00Z',
+            ],
+          }),
+          response(),
+          next,
+        ),
+      ).toThrow(new BadRequestException(
+        `${TEST_CLOCK_HEADER} must be sent at most once`,
+      ));
+
       expect(next).not.toHaveBeenCalled();
       expect(clockOverrideStorage.getStore()).toBeUndefined();
     });
