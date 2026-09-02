@@ -87,6 +87,14 @@ export const UNOWNED_ROUTES: readonly string[] = [
   '/auth/callback',
   '/activate',
   '/testing/login',
+  // The AI key setup screen (#39, epic #25). Reached only by the gate, which
+  // hard-blocks a user who has no key — and it mounts OUTSIDE `Layout`
+  // entirely, so there is no rail or bottom bar for a destination to highlight.
+  //
+  // It is also the one screen a blocked user can reach at all, which is the
+  // second reason no destination owns it: highlighting a navigation target the
+  // user cannot currently go to would be worse than highlighting nothing.
+  '/setup/ai-key',
 ];
 
 /**

@@ -1,50 +1,61 @@
-import { ThemeProvider } from '@mui/material/styles';
-import CssBaseline from '@mui/material/CssBaseline';
-import { Routes, Route, Navigate } from 'react-router-dom';
-import { AuthProvider } from './contexts/AuthContext';
-import { NotificationProvider } from './contexts/NotificationContext';
-import { ThemeContextProvider, useThemeContext } from './contexts/ThemeContext';
-import { ProtectedRoute } from './components/common/ProtectedRoute';
-import { RequirePermission } from './components/common/RequirePermission';
-import { Layout } from './components/common/Layout';
-import { ErrorBoundary } from './components/common/ErrorBoundary';
+import { ThemeProvider } from "@mui/material/styles";
+import CssBaseline from "@mui/material/CssBaseline";
+import { Routes, Route, Navigate } from "react-router-dom";
+import { AuthProvider } from "./contexts/AuthContext";
+import { NotificationProvider } from "./contexts/NotificationContext";
+import { ThemeContextProvider, useThemeContext } from "./contexts/ThemeContext";
+import { ProtectedRoute } from "./components/common/ProtectedRoute";
+import { RequirePermission } from "./components/common/RequirePermission";
+import { RequireAiKey } from "./components/common/RequireAiKey";
+import { AiStatusProvider } from "./contexts/AiStatusContext";
+import { Layout } from "./components/common/Layout";
+import { ErrorBoundary } from "./components/common/ErrorBoundary";
 
 // Pages (lazy loaded)
-import { Suspense, lazy } from 'react';
-import { LoadingSpinner } from './components/common/LoadingSpinner';
+import { Suspense, lazy } from "react";
+import { LoadingSpinner } from "./components/common/LoadingSpinner";
 
-const LoginPage = lazy(() => import('./pages/LoginPage'));
-const AuthCallbackPage = lazy(() => import('./pages/AuthCallbackPage'));
-const ActivateDevicePage = lazy(() => import('./pages/ActivateDevicePage'));
-const HomePage = lazy(() => import('./pages/HomePage'));
+const LoginPage = lazy(() => import("./pages/LoginPage"));
+const AuthCallbackPage = lazy(() => import("./pages/AuthCallbackPage"));
+const ActivateDevicePage = lazy(() => import("./pages/ActivateDevicePage"));
+const HomePage = lazy(() => import("./pages/HomePage"));
+const AiKeySetupPage = lazy(() => import("./pages/AiKeySetupPage"));
 // User settings — the hub (#96) plus one route per card in
 // `config/userSettingsSections.tsx` (#91, epic #90). These replace the single
 // stacked `UserSettingsPage`, which is deleted rather than left unrouted.
-const UserSettingsHubPage = lazy(() => import('./pages/UserSettingsHubPage'));
-const UserProfilePage = lazy(() => import('./pages/UserProfilePage'));
+const UserSettingsHubPage = lazy(() => import("./pages/UserSettingsHubPage"));
+const UserProfilePage = lazy(() => import("./pages/UserProfilePage"));
 // `User`-prefixed to keep it distinct from `Admin/AppearanceSettingsPage`
 // below: one is the user's own theme, the other the deployment's default.
-const UserAppearancePage = lazy(() => import('./pages/UserAppearancePage'));
+const UserAppearancePage = lazy(() => import("./pages/UserAppearancePage"));
 // Issue #126, epic #109 — the per-user event x channel notification matrix.
-const UserNotificationsPage = lazy(() => import('./pages/UserNotificationsPage'));
-const UserTokensPage = lazy(() => import('./pages/UserTokensPage'));
+const UserNotificationsPage = lazy(
+  () => import("./pages/UserNotificationsPage"),
+);
+const UserTokensPage = lazy(() => import("./pages/UserTokensPage"));
 
 // Console — the hub (#93) plus one route per card in
 // `config/adminSections.tsx` (#92, epic #90).
-const SettingsHubPage = lazy(() => import('./pages/Admin/SettingsHubPage'));
-const GeneralSettingsPage = lazy(() => import('./pages/Admin/GeneralSettingsPage'));
-const AppearanceSettingsPage = lazy(() => import('./pages/Admin/AppearanceSettingsPage'));
-const FeatureFlagsPage = lazy(() => import('./pages/Admin/FeatureFlagsPage'));
+const SettingsHubPage = lazy(() => import("./pages/Admin/SettingsHubPage"));
+const GeneralSettingsPage = lazy(
+  () => import("./pages/Admin/GeneralSettingsPage"),
+);
+const AppearanceSettingsPage = lazy(
+  () => import("./pages/Admin/AppearanceSettingsPage"),
+);
+const FeatureFlagsPage = lazy(() => import("./pages/Admin/FeatureFlagsPage"));
 // Issue #124, epic #109 — the admin email configuration and its test send.
-const EmailSettingsPage = lazy(() => import('./pages/Admin/EmailSettingsPage'));
-const AiSettingsPage = lazy(() => import('./pages/Admin/AiSettingsPage'));
-const AdvancedSettingsPage = lazy(() => import('./pages/Admin/AdvancedSettingsPage'));
-const AdminUsersPage = lazy(() => import('./pages/Admin/UsersPage'));
+const EmailSettingsPage = lazy(() => import("./pages/Admin/EmailSettingsPage"));
+const AiSettingsPage = lazy(() => import("./pages/Admin/AiSettingsPage"));
+const AdvancedSettingsPage = lazy(
+  () => import("./pages/Admin/AdvancedSettingsPage"),
+);
+const AdminUsersPage = lazy(() => import("./pages/Admin/UsersPage"));
 
 // Test login page (development only)
 const TestLoginPage = import.meta.env.PROD
   ? null
-  : lazy(() => import('./pages/TestLoginPage'));
+  : lazy(() => import("./pages/TestLoginPage"));
 
 function AppRoutes() {
   const { theme } = useThemeContext();
@@ -66,10 +77,39 @@ function AppRoutes() {
 
             {/* Protected routes */}
             <Route element={<ProtectedRoute />}>
-              {/* Device activation page - without layout for full-screen experience */}
-              <Route path="/activate" element={<ActivateDevicePage />} />
+              {/* The AI availability status (#39, epic #25), fetched ONCE and
+                  shared by everything below it.
 
-              {/* The notification centre (#127, epic #109) wraps the SHELL,
+                  ABOVE BOTH the key setup screen and the gate, deliberately:
+                  saving a key on that screen releases the gate without a page
+                  reload, because the two are looking at the same state. A
+                  provider mounted inside the gate could not do that, and a
+                  fetch inside the gate would fire on every navigation — a
+                  request storm behind a first-run screen a new user cannot get
+                  past. */}
+              <Route element={<AiStatusProvider />}>
+                {/* OUTSIDE `RequireAiKey`, which is what makes a redirect loop
+                    structurally impossible rather than prevented by a path
+                    comparison somebody could edit. #41 replaces this screen's
+                    chrome with the designed onboarding experience; the route's
+                    position does not change. */}
+                <Route path="/setup/ai-key" element={<AiKeySetupPage />} />
+
+                {/* THE GATE. Every inference call runs on the user's own key,
+                    so a keyless user cannot do anything the product exists to
+                    do — and letting them wander is worse than blocking them:
+                    they would meet a failure at every AI surface with no
+                    explanation of the one thing they need to fix.
+
+                    `systemReady === false` is explicitly NOT handled here. It
+                    is not a block; the user gets in and meets a point-of-use
+                    message (#43). See `RequireAiKey` for the exempt routes and
+                    for the fresh-install deadlock exemption 3 prevents. */}
+                <Route element={<RequireAiKey />}>
+                  {/* Device activation page - without layout for full-screen experience */}
+                  <Route path="/activate" element={<ActivateDevicePage />} />
+
+                  {/* The notification centre (#127, epic #109) wraps the SHELL,
                   not the whole app, and that scoping is the point:
 
                     * It is INSIDE `ProtectedRoute`, so it only ever mounts for
@@ -87,15 +127,15 @@ function AppRoutes() {
                   on every navigation, which the server sees as a connection
                   storm from a single user and the client experiences as a bell
                   that resets its state every time the route changes. */}
-              <Route
-                element={
-                  <NotificationProvider>
-                    <Layout />
-                  </NotificationProvider>
-                }
-              >
-                <Route path="/" element={<HomePage />} />
-                {/* The per-user settings surface (#96, epic #90) — the same
+                  <Route
+                    element={
+                      <NotificationProvider>
+                        <Layout />
+                      </NotificationProvider>
+                    }
+                  >
+                    <Route path="/" element={<HomePage />} />
+                    {/* The per-user settings surface (#96, epic #90) — the same
                     hub component `/admin/settings` renders, over
                     `USER_SETTINGS_SECTIONS`, plus one route per card.
 
@@ -112,15 +152,27 @@ function AppRoutes() {
                     As above, declaration order does not matter — React Router
                     v6 ranks by specificity, so `/settings/profile` beats
                     `/settings` wherever each is written. */}
-                <Route path="/settings" element={<UserSettingsHubPage />} />
-                <Route path="/settings/profile" element={<UserProfilePage />} />
-                <Route path="/settings/appearance" element={<UserAppearancePage />} />
-                {/* Ungated like its siblings (#126): these are the caller's own
+                    <Route path="/settings" element={<UserSettingsHubPage />} />
+                    <Route
+                      path="/settings/profile"
+                      element={<UserProfilePage />}
+                    />
+                    <Route
+                      path="/settings/appearance"
+                      element={<UserAppearancePage />}
+                    />
+                    {/* Ungated like its siblings (#126): these are the caller's own
                     preferences, and the registry endpoint the page renders is
                     itself `@Auth()` with no permission for the same reason. */}
-                <Route path="/settings/notifications" element={<UserNotificationsPage />} />
-                <Route path="/settings/tokens" element={<UserTokensPage />} />
-                {/* Route-level AUTHORIZATION, not just authentication.
+                    <Route
+                      path="/settings/notifications"
+                      element={<UserNotificationsPage />}
+                    />
+                    <Route
+                      path="/settings/tokens"
+                      element={<UserTokensPage />}
+                    />
+                    {/* Route-level AUTHORIZATION, not just authentication.
                     `ProtectedRoute` above only establishes that someone is
                     logged in — before this, a Viewer typing `/admin/settings`
                     reached the page and only then watched every API call 403.
@@ -140,7 +192,7 @@ function AppRoutes() {
                     of where each sits in this list. They are grouped by surface
                     for reading, not for matching. */}
 
-                {/* Both redirects are REAL ROUTES, not catch-all fallout.
+                    {/* Both redirects are REAL ROUTES, not catch-all fallout.
                     Without them a bookmarked `/admin/users` matches only `*`
                     and lands silently on `/` — the user asked for a page that
                     still exists and got the home screen with no explanation.
@@ -151,19 +203,22 @@ function AppRoutes() {
                     They sit INSIDE `ProtectedRoute` so an unauthenticated
                     bookmark goes to login and arrives here afterwards, rather
                     than being redirected first and losing the destination. */}
-                <Route path="/admin" element={<Navigate to="/admin/settings" replace />} />
-                <Route
-                  path="/admin/users"
-                  element={<Navigate to="/admin/settings/users" replace />}
-                />
+                    <Route
+                      path="/admin"
+                      element={<Navigate to="/admin/settings" replace />}
+                    />
+                    <Route
+                      path="/admin/users"
+                      element={<Navigate to="/admin/settings/users" replace />}
+                    />
 
-                {/* The Console hub (#93, epic #90) — the searchable, grouped
+                    {/* The Console hub (#93, epic #90) — the searchable, grouped
                     card grid that reads `ADMIN_SECTIONS`. It replaces the
                     three-tab placeholder that answered this route through #92,
                     whose tabs duplicated the four routes below. That
                     duplication is now gone: the hub NAVIGATES to those routes
                     instead of re-hosting them. */}
-                {/* ANY-OF, and the one route here that is not a single
+                    {/* ANY-OF, and the one route here that is not a single
                     permission. This gate MUST STAY IN SYNC WITH `console`'s
                     `anyPermission` in `config/destinations.ts` — the two lists
                     answer the same question ("may this user reach the admin
@@ -188,51 +243,51 @@ function AppRoutes() {
                     reach the admin surface at all?". The five child routes
                     below keep their single-permission gates: each is one
                     specific page with one specific permission. */}
-                <Route
-                  path="/admin/settings"
-                  element={
-                    <RequirePermission
-                      permissions={['system_settings:read', 'users:read']}
-                      fallback={<Navigate to="/" replace />}
-                    >
-                      <SettingsHubPage />
-                    </RequirePermission>
-                  }
-                />
-                <Route
-                  path="/admin/settings/general"
-                  element={
-                    <RequirePermission
-                      permission="system_settings:read"
-                      fallback={<Navigate to="/" replace />}
-                    >
-                      <GeneralSettingsPage />
-                    </RequirePermission>
-                  }
-                />
-                <Route
-                  path="/admin/settings/appearance"
-                  element={
-                    <RequirePermission
-                      permission="system_settings:read"
-                      fallback={<Navigate to="/" replace />}
-                    >
-                      <AppearanceSettingsPage />
-                    </RequirePermission>
-                  }
-                />
-                <Route
-                  path="/admin/settings/feature-flags"
-                  element={
-                    <RequirePermission
-                      permission="system_settings:read"
-                      fallback={<Navigate to="/" replace />}
-                    >
-                      <FeatureFlagsPage />
-                    </RequirePermission>
-                  }
-                />
-                {/* Issue #124, epic #109. Same permission string the `Email`
+                    <Route
+                      path="/admin/settings"
+                      element={
+                        <RequirePermission
+                          permissions={["system_settings:read", "users:read"]}
+                          fallback={<Navigate to="/" replace />}
+                        >
+                          <SettingsHubPage />
+                        </RequirePermission>
+                      }
+                    />
+                    <Route
+                      path="/admin/settings/general"
+                      element={
+                        <RequirePermission
+                          permission="system_settings:read"
+                          fallback={<Navigate to="/" replace />}
+                        >
+                          <GeneralSettingsPage />
+                        </RequirePermission>
+                      }
+                    />
+                    <Route
+                      path="/admin/settings/appearance"
+                      element={
+                        <RequirePermission
+                          permission="system_settings:read"
+                          fallback={<Navigate to="/" replace />}
+                        >
+                          <AppearanceSettingsPage />
+                        </RequirePermission>
+                      }
+                    />
+                    <Route
+                      path="/admin/settings/feature-flags"
+                      element={
+                        <RequirePermission
+                          permission="system_settings:read"
+                          fallback={<Navigate to="/" replace />}
+                        >
+                          <FeatureFlagsPage />
+                        </RequirePermission>
+                      }
+                    />
+                    {/* Issue #124, epic #109. Same permission string the `Email`
                     card declares in `config/adminSections.tsx`, which is the
                     same string the API's email-settings controller enforces on
                     its GET — the invariant `destinations.test.ts` asserts for
@@ -240,65 +295,67 @@ function AppRoutes() {
                     and test-sending need write, and the page disables both
                     without it, but the configuration is worth READING for
                     anyone diagnosing why mail is not arriving. */}
-                <Route
-                  path="/admin/settings/email"
-                  element={
-                    <RequirePermission
-                      permission="system_settings:read"
-                      fallback={<Navigate to="/" replace />}
-                    >
-                      <EmailSettingsPage />
-                    </RequirePermission>
-                  }
-                />
-                {/* `system_settings:read`, the SAME string
+                    <Route
+                      path="/admin/settings/email"
+                      element={
+                        <RequirePermission
+                          permission="system_settings:read"
+                          fallback={<Navigate to="/" replace />}
+                        >
+                          <EmailSettingsPage />
+                        </RequirePermission>
+                      }
+                    />
+                    {/* `system_settings:read`, the SAME string
                     `config/adminSections.tsx`'s AI card declares and the same
                     one `ai-settings.controller.ts` enforces on its GET.
                     Saving and testing need `:write`, which the page gates
                     internally — the route gate is about REACHABILITY, and a
                     read-only admin diagnosing "why is AI broken" is worth
                     letting in to look. */}
-                <Route
-                  path="/admin/settings/ai"
-                  element={
-                    <RequirePermission
-                      permission="system_settings:read"
-                      fallback={<Navigate to="/" replace />}
-                    >
-                      <AiSettingsPage />
-                    </RequirePermission>
-                  }
-                />
-                {/* `system_settings:WRITE`, not `read`, and the one route here
+                    <Route
+                      path="/admin/settings/ai"
+                      element={
+                        <RequirePermission
+                          permission="system_settings:read"
+                          fallback={<Navigate to="/" replace />}
+                        >
+                          <AiSettingsPage />
+                        </RequirePermission>
+                      }
+                    />
+                    {/* `system_settings:WRITE`, not `read`, and the one route here
                     whose permission differs from its siblings'. A raw editor
                     over the entire settings document has no read-only meaning —
                     see `config/adminSections.tsx`. */}
-                <Route
-                  path="/admin/settings/advanced"
-                  element={
-                    <RequirePermission
-                      permission="system_settings:write"
-                      fallback={<Navigate to="/" replace />}
-                    >
-                      <AdvancedSettingsPage />
-                    </RequirePermission>
-                  }
-                />
-                {/* `users:read` alone, even though the page also hosts the
+                    <Route
+                      path="/admin/settings/advanced"
+                      element={
+                        <RequirePermission
+                          permission="system_settings:write"
+                          fallback={<Navigate to="/" replace />}
+                        >
+                          <AdvancedSettingsPage />
+                        </RequirePermission>
+                      }
+                    />
+                    {/* `users:read` alone, even though the page also hosts the
                     allowlist. The route gate is about REACHABILITY and the page
                     is worth reaching for its Users tab; the Allowlist tab gates
                     its own content on `allowlist:read` inside the page. */}
-                <Route
-                  path="/admin/settings/users"
-                  element={
-                    <RequirePermission
-                      permission="users:read"
-                      fallback={<Navigate to="/" replace />}
-                    >
-                      <AdminUsersPage />
-                    </RequirePermission>
-                  }
-                />
+                    <Route
+                      path="/admin/settings/users"
+                      element={
+                        <RequirePermission
+                          permission="users:read"
+                          fallback={<Navigate to="/" replace />}
+                        >
+                          <AdminUsersPage />
+                        </RequirePermission>
+                      }
+                    />
+                  </Route>
+                </Route>
               </Route>
             </Route>
 
