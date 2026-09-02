@@ -8,10 +8,13 @@ import {
 import type { AiCapabilityFamily } from './ai-model-roles';
 import type { AiProviderKind } from './ai-settings.schema';
 import type {
+  AiCompletionRequest,
+  AiCompletionResult,
   AiConnectionTestResult,
   AiModelCatalogResult,
   AiReachabilityRequest,
 } from './ai.types';
+import type { AiUsageService } from './ai-usage.service';
 import type {
   AiCapabilitySet,
   AiProvider,
@@ -68,6 +71,50 @@ import type {
 const tracer = trace.getTracer(process.env.OTEL_SERVICE_NAME || 'oathpath-api');
 
 /**
+ * Usage for a call whose consumption we were never told.
+ *
+ * ALL NULL, NEVER ZERO. See `ai_usage_events` and {@link BaseAiProvider.complete}:
+ * a throw mid-stream may follow real consumption the provider never reported,
+ * and recording `0` would state that it did not.
+ */
+const EMPTY_USAGE = {
+  promptTokens: null,
+  completionTokens: null,
+  totalTokens: null,
+} as const;
+
+/**
+ * A short, stable code for a thrown value, for `ai_usage_events.error_code`.
+ *
+ * DELIBERATELY COARSE. The column is written on every failed call and is meant
+ * to be GROUPed by; the diagnosable text lives in the result's `error`, which
+ * is verbatim and redacted. A code derived from the provider's message would
+ * be as unGROUPable as the message itself.
+ *
+ * Matching on the message rather than on an SDK error class keeps this file
+ * free of a provider dependency — it is the base class, and a second provider
+ * must not have to be an OpenAI error to be classified.
+ */
+function classifyThrow(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err ?? '');
+  const lower = message.toLowerCase();
+
+  if (lower.includes('rate limit') || lower.includes('429')) return 'rate_limit';
+  if (lower.includes('timeout') || lower.includes('etimedout')) return 'timeout';
+  if (lower.includes('401') || lower.includes('incorrect api key')) {
+    return 'invalid_key';
+  }
+  if (lower.includes('does not exist') || lower.includes('404')) {
+    return 'model_not_found';
+  }
+  if (lower.includes('insufficient_quota') || lower.includes('quota')) {
+    return 'quota_exceeded';
+  }
+
+  return 'error';
+}
+
+/**
  * Base class for every AI provider in this app.
  *
  * Subclasses implement {@link fetchModels} and {@link probeConnection}; they do
@@ -76,6 +123,18 @@ const tracer = trace.getTracer(process.env.OTEL_SERVICE_NAME || 'oathpath-api');
 export abstract class BaseAiProvider implements AiProvider {
   /** Subclass's logger, so failures are attributed to the real provider. */
   protected abstract readonly logger: Logger;
+
+  /**
+   * Where a completed call is recorded (#37).
+   *
+   * DECLARED HERE RATHER THAN INJECTED, because this is an abstract class and
+   * not a Nest provider — the concrete subclass injects the service and
+   * exposes it, the same shape `logger` already uses. That keeps the recording
+   * obligation on the base class, where the never-throw wrapper is, rather
+   * than on each provider's own call sites, where it is one forgotten line
+   * away from a user's consumption going unrecorded.
+   */
+  protected abstract readonly usage: AiUsageService;
 
   /** Which provider this is. Matches a member of `AI_PROVIDER_KINDS`. */
   abstract readonly kind: AiProviderKind;
@@ -144,6 +203,20 @@ export abstract class BaseAiProvider implements AiProvider {
     probes: AiReachabilityRequest[],
     redact: SecretRedactor,
   ): Promise<AiConnectionTestResult>;
+
+  /**
+   * Run one completion on the caller's key.
+   *
+   * MAY THROW FREELY, as the other two hooks may. {@link complete} turns a
+   * throw into a recorded failure with NULL token counts.
+   *
+   * @param redact the key is already registered by {@link complete}.
+   */
+  protected abstract runCompletion(
+    apiKey: string,
+    request: AiCompletionRequest,
+    redact: SecretRedactor,
+  ): Promise<AiCompletionResult>;
 
   // ---------------------------------------------------------------------------
   // Public surface — NEVER THROWS. Do not override.
@@ -275,6 +348,134 @@ export abstract class BaseAiProvider implements AiProvider {
     } finally {
       span.end();
     }
+  }
+
+  /**
+   * Run one completion, and record it. NEVER throws.
+   *
+   * -------------------------------------------------------------------------
+   * ONE ROW PER CALL, ON SUCCESS AND ON FAILURE ALIKE
+   * -------------------------------------------------------------------------
+   *
+   * Recording lives HERE rather than at each provider's call sites, so a new
+   * provider inherits it. A provider that recorded its own usage is a provider
+   * that can forget to, and the symptom of forgetting is a user whose
+   * consumption is simply missing — with nothing failing to draw attention to
+   * it.
+   *
+   * -------------------------------------------------------------------------
+   * NULL TOKEN COUNTS ARE PRESERVED. THEY ARE NOT ZEROED.
+   * -------------------------------------------------------------------------
+   *
+   * A call that fails mid-stream yields partial or no usage. Writing `0` there
+   * would be a claim — a false one that understates consumption, and an
+   * invisible one, because zero is a perfectly plausible value. `null` means
+   * "unknown", and `success`/`errorCode` are what distinguish the two.
+   *
+   * @param userId the caller whose key this runs on and whose row is written.
+   */
+  async complete(
+    userId: string,
+    apiKey: string,
+    request: AiCompletionRequest,
+  ): Promise<AiCompletionResult> {
+    const redact = new SecretRedactor();
+
+    // REGISTERED BEFORE ANYTHING THAT CAN THROW WHILE HOLDING IT.
+    redact.protect(apiKey);
+
+    const span = tracer.startSpan(`${this.providerName}.complete`);
+    span.setAttribute('ai.model', request.modelId);
+    span.setAttribute('ai.role', request.roleKey);
+    span.setAttribute('ai.stream', request.stream === true);
+
+    const startedAt = Date.now();
+    let result: AiCompletionResult;
+
+    try {
+      result = await this.runCompletion(apiKey, request, redact);
+
+      if (typeof result !== 'object' || result === null) {
+        this.logger.error(
+          `${this.providerName} provider returned no completion result; treating as a failure`,
+        );
+        result = {
+          success: false,
+          text: null,
+          usage: EMPTY_USAGE,
+          errorCode: 'malformed_result',
+          error: `${this.providerName} returned no result.`,
+        };
+      } else if (!result.success) {
+        // A subclass-authored failure still goes through the single exit path
+        // for error text.
+        result = {
+          ...result,
+          error: this.formatError(result.error ?? 'Unknown error.', redact),
+        };
+      }
+    } catch (err) {
+      result = {
+        success: false,
+        text: null,
+        // UNKNOWN, not zero. A throw mid-stream may follow real consumption we
+        // were never told about.
+        usage: EMPTY_USAGE,
+        errorCode: classifyThrow(err),
+        error: this.formatCaught(err, redact),
+      };
+    }
+
+    const latencyMs = Date.now() - startedAt;
+
+    if (result.success) {
+      span.setStatus({ code: SpanStatusCode.OK });
+    } else {
+      span.setStatus({ code: SpanStatusCode.ERROR, message: 'completion failed' });
+      this.logger.warn(
+        `${this.providerName} completion failed for user ${userId} (${request.roleKey}/${request.modelId}): ${result.error}`,
+      );
+    }
+
+    // Token counts on the span too, so a trace answers "what did that cost"
+    // without a database query. Only when known — an attribute of 0 would be
+    // the same lie the column refuses.
+    if (result.usage.totalTokens !== null) {
+      span.setAttribute('ai.total_tokens', result.usage.totalTokens);
+    }
+    span.end();
+
+    // A FAILED USAGE WRITE MUST NEVER FAIL THE USER'S REQUEST.
+    //
+    // `AiUsageService.record` already swallows internally, and this catch is
+    // deliberately belt-and-braces on top of that rather than redundant: the
+    // guarantee belongs to THIS method, which is the one the user's request
+    // runs through. Trusting the recorder alone means a different recorder — a
+    // test double, a future implementation, an injected decorator — silently
+    // takes the guarantee away, and the symptom would be a user losing a tutor
+    // explanation because an accounting row could not be written.
+    try {
+      await this.usage.record({
+        userId,
+        provider: this.kind,
+        model: request.modelId,
+        roleKey: request.roleKey,
+        usage: result.usage,
+        latencyMs,
+        success: result.success,
+        errorCode: result.errorCode,
+      });
+    } catch (err) {
+      // The user id and the model are enough to find the gap. Nothing about
+      // the content of the call is available here to leak.
+      this.logger.error(
+        `Failed to record AI usage for user ${userId} (${request.modelId}/${request.roleKey}): ${
+          err instanceof Error ? err.message : 'unknown error'
+        }`,
+      );
+    }
+
+    return result;
   }
 
   // ---------------------------------------------------------------------------

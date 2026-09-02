@@ -23,6 +23,17 @@ export { AiSettingsController } from './ai-settings.controller';
 export { AiUserKeyController } from './ai-user-key.controller';
 export { AiUserKeyService } from './ai-user-key.service';
 export { AiStatusService } from './ai-status.service';
+export { AiUsageController } from './ai-usage.controller';
+export {
+  AiUsageService,
+  DEFAULT_USAGE_WINDOW_DAYS,
+  MAX_USAGE_WINDOW_DAYS,
+} from './ai-usage.service';
+export type {
+  AiUsageBreakdown,
+  AiUsageRecord,
+  AiUsageSummary,
+} from './ai-usage.service';
 export { AiSettingsService } from './ai-settings.service';
 // AiConnectionTestService is deliberately NOT exported — see ai.module.ts.
 export { BaseAiProvider } from './base-ai.provider';
@@ -93,10 +104,13 @@ export { updateAiSettingsSchema } from './dto/update-ai-settings.dto';
 export type { AiSettingsResponse } from './dto/ai-settings-response.dto';
 export type { UpdateAiSettingsInput } from './dto/update-ai-settings.dto';
 export type {
+  AiCompletionRequest,
+  AiCompletionResult,
   AiConnectionTestResult,
   AiModelCatalogResult,
   AiModelDescriptor,
   AiReachabilityRequest,
+  AiMessage,
   AiReachabilityResult,
   AiUsage,
 } from './ai.types';

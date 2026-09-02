@@ -11,12 +11,16 @@ import {
 } from '../ai-credential.constants';
 import type { AiCapabilityFamily } from '../ai-model-roles';
 import type { AiProviderKind } from '../ai-settings.schema';
+import { AiUsageService } from '../ai-usage.service';
 import type {
+  AiCompletionRequest,
+  AiCompletionResult,
   AiConnectionTestResult,
   AiModelCatalogResult,
   AiModelDescriptor,
   AiReachabilityRequest,
   AiReachabilityResult,
+  AiUsage,
 } from '../ai.types';
 import type { AiCapabilitySet } from './ai-provider.interface';
 import { classifyModel, parseGeneration } from './model-classifier';
@@ -132,7 +136,13 @@ export class OpenAiProvider extends BaseAiProvider {
    */
   private cache: CachedCatalog | null = null;
 
-  constructor(private readonly credentials: CredentialsService) {
+  constructor(
+    private readonly credentials: CredentialsService,
+    // Exposed to the base class through the `usage` field below, so the
+    // never-throw recording wrapper lives in one place rather than at each
+    // call site here.
+    protected readonly usage: AiUsageService,
+  ) {
     super();
   }
 
@@ -267,6 +277,107 @@ export class OpenAiProvider extends BaseAiProvider {
     };
   }
 
+  /**
+   * Run one completion on the caller's key.
+   *
+   * -------------------------------------------------------------------------
+   * `stream_options: { include_usage: true }` IS NOT OPTIONAL
+   * -------------------------------------------------------------------------
+   *
+   * OpenAI reports `usage` on a completed non-streaming response
+   * unconditionally, but on a STREAMED one only when that flag is set. Omit it
+   * and every streaming call records nothing — no error, no warning, just a
+   * consumption figure that is quietly always zero.
+   *
+   * That is the most likely way this feature ends up wrong, which is why the
+   * flag is set HERE, in the single place a streaming request is constructed,
+   * and why a test asserts it rather than trusting a comment.
+   *
+   * -------------------------------------------------------------------------
+   * A MID-STREAM FAILURE RECORDS NULL, NOT ZERO
+   * -------------------------------------------------------------------------
+   *
+   * Throwing out of this method is how that happens: `BaseAiProvider.complete`
+   * catches it and records all-null usage. This method therefore does NOT
+   * catch a stream error and return partial counts as if they were final — the
+   * counts it has mid-stream are not the call's consumption, and reporting
+   * them as such would understate what the user was actually billed for by an
+   * unknowable amount.
+   */
+  protected async runCompletion(
+    apiKey: string,
+    request: AiCompletionRequest,
+    redact: SecretRedactor,
+  ): Promise<AiCompletionResult> {
+    redact.protect(apiKey);
+
+    const client = new OpenAI({ apiKey });
+
+    const base = {
+      model: request.modelId,
+      messages: request.messages.map((message) => ({
+        role: message.role,
+        content: message.content,
+      })),
+      ...(request.maxTokens !== undefined
+        ? { max_completion_tokens: request.maxTokens }
+        : {}),
+    };
+
+    if (!request.stream) {
+      const response = await client.chat.completions.create({
+        ...base,
+        stream: false,
+      });
+
+      return {
+        success: true,
+        text: response.choices[0]?.message?.content ?? null,
+        usage: readUsage(response.usage),
+        errorCode: null,
+        error: null,
+      };
+    }
+
+    const stream = await client.chat.completions.create({
+      ...base,
+      stream: true,
+      // THE FLAG. See the note above — without it, every streamed call records
+      // zero tokens and nothing fails.
+      stream_options: { include_usage: true },
+    });
+
+    let text = '';
+    // Assigned only from a usage-bearing chunk. Stays all-null if the stream
+    // ends without one, which is honest: we were not told.
+    let usage: AiUsage = {
+      promptTokens: null,
+      completionTokens: null,
+      totalTokens: null,
+    };
+
+    // A throw from inside this loop propagates — see the header. It is how a
+    // mid-stream failure becomes an all-null row rather than a partial count
+    // presented as final.
+    for await (const chunk of stream) {
+      text += chunk.choices[0]?.delta?.content ?? '';
+
+      // The usage chunk arrives LAST, after the final content chunk, and only
+      // because `include_usage` was set.
+      if (chunk.usage) {
+        usage = readUsage(chunk.usage);
+      }
+    }
+
+    return {
+      success: true,
+      text: text.length > 0 ? text : null,
+      usage,
+      errorCode: null,
+      error: null,
+    };
+  }
+
   // ---------------------------------------------------------------------------
   // Internals
   // ---------------------------------------------------------------------------
@@ -398,4 +509,33 @@ function describeError(err: unknown): string {
   if (err instanceof Error) return err.message || err.name;
   if (typeof err === 'string') return err;
   return `Non-Error value of type ${typeof err} thrown.`;
+}
+
+/**
+ * Read a provider usage object into our shape.
+ *
+ * ABSENT MEANS NULL, NOT ZERO. A response with no `usage` — a streamed one
+ * whose request omitted `include_usage`, or a provider that simply did not
+ * send it — is one we were not told about, and `0` would state otherwise. The
+ * database column is nullable for exactly this.
+ */
+function readUsage(
+  usage:
+    | {
+        prompt_tokens?: number | null;
+        completion_tokens?: number | null;
+        total_tokens?: number | null;
+      }
+    | null
+    | undefined,
+): AiUsage {
+  return {
+    promptTokens: numberOrNull(usage?.prompt_tokens),
+    completionTokens: numberOrNull(usage?.completion_tokens),
+    totalTokens: numberOrNull(usage?.total_tokens),
+  };
+}
+
+function numberOrNull(value: number | null | undefined): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }

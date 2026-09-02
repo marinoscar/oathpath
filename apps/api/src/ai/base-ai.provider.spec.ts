@@ -7,10 +7,12 @@ import type { AiProviderKind } from './ai-settings.schema';
 import type { AiCapabilityFamily } from './ai-model-roles';
 import type { AiCapabilitySet } from './providers/ai-provider.interface';
 import type {
+  AiCompletionResult,
   AiConnectionTestResult,
   AiModelCatalogResult,
   AiReachabilityRequest,
 } from './ai.types';
+import type { AiUsageService } from './ai-usage.service';
 
 // =============================================================================
 // BaseAiProvider (issue #28, epic #25)
@@ -31,6 +33,10 @@ class StubProvider extends BaseAiProvider {
   protected readonly logger = new Logger('StubProvider');
   readonly kind: AiProviderKind = 'openai';
   protected readonly providerName = 'Stub';
+  // Recording is exercised in ai-usage.spec.ts; here it only has to exist.
+  protected readonly usage = {
+    record: jest.fn().mockResolvedValue(undefined),
+  } as unknown as AiUsageService;
 
   constructor(
     readonly capabilities: AiCapabilitySet,
@@ -56,6 +62,10 @@ class StubProvider extends BaseAiProvider {
     redact: SecretRedactor,
   ) {
     return this.onProbe(apiKey, probes, redact);
+  }
+
+  protected async runCompletion(): Promise<AiCompletionResult> {
+    throw new Error('not exercised here — see ai-usage.spec.ts');
   }
 }
 

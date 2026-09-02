@@ -8,6 +8,8 @@ import { AiConnectionTestService } from './ai-connection-test.service';
 import { AiUserKeyController } from './ai-user-key.controller';
 import { AiUserKeyService } from './ai-user-key.service';
 import { AiStatusService } from './ai-status.service';
+import { AiUsageController } from './ai-usage.controller';
+import { AiUsageService } from './ai-usage.service';
 import { OpenAiProvider } from './providers/openai.provider';
 
 // =============================================================================
@@ -59,6 +61,11 @@ import { OpenAiProvider } from './providers/openai.provider';
     // rather than per decorator, and a route added to the wrong one is a
     // visibly wrong file rather than a missing decorator.
     AiUserKeyController,
+    // Read-only, and separate from the key controller even though both live
+    // under /api/ai. A controller that both holds credentials and reports
+    // history is a controller where a future "usage for user X" route looks
+    // like it belongs.
+    AiUsageController,
   ],
   providers: [
     AiSettingsService,
@@ -68,13 +75,14 @@ import { OpenAiProvider } from './providers/openai.provider';
     AiConnectionTestService,
     AiUserKeyService,
     AiStatusService,
+    AiUsageService,
     OpenAiProvider,
   ],
   // AiConnectionTestService is deliberately NOT exported: running an outbound
   // call on the organisation's key is an admin action reached through this
   // module's controller, not a service other features should be able to
   // invoke. Same posture as EmailTestSendService.
-  exports: [AiSettingsService, AiStatusService, OpenAiProvider],
+  exports: [AiSettingsService, AiStatusService, AiUsageService, OpenAiProvider],
 })
 export class AiModule {
   /**
