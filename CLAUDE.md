@@ -479,6 +479,18 @@ row). See [`docs/specs/civics-content.md`](docs/specs/civics-content.md) §8.
 Reused permissions, not invented — see [`docs/specs/civics-content.md`](docs/specs/civics-content.md)
 §9 and [`docs/runbooks/updating-civics-content.md`](docs/runbooks/updating-civics-content.md).
 
+### Practice (Per User)
+- `POST /api/practice/sessions` - Start a session (`quick` or `category`); closes any existing `in_progress` session for the caller first
+- `GET /api/practice/sessions` - List the caller's sessions, paginated, newest first
+- `GET /api/practice/sessions/{id}` - Resume or review one session: its attempts so far and the next unanswered question
+- `POST /api/practice/sessions/{id}/attempts` - Answer a question; graded deterministically and recorded as one `practice_attempts` row
+- `POST /api/practice/sessions/{id}/attempts/{attemptId}/self-mark` - Flip a recorded `incorrect`/`skipped` attempt to `correct` after revealing the accepted answer
+- `POST /api/practice/sessions/{id}/complete` - Finish a session and compute its summary
+
+All six are `@Auth()` with no permissions, and another learner's session (or
+an attempt inside it) is a **404, not a 403**. See
+[`docs/specs/practice-sessions.md`](docs/specs/practice-sessions.md) §10.
+
 ### Health
 - `GET /api/health/live` - Liveness check
 - `GET /api/health/ready` - Readiness check (includes DB)
@@ -544,6 +556,12 @@ resolved from the authenticated session — so there is no "read/write any
 learner's profile" permission to add in the first place. See
 [`docs/specs/journey-shell.md`](docs/specs/journey-shell.md) §4.1 and §5.
 
+**Practice adds no permission strings either, for the same reason.** All six
+`/api/practice/*` routes are `@Auth()` with no permissions: every
+authenticated learner owns their own practice attempts, exactly as they own
+their own learner profile and their own AI key, and no route accepts a user
+id. See [`docs/specs/practice-sessions.md`](docs/specs/practice-sessions.md) §10.
+
 ## Database Tables
 
 - `users` - User accounts with profile info
@@ -565,6 +583,8 @@ learner's profile" permission to add in the first place. See
 - `civics_categories` - A test version's sections (e.g. "American Government"), in render order
 - `civics_questions` - One version's questions: number, category, prompt, `senior_eligible`, `dynamic_scope` (`none`/`national`/`state`)
 - `civics_answers` - Accepted answers per question/state/slot; `effective_to IS NULL` means currently correct (no `is_current` flag — see `docs/specs/civics-content.md` §3)
+- `practice_sessions` - One row per practice run (Quick 5 or by-category): kind, status, planned count, cached completion `summary`
+- `practice_attempts` - One row per question ever answered, from a session or (from E8) a mock interview — the single evidence table E5/E6/E7 read and E8 writes into
 
 ## Access Control: Email Allowlist
 
@@ -796,6 +816,31 @@ Live examples: `apps/api/src/ai/ai-model-roles.ts` (the registry),
 capability family), and `apps/web/src/pages/Admin/AiSettingsPage.tsx` (the
 selects it drives). The design record, with the rejected alternatives, is
 [`docs/specs/ai-settings.md`](docs/specs/ai-settings.md).
+
+### Adding a practice session kind
+
+`practice_sessions.kind` is a five-value Postgres enum — `quick`, `category`,
+`review`, `weak`, `mixed` — declared all at once so a later kind never needs a
+migration over live session rows; `quick` and `category` are wired today.
+
+1. **The enum value must already exist** in `PracticeSessionKind`
+   (`apps/api/prisma/schema.prisma`). `review`, `weak`, and `mixed` are — a
+   genuinely new sixth kind needs its own migration first; widening from one
+   of the three already-declared values needs none.
+2. **Widen `createPracticeSessionSchema`'s `kind` enum**
+   (`apps/api/src/practice/dto/create-practice-session.dto.ts`) to accept it.
+   Until this ships, `POST /api/practice/sessions` rejects the value as a 400
+   even though the database enum already allows it.
+3. **Add the selector branch** in `PracticeService.createSession`
+   (`apps/api/src/practice/practice.service.ts`) — the same place the
+   `kind === 'category'` branch picks its questions — that selects the
+   question pool for the new kind.
+4. **Add the kind's entry to the picker on `/practice`**
+   (`apps/web/src/pages/PracticePage.tsx`).
+
+See [`docs/specs/practice-sessions.md`](docs/specs/practice-sessions.md) §4
+for which of the five kinds ship today and why the other three are declared
+unwired rather than added later.
 
 ## Specialized Subagents (MANDATORY)
 

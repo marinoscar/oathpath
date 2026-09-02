@@ -437,37 +437,48 @@ the product quietly telling a learner they used to know something they
 still know, that they no longer know it.
 
 So `answer_snapshot` freezes, at grading time, exactly what the learner was
-graded against — the design-level shape:
+graded against — **the shape below is the shipped one**
+(`practiceAnswerSnapshotSchema`, `apps/api/src/practice/dto/practice-attempt.dto.ts`),
+not the illustrative sketch an earlier draft of this document carried; §15
+records the rename:
 
 ```json
 {
-  "questionId": "…",
-  "resolutionStatus": "resolved",
-  "acceptedAnswers": [
-    { "answerId": "…", "text": "Jane Q. Doe", "sort": 0, "stateCode": null }
-  ],
-  "matchedAnswerId": "…",
-  "matchedAnswerText": "Jane Q. Doe",
-  "rule": "normalized",
-  "normalizedResponse": "jane q doe"
+  "resolvedAt": "2026-06-01T14:03:00.000Z",
+  "answerResolution": "resolved",
+  "resolvedForStateCode": null,
+  "answers": [
+    {
+      "id": "…",
+      "text": "Jane Q. Doe",
+      "sort": 0,
+      "stateCode": null,
+      "verifiedAt": "2026-05-01T00:00:00.000Z"
+    }
+  ]
 }
 ```
 
-`acceptedAnswers` is the **entire** array §5's `selectAnswers` returned at
-that moment — every simultaneously-correct alternative for a `none`-scope
+`answers` is the **entire** array §5's `selectAnswers` returned at that
+moment — every simultaneously-correct alternative for a `none`-scope
 question, or the single current row for a `national`/`state`-scope one —
 not only the one the learner happened to match, because a debrief showing
 "you said X; Y and Z were also accepted" is real information a single
-matched answer discards. `matchedAnswerId`/`matchedAnswerText`/`rule` are
-`matchAnswer`'s own return shape (§7), stored so a later reader never has to
-re-run the matcher against frozen content to learn *how* an attempt was
-graded. `resolutionStatus` records civics-content.md §5's `state_required`
-case too: an attempt against a `state`-scope question with no state set at
-the time is `incorrect`/`skipped` with an empty `acceptedAnswers` array and
-`resolutionStatus: 'state_required'`, so a debrief can say "you hadn't set
-your state yet" rather than "there was no correct answer to this question,"
-which would be a lie about the question, not an honest account of what the
-learner's profile allowed at the time.
+matched answer discards. **`matchedAnswerId`/`matchedAnswerText`/`rule` are
+deliberately NOT stored here** — see §15: they are `matchAnswer`'s return
+shape (§7), reported once on the graded-attempt response, and recoverable
+forever by re-running the pure `matchAnswer` over `responseText` and this
+frozen `answers` list, so persisting them a second time would be a value
+computable from data already on the row. `answerResolution` records
+civics-content.md §5's `state_required` case too: an attempt against a
+`state`-scope question with no state set at the time is `incorrect`/`skipped`
+with an empty `answers` array and `answerResolution: 'state_required'`, so a
+debrief can say "you hadn't set your state yet" rather than "there was no
+correct answer to this question," which would be a lie about the question,
+not an honest account of what the learner's profile allowed at the time.
+`resolvedAt` is the instant resolution ran (`Clock.now()`), kept inside the
+document so a reader holding only this JSON can say which moment's answers
+these were without also holding the enclosing row.
 
 `answer_snapshot` is a plain `Json` column, the same convention
 `SystemSettings.value`/`UserSettings.value`/`practice_sessions.summary`
@@ -733,45 +744,40 @@ building accurate confidence toward a real interview. `VISION.md`'s
 tone rules already forbid condescension; grading a correct learner as wrong
 with no recourse is a harsher failure than a tone problem.
 
-**The mechanism has to respect a fact §2.2 already establishes: `practice_attempts`
-has no `updatedAt` column, and its own schema comment calls it an immutable
-record of something that already happened.** Self-mark therefore cannot be a
-later PATCH against an already-persisted row — there is no column that
-would even record when such a mutation happened, and mutating an "immutable"
-row silently would contradict the one property every other reader of this
-table is entitled to assume. So self-mark is folded into the **single**
-write that creates the attempt, not a second write against it:
+**The mechanism actually shipped as a distinct route performing a genuine
+update against an already-persisted row — §15 records this as a reversal of
+this document's original design, which is preserved below only as the
+reasoning self-mark still has to satisfy, not as a description of the
+shipped code:**
 
-1. The learner types a response (or types nothing) and, before anything is
-   persisted, the client can ask the practice module to **check** it against
-   the question's currently-resolved accepted answers — a read-only call
-   that runs §7.1's `matchAnswer` and returns its verdict, but writes
-   nothing. This is what "immediate feedback" (epic #52's own phrase) means
-   concretely: the learner sees whether they were right before the attempt
-   is ever committed.
-2. If that check comes back `incorrect`, the learner may ask to see the
-   accepted answer (a **reveal**, §9.1) and, having seen it, assert "I was
-   right" — the self-mark decision.
-3. Exactly one `POST` then creates the `practice_attempts` row, carrying
-   whatever the learner ultimately decided: `revealed` and `hintUsed` as
-   they actually happened, and — the one substantive effect of a self-mark —
-   `outcome: 'correct'`, `gradingMethod: 'self'` in place of whatever the
-   deterministic pipeline would otherwise have recorded. The server does not
-   trust the client's claim blindly: it still runs `matchAnswer` itself
-   (when a `responseText` was even submitted) as part of handling that
-   `POST`, and only honours a client-asserted self-mark when (a) the
-   deterministic result would be `incorrect` **or** `skipped` — self-mark
-   can never be used to downgrade or relitigate a match the pipeline
-   already accepted as `correct` — and (b) the request also asserts
-   `revealed: true` in the same payload, for the reason given below.
-   Allowing self-mark over a would-be `skipped` result, not only an
-   `incorrect` one, is what makes the "flashcard-style" use the schema's own
-   `gradingMethod` comment names possible at all: a learner who never types
-   an answer, only reveals it and self-reports "I knew it," produces exactly
-   this shape of row. There is never a second write against the row: the
-   attempt is created once, already reflecting whatever the learner decided
-   before moving on, which is exactly what a table with no `updatedAt`
-   requires of it.
+1. The learner answers (or skips) a question through the ordinary
+   `POST .../attempts` call (§10). That call is the **only** place grading
+   happens and the **only** place a `practice_attempts` row is created — it
+   always writes something, `incorrect` or `skipped` included, because an
+   attempt that produces no row is not evidence at all (§15). There is no
+   side-effect-free "check" call ahead of it: a learner who disagrees with
+   the verdict is disagreeing with something already on the record, not
+   something floating unwritten in a request/response pair.
+2. If that attempt came back `incorrect` or `skipped`, the client may reveal
+   the accepted answer to the learner and, having revealed it, call
+   `POST .../attempts/:attemptId/self-mark` (§10) — a **second, distinct
+   route**, naming the exact attempt it acts on. This route performs the one
+   mutation this table permits: it flips that row's `outcome` to `'correct'`
+   and its `gradingMethod` to `'self'`. It refuses (409) unless `revealed`
+   is already `true` on the row, for the reason given below, and refuses
+   (400) an attempt already `'correct'` by `'exact'` — self-mark can only
+   ever upgrade an `incorrect` or `skipped` verdict, never relitigate a
+   match the deterministic pipeline already accepted, because overwriting
+   `'exact'` with `'self'` would downgrade verified evidence to a learner's
+   own claim. It is **idempotent**: calling it again on an
+   already-self-marked attempt returns the same row unchanged.
+
+`practice_attempts` still carries no `updatedAt` column, and is still, in
+every ordinary sense, evidence of something that already happened — the two
+columns this one route is permitted to move are the single, narrow exception
+that exists specifically so `gradingMethod: 'self'` can be recorded as its
+own distinguishable fact forever, not a general-purpose mutation surface.
+§15 explains why this shape won out over the single-write design below.
 
 Revealing before self-marking is required for the identical reason
 regardless of which call carries the flag: self-mark is the learner
@@ -843,14 +849,18 @@ own practice history is exactly as private, and exactly as unconditionally
 theirs to act on, as their own learner profile or their own AI key. No route
 accepts another user's id, ever.
 
+**No `POST .../questions/:questionId/check` route** — an earlier draft of
+this table specified one; §15 records why the shipped design has no
+side-effect-free pre-check at all.
+
 | Method + path | Notes |
 |---|---|
-| `POST /api/practice/sessions` | Body: `kind` (`quick` \| `category` only — §4), `categoryId?` (required iff `kind: 'category'`). Closes any existing `in_progress` session for the caller first (§5), resolves `testVersionCode` from the caller's own `learner_profiles` row, and creates the new one. |
-| `GET /api/practice/sessions` | Paginated, `page`/`pageSize` per `AllowlistController`'s convention, newest first — the "recent sessions" list. |
-| `GET /api/practice/sessions/:id` | One session plus its attempts so far. Ownership-checked, not permission-checked — the `storage_objects` posture (`CLAUDE.md`'s RBAC section): every authenticated user may read their own, and a `PermissionsGuard` here would reject the ordinary case. |
-| `POST /api/practice/sessions/:id/questions/:questionId/check` | **Read-only — writes nothing.** Body: `responseText?`. Resolves the question's current accepted answers (§1's `answer-resolution.ts`) and runs §7.1's `matchAnswer` against them, returning the verdict and the full resolved answer set so the client can render "immediate feedback" (epic #52's phrase) and, on an incorrect or empty response, offer reveal — all before anything is persisted. Callable any number of times for the same question with no side effect, which is exactly why it is not the endpoint that creates the evidence row. |
-| `POST /api/practice/sessions/:id/attempts` | Body: `questionId`, `responseText?`, `revealed?`, `hintUsed?`, `durationMs?`, `selfMarkCorrect?`. Re-runs `matchAnswer` server-side (never trusts a client-reported verdict), then applies §9's self-mark override when `selfMarkCorrect: true`, `revealed: true`, and the deterministic result is not already `correct`. Writes exactly one `practice_attempts` row — `outcome`, `gradingMethod`, `revealed`, `hintUsed`, `answerSnapshot`, `answeredAt: Clock.now()` — in one transaction, and returns the created attempt. There is no follow-up call that mutates it: §9 designs this around the table's own immutability, not against it. |
-| `POST /api/practice/sessions/:id/complete` | Sets `status: 'completed'`, `completedAt`, and computes `summary` (§2.1) from the session's own attempts. Refuses (409) a session that is not `in_progress`. |
+| `POST /api/practice/sessions` | Body: `kind` (`quick` \| `category` only — §4), `categoryId?` (required iff `kind: 'category'`), `plannedCount?` (integer, 1–20, default 5 — clamped down to the questions actually available, §2.1). Closes any existing `in_progress` session for the caller first (§5), resolves `testVersionCode` from the caller's own `learner_profiles` row, and creates the new one, returning it with its first question (prompt only) and `progress: { answered: 0, planned }`. |
+| `GET /api/practice/sessions` | Paginated, `page`/`pageSize` per `AllowlistController`'s convention, newest first — the "recent sessions" list. Each row adds live `answeredCount`/`correctCount` counted from the attempt rows, not from the stored `summary`, so an abandoned session still reports what it actually answered. |
+| `GET /api/practice/sessions/:id` | One session, every attempt recorded against it, and — while still `in_progress` with attempts remaining — the next unanswered question (prompt only) and `progress`. Ownership-checked, not permission-checked — the `storage_objects` posture (`CLAUDE.md`'s RBAC section): every authenticated user may read their own, and a `PermissionsGuard` here would reject the ordinary case. **A session belonging to another learner is a 404, not a 403** (§15). |
+| `POST /api/practice/sessions/:id/attempts` | Body: `questionId`, `responseText?`, `skipped?` (default `false`), `revealed?` (default `false`), `hintUsed?` (default `false`), `durationMs?`. **No `selfMarkCorrect` field, and none is ever accepted here** — §15 records why self-mark moved to its own route below. Re-runs `matchAnswer` server-side (never trusts a client-reported verdict) and writes exactly one `practice_attempts` row — `outcome`, `gradingMethod: 'exact'`, `revealed`, `hintUsed`, `answerSnapshot`, `answeredAt: Clock.now()`. One attempt per question per session: a repeat is a 409. Returns `{ attempt, acceptedAnswers, nextQuestion, progress }` — the accepted answers are shown here for the first time, earned because the attempt is already recorded, and frozen into the same response's `attempt.answerSnapshot`. |
+| `POST /api/practice/sessions/:id/attempts/:attemptId/self-mark` | No body. Flips a recorded `incorrect` or `skipped` attempt to `outcome: 'correct'`, `gradingMethod: 'self'` (§9). Refuses (409) unless the attempt's `revealed` is already `true`; refuses (400) an attempt already `correct` by `'exact'`. Idempotent — a second call on an already self-marked attempt returns it unchanged. **A distinct route on purpose** (§15): it keeps `gradingMethod: 'self'` permanently distinguishable from `'exact'`, and nesting it under the owner-resolved session means the attempt id can never be probed on its own. |
+| `POST /api/practice/sessions/:id/complete` | Sets `status: 'completed'`, `completedAt`, and computes `summary` (§2.1) from the session's own attempts. Refuses (409) a session that is `abandoned`. **Idempotent** — completing an already-completed session returns the stored summary unchanged and does not move `completedAt`. |
 
 **No new audit action.** Unlike an admin settings write or a role change,
 an ordinary practice attempt is routine product usage, not a privileged or
@@ -919,7 +929,7 @@ assembled string.
 | **Requiring `session_id` non-null on every `practice_attempts` row** | Would force E8's mock-interview attempts to reference a `practice_sessions` row that means nothing to an interview flow, purely to satisfy a `NOT NULL` constraint this table's other producer has no honest value for. §2.2. |
 | **Self-mark reachable without first revealing the accepted answer** | Turns self-mark into "mark myself correct because I want to be," with nothing checking the claim against the actual accepted answer the learner is asserting they matched. §9. |
 | **Recording `duration_ms: 0` when a client cannot report a duration** | `0` is a claim — a false one, that the learner answered instantly — for the identical reason `ai_usage_events`' token columns are nullable rather than defaulting to zero on a failed call. §2.2. |
-| **A `PATCH`-style endpoint that mutates an already-persisted attempt for reveal and self-mark** | `practice_attempts` has no `updatedAt` column at all, and the shipped schema's own comment calls it an immutable record — the same posture `AiUsageEvent` takes. Folding reveal and self-mark into the single write that creates the attempt (§9, §10) respects that immutability instead of contradicting it with a mutation the table has no column to timestamp. §9, §10. |
+| **A `PATCH`-style endpoint that mutates an already-persisted attempt for reveal and self-mark — this document's ORIGINAL decision, since reversed** | Rejected here on the reasoning that `practice_attempts` has no `updatedAt` column and its schema comment calls it an immutable record. **§15 records that the shipped implementation does exactly this** for self-mark alone — a narrowly-scoped, distinct-route update of `outcome`/`gradingMethod`, not a general PATCH — because the alternative (folding self-mark into the same write that creates the attempt) required a side-effect-free "check" call ahead of it, which itself conflicts with "an attempt that is not written is not evidence." Kept here, struck through in spirit rather than deleted, so a reader sees the reasoning this decision had to overcome, not just its outcome. §9, §10, §15. |
 | **A nullable `grading_method`, so a `skipped` attempt could record "no grading happened"** | The shipped column is `NOT NULL`; reconciling that fact with a skip is this document's job (§8.1), and reading `grading_method` as "which decision-maker's verdict produced this outcome" rather than "did grading occur" answers it without needing a schema change the migration has already foreclosed. §8.1. |
 | **A database-level partial unique index on `practice_sessions(user_id) WHERE status = 'in_progress'`** | Not what the shipped migration does — verified directly against its SQL, which defines only two ordinary indexes. The application-level check in the create-session flow is cheaper to have shipped in the same migration and closes a narrow, low-consequence race (§5) well enough for E3; nothing in this document rules out adding the index later as a tightening, and doing so would not change any contract this document promises. §2.1, §5. |
 
@@ -953,3 +963,33 @@ does not mistake a silence in this document for an oversight:
   table's enum accepts; the interview flow that ever writes it, and
   whatever grouping concept replaces `session_id` for that flow, is E8's
   (#57) design, not this document's.
+
+---
+
+## 15. Divergences from this design, as shipped
+
+Issue #87 requires this document reconciled against `PracticeController`,
+`PracticeService`, and the `practice` DTOs as they actually shipped (issue
+#73), and every place they disagree recorded with the reason — not silently
+edited over. This section is that record; the inline notes elsewhere in this
+document ("§15 records...") point back here rather than restating it. Every
+row below was checked directly against the shipped source, not against the
+issue text.
+
+| This document said | What shipped | Why the shipped design is right |
+|---|---|---|
+| §10: `POST /api/practice/sessions/:id/questions/:questionId/check` — a side-effect-free pre-check, called before an attempt exists, so a learner could see a verdict without anything being written. | **No such route exists.** The only way to see a grading verdict is `POST .../attempts` (§10), which grades **and writes** in the same call. There is no way to probe a question's answer without producing an evidence row. | This is issue #73's own specified design, not an omission: "flips a recorded `incorrect` to `correct`" presumes the attempt is already recorded. It is also the better design on this document's own terms — an attempt that is not written is not evidence, and a callable-any-number-of-times "check" endpoint would let a learner probe the same question repeatedly (learning the accepted answer by trial and error) with no record of having done so at all, which is worse for the exact mastery-verification goal §9's discounting argument exists to protect. |
+| §9: self-mark folds into the **single** write that creates the attempt, via a `selfMarkCorrect` flag on `POST .../attempts`, specifically because `practice_attempts` has no `updatedAt` column and a later mutation would contradict its immutability. §13 rejected a "PATCH-style endpoint that mutates an already-persisted attempt" on that basis. | Self-mark is `POST /api/practice/sessions/:id/attempts/:attemptId/self-mark` — a **second, distinct route**, called after the fact, that performs an actual `UPDATE` on the already-persisted row (`outcome` → `'correct'`, `gradingMethod` → `'self'`). §9 and §10 are rewritten above to describe this. | The single-write design depended on the "check" route above existing (step 1 of the original §9 mechanism), which did not ship, for the reason in the row above. Once grading always writes immediately, self-mark can only ever be a decision made about an *existing* row, so it has to be a second call. Making it a **separate route** rather than a field on a generic "update attempt" endpoint is deliberate, not incidental: it keeps `gradingMethod: 'self'` structurally distinguishable from `'exact'` forever — there is no field a future edit could widen into a general attempt-mutation surface, only this one named, narrowly-scoped transition, gated on `revealed` and refusing to downgrade an `'exact'` match. This is worth stating plainly because it reverses this document's own §13 entry, not because the original reasoning about immutability was wrong: the table is still immutable in every sense except this one, named exception. |
+| §6: `answer_snapshot`'s illustrative shape used `questionId`, `resolutionStatus`, `acceptedAnswers`, `matchedAnswerId`, `matchedAnswerText`, `rule`, `normalizedResponse`. | The shipped `practiceAnswerSnapshotSchema` uses `resolvedAt`, `answerResolution`, `resolvedForStateCode`, `answers` (each `{ id, text, sort, stateCode, verifiedAt }`) — **and stores no `matchedAnswerId`/`matchedAnswerText`/`rule` at all.** §6 is rewritten above with the real shape. | Field names aside, the substantive change is dropping the matched-answer identity and rule from the stored document. Both are recoverable exactly, at any time, by re-running the pure `matchAnswer` over the attempt's own `responseText` and this frozen `answers` list — the matcher takes no clock, no database, and no configuration, so it returns the same verdict forever. Freezing the *inputs* to a deterministic function is what makes storing its *output* a second time redundant; the verdict the product actually queries on lives in the row's own `outcome`/`gradingMethod` columns, not inside the JSON document. |
+| §10: `POST /api/practice/sessions` did not list `plannedCount` as an accepted body field. | The shipped body accepts an optional `plannedCount` (integer, 1–20, default 5), clamped down to the questions actually available for the selection. §10 is corrected above. | An omission from an earlier pass, not a design change — `MAX_PLANNED_COUNT` and the clamping behavior are real and load-bearing (they are what keeps "4 of 5" on the summary screen honest per §2.1), simply not previously reflected in the endpoint's own row. |
+| §10: `POST .../attempts` was described as returning "the created attempt" and refusing (409) whenever the session was "not `in_progress`"; `POST .../complete` was described as refusing (409) any session that was "not `in_progress`" (which would include an already-`completed` one). | `POST .../attempts` returns `{ attempt, acceptedAnswers, nextQuestion, progress }`. `POST .../complete` is **idempotent** on an already-`completed` session (returns the stored summary unchanged, does not move `completedAt`) and refuses (409) only an `abandoned` one. §10 is corrected above for both. | The richer attempts response is what makes one round trip carry the graded verdict, the accepted answers, and the next question together — exactly the "immediate feedback" epic #52 asks for, without a second request. Idempotent completion matters because a retried request (a flaky connection, a double-tap on a "finish" button) must not become an error the learner has to interpret; treating a second `complete` call as a failure would punish a client for something the client could not have known was redundant. |
+
+No divergence was found in §7's normalisation table: every step, its order,
+the nine-entry filler list, the eight-entry abbreviation table, and the
+number-word scanner's ordering guards were checked line-by-line against
+`apps/api/src/practice/answer-matching.ts` and match exactly, including the
+two load-bearing orderings the module's own comments call out (filler
+stripped before punctuation; abbreviations expanded after tokenization).
+§2's table descriptions of the shipped columns, nullability, and indexes
+were likewise re-checked against `apps/api/prisma/schema.prisma` directly
+and found accurate as written.
