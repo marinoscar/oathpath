@@ -349,6 +349,60 @@ describe('AiUserKeyService', () => {
   });
 
   // ---------------------------------------------------------------------------
+  // Account deletion (#38)
+  // ---------------------------------------------------------------------------
+
+  describe('purgeForDeletedUser', () => {
+    it('removes the deleted user\'s key', async () => {
+      await service.purgeForDeletedUser(ALICE);
+
+      expect(credentials.deleteSecret).toHaveBeenCalledWith(
+        AI_USER_CREDENTIAL_PURPOSE,
+        aiUserCredentialName(ALICE),
+      );
+    });
+
+    it('is idempotent — purging a user with no key is not an error', async () => {
+      await expect(service.purgeForDeletedUser(ALICE)).resolves.toBeUndefined();
+    });
+
+    it('deletes BEFORE auditing, so a failed audit cannot retain the key', async () => {
+      // An unaudited deletion is a smaller problem than a retained live
+      // OpenAI credential belonging to someone who has left.
+      const order: string[] = [];
+      credentials.deleteSecret.mockImplementation(async () => {
+        order.push('delete');
+      });
+      (prisma.auditEvent.create as unknown as jest.Mock).mockImplementation(
+        async () => {
+          order.push('audit');
+          return {};
+        },
+      );
+
+      await service.purgeForDeletedUser(ALICE);
+
+      expect(order).toEqual(['delete', 'audit']);
+    });
+
+    it('records why the key went', async () => {
+      await service.purgeForDeletedUser(ALICE);
+
+      expect(lastAudit().action).toBe('ai_key:delete');
+      expect(lastAudit().meta).toMatchObject({ reason: 'account_deleted' });
+    });
+
+    it('touches only that user\'s address', async () => {
+      await service.purgeForDeletedUser(BOB);
+
+      expect(credentials.deleteSecret).toHaveBeenCalledWith(
+        AI_USER_CREDENTIAL_PURPOSE,
+        BOB,
+      );
+    });
+  });
+
+  // ---------------------------------------------------------------------------
   // The key never escapes
   // ---------------------------------------------------------------------------
 

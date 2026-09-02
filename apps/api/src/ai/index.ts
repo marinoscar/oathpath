@@ -22,6 +22,7 @@ export { AiModule } from './ai.module';
 export { AiSettingsController } from './ai-settings.controller';
 export { AiUserKeyController } from './ai-user-key.controller';
 export { AiUserKeyService } from './ai-user-key.service';
+export { AiUserCredentialCleanupTask } from './tasks/ai-credential-cleanup.task';
 export { AiStatusService } from './ai-status.service';
 export { AiUsageController } from './ai-usage.controller';
 export {

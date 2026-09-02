@@ -10,6 +10,7 @@ import { AiUserKeyService } from './ai-user-key.service';
 import { AiStatusService } from './ai-status.service';
 import { AiUsageController } from './ai-usage.controller';
 import { AiUsageService } from './ai-usage.service';
+import { AiUserCredentialCleanupTask } from './tasks/ai-credential-cleanup.task';
 import { OpenAiProvider } from './providers/openai.provider';
 
 // =============================================================================
@@ -76,6 +77,10 @@ import { OpenAiProvider } from './providers/openai.provider';
     AiUserKeyService,
     AiStatusService,
     AiUsageService,
+    // The orphaned-key sweep (#38). `Credential` has no FK to `User`, so a
+    // deleted user's key is invisible to the database and to every query — a
+    // scheduled sweep is the only thing that will ever find one.
+    AiUserCredentialCleanupTask,
     OpenAiProvider,
   ],
   // AiConnectionTestService is deliberately NOT exported: running an outbound
