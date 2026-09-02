@@ -1413,6 +1413,284 @@ is static; a learner's own stage is not) and different cache lifetimes.
 
 ---
 
+### Civics
+
+Epic #51. The versioned, provenance-tracked USCIS civics question bank both
+test versions read from. Design rationale — the three-table shape, the
+partial-unique-index invariant, the dynamic-answer close-then-open lifecycle,
+and the resolution rules below — lives in
+[`docs/specs/civics-content.md`](specs/civics-content.md); this section covers
+only the wire contract. Operational guidance (which path to use for a content
+change, re-seeding) lives in
+[`docs/runbooks/updating-civics-content.md`](runbooks/updating-civics-content.md).
+
+**Every route below is `@Auth()` with no permissions**, and none accepts a
+caller-supplied user id or state code: `state_code` and `senior_exemption`
+always come from the caller's own `learner_profiles` row via
+`@CurrentUser('id')`, the identical structural rule `/journey/*` holds to.
+Civics content is core product material every authenticated learner reads;
+gating it would leave the default Viewer role unable to study at all.
+
+#### GET /civics/versions
+Every `civics_test_versions` row.
+
+**Response:**
+```json
+{
+  "data": [
+    {
+      "code": "v2008",
+      "label": "2008 Civics Test",
+      "questionsAsked": 10,
+      "passThreshold": 6,
+      "seniorQuestionsAsked": 10,
+      "seniorPassThreshold": 6,
+      "contentHash": "3f9c1a…"
+    }
+  ]
+}
+```
+
+`contentHash` is a sha256 over the content file the loader last applied —
+`null` before any content has been loaded for that version. It answers "does
+this environment's database match exactly the content file in git." It is
+**not** a hash of the official USCIS source document (that lives in the
+content file's own provenance block).
+
+---
+
+#### GET /civics/versions/:code/categories
+A version's categories, in `sortOrder` (not alphabetical — Government
+precedes History precedes Integrated Civics in the official material).
+
+**Parameters:**
+- `code` (string) — a test version code, e.g. `v2008` or `v2025`
+
+**Response:**
+```json
+{
+  "data": [
+    { "id": "uuid", "section": "AMERICAN GOVERNMENT", "code": "principles_of_american_democracy", "name": "Principles of American Democracy", "sortOrder": 0 }
+  ]
+}
+```
+
+**Error Cases:**
+- 404 Not Found — unknown version code (distinct from "this version has no
+  categories loaded yet")
+
+---
+
+#### GET /civics/questions
+Paginated question summaries. **No answers** — those are per-caller and
+belong on the detail route.
+
+**Query Parameters:**
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `page` | number | 1 | Page number |
+| `pageSize` | number | 20 | Items per page (max 100) |
+| `testVersionCode` | string | — | Restrict to one version. **Omitting it does not mean "every version"** — it falls back to the caller's own resolved `learner_profiles.test_version_code`. Only a caller who has not finished orientation (no resolved version) sees the whole bank |
+| `categoryId` | uuid | — | Restrict to one category |
+| `seniorEligible` | boolean | — | Restrict to the 65/20 subset or its complement. Explicit filter only — a learner claiming the accommodation is still entitled to browse the full bank |
+
+An unrecognized query parameter is a **400** (`z.strictObject`) rather than
+silently ignored — there is deliberately no `userId` or `stateCode` parameter
+here.
+
+**Response:**
+```json
+{
+  "data": [
+    {
+      "id": "uuid",
+      "number": 20,
+      "prompt": "Who is one of your state's U.S. Senators now?",
+      "categoryId": "uuid",
+      "testVersionCode": "v2008",
+      "seniorEligible": true,
+      "dynamicScope": "state"
+    }
+  ],
+  "meta": { "total": 100, "page": 1, "pageSize": 20 }
+}
+```
+
+---
+
+#### GET /civics/questions/:id
+One question, with its answer(s) already resolved for the caller.
+
+**Parameters:**
+- `id` (uuid) — question id
+
+**Response:**
+```json
+{
+  "data": {
+    "id": "uuid",
+    "number": 43,
+    "prompt": "Who is the Speaker of the House of Representatives now?",
+    "categoryId": "uuid",
+    "testVersionCode": "v2008",
+    "seniorEligible": false,
+    "dynamicScope": "national",
+    "category": { "id": "uuid", "section": "AMERICAN GOVERNMENT", "code": "system_of_government", "name": "System of Government", "sortOrder": 1 },
+    "answerResolution": "resolved",
+    "resolvedForStateCode": null,
+    "verifiedAt": "2026-01-15T00:00:00.000Z",
+    "answers": [
+      { "id": "uuid", "text": "John R. Roe", "sort": 0, "stateCode": null, "verifiedAt": "2026-01-15T00:00:00.000Z", "sourceNote": "U.S. House of Representatives, Office of the Clerk — retrieved 2026-01-15" }
+    ]
+  }
+}
+```
+
+How `answers` is populated depends on `dynamicScope`:
+- `none` — every simultaneously correct alternative, in slot order (e.g.
+  "Name one branch of the government" returns three).
+- `national` — the single current answer.
+- `state` — the single current answer for the caller's own state.
+
+**`answerResolution: "state_required"` is the case a client must handle.** A
+`state`-scope question asked by a learner with no `state_code` set returns
+the question with `answers: []` and `verifiedAt: null` — **never** a 404,
+never a guess, never another state's answer. Render a prompt to set their
+state.
+
+**Error Cases:**
+- 404 Not Found — unknown question id
+
+---
+
+### Civics Admin
+
+Issue #117. Corrects `national`- and `state`-scope answers at runtime — the
+election-result / officeholder-change path.
+[`docs/runbooks/updating-civics-content.md`](runbooks/updating-civics-content.md)
+explains when to use this versus a content PR. `none`-scope (static) answers
+are **not** addressable through this surface at all — those change only
+through a reviewed content PR and a re-seed.
+
+**Gate: `system_settings:read` to view, `system_settings:write` to correct —
+reused from `system-settings.controller.ts`, never a `civics:*` pair.**
+
+#### GET /civics/dynamic-answers
+**Requires `system_settings:read`.** Every `national`- and `state`-scope
+question with the answer that is currently **open** for it (`effectiveTo:
+null`) — the row a correction would close. The page is over **questions**,
+not answer rows: a `state`-scope question carries up to 56 answers (one per
+state/territory) as one editable unit, and `total` counts questions.
+
+**Query Parameters:**
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `page` | number | 1 | Page number |
+| `pageSize` | number | 20 | Items per page (max 100) |
+| `testVersionCode` | string | — | Restrict to one version. Omitted means both — an administrator has no "own" version |
+| `dynamicScope` | enum | — | `national` or `state`. There is no `none` value — a static question is not addressable here |
+| `stateCode` | string | — | Narrow a `state` question's answers to one state. Does **not** drop `national` questions from the page |
+
+**Response:**
+```json
+{
+  "data": [
+    {
+      "questionId": "uuid",
+      "testVersionCode": "v2008",
+      "number": 43,
+      "prompt": "Who is the Speaker of the House of Representatives now?",
+      "categoryId": "uuid",
+      "dynamicScope": "national",
+      "answers": [
+        { "id": "uuid", "text": "John R. Roe", "sort": 0, "stateCode": null, "verifiedAt": "2027-01-03T00:00:00.000Z", "effectiveFrom": "2027-01-03T00:00:00.000Z", "effectiveTo": null, "sourceNote": "…" }
+      ],
+      "missingStateCodes": []
+    }
+  ],
+  "meta": { "total": 15, "page": 1, "pageSize": 20 }
+}
+```
+
+**`missingStateCodes`** names any state/territory in scope of the request
+with no open answer — the gap this surface makes visible: a `state`-scope
+question missing a row for e.g. Wyoming means Wyoming's learners currently
+see an unanswerable question.
+
+---
+
+#### PUT /civics/dynamic-answers
+**Requires `system_settings:write`.** Records a new answer for one slot (one
+question, and for a `state`-scope question one state). **Closes** the
+currently open row (`effectiveTo` set to this correction's `effectiveFrom`)
+and **opens** a new one, in a single transaction — never an in-place edit of
+an existing row's `text`.
+
+**Request Body:**
+```json
+{
+  "questionId": "uuid",
+  "stateCode": null,
+  "text": "John R. Roe",
+  "sourceNote": "U.S. House of Representatives, Office of the Clerk — history.house.gov, retrieved 2027-01-03",
+  "effectiveFrom": "2027-01-03"
+}
+```
+
+**Fields:**
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `questionId` | uuid | Yes | The question whose answer is being corrected |
+| `stateCode` | string | Only for `state`-scope questions | Required for `state` scope, rejected for `national` (both checked server-side, since a schema cannot see the question's scope) |
+| `text` | string | Yes | The new accepted answer, verbatim |
+| `sourceNote` | string | Yes | The citation — **required on every correction**, no exceptions |
+| `effectiveFrom` | string (`YYYY-MM-DD` or ISO-8601) | No | The real-world date the new answer became correct, from the same citation. Omitted, the server clock is the stated fallback — the honest value when no precise date is knowable |
+
+Not accepted, by design: `verifiedAt` (always stamped `Clock.now()` at write
+time — it records that a human, the caller, confirmed the text just now),
+`sort` (the correction writes into the slot the open row already occupies),
+and `effectiveTo` (derived, so the two rows stay contiguous with no gap or
+overlap).
+
+**Response:**
+```json
+{
+  "data": {
+    "questionId": "uuid",
+    "testVersionCode": "v2008",
+    "number": 43,
+    "prompt": "Who is the Speaker of the House of Representatives now?",
+    "categoryId": "uuid",
+    "dynamicScope": "national",
+    "stateCode": null,
+    "previous": { "id": "uuid", "text": "Jane Q. Doe", "sort": 0, "stateCode": null, "verifiedAt": "2026-01-15T00:00:00.000Z", "effectiveFrom": "2023-01-07T00:00:00.000Z", "effectiveTo": "2027-01-03T00:00:00.000Z", "sourceNote": "…" },
+    "current": { "id": "uuid", "text": "John R. Roe", "sort": 0, "stateCode": null, "verifiedAt": "2027-01-03T00:00:00.000Z", "effectiveFrom": "2027-01-03T00:00:00.000Z", "effectiveTo": null, "sourceNote": "…" }
+  }
+}
+```
+
+`previous` is `null` only when the slot had no open row at all (content that
+was never loaded for that state — the gap `missingStateCodes` reports).
+Returning the closed row, rather than only the new value, is deliberate: a
+response that showed only the new answer would read exactly like the
+in-place edit this design refuses to perform.
+
+**Every accepted correction writes an `audit_events` row**,
+`action: "civics:dynamic_answer_update"`, carrying the question id, the
+`stateCode` (or `null`), the **old and new `text` in full**, both
+`sourceNote`s, and the real-world `effectiveFrom` used. Unlike
+`journey:profile_update` (which redacts every field value because a learner's
+profile is private), this action records the full diff — civics content is
+public exam material, so the diff itself is what a reviewer needs.
+
+**Error Cases:**
+- 400 Bad Request — a `none`-scope `questionId`, a `stateCode` on a
+  `national` question, a missing `stateCode` on a `state` question, a missing
+  `sourceNote`, or an `effectiveFrom` earlier than the answer being replaced
+- 404 Not Found — unknown question id
+
+---
+
 ### Storage Objects
 
 The storage system provides file upload and management capabilities with support for large files (GB scale) through resumable multipart uploads.
