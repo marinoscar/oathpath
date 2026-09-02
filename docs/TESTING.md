@@ -897,34 +897,127 @@ In development/test environments, a special login page at `/testing/login` allow
 tests/e2e/
 ├── playwright.config.ts       # Playwright configuration
 ├── helpers/
-│   └── auth.helper.ts         # Login helper functions
+│   ├── auth.helper.ts         # Login helper functions
+│   └── seed-onboarding.ts     # Drives a test user through the onboarding gates directly (epic #50)
 ├── fixtures/
 │   └── auth.fixture.ts        # Pre-authenticated page fixtures
 └── specs/
     ├── auth.spec.ts           # Authentication tests
+    ├── journey-shell.spec.ts  # Orientation gate, Home, the four-destination bar (epic #50)
     └── example.spec.ts        # Example feature tests
 ```
 
 ### Auth Helper
 
+`loginAsTestUser` no longer clicks through `/testing/login`. Since epic #50
+added onboarding gates (`RequireAiKey`, then `RequireOrientation`), a freshly
+created test user lands on `/setup/ai-key`, not `/`, so a bare
+`page.waitForURL('/')` right after login would time out. `loginAsTestUser`
+now calls `seedOnboarding` (below) to clear both gates via the API directly,
+then waits for `/` only when it did:
+
 ```typescript
-// tests/e2e/helpers/auth.helper.ts
+// tests/e2e/helpers/auth.helper.ts (real signature, abbreviated)
 import { Page } from '@playwright/test';
+import { OnboardingLevel, seedOnboarding } from './seed-onboarding';
+
+export interface TestUserOptions {
+  email: string;
+  role?: 'admin' | 'contributor' | 'viewer';
+  displayName?: string;
+  /** @default 'full' */
+  onboarding?: OnboardingLevel;
+}
 
 export async function loginAsTestUser(
   page: Page,
-  options: { email: string; role?: 'admin' | 'contributor' | 'viewer' }
+  options: TestUserOptions
 ): Promise<void> {
-  await page.goto('/testing/login');
-  await page.fill('[data-testid="test-email-input"]', options.email);
-  if (options.role) {
-    await page.click('[data-testid="test-role-select"]');
-    await page.click(`[data-value="${options.role}"]`);
+  const onboarding = options.onboarding ?? 'full';
+
+  await seedOnboarding(page, { ...options, onboarding });
+
+  if (onboarding === 'full') {
+    await page.waitForURL('/', { timeout: 10000 });
   }
-  await page.click('[data-testid="test-login-button"]');
-  await page.waitForURL('/');
+  // A caller that passed 'ai-key-only' or 'none' is, by definition,
+  // expecting to land on a setup screen — it asserts its own destination.
 }
 ```
+
+`loginAsAdmin`, `loginAsContributor`, and `loginAsViewer` are thin wrappers
+over `loginAsTestUser` with a role and a default email; none of them changed
+shape.
+
+### Onboarding Gates & `seedOnboarding`
+
+`tests/e2e/helpers/seed-onboarding.ts` exports `seedOnboarding(page, options)`,
+which drives three API calls directly — `POST /api/auth/test/login`,
+`PUT /api/ai/key`, `PUT /api/journey/profile` — rather than clicking through
+two onboarding screens. It is faster, and a failure names the call and the
+response body instead of surfacing as a generic Playwright timeout on a URL
+that was never coming.
+
+**Use `page.request` for these calls (as the fixture does), not a bare
+`fetch`.** `page.request` is the same `APIRequestContext` as
+`page.context().request`, so the `refresh_token` cookie `POST
+/api/auth/test/login` sets lands in the browser's own cookie jar — exactly as
+it would after a real OAuth redirect — instead of a jar the browser never
+sees.
+
+**`onboarding` is opt-out on two independent axes, not an all-or-nothing
+switch**, because `RequireAiKey` and `RequireOrientation` each need to stay
+testable in their own right (a spec asserting what `/setup/journey` itself
+does has to actually reach it, not skip past it):
+
+| `onboarding` | Clears `RequireAiKey` | Clears `RequireOrientation` | Lands on |
+|--------------|:---:|:---:|----------|
+| `'full'` (default) | ✅ | ✅ | wherever a fully onboarded user goes |
+| `'ai-key-only'` | ✅ | ❌ | `/setup/journey` |
+| `'none'` | ❌ | ❌ | `/setup/ai-key` |
+
+`seedOnboarding` does not itself assert or wait for a final URL — with
+anything less than `'full'` the destination is a setup screen by design, and
+asserting one destination here would make the two partial levels unusable for
+the specs that exist to reach them. It returns the bearer token, the token's
+`expiresIn`, and the exact `/auth/callback?...` URL the test-login redirect
+carried, then navigates the page to that callback URL itself — the same path
+a real OAuth login takes (`AuthCallbackPage` stores the token, calls `GET
+/auth/me`, then navigates on) — so no test has to reimplement that handoff.
+
+`tests/e2e/specs/journey-shell.spec.ts` is the worked example: it seeds
+`'ai-key-only'` to reach `/setup/journey` for real and assert the gate, then
+saves orientation through the UI to watch the redirect clear.
+
+### Test Clock: `X-Test-Clock`
+
+Journey's interview countdown (`GET /api/journey/home`) is computed
+server-side from the injected `Clock`
+(`apps/api/src/common/clock/clock.ts`), which normally returns the real wall
+clock. `TestClockMiddleware`
+(`apps/api/src/common/clock/test-clock.middleware.ts`) lets a request pin
+that clock instead, via an `X-Test-Clock` header carrying a strict ISO-8601
+instant **with a zone designator** — `2026-01-15T09:00:00Z`, not
+`2026-01-15T09:00:00`. The middleware is registered only when the API's
+`NODE_ENV` is not `production`, so the header does nothing outside a test or
+dev deployment, and a malformed or duplicated value is rejected with a 400
+rather than silently falling back to real time.
+
+Set the header on the **page**, not on `page.request`, so it rides along on
+every `fetch` the React app itself makes:
+
+```typescript
+// tests/e2e/specs/journey-shell.spec.ts
+const pinnedNow = '2026-01-01T12:00:00Z';
+await page.setExtraHTTPHeaders({ 'X-Test-Clock': pinnedNow });
+```
+
+`page.request` (what `seedOnboarding` uses) is a separate `APIRequestContext`
+and is unaffected by `page.setExtraHTTPHeaders` — pinning the clock has no
+effect on onboarding calls made before it is set, only on requests the
+mounted app makes afterward. This is what lets a spec assert an exact
+interview-countdown day count instead of one computed from whatever day the
+suite happens to run on.
 
 ### Auth Fixtures
 

@@ -447,6 +447,20 @@ above. Don't restate any of that here; extend those three instead.
 - `GET /api/ai/status` - `userKeyConfigured` and `systemReady`, independently
 - `GET /api/ai/usage` - Your own recorded usage (not a bill)
 
+### Journey (Per User)
+- `GET /api/journey/profile` - Your `learner_profiles` row, the civics test versions, and the state/territory list (lazily creates the row on first call)
+- `PUT /api/journey/profile` - Merge-update your profile; orientation completion is server-inferred, never a client flag
+- `GET /api/journey/home` - Stage, interview countdown, daily-goal placeholder and the one `nextAction` to render
+- `GET /api/journey/stages` - The eight journey stages, in order, with their display copy
+
+On the web, `RequireOrientation` (`apps/web/src/components/common/RequireOrientation.tsx`)
+hard-blocks a learner who has not completed orientation. It chains **after**
+`RequireAiKey` in `App.tsx` — a keyless, unoriented user is sent to
+`/setup/ai-key` first — and shares the same three exemptions (the setup route
+itself, logout, and the `/admin/*` subtree for a caller holding
+`system_settings:read`). See
+[`docs/specs/journey-shell.md`](docs/specs/journey-shell.md) §5.
+
 ### Health
 - `GET /api/health/live` - Liveness check
 - `GET /api/health/ready` - Readiness check (includes DB)
@@ -473,6 +487,15 @@ permissions, because every authenticated user owns their own credentials — and
 since a keyless user is hard-blocked, gating them would leave the gated role
 unable to use the app at all.
 
+**Journey adds no permission strings either, for the same reason.** All four
+`/api/journey/*` routes are `@Auth()` with no permissions: every authenticated
+user owns their own learner profile, and `RequireOrientation` hard-blocks an
+unoriented learner, so gating these routes would leave the gated role unable
+to clear the gate at all. No route accepts a user id — the caller is always
+resolved from the authenticated session — so there is no "read/write any
+learner's profile" permission to add in the first place. See
+[`docs/specs/journey-shell.md`](docs/specs/journey-shell.md) §4.1 and §5.
+
 ## Database Tables
 
 - `users` - User accounts with profile info
@@ -489,6 +512,8 @@ unable to use the app at all.
 - `storage_object_chunks` - Multipart upload chunk tracking
 - `personal_access_tokens` - User-created long-lived API tokens (hashed)
 - `ai_usage_events` - Per-user AI call records (token counts nullable: null means unknown, never zero)
+- `learner_profiles` - One row per user: journey stage, interview date, state/test-version selection, daily goal, orientation completion (lazily created on first `GET /api/journey/profile`)
+- `civics_test_versions` - Seeded civics test versions (question counts, pass thresholds); `learner_profiles.test_version_code` references it
 
 ## Access Control: Email Allowlist
 
@@ -581,6 +606,20 @@ Note: `DATABASE_URL` is constructed automatically from these variables at runtim
 2. Add migration if schema structure changes
 3. Update TypeScript types
 4. Add frontend UI if user-facing
+
+### Using the Clock
+
+Any backend code that needs "now" — a timestamp, a countdown, a day
+comparison — MUST inject `Clock` (`apps/api/src/common/clock/clock.ts`) and
+call `clock.now()` or `clock.calendarDateIn(timeZone)`, never construct a bare
+`new Date()`. `Clock` is what lets a request pin an instant via the
+`X-Test-Clock` header (non-production only; see
+`apps/api/src/common/clock/test-clock.middleware.ts` and
+[`docs/TESTING.md`](docs/TESTING.md)) instead of a test sleeping or asserting
+against whatever the real wall clock happens to read. `apps/api/src/journey/`
+is the worked example — grep it for `new Date(` and the result is empty,
+comments included. Any later epic computing streaks, recency, or elapsed time
+(E2 onward) inherits this rule.
 
 ### Adding a Notification
 
