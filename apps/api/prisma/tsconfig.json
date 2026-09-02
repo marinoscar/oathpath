@@ -17,6 +17,7 @@
     ]
   },
   "include": [
-    "seed.ts"
+    "seed.ts",
+    "content/**/*.ts"
   ]
 }

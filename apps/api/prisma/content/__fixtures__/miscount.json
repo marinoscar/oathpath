@@ -1,0 +1,26 @@
+{
+  "testVersionCode": "vtest",
+  "label": "Fixture: miscount — expected 5, actual 1",
+  "provenance": {
+    "sourceUrl": "https://example.invalid/source",
+    "retrievedAt": "2026-01-01",
+    "sha256": null,
+    "transcription": { "status": "UNVERIFIED_MODEL_DRAFT", "warning": "Fixture content." }
+  },
+  "expected": { "questionCount": 5, "seniorEligibleCount": 0 },
+  "categories": [
+    { "code": "cat_a", "section": "SECTION A", "name": "Category A", "sortOrder": 0 }
+  ],
+  "questions": [
+    {
+      "number": 1,
+      "categoryCode": "cat_a",
+      "prompt": "Only question in a file that claims to have five?",
+      "seniorEligible": false,
+      "dynamicScope": "none",
+      "answers": [
+        { "sort": 0, "stateCode": null, "text": "Answer", "sourceNote": "fixture", "verifiedAt": null, "effectiveFrom": "2026-01-01", "effectiveTo": null }
+      ]
+    }
+  ]
+}

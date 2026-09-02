@@ -1,0 +1,23 @@
+{
+  "testVersionCode": "v2025",
+  "label": "2025 Civics Test (128 Questions)",
+  "provenance": {
+    "sourceUrl": "https://www.uscis.gov/citizenship/find-study-materials-and-resources/study-for-the-test/study-materials-for-the-2025-civics-test",
+    "retrievedAt": "2026-09-02",
+    "sha256": null,
+    "transcription": {
+      "status": "AWAITING_SOURCE",
+      "warning": "This file intentionally ships with ZERO questions. Recall of the specific 128-question 2025 civics test bank is not reliable enough to draft even as an unverified placeholder — unlike the long-published, extremely well-documented 2008 test, wrong civics content here would sit in front of a real citizenship interview. Fabricating 128 questions was explicitly rejected for this file (issue #101); an empty, honestly-labelled bank is correct, a fabricated one is not. The three top-level categories below are the well-known top-level USCIS grouping (American Government / American History / Integrated Civics) carried over from the 2008 structure as a provisional scaffold — their subsection breakdown, and every one of the 128 questions and answers, must be transcribed from the official USCIS source (sourceUrl above) by a human and checked in per docs/specs/civics-content.md §6.1 before this file is anything but a placeholder. sha256 is null because no source document was ever downloaded. Until that transcription lands, this file's question count (0) and senior-eligible count are both KNOWN GAPS against the version's real targets (128 questions; senior-eligible subset not yet determined), reported loudly by the validator, not silently ignored."
+    }
+  },
+  "expected": {
+    "questionCount": 128,
+    "seniorEligibleCount": null
+  },
+  "categories": [
+    { "code": "american_government", "section": "AMERICAN GOVERNMENT", "name": "American Government", "sortOrder": 0 },
+    { "code": "american_history", "section": "AMERICAN HISTORY", "name": "American History", "sortOrder": 1 },
+    { "code": "integrated_civics", "section": "INTEGRATED CIVICS", "name": "Integrated Civics", "sortOrder": 2 }
+  ],
+  "questions": []
+}

@@ -1,0 +1,24 @@
+{
+  "testVersionCode": "vtest",
+  "label": "Fixture: incomplete provenance block",
+  "provenance": {
+    "retrievedAt": "not-a-date",
+    "transcription": { "status": "NOT_A_REAL_STATUS" }
+  },
+  "expected": { "questionCount": 1, "seniorEligibleCount": 0 },
+  "categories": [
+    { "code": "cat_a", "section": "SECTION A", "name": "Category A", "sortOrder": 0 }
+  ],
+  "questions": [
+    {
+      "number": 1,
+      "categoryCode": "cat_a",
+      "prompt": "A question whose file forgot sourceUrl, sha256, and a real status?",
+      "seniorEligible": false,
+      "dynamicScope": "none",
+      "answers": [
+        { "sort": 0, "stateCode": null, "text": "Answer", "sourceNote": "fixture", "verifiedAt": null, "effectiveFrom": "2026-01-01", "effectiveTo": null }
+      ]
+    }
+  ]
+}
