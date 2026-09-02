@@ -173,26 +173,34 @@ describe('validateContent — the real shipped content files', () => {
     expect(report.releaseReady).toBe(false);
   });
 
-  it('civics-2025.json ships an honest, empty, AWAITING_SOURCE bank — not a fabricated one', () => {
+  it('civics-2025.json has zero structural errors, exactly 128 questions, and 20 senior-eligible questions', () => {
     const file = loadContentFile(join(CONTENT_DIR, 'civics-2025.json'));
     const report = validateContent(file, { fileLabel: 'civics-2025.json' });
     expect(report.errors).toEqual([]);
     expect(report.structurallyValid).toBe(true);
-    expect(file.questions).toHaveLength(0);
-    expect(file.provenance.transcription.status).toBe('AWAITING_SOURCE');
-    expect(file.provenance.sha256).toBeNull();
-    // The 128-question gap is real and must be visible, not swallowed.
-    expect(report.knownGaps.map((g) => g.code)).toContain('count.questionCount');
-    expect(report.releaseReady).toBe(false);
+    expect(file.questions).toHaveLength(128);
+    expect(file.questions.filter((q) => q.seniorEligible)).toHaveLength(20);
+    // Transcribed from the hashed official source and signed off by the
+    // repository owner (#212, PR #214), so this file — unlike civics-2008.json —
+    // is the one content file cleared to reach a production database.
+    expect(file.provenance.transcription.status).toBe('HUMAN_VERIFIED');
+    expect(typeof file.provenance.sha256).toBe('string');
+    expect(file.provenance.sha256).not.toBeNull();
+    // Both gaps are closed: the question-count gap went when the bank was
+    // transcribed, the trust gap when it was verified. Neither may resurface.
+    expect(report.knownGaps).toEqual([]);
+    expect(report.releaseReady).toBe(true);
   });
 
   it('every state-scope question in the real files covers all 56 state/territory codes', () => {
-    const file = loadContentFile(join(CONTENT_DIR, 'civics-2008.json'));
-    const stateScoped = file.questions.filter((q) => q.dynamicScope === 'state');
-    expect(stateScoped.length).toBeGreaterThan(0);
-    for (const q of stateScoped) {
-      expect(q.answers).toHaveLength(56);
-      expect(new Set(q.answers.map((a) => a.stateCode)).size).toBe(56);
+    for (const fileName of ['civics-2008.json', 'civics-2025.json']) {
+      const file = loadContentFile(join(CONTENT_DIR, fileName));
+      const stateScoped = file.questions.filter((q) => q.dynamicScope === 'state');
+      expect(stateScoped.length).toBeGreaterThan(0);
+      for (const q of stateScoped) {
+        expect(q.answers).toHaveLength(56);
+        expect(new Set(q.answers.map((a) => a.stateCode)).size).toBe(56);
+      }
     }
   });
 });

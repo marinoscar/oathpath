@@ -109,10 +109,14 @@ const DEFAULT_SYSTEM_SETTINGS = {
 // The senior-accommodation columns (`seniorQuestionsAsked`/
 // `seniorPassThreshold`) are seeded to the same 10-asked/6-to-pass shape as
 // the 2008 test for BOTH rows, mirroring the long-standing 65/20
-// accommodation. This is a DESIGN-LEVEL PLACEHOLDER, not verified DDL: E2's
-// content load is what checks this figure against the authoritative USCIS
-// source and is the designated place to correct it if the real 2025 senior
-// accommodation differs.
+// accommodation. For v2025, this figure is now CONFIRMED against the
+// official USCIS source document M-1778 (09/25), "128 Civics Questions and
+// Answers (2025 version)" — its sha256 is recorded in
+// apps/api/prisma/content/civics-2025.json's provenance block — which states
+// the 65/20 applicant answers 10 of the 20 asterisked questions and must get
+// at least 6 (60%) correct. The v2008 row's 10/6 figure is NOT verified by
+// that source, since it covers only the 2025 test; it remains a
+// design-level placeholder until checked against 2008-era USCIS guidance.
 const CIVICS_TEST_VERSIONS = [
   {
     code: 'v2008',
