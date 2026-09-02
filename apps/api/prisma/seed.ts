@@ -103,6 +103,34 @@ const DEFAULT_SYSTEM_SETTINGS = {
   features: {},
 };
 
+// Civics test versions (docs/specs/journey-shell.md §3.1, issue #62).
+//
+// The senior-accommodation columns (`seniorQuestionsAsked`/
+// `seniorPassThreshold`) are seeded to the same 10-asked/6-to-pass shape as
+// the 2008 test for BOTH rows, mirroring the long-standing 65/20
+// accommodation. This is a DESIGN-LEVEL PLACEHOLDER, not verified DDL: E2's
+// content load is what checks this figure against the authoritative USCIS
+// source and is the designated place to correct it if the real 2025 senior
+// accommodation differs.
+const CIVICS_TEST_VERSIONS = [
+  {
+    code: 'v2008',
+    label: '2008 Civics Test',
+    questionsAsked: 10,
+    passThreshold: 6,
+    seniorQuestionsAsked: 10,
+    seniorPassThreshold: 6,
+  },
+  {
+    code: 'v2025',
+    label: '2025 Civics Test',
+    questionsAsked: 20,
+    passThreshold: 12,
+    seniorQuestionsAsked: 10,
+    seniorPassThreshold: 6,
+  },
+] as const;
+
 // =============================================================================
 // Seed Functions
 // =============================================================================
@@ -186,6 +214,21 @@ async function seedSystemSettings() {
   console.log('✓ Seeded default system settings');
 }
 
+async function seedCivicsTestVersions() {
+  console.log('Seeding civics test versions...');
+
+  for (const version of CIVICS_TEST_VERSIONS) {
+    const { code, ...fields } = version;
+    await prisma.civicsTestVersion.upsert({
+      where: { code },
+      update: fields,
+      create: version,
+    });
+  }
+
+  console.log(`✓ Seeded ${CIVICS_TEST_VERSIONS.length} civics test versions`);
+}
+
 async function seedInitialAdminAllowlist() {
   console.log('Seeding initial admin allowlist...');
 
@@ -216,6 +259,7 @@ async function main() {
   await seedPermissions();
   await seedRolePermissions();
   await seedSystemSettings();
+  await seedCivicsTestVersions();
   await seedInitialAdminAllowlist();
 
   console.log('\n✓ Database seeding completed successfully');
