@@ -1,5 +1,5 @@
 // =============================================================================
-// The nextAction recommender (issue #65, epic #50)
+// The nextAction recommender (issue #65, epic #50; extended by #81, epic #52)
 // =============================================================================
 //
 // Home renders ONE deterministic recommendation at a time. ROADMAP §7 is
@@ -7,11 +7,13 @@
 // counts, coverage, recency, and journey stage — not a model call. It must
 // produce an identical, explainable answer on two consecutive loads."
 //
-// E1 has no mastery counts and no coverage (those are E5), so this version has
-// exactly three things to say. It is a plain exported function rather than a
-// service method for the reason journey-shell.md §4.2 gives: it is a pure
-// function over a profile shape and is unit-tested directly, independently of
-// DI, HTTP, or whether the live UI can currently reach a given branch.
+// E1 had no mastery counts and no coverage (those are E5) and so had exactly
+// three things to say. E3 adds the fourth — `practice` — because there is now
+// somewhere real to send a learner and a real fact about today to decide on.
+// It is still a plain exported function rather than a service method, for the
+// reason journey-shell.md §4.2 gives: it is a pure function over a profile
+// shape and is unit-tested directly, independently of DI, HTTP, or whether the
+// live UI can currently reach a given branch.
 //
 // NO AI CALL HAPPENS HERE, and none ever should. Two consecutive loads of Home
 // must produce the same card; a model call would make that a coin flip and
@@ -34,32 +36,48 @@
 // alternative and why it lost.
 //
 // -----------------------------------------------------------------------------
-// WHY BOTH NON-ORIENTATION KINDS POINT AT `/learn` TODAY
+// WHAT E3 CHANGED, AND WHY THE NOTE THAT USED TO SIT HERE IS GONE
 // -----------------------------------------------------------------------------
 //
-// Deliberate, not a missed distinction (journey-shell.md §4). `/learn` is
-// created by #69 and receives E2's real civics content in the very next epic;
-// E3's practice loop does not exist until after it. An interview countdown's
-// honest advice today is "start with the material", not "go to a page where
-// practice does not exist yet".
+// This block used to explain why BOTH non-orientation kinds pointed at
+// `/learn`: `/practice` existed as a real route but held a designed empty
+// state, so an interview countdown's honest advice was "start with the
+// material", not "go to a page where practice does not exist yet". It ended
+// with an instruction to the contributor who shipped E3 — re-point
+// `interview_countdown` at `/practice` rather than "fix" the duplication into
+// two identical branches.
 //
-// **E3 (#52) re-points `interview_countdown` to `/practice`** once Practice
-// has real content to send a learner to. A contributor finding both kinds
-// pointing at `/learn` should extend the mapping when E3 ships, not "fix" this
-// into two identical branches now.
+// **That is what this file now does** (#81, epic #52). `/practice` runs real
+// sessions — Quick 5, by category, graded, recorded as `practice_attempts` —
+// so:
+//
+//   * `interview_countdown` points at `/practice`, and its reason no longer
+//     promises practice as something to "build up to". It is here.
+//   * `practice` joins the union as its own kind, for the learner with no
+//     interview date who simply has not practised yet today.
+//   * `explore` keeps pointing at `/learn` (practice-sessions.md §12 is
+//     explicit that only the countdown re-points), but its copy changed too:
+//     see the branch itself.
+//
+// One more hardcoded, verified path in the same closed map. Nothing about the
+// mechanism changed — only how many real destinations there are to name.
+//
+// The next kinds are still E5's `review` and E8's `interview`, on the same
+// extend-the-union-when-the-destination-exists discipline. Neither route
+// exists yet; neither member does either.
 // =============================================================================
 
 /**
- * The three recommendations E1 can make.
+ * The four recommendations this recommender can make.
  *
- * E3/E5/E8 each add exactly one member when their route exists to receive it —
- * `practice` (E3), `review` (E5), `interview` (E8) — following the same
- * extend-the-union-when-the-destination-exists discipline the stage and
- * destination registries use.
+ * `practice` is E3's addition (#81). E5 and E8 each add exactly one more when
+ * their route exists to receive it — `review` (E5), `interview` (E8) —
+ * following the same discipline the stage and destination registries use.
  */
 export const NEXT_ACTION_KINDS = [
   'orientation',
   'interview_countdown',
+  'practice',
   'explore',
 ] as const;
 
@@ -73,8 +91,16 @@ export type NextActionKind = (typeof NEXT_ACTION_KINDS)[number];
  *
  *   - `/setup/journey` — the orientation screen, mounted OUTSIDE its own gate
  *     (journey-shell.md §5) so recommending it can never start a redirect loop.
- *   - `/learn` — one of the four bar destinations, which ship as real routes in
- *     E1 (§2.3) precisely so this invariant holds the moment E1 lands.
+ *   - `/practice` — one of the four bar destinations, a real route since E1
+ *     (§2.3) and a real destination since E3: it runs the sessions
+ *     `practice.controller.ts` serves.
+ *   - `/learn` — likewise a bar destination, carrying E2's civics content.
+ *
+ * `interview_countdown` and `practice` deliberately share `/practice`. That is
+ * two kinds naming one destination, not a duplicated branch: they differ in
+ * what they SAY (a countdown is about a date; `practice` is about today), and
+ * collapsing them would lose the countdown, which is the single most
+ * emotionally loaded card this product shows.
  *
  * Frozen because this is process-lifetime state a serialiser or a careless
  * `Object.assign` must not be able to repoint.
@@ -82,7 +108,8 @@ export type NextActionKind = (typeof NEXT_ACTION_KINDS)[number];
 export const NEXT_ACTION_PATHS: Readonly<Record<NextActionKind, string>> =
   Object.freeze({
     orientation: '/setup/journey',
-    interview_countdown: '/learn',
+    interview_countdown: '/practice',
+    practice: '/practice',
     explore: '/learn',
   });
 
@@ -98,9 +125,11 @@ export interface NextAction {
 /**
  * Everything the recommender is allowed to see.
  *
- * Deliberately NOT the Prisma row: this narrows the input to the two facts the
- * decision actually turns on, so a future field on `learner_profiles` cannot
- * quietly become an input to the front page without a signature change.
+ * Deliberately NOT the Prisma row, and deliberately not "the learner's
+ * practice history" either: this narrows the input to the three facts the
+ * decision actually turns on, so a future field on `learner_profiles` — or a
+ * future column on `practice_attempts` — cannot quietly become an input to the
+ * front page without a signature change.
  */
 export interface NextActionInput {
   /** Null until orientation is submitted. */
@@ -114,14 +143,46 @@ export interface NextActionInput {
    * deterministic.
    */
   daysUntilInterview: number | null;
+
+  /**
+   * Whether this learner has recorded at least one practice attempt on
+   * TODAY'S calendar day IN THEIR OWN TIMEZONE (#81).
+   *
+   * A BOOLEAN, NOT A COUNT, on purpose. The branch below asks "any?" and
+   * nothing else, and a number in this interface would be a number some later
+   * copy change is tempted to render — "you have answered 3 questions today" —
+   * at a point where `dailyGoal.tracked` is still `false` and Home has no
+   * measured target to compare it against. journey-shell.md §10's rule against
+   * displaying a figure the learner cannot interpret applies to a 3 exactly as
+   * it applies to a 0. When E6/E7 land real session tracking they can widen
+   * this with a reason; today the honest input is a yes or a no.
+   *
+   * Like `daysUntilInterview`, the timezone reduction happens in the caller.
+   * This function still has no notion of "now".
+   */
+  hasPractisedToday: boolean;
 }
 
 /**
  * The single recommendation to show, given a profile.
  *
- * Ordering is the contract: orientation outranks a countdown, and a countdown
- * outranks exploring. A learner who has not finished setup has nothing useful
- * to be told about a date they entered halfway through it.
+ * ORDERING IS THE CONTRACT:
+ *
+ *   orientation  >  interview_countdown  >  practice  >  explore
+ *
+ * A learner who has not finished setup has nothing useful to be told about a
+ * date they entered halfway through it. A learner with a date on the calendar
+ * is told about the date, whether or not they have already practised today —
+ * the countdown outranks the nudge because it is the more specific true thing
+ * to say. Everything else is "practise today", and `explore` is what is left
+ * once they have.
+ *
+ * E3 inserted `practice` between the countdown and `explore` and moved nothing
+ * that was already there. One consequence is worth naming rather than
+ * discovering: a learner whose interview date has PASSED now falls through the
+ * countdown into `practice` rather than into `explore`. That is the intended
+ * reading — we do not know how their interview went (see branch 2), and
+ * inviting them to practise is the one suggestion that is true either way.
  */
 export function recommendNextAction(input: NextActionInput): NextAction {
   // 1. Not oriented.
@@ -147,25 +208,55 @@ export function recommendNextAction(input: NextActionInput): NextAction {
   // interview happening in a few hours is the most relevant thing this product
   // could possibly say to that learner.
   //
-  // A date in the PAST falls through to `explore` rather than counting up. We
-  // do not know how the interview went — nobody has told us — so "your
-  // interview was 12 days ago" would be a claim dressed as a countdown, and
-  // §10's honesty rule covers exactly that shape of fabricated confidence.
+  // A date in the PAST falls through — to `practice` now, `explore` before E3
+  // — rather than counting up. We do not know how the interview went; nobody
+  // has told us. "Your interview was 12 days ago" would be a claim dressed as
+  // a countdown, and §10's honesty rule covers exactly that shape of
+  // fabricated confidence.
+  //
+  // The reason line no longer says "Start with the material, then build up to
+  // full practice." That sentence was true only while `/practice` was an empty
+  // state; it now points at real sessions, so it says what practice is FOR.
   if (input.daysUntilInterview !== null && input.daysUntilInterview >= 0) {
     return {
       kind: 'interview_countdown',
       title: countdownTitle(input.daysUntilInterview),
-      reason: 'Start with the material, then build up to full practice.',
+      reason:
+        'Practice is the closest thing to the real interview. A few questions today, and the day itself will feel familiar.',
       path: NEXT_ACTION_PATHS.interview_countdown,
     };
   }
 
-  // 3. Oriented, no upcoming date, and E1 has nothing more specific to say.
+  // 3. Oriented, no interview ahead of them, and nothing recorded today.
+  //
+  // The whole product in one card: five questions is a few minutes, and the
+  // attempts it records are the evidence E5's readiness model is built from.
+  if (!input.hasPractisedToday) {
+    return {
+      kind: 'practice',
+      title: 'Practice five questions.',
+      reason:
+        "It only takes a few minutes, and every answer you give builds the evidence that you're ready.",
+      path: NEXT_ACTION_PATHS.practice,
+    };
+  }
+
+  // 4. Oriented, no interview ahead of them, and they have already practised
+  // today. There is genuinely nothing more urgent to ask of this learner.
+  //
+  // THE OLD COPY HERE BECAME FALSE THE MOMENT E3 SHIPPED. It read "The
+  // learning and practice tools are on their way. For now, take a look at
+  // what's ready." — honest in E1, when this branch was the answer for every
+  // oriented learner and neither tool existed. Both exist now, and this branch
+  // is only ever reached by someone who has just used one of them, so keeping
+  // that sentence would have made the card tell a learner their own completed
+  // practice session had not been built yet. journey-shell.md §9.1 still
+  // records the E1 wording; it is superseded by this branch.
   return {
     kind: 'explore',
-    title: "See what's here so far.",
+    title: "You've practiced today.",
     reason:
-      "The learning and practice tools are on their way. For now, take a look at what's ready.",
+      "That's today's work done. Look around the material whenever you want, or come back later for another round.",
     path: NEXT_ACTION_PATHS.explore,
   };
 }

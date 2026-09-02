@@ -18,7 +18,9 @@ import { JourneyService } from './journey.service';
 //   * orientation completion is inferred, happens once, and never walks a
 //     later stage backwards;
 //   * the audit row names fields and never values;
-//   * the countdown counts calendar days in the learner's own timezone.
+//   * the countdown counts calendar days in the learner's own timezone;
+//   * "has this learner practised today" is answered on the learner's own
+//     calendar day too, and not on UTC's (#81).
 // =============================================================================
 
 const LEARNER = '11111111-1111-4111-8111-111111111111';
@@ -74,6 +76,7 @@ describe('JourneyService', () => {
     learnerProfile: { upsert: jest.Mock; update: jest.Mock };
     civicsTestVersion: { findMany: jest.Mock };
     auditEvent: { create: jest.Mock };
+    practiceAttempt: { findFirst: jest.Mock };
   };
   let clock: { now: jest.Mock; calendarDateIn: jest.Mock };
 
@@ -102,6 +105,8 @@ describe('JourneyService', () => {
       },
       civicsTestVersion: { findMany: jest.fn().mockResolvedValue(TEST_VERSIONS) },
       auditEvent: { create: jest.fn().mockResolvedValue({}) },
+      // A learner who has never practised. Individual tests hand back a row.
+      practiceAttempt: { findFirst: jest.fn().mockResolvedValue(null) },
     };
     clock = {
       now: jest.fn().mockReturnValue(new Date('2026-02-01T10:00:00Z')),
@@ -539,7 +544,10 @@ describe('JourneyService', () => {
 
       expect(home.daysUntilInterview).toBe(-12);
       expect(home.interviewPast).toBe(true);
-      expect(home.nextAction.kind).toBe('explore');
+      // `practice` since E3 (#81), `explore` before it: a new rung was
+      // inserted below the countdown, so a learner with nothing recorded today
+      // is invited to practise rather than to look around.
+      expect(home.nextAction.kind).toBe('practice');
     });
 
     it('says the daily goal is not tracked, and invents no minutesToday', async () => {
@@ -562,6 +570,118 @@ describe('JourneyService', () => {
       expect(await service.getHome(LEARNER)).toEqual(
         await service.getHome(LEARNER),
       );
+    });
+
+    // -------------------------------------------------------------------------
+    // "Have I practised today?" — on the learner's calendar day, not UTC's
+    // -------------------------------------------------------------------------
+    //
+    // Every fixture here is in `Pacific/Auckland` (UTC+13 in February) with the
+    // clock pinned to 15 February LOCAL. That zone is chosen so the assertions
+    // DISCRIMINATE: the two boundary instants below are two minutes apart and
+    // fall on the SAME UTC calendar day, so an implementation that reduced
+    // `answeredAt` in UTC could not tell them apart and would have to get one
+    // of the two wrong.
+    describe('hasPractisedToday', () => {
+      /** An oriented learner in Auckland, whose local "today" is 15 February. */
+      function inAuckland(): void {
+        prisma.learnerProfile.upsert.mockResolvedValue(
+          blankProfile({
+            timezone: 'Pacific/Auckland',
+            orientationCompletedAt: new Date('2026-01-01T00:00:00Z'),
+          }),
+        );
+        clock.calendarDateIn.mockReturnValue('2026-02-15');
+      }
+
+      /** The learner's most recent attempt, at `answeredAt`. */
+      function lastAttemptAt(answeredAt: string): void {
+        prisma.practiceAttempt.findFirst.mockResolvedValue({
+          answeredAt: new Date(answeredAt),
+        });
+      }
+
+      it('recommends practice when nothing has ever been recorded', async () => {
+        inAuckland();
+
+        expect((await service.getHome(LEARNER)).nextAction.kind).toBe(
+          'practice',
+        );
+      });
+
+      it('counts an attempt at 23:59 on the learner’s own day as today', async () => {
+        // 2026-02-15T23:59+13:00 — still 15 February in Auckland, already
+        // 15 February in UTC as well, but only just: the instant is 10:59Z.
+        inAuckland();
+        lastAttemptAt('2026-02-15T10:59:00Z');
+
+        expect((await service.getHome(LEARNER)).nextAction.kind).toBe('explore');
+      });
+
+      it('does NOT count an attempt at 00:01 the next local day', async () => {
+        // 2026-02-16T00:01+13:00 — the very next local day, and TWO MINUTES
+        // after the instant above. Both are 15 February in UTC; only one is
+        // 15 February in Auckland. A UTC comparison would call this one
+        // "today" and tell a learner who has not practised since yesterday
+        // that their work is done.
+        inAuckland();
+        lastAttemptAt('2026-02-15T11:01:00Z');
+
+        expect((await service.getHome(LEARNER)).nextAction.kind).toBe(
+          'practice',
+        );
+      });
+
+      it('counts an attempt at 00:01 on the learner’s own day, which UTC calls yesterday', async () => {
+        // 2026-02-15T00:01+13:00 = 2026-02-14T11:01Z. The mirror image of the
+        // case above: UTC says 14 February and would refuse to count work the
+        // learner did this morning.
+        inAuckland();
+        lastAttemptAt('2026-02-14T11:01:00Z');
+
+        expect((await service.getHome(LEARNER)).nextAction.kind).toBe('explore');
+      });
+
+      it('asks only for the caller’s latest attempt, and only for its timestamp', async () => {
+        // Scoped by the id the service was handed — there is no other source
+        // of a user id in this module — and narrowed to one column: an attempt
+        // row carries the learner's own response text and a frozen answer
+        // snapshot, and Home has no business loading either to answer a
+        // yes/no question.
+        inAuckland();
+
+        await service.getHome(LEARNER);
+
+        expect(prisma.practiceAttempt.findFirst).toHaveBeenCalledWith({
+          where: { userId: LEARNER },
+          orderBy: { answeredAt: 'desc' },
+          select: { answeredAt: true },
+        });
+      });
+
+      it('reads the learner’s day from the Clock, never from wall-clock time', async () => {
+        inAuckland();
+
+        await service.getHome(LEARNER);
+
+        expect(clock.calendarDateIn).toHaveBeenCalledWith('Pacific/Auckland');
+      });
+
+      it('lets the countdown outrank practice for a learner with a date', async () => {
+        prisma.learnerProfile.upsert.mockResolvedValue(
+          blankProfile({
+            timezone: 'Pacific/Auckland',
+            interviewDate: new Date('2026-02-20T00:00:00Z'),
+            orientationCompletedAt: new Date('2026-01-01T00:00:00Z'),
+          }),
+        );
+        clock.calendarDateIn.mockReturnValue('2026-02-15');
+        lastAttemptAt('2026-02-15T10:59:00Z');
+
+        expect((await service.getHome(LEARNER)).nextAction.kind).toBe(
+          'interview_countdown',
+        );
+      });
     });
 
     it('creates the profile lazily, so Home works on a first login too', async () => {

@@ -128,6 +128,12 @@ function setupJourneyMocks(): void {
       return { id: `audit-${auditRows.length}`, ...data };
     },
   );
+
+  // A learner who has never practised (#81). Home asks for the caller's most
+  // recent `practice_attempts` row to decide whether today is already done;
+  // `null` is the state every account starts in, and the one test that cares
+  // hands a row back.
+  (prismaMock.practiceAttempt.findFirst as jest.Mock).mockResolvedValue(null);
 }
 
 /** Everything the orientation screen collects, in one request body. */
@@ -539,8 +545,13 @@ describe('Journey (Integration)', () => {
 
   describe('GET /api/journey/home', () => {
     /** The only paths the recommender is allowed to emit. Real, mounted routes. */
-    const ALLOWED_PATHS = ['/setup/journey', '/learn'];
-    const ALLOWED_KINDS = ['orientation', 'interview_countdown', 'explore'];
+    const ALLOWED_PATHS = ['/setup/journey', '/learn', '/practice'];
+    const ALLOWED_KINDS = [
+      'orientation',
+      'interview_countdown',
+      'practice',
+      'explore',
+    ];
 
     async function orient(
       overrides: Record<string, unknown> = {},
@@ -584,17 +595,17 @@ describe('Journey (Integration)', () => {
         'interview_countdown',
       ],
       [
-        'oriented with no interview',
+        'oriented with no interview and nothing practised today',
         {
           stage: 'oriented',
           stateCode: 'CA',
           testVersionCode: 'v2025',
           orientationCompletedAt: new Date('2026-01-01T00:00:00Z'),
         },
-        'explore',
+        'practice',
       ],
       [
-        'oriented with a past interview',
+        'oriented with a past interview and nothing practised today',
         {
           stage: 'oriented',
           stateCode: 'CA',
@@ -602,7 +613,7 @@ describe('Journey (Integration)', () => {
           orientationCompletedAt: new Date('2026-01-01T00:00:00Z'),
           interviewDate: new Date('2026-01-05T00:00:00Z'),
         },
-        'explore',
+        'practice',
       ],
     ])(
       'recommends %s → %s, on a permitted path',
@@ -643,6 +654,110 @@ describe('Journey (Integration)', () => {
         .expect(200);
 
       expect(first.body.data).toEqual(second.body.data);
+    });
+
+    // -------------------------------------------------------------------------
+    // AC — the `practice` next action (#81, epic #52)
+    // -------------------------------------------------------------------------
+    //
+    // The kind E3 added, over the wire: the union widened, the Zod response
+    // schema widened with it (it enumerates from the recommender's own array),
+    // and the path is one more hardcoded, verified route.
+    describe('the practice next action', () => {
+      it('sends an oriented learner with no attempts and no interview to /practice', async () => {
+        await orient();
+
+        const response = await request(server())
+          .get('/api/journey/home')
+          .set(authHeader(learner.accessToken))
+          .set('X-Test-Clock', '2026-02-01T12:00:00Z')
+          .expect(200);
+
+        const { nextAction } = response.body.data;
+        expect(nextAction.kind).toBe('practice');
+        expect(nextAction.path).toBe('/practice');
+        expect(nextAction.title).toBe('Practice five questions.');
+        expect(nextAction.reason.length).toBeGreaterThan(0);
+        // No interview is booked, so nothing about the card is a countdown.
+        expect(response.body.data.daysUntilInterview).toBeNull();
+      });
+
+      it('scopes the attempt lookup to the caller', async () => {
+        await orient();
+
+        await request(server())
+          .get('/api/journey/home')
+          .set(authHeader(learner.accessToken))
+          .set('X-Test-Clock', '2026-02-01T12:00:00Z')
+          .expect(200);
+
+        expect(prismaMock.practiceAttempt.findFirst).toHaveBeenCalledWith(
+          expect.objectContaining({ where: { userId: learner.id } }),
+        );
+      });
+
+      it('falls through to explore once the learner has practised today', async () => {
+        await orient({ timezone: 'UTC' });
+        (prismaMock.practiceAttempt.findFirst as jest.Mock).mockResolvedValue({
+          answeredAt: new Date('2026-02-01T09:00:00Z'),
+        });
+
+        const response = await request(server())
+          .get('/api/journey/home')
+          .set(authHeader(learner.accessToken))
+          .set('X-Test-Clock', '2026-02-01T12:00:00Z')
+          .expect(200);
+
+        const { nextAction } = response.body.data;
+        expect(nextAction.kind).toBe('explore');
+        expect(nextAction.path).toBe('/learn');
+        // The E1 copy said the practice tools were "on their way". They have
+        // arrived, and this branch is only ever reached by someone who has
+        // just used them.
+        expect(nextAction.reason).not.toContain('on their way');
+      });
+
+      it('re-points the interview countdown at /practice', async () => {
+        // The change practice-sessions.md §12 and the recommender's own E1
+        // header both name: `/learn` until Practice had real content, and
+        // `/practice` from the moment it did.
+        await orient({
+          timezone: 'UTC',
+          interviewDate: new Date('2026-03-15T00:00:00Z'),
+        });
+
+        const response = await request(server())
+          .get('/api/journey/home')
+          .set(authHeader(learner.accessToken))
+          .set('X-Test-Clock', '2026-02-01T12:00:00Z')
+          .expect(200);
+
+        expect(response.body.data.nextAction.kind).toBe('interview_countdown');
+        expect(response.body.data.nextAction.path).toBe('/practice');
+      });
+
+      it('decides "today" on the learner’s calendar day, not on UTC’s', async () => {
+        // Auckland is UTC+13 in February, and both instants below fall on
+        // 15 February in UTC — so a server comparing UTC days could not tell
+        // them apart and would report this learner's work as done.
+        //
+        //   now:     2026-02-15T11:30Z = 2026-02-16 00:30 in Auckland (today)
+        //   attempt: 2026-02-15T10:59Z = 2026-02-15 23:59 in Auckland (yesterday)
+        //
+        // They practised last night, not today, and Home must say so.
+        await orient({ timezone: 'Pacific/Auckland' });
+        (prismaMock.practiceAttempt.findFirst as jest.Mock).mockResolvedValue({
+          answeredAt: new Date('2026-02-15T10:59:00Z'),
+        });
+
+        const response = await request(server())
+          .get('/api/journey/home')
+          .set(authHeader(learner.accessToken))
+          .set('X-Test-Clock', '2026-02-15T11:30:00Z')
+          .expect(200);
+
+        expect(response.body.data.nextAction.kind).toBe('practice');
+      });
     });
 
     describe('the countdown respects X-Test-Clock', () => {
@@ -723,7 +838,10 @@ describe('Journey (Integration)', () => {
 
         expect(response.body.data.daysUntilInterview).toBe(-12);
         expect(response.body.data.interviewPast).toBe(true);
-        expect(response.body.data.nextAction.kind).toBe('explore');
+        // The countdown stops; the recommendation falls through to the rung
+        // E3 inserted below it. Nobody has told us how the interview went, so
+        // "practise today" is the one suggestion true either way.
+        expect(response.body.data.nextAction.kind).toBe('practice');
       });
 
       it('advances the countdown when the pinned clock advances', async () => {
