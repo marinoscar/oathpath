@@ -62,6 +62,10 @@ const FeatureFlagsPage = lazy(() => import("./pages/Admin/FeatureFlagsPage"));
 // Issue #124, epic #109 — the admin email configuration and its test send.
 const EmailSettingsPage = lazy(() => import("./pages/Admin/EmailSettingsPage"));
 const AiSettingsPage = lazy(() => import("./pages/Admin/AiSettingsPage"));
+// Issue #126, epic #51 — the dynamic civics answers an admin corrects at runtime.
+const CivicsSettingsPage = lazy(
+  () => import("./pages/Admin/CivicsSettingsPage"),
+);
 const AdvancedSettingsPage = lazy(
   () => import("./pages/Admin/AdvancedSettingsPage"),
 );
@@ -415,6 +419,26 @@ function AppRoutes() {
                               fallback={<Navigate to="/" replace />}
                             >
                               <AiSettingsPage />
+                            </RequirePermission>
+                          }
+                        />
+                        {/* Issue #126, epic #51. `system_settings:read`, the SAME
+                        string `config/adminSections.tsx`'s Civics Answers card
+                        declares and the same one `civics-admin.controller.ts`
+                        enforces on its GET — reused, never invented
+                        (`civics-content.md` §9). Recording a correction needs
+                        `:write`, which the page gates internally: the route gate
+                        is about REACHABILITY, and an admin checking what
+                        learners are currently being told is worth letting in to
+                        look. */}
+                        <Route
+                          path="/admin/settings/civics"
+                          element={
+                            <RequirePermission
+                              permission="system_settings:read"
+                              fallback={<Navigate to="/" replace />}
+                            >
+                              <CivicsSettingsPage />
                             </RequirePermission>
                           }
                         />

@@ -406,6 +406,22 @@ describe('admin sections — registry against the live routes', () => {
     expect(gates.get('/admin/settings/email')).toBe('system_settings:read');
   });
 
+  it('gives Civics Answers (#126) a General card, routed and gated on system_settings:read', () => {
+    // Recording a correction needs `system_settings:write`, but that is the
+    // PAGE's own internal gate — see `CivicsSettingsPage`'s `canWrite` — not
+    // the card's reachability gate, which mirrors the read-only siblings so an
+    // admin can open the page to check what learners are currently being told.
+    // `civics-content.md` §9 fixes both strings; neither is invented here.
+    const gates = declaredRouteGates();
+    const general = ADMIN_SECTIONS.find((section) => section.label === 'General');
+    const civicsCard = general?.cards.find((card) => card.title === 'Civics Answers');
+
+    expect(civicsCard, 'the Civics Answers card must live in the General group').toBeDefined();
+    expect(civicsCard?.path).toBe('/admin/settings/civics');
+    expect(civicsCard?.permission).toBe('system_settings:read');
+    expect(gates.get('/admin/settings/civics')).toBe('system_settings:read');
+  });
+
   it('leaves the old admin URLs as declared redirect routes, not catch-all fallout', () => {
     const gates = declaredRouteGates();
     // Declared with no permission of their own: they redirect, and the target

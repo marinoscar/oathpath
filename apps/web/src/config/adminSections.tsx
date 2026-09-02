@@ -39,6 +39,7 @@ import EmailOutlinedIcon from '@mui/icons-material/EmailOutlined';
 import DataObjectIcon from '@mui/icons-material/DataObject';
 import PeopleIcon from '@mui/icons-material/People';
 import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome';
+import AccountBalanceIcon from '@mui/icons-material/AccountBalance';
 
 /**
  * One settings page, fully described for every surface that draws it.
@@ -155,6 +156,30 @@ export const ADMIN_SECTIONS: SettingsSectionDef[] = [
           'Choose the AI provider, bind a model to each role, and test the connection.',
         Icon: AutoAwesomeIcon,
         path: '/admin/settings/ai',
+        permission: 'system_settings:read',
+      },
+      {
+        // Issue #126, epic #51. `system_settings:read` is the string
+        // `civics-admin.controller.ts` enforces on its GET — reused, never
+        // invented, exactly as `civics-content.md` §9 fixes it and for the same
+        // reason the Email and AI cards above mirror their own controllers: a
+        // `civics:read` / `civics:write` pair would cost a seed change, a
+        // re-seed and an update to every existing Admin role, for a page that
+        // is administering system configuration by any reasonable reading.
+        //
+        // Recording a correction needs `system_settings:write`, which the PAGE
+        // gates internally: the card gate is about REACHABILITY, and an admin
+        // checking what learners are currently being told is worth letting in
+        // to look.
+        //
+        // Under General rather than a group of its own, like AI: this is
+        // deployment content configuration, and one card does not earn a
+        // heading.
+        title: 'Civics Answers',
+        description:
+          'Correct the civics answers that change on their own — officeholders nationally and by state.',
+        Icon: AccountBalanceIcon,
+        path: '/admin/settings/civics',
         permission: 'system_settings:read',
       },
       {

@@ -230,6 +230,10 @@ import type {
   UpdateJourneyProfileInput,
   JourneyHome,
   JourneyStage,
+  CivicsAdminScope,
+  CivicsAnswerCorrection,
+  CivicsAnswerCorrectionResult,
+  CivicsDynamicAnswerPage,
   CivicsCategory,
   CivicsQuestionDetail,
   CivicsQuestionListResponse,
@@ -780,6 +784,62 @@ export async function getJourneyStages(): Promise<JourneyStage[]> {
 }
 
 // =============================================================================
+// Civics — the admin dynamic-answer surface (#126, epic #51)
+// =============================================================================
+//
+// `system_settings:read` on the GET and `system_settings:write` on the PUT —
+// the strings `civics-admin.controller.ts` enforces, reused rather than
+// invented (`civics-content.md` §9). The learner-facing `/api/civics/*` routes
+// are a different controller with the opposite posture (`@Auth()`, no
+// permission) and are not called from here.
+// =============================================================================
+
+/**
+ * A page of `national`- and `state`-scope questions with their OPEN answers.
+ *
+ * `none`-scope questions are not listed and are not addressable through this
+ * surface at all.
+ *
+ * THE QUERY IS A STRICT OBJECT SERVER-SIDE: a misremembered parameter is a 400
+ * rather than a filter that silently did nothing, so every key set here has to
+ * be one `civicsDynamicAnswerQuerySchema` declares.
+ */
+export async function getCivicsDynamicAnswers(params?: {
+  page?: number;
+  pageSize?: number;
+  testVersionCode?: string;
+  dynamicScope?: CivicsAdminScope;
+  stateCode?: string;
+}): Promise<CivicsDynamicAnswerPage> {
+  const searchParams = new URLSearchParams();
+  if (params?.page) searchParams.set('page', String(params.page));
+  if (params?.pageSize) searchParams.set('pageSize', String(params.pageSize));
+  if (params?.testVersionCode) searchParams.set('testVersionCode', params.testVersionCode);
+  if (params?.dynamicScope) searchParams.set('dynamicScope', params.dynamicScope);
+  if (params?.stateCode) searchParams.set('stateCode', params.stateCode);
+
+  return api.get<CivicsDynamicAnswerPage>(`/civics/dynamic-answers?${searchParams}`);
+}
+
+/**
+ * Correct one dynamic answer — `PUT /api/civics/dynamic-answers`.
+ *
+ * `PUT`, and NOT an update. The request declares what the answer for a slot IS;
+ * underneath, the open row is closed and a new one is opened in one
+ * transaction. There is no route that takes an answer id, because a row a
+ * learner may already have been graded against is not editable by anybody
+ * through any surface.
+ *
+ * The response carries BOTH rows, and a caller must render it that way: showing
+ * only `current` would read exactly like the in-place edit the lifecycle
+ * refuses to perform.
+ */
+export async function correctCivicsDynamicAnswer(
+  input: CivicsAnswerCorrection,
+): Promise<CivicsAnswerCorrectionResult> {
+  return api.put<CivicsAnswerCorrectionResult>('/civics/dynamic-answers', input);
+}
+
 // Civics content — the read surface (epic #51, API #111)
 // =============================================================================
 //
