@@ -44,6 +44,30 @@
  * which is copy the learner reads, not a value anything branches on.
  *
  * =============================================================================
+ * ON `/settings/journey`, A NEW DATE IS A CHANGE — AND HAS TO READ AS ONE
+ * =============================================================================
+ *
+ * Issue #77. Orientation resolves a version for a learner who has none, so
+ * naming it is enough. The settings page resolves one for a learner who
+ * ALREADY HAS ONE, and there "Your test: 2025 Civics Test" is a materially
+ * different statement: it silently replaces the question bank they have been
+ * studying. So when a typed date resolves to a version other than the one on
+ * the profile, the preview says what is being replaced, with what, and that
+ * nothing has happened yet — {@link JourneyProfileFields}'s
+ * `versionIsChanging` below.
+ *
+ * THAT CONDITION IS DERIVED, NOT DECLARED, and deliberately takes no prop. It
+ * is true exactly when there is a stored version AND a typed date resolves to a
+ * different one, which cannot happen on `/setup/journey` — a learner with a
+ * stored version is past that screen's gate. A `warnOnChange` prop would be a
+ * second, weaker way of saying the same thing, and the failure it invites is
+ * the settings page being added one day without it.
+ *
+ * It renders inside the SAME polite `role="status"` region as the preview,
+ * never as an `Alert`. Nothing has gone wrong: the learner is being told what
+ * their own edit means, before they commit it.
+ *
+ * =============================================================================
  * THE TIMEZONE IS CAPTURED, NOT ASKED
  * =============================================================================
  *
@@ -71,6 +95,7 @@ import {
   TextField,
   Typography,
 } from '@mui/material';
+import WarningAmberIcon from '@mui/icons-material/WarningAmber';
 
 import { useLearnerProfile } from '../../contexts/LearnerProfileContext';
 import { ApiError, updateJourneyProfile } from '../../services/api';
@@ -275,6 +300,15 @@ function JourneyProfileFields({
   );
 
   /**
+   * The learner is about to be moved to a DIFFERENT test than the one they
+   * have (#77). See the file header on why this is derived rather than
+   * declared, and why it cannot fire on `/setup/journey`.
+   */
+  const versionIsChanging = Boolean(
+    storedVersion && previewVersion && previewVersion.code !== storedVersion.code,
+  );
+
+  /**
    * A filing date is required only while no version has been resolved yet.
    *
    * Orientation always needs one. The settings page must not force a learner
@@ -381,13 +415,48 @@ function JourneyProfileFields({
               every time a date digit changed. Announced politely, so the answer
               still reaches someone who cannot see it appear. */}
           <Box sx={{ mt: 1.5 }} role="status" aria-live="polite">
+            {/* THE CHANGE, BEFORE IT IS SAVED (#77). Only ever rendered on the
+                settings page, where a version already exists to be replaced —
+                see the file header. Inside the polite region with the preview
+                rather than in an `Alert`: this is the consequence of the
+                learner's own edit, told to them in advance, not a fault. */}
+            {versionIsChanging && storedVersion && previewVersion && (
+              <Paper
+                variant="outlined"
+                sx={{ p: 1.5, mb: 1.5, borderColor: 'warning.main' }}
+              >
+                <Stack
+                  direction="row"
+                  spacing={1}
+                  sx={{ alignItems: 'flex-start' }}
+                >
+                  <WarningAmberIcon
+                    fontSize="small"
+                    color="warning"
+                    aria-hidden
+                  />
+                  <Box>
+                    <Typography variant="subtitle2" component="p">
+                      This date changes your test from the {storedVersion.label}{' '}
+                      to the {previewVersion.label}.
+                    </Typography>
+                    <Typography variant="body2" color="text.secondary">
+                      The questions you practice will change to match. Nothing
+                      changes until you save.
+                    </Typography>
+                  </Box>
+                </Stack>
+              </Paper>
+            )}
+
             {previewVersion ? (
               <Paper
                 variant="outlined"
                 sx={{ p: 1.5, bgcolor: 'action.hover' }}
               >
                 <Typography variant="subtitle2" component="p">
-                  Your test: {previewVersion.label}
+                  {versionIsChanging ? 'Your test after you save' : 'Your test'}:{' '}
+                  {previewVersion.label}
                 </Typography>
                 <Typography variant="body2" color="text.secondary">
                   {seniorExemption
