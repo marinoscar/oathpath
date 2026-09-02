@@ -189,7 +189,42 @@ export interface JourneyProfileFormProps {
   onSaved?: (response: JourneyProfileResponse) => void;
 }
 
-export function JourneyProfileForm({
+/**
+ * Waits for the profile before mounting the fields.
+ *
+ * NOT COSMETIC, AND NOT A PLACE TO SAVE A RENDER. The fields below seed their
+ * `useState` from the profile ONCE, on first render, and a `useState`
+ * initialiser does not re-run when its input arrives later — so mounting them
+ * against a still-loading context would seed every control with a default and
+ * then leave it there. On `/setup/journey` that is invisible (a new learner has
+ * nothing but defaults anyway); on a learner who already answered, it is
+ * silent data loss, because saving would write those defaults back over their
+ * real goal and state.
+ *
+ * The fix is structural rather than an effect that copies context into state
+ * on arrival: such an effect would also fire on the save that follows and fight
+ * the learner's own typing. Mounting late means the initialisers are right the
+ * first time, and nothing has to be re-synchronised afterwards.
+ *
+ * A FAILED read still mounts the fields — the context fails open, `profile`
+ * stays null, and the form seeds from its own defaults. The learner can fill it
+ * in and find out on save; being shown nothing at all would be worse.
+ */
+export function JourneyProfileForm(props: JourneyProfileFormProps) {
+  const { isLoading } = useLearnerProfile();
+
+  if (isLoading) {
+    return (
+      <Box sx={{ display: 'flex', justifyContent: 'center', py: 4 }}>
+        <CircularProgress aria-label="Loading your answers" />
+      </Box>
+    );
+  }
+
+  return <JourneyProfileFields {...props} />;
+}
+
+function JourneyProfileFields({
   submitLabel = 'Save and continue',
   onSaved,
 }: JourneyProfileFormProps) {

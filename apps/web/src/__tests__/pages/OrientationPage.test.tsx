@@ -523,3 +523,55 @@ describe('OrientationPage — 360px and both themes', () => {
     expect(await screen.findByRole('heading', { name: /welcome back/i })).toBeInTheDocument();
   });
 });
+
+describe('OrientationPage — a learner who already answered', () => {
+  it('SEEDS FROM THE STORED PROFILE, not from defaults', async () => {
+    // `/setup/journey` stays mounted and reachable after orientation, so the
+    // form has to render what the learner actually chose. Seeding from defaults
+    // here is silent data loss: the next save writes 5 minutes and no state
+    // back over their real answers.
+    //
+    // This is why the fields mount only after the context settles — a
+    // `useState` initialiser does not re-run when its input arrives late.
+    mockJourneyApi(ORIENTED_PROFILE);
+    renderPage();
+
+    expect(
+      await screen.findByRole('heading', { level: 1, name: /let's set up your plan/i }),
+    ).toBeInTheDocument();
+
+    expect(screen.getByLabelText(/how many minutes a day/i)).toHaveValue(15);
+    expect(screen.getByLabelText(/which state or territory/i)).toHaveValue('CA');
+    expect(screen.getByLabelText(/what language should we use/i)).toHaveValue('es');
+    expect(screen.getByLabelText(/do you have an interview date yet/i)).toHaveValue(
+      '2026-11-04',
+    );
+  });
+
+  it('keeps naming their resolved test, though the filing date is never stored', async () => {
+    // The filing date is an INPUT the server resolves from, not a column — so
+    // the preview falls back to the profile's `testVersionCode` rather than
+    // going blank and implying nothing was ever chosen.
+    mockJourneyApi(ORIENTED_PROFILE);
+    renderPage();
+
+    await screen.findByRole('heading', { level: 1 });
+    expect(screen.getByText(/2008 Civics Test/)).toBeInTheDocument();
+    expect(screen.getByLabelText(/when did you file your form n-400/i)).toHaveValue('');
+  });
+
+  it('does not force them to re-enter a filing date to save', async () => {
+    mockJourneyApi(ORIENTED_PROFILE);
+    const user = userEvent.setup();
+    renderPage();
+
+    await screen.findByRole('heading', { level: 1 });
+    await user.clear(screen.getByLabelText(/how many minutes a day/i));
+    await user.type(screen.getByLabelText(/how many minutes a day/i), '20');
+    await user.click(screen.getByRole('button', { name: /save and continue/i }));
+
+    await waitFor(() => expect(savedBodies).toHaveLength(1));
+    expect(savedBodies[0]).not.toHaveProperty('filingDate');
+    expect(savedBodies[0]).toMatchObject({ dailyGoalMinutes: 20, stateCode: 'CA' });
+  });
+});
