@@ -1,0 +1,43 @@
+{
+  "testVersionCode": "vtest",
+  "label": "Fixture: valid minimal file",
+  "provenance": {
+    "sourceUrl": "https://example.invalid/source",
+    "retrievedAt": "2026-01-01",
+    "sha256": null,
+    "transcription": {
+      "status": "UNVERIFIED_MODEL_DRAFT",
+      "warning": "Fixture content — never real civics content."
+    }
+  },
+  "expected": {
+    "questionCount": 2,
+    "seniorEligibleCount": 1
+  },
+  "categories": [
+    { "code": "cat_a", "section": "SECTION A", "name": "Category A", "sortOrder": 0 }
+  ],
+  "questions": [
+    {
+      "number": 1,
+      "categoryCode": "cat_a",
+      "prompt": "A static fixture question with two accepted alternatives?",
+      "seniorEligible": true,
+      "dynamicScope": "none",
+      "answers": [
+        { "sort": 0, "stateCode": null, "text": "Answer one", "sourceNote": "fixture", "verifiedAt": null, "effectiveFrom": "2026-01-01", "effectiveTo": null },
+        { "sort": 1, "stateCode": null, "text": "Answer two", "sourceNote": "fixture", "verifiedAt": null, "effectiveFrom": "2026-01-01", "effectiveTo": null }
+      ]
+    },
+    {
+      "number": 2,
+      "categoryCode": "cat_a",
+      "prompt": "A national-scope fixture question?",
+      "seniorEligible": false,
+      "dynamicScope": "national",
+      "answers": [
+        { "sort": 0, "stateCode": null, "text": "The current fixture officeholder", "sourceNote": "fixture", "verifiedAt": null, "effectiveFrom": "2026-01-01", "effectiveTo": null }
+      ]
+    }
+  ]
+}

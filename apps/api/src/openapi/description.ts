@@ -151,6 +151,12 @@ roles are listed the guard admits any one of them; where several permissions are
 requires all of them. Those lines are rendered from the same \`@Auth()\` metadata the guards read,
 so they cannot drift from what the server enforces.
 
+A permission can also **widen** a rule instead of gating a route, in which case there is no
+**Requires:** line to render — the operation is reachable without it. \`storage:delete_any\` is the
+one such permission today: every authenticated user may delete their own objects, and a holder may
+additionally delete objects they do not own. Where that applies, the operation's own description
+says so.
+
 Deactivated users are rejected at authentication time regardless of their roles.
 
 ---

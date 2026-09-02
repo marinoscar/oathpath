@@ -28,6 +28,8 @@ import { ZodValidationPipe } from 'nestjs-zod';
 import { Auth } from '../../auth/decorators/auth.decorator';
 import { ApiDataResponse } from '../../common/decorators/api-data-response.decorator';
 import { CurrentUser } from '../../auth/decorators/current-user.decorator';
+import { RequestUser } from '../../auth/interfaces/authenticated-user.interface';
+import { PERMISSIONS } from '../../common/constants/roles.constants';
 import { ObjectsService } from './objects.service';
 import {
   InitUploadBodyDto,
@@ -156,7 +158,11 @@ export class ObjectsController {
   @HttpCode(HttpStatus.NO_CONTENT)
   @ApiOperation({
     summary: 'Delete storage object',
-    description: 'Delete a storage object from both storage and database',
+    description:
+      'Delete a storage object from both storage and database. You may delete ' +
+      'your own objects. A caller holding the `storage:delete_any` permission ' +
+      "may also delete another user's object; that case is recorded in the " +
+      'audit log with both user ids and the permission that admitted it.',
   })
   @ApiParam({ name: 'id', type: String, format: 'uuid', description: 'Object ID' })
   @ApiResponse({
@@ -169,13 +175,25 @@ export class ObjectsController {
   })
   @ApiResponse({
     status: 403,
-    description: 'Access denied - you do not own this object',
+    description:
+      'Access denied - you do not own this object and do not hold storage:delete_any',
   })
   async deleteObject(
     @Param('id', ParseUUIDPipe) id: string,
-    @CurrentUser('id') userId: string,
+    @CurrentUser() user: RequestUser,
   ): Promise<void> {
-    await this.objectsService.delete(id, userId);
+    // The route is `@Auth()` with no permission metadata on purpose: every
+    // authenticated user may delete their own objects, so a PermissionsGuard
+    // here would reject the ordinary case. `storage:delete_any` widens that
+    // rule rather than gating it, which is a decision only the service can
+    // make — it needs the object's owner. This is the single check: the
+    // controller resolves the permission to a capability and the service
+    // enforces it; neither repeats the other.
+    await this.objectsService.delete(
+      id,
+      user.id,
+      user.permissions.includes(PERMISSIONS.STORAGE_DELETE_ANY),
+    );
   }
 
   /**

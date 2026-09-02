@@ -1,0 +1,27 @@
+{
+  "testVersionCode": "vtest",
+  "label": "Fixture: national-scope question with two answer slots",
+  "provenance": {
+    "sourceUrl": "https://example.invalid/source",
+    "retrievedAt": "2026-01-01",
+    "sha256": null,
+    "transcription": { "status": "UNVERIFIED_MODEL_DRAFT", "warning": "Fixture content." }
+  },
+  "expected": { "questionCount": 1, "seniorEligibleCount": 0 },
+  "categories": [
+    { "code": "cat_a", "section": "SECTION A", "name": "Category A", "sortOrder": 0 }
+  ],
+  "questions": [
+    {
+      "number": 1,
+      "categoryCode": "cat_a",
+      "prompt": "A national-scope question that ended up with two simultaneously-open slots?",
+      "seniorEligible": false,
+      "dynamicScope": "national",
+      "answers": [
+        { "sort": 0, "stateCode": null, "text": "First fixture officeholder", "sourceNote": "fixture", "verifiedAt": null, "effectiveFrom": "2026-01-01", "effectiveTo": null },
+        { "sort": 1, "stateCode": null, "text": "Second fixture officeholder", "sourceNote": "fixture", "verifiedAt": null, "effectiveFrom": "2026-01-01", "effectiveTo": null }
+      ]
+    }
+  ]
+}
