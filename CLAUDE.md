@@ -461,6 +461,24 @@ itself, logout, and the `/admin/*` subtree for a caller holding
 `system_settings:read`). See
 [`docs/specs/journey-shell.md`](docs/specs/journey-shell.md) §5.
 
+### Civics (Per User, read-only)
+- `GET /api/civics/versions` - Every civics test version (question/threshold counts, `contentHash`)
+- `GET /api/civics/versions/{code}/categories` - A version's categories, in render order
+- `GET /api/civics/questions` - Paginated question summaries, defaulting to the caller's own test version
+- `GET /api/civics/questions/{id}` - One question with its answer(s) resolved for the caller's own state
+
+All four are `@Auth()` with no permissions — civics content is core product
+material every authenticated learner reads, and no route accepts a caller-supplied
+user id or state code (resolution always reads the caller's own `learner_profiles`
+row). See [`docs/specs/civics-content.md`](docs/specs/civics-content.md) §8.
+
+### Civics (Admin)
+- `GET /api/civics/dynamic-answers` - `system_settings:read` — the `national`/`state` questions and their currently open answer(s)
+- `PUT /api/civics/dynamic-answers` - `system_settings:write` — correct one answer slot (closes the open row, opens a new one; never an in-place edit)
+
+Reused permissions, not invented — see [`docs/specs/civics-content.md`](docs/specs/civics-content.md)
+§9 and [`docs/runbooks/updating-civics-content.md`](docs/runbooks/updating-civics-content.md).
+
 ### Health
 - `GET /api/health/live` - Liveness check
 - `GET /api/health/ready` - Readiness check (includes DB)
@@ -544,6 +562,9 @@ learner's profile" permission to add in the first place. See
 - `ai_usage_events` - Per-user AI call records (token counts nullable: null means unknown, never zero)
 - `learner_profiles` - One row per user: journey stage, interview date, state/test-version selection, daily goal, orientation completion (lazily created on first `GET /api/journey/profile`)
 - `civics_test_versions` - Seeded civics test versions (question counts, pass thresholds); `learner_profiles.test_version_code` references it
+- `civics_categories` - A test version's sections (e.g. "American Government"), in render order
+- `civics_questions` - One version's questions: number, category, prompt, `senior_eligible`, `dynamic_scope` (`none`/`national`/`state`)
+- `civics_answers` - Accepted answers per question/state/slot; `effective_to IS NULL` means currently correct (no `is_current` flag — see `docs/specs/civics-content.md` §3)
 
 ## Access Control: Email Allowlist
 

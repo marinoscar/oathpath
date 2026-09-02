@@ -563,12 +563,14 @@ number could.
 
 ### 8.1 `/learn`
 
-"This is where you'll work through the official civics questions for your
-test version, one at a time, with a clear explanation whenever one doesn't
-click."
-
-"There isn't any content here yet. For now, check Home for what to do next,
-or revisit your setup answers."
+**Superseded.** Issue #121 (epic #51) replaced this stub with the real
+destination — categories → question list → question detail, "current as of
+{verifiedAt}", the 65/20 marker, a recognition-only flashcard study mode with
+no scoring of any kind, and the `state_required` case rendering the question
+in full with the answer replaced by an explanation and a link to
+`/settings/journey`, never another state's answer standing in. See
+`apps/web/src/pages/LearnPage.tsx` and `docs/specs/civics-content.md` §5 and
+§8 for the resolution rules this page renders.
 
 ### 8.2 `/practice`
 

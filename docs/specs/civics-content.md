@@ -83,19 +83,35 @@ Source of truth for every claim below:
   the design, then rejected alternatives, reasons stated plainly, no
   marketing.
 
-**Nothing described past this line exists yet.** There is no
-`civics_categories`, `civics_questions`, or `civics_answers` table, no
-`DynamicScope` enum, no `apps/api/src/civics/` directory, no
-`apps/api/prisma/content/` directory or content JSON file, no `/api/civics/*`
-route, and no admin dynamic-answer page anywhere in the repository. This
-document is what this epic's child issues build *against*, not a description
-of code already in the repository. Every fact cited above about the
-*existing* codebase has been verified against the files named; the *proposed*
-architecture in every other section is a design, and a child issue is free to
-find a better answer to a specific sub-problem as long as it keeps the
-contracts this document promises to the epics around it — the three table
-shapes, the slot-uniqueness invariant, the resolution rules, and the
-provenance requirement.
+**Most of what this document describes has since shipped; two things have
+not.** The `civics_categories`, `civics_questions`, and `civics_answers`
+tables exist, with the `DynamicScope` enum and the partial unique index from
+§3; `apps/api/src/civics/` holds the read endpoints (§8) and the admin
+dynamic-answer endpoints (§9); `apps/api/prisma/content/` holds the content
+files, the structural validator, and the idempotent loader (§6–§7). What has
+**not** shipped:
+
+1. **Neither content file is human-verified.** `civics-2008.json` is
+   `UNVERIFIED_MODEL_DRAFT` — drafted to give the rest of this epic
+   realistic-shaped data to build against, not transcribed from the official
+   USCIS PDF, with every dynamic (officeholder) answer an explicit
+   `"[DRAFT PLACEHOLDER]"` string. `civics-2025.json` is `AWAITING_SOURCE`
+   with **zero** questions — the 128-question bank was deliberately not
+   fabricated. The loader enforces this rather than merely documenting it
+   (§7); see
+   [`docs/runbooks/updating-civics-content.md`](../runbooks/updating-civics-content.md)
+   for how a human transcribes and verifies either file.
+2. **The admin dynamic-answer page is UI work in flight**, not yet merged to
+   `main` as of this writing — the API surface in §9 it renders against is
+   live. (The Learn destination against §8's read API has since shipped,
+   issue #121.)
+
+Every other fact cited above about the *existing* codebase has been verified
+against the files named; a child issue remains free to find a better answer
+to a specific sub-problem as long as it keeps the contracts this document
+promises to the epics around it — the three table shapes, the
+slot-uniqueness invariant, the resolution rules, and the provenance
+requirement.
 
 ---
 
