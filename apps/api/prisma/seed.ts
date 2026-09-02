@@ -1,5 +1,6 @@
 import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
+import { loadAllCivicsContent } from './content/load-content';
 
 // Prisma 7 requires a driver adapter — PrismaClient can no longer be
 // instantiated with no options. The seed script is invoked as a standalone
@@ -261,6 +262,12 @@ async function main() {
   await seedSystemSettings();
   await seedCivicsTestVersions();
   await seedInitialAdminAllowlist();
+
+  // Content is data, not code (docs/specs/civics-content.md §7): it lives in
+  // apps/api/prisma/content/*.json, not in this file, and is loaded here as
+  // a sibling step, idempotently, on every seed run.
+  console.log('Loading civics content...');
+  await loadAllCivicsContent(prisma);
 
   console.log('\n✓ Database seeding completed successfully');
 }
