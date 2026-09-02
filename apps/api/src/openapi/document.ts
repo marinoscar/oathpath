@@ -57,17 +57,23 @@ export function buildOpenApiConfig(version: string = resolveApiVersion()) {
     // Scalar renders 3.1 natively.
     .setOpenAPIVersion('3.1.0')
     // The name is the product's and follows `APP_NAME`; the URL is this
-    // repository's and deliberately does not — a fork renames its product long
-    // before (or without ever) moving its source, so deriving the URL from the
-    // name would point readers at a repository that does not exist.
+    // repository's and deliberately does not. The two are independent facts:
+    // where the source lives is not derivable from what the product is called,
+    // and deriving one from the other points readers at a repository that may
+    // not exist.
+    //
+    // This is not hypothetical. Until the OathPath rename (#10) these URLs
+    // still pointed at the upstream template, `marinoscar/EnterpriseAppBase` —
+    // a repository that is very much alive and has since diverged, so the
+    // API's own documentation was sending readers to somebody else's code.
     .setContact(
       APP_NAME,
-      'https://github.com/marinoscar/EnterpriseAppBase',
+      'https://github.com/marinoscar/oathpath',
       '',
     )
     .setExternalDoc(
       'Architecture and operations documentation',
-      'https://github.com/marinoscar/EnterpriseAppBase/tree/main/docs',
+      'https://github.com/marinoscar/oathpath/tree/main/docs',
     )
     // Same-origin: the UI is served at `/`, this API under `/api`, so a
     // relative server URL is correct for every deployment without templating.
