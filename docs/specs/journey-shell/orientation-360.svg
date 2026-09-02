@@ -1,0 +1,82 @@
+<svg xmlns='http://www.w3.org/2000/svg' width='360' height='1520' viewBox='0 0 360 1520'>
+<rect x='0' y='0' width='360' height='1520' fill='#ffffff'/>
+
+<rect x='0' y='0' width='360' height='48' fill='#ffffff' stroke='#d1d5db' stroke-width='1'/>
+<text x='16' y='30' font-size='14' fill='#1f2937' font-weight='bold' font-family='Helvetica, Arial, sans-serif'>OathPath</text>
+<text x='344' y='30' font-size='12' fill='#2f6fed' text-anchor='end' font-family='Helvetica, Arial, sans-serif'>Sign out</text>
+<text x='20' y='84' font-size='20' fill='#1f2937' font-weight='bold' font-family='Helvetica, Arial, sans-serif'>
+<tspan x='20' dy='0'>Let's set up your plan</tspan>
+</text>
+<text x='20' y='114' font-size='12' fill='#4b5563' font-weight='normal' font-family='Helvetica, Arial, sans-serif'>
+<tspan x='20' dy='0'>A few quick questions help us show you the</tspan>
+<tspan x='20' dy='18'>right test, and a realistic countdown if</tspan>
+<tspan x='20' dy='18'>you have an interview date. You can change</tspan>
+<tspan x='20' dy='18'>any of this later in Settings.</tspan>
+</text>
+<text x='20' y='214' font-size='13' fill='#1f2937' font-weight='bold' font-family='Helvetica, Arial, sans-serif'>
+<tspan x='20' dy='0'>When did you file your Form N-400?</tspan>
+</text>
+<rect x='20' y='238' width='320' height='30' rx='6' fill='#ffffff' stroke='#d1d5db'/>
+<text x='30' y='258' font-size='12' fill='#4b5563' font-family='Helvetica, Arial, sans-serif'>MM / DD / YYYY</text>
+<text x='20' y='284' font-size='11' fill='#6b7280' font-weight='normal' font-family='Helvetica, Arial, sans-serif'>
+<tspan x='20' dy='0'>This tells us which civics test applies to you</tspan>
+<tspan x='20' dy='18'>— the test changed for people who filed on or</tspan>
+<tspan x='20' dy='18'>after October 20, 2025. We'll pick the right</tspan>
+<tspan x='20' dy='18'>one for you automatically.</tspan>
+</text>
+<text x='20' y='378' font-size='13' fill='#1f2937' font-weight='bold' font-family='Helvetica, Arial, sans-serif'>
+<tspan x='20' dy='0'>Are you 65 or older, with a green card</tspan>
+<tspan x='20' dy='18'>for 20 years or more?</tspan>
+</text>
+<rect x='20' y='420' width='320' height='30' rx='6' fill='#ffffff' stroke='#d1d5db'/>
+<text x='30' y='440' font-size='12' fill='#4b5563' font-family='Helvetica, Arial, sans-serif'>☐ Yes, both are true</text>
+<text x='20' y='466' font-size='11' fill='#6b7280' font-weight='normal' font-family='Helvetica, Arial, sans-serif'>
+<tspan x='20' dy='0'>If both are true, you may only need to know a</tspan>
+<tspan x='20' dy='18'>shorter list of questions. Answer honestly —</tspan>
+<tspan x='20' dy='18'>this changes what we ask you to practice.</tspan>
+</text>
+<text x='20' y='542' font-size='13' fill='#1f2937' font-weight='bold' font-family='Helvetica, Arial, sans-serif'>
+<tspan x='20' dy='0'>Do you have an interview date yet?</tspan>
+<tspan x='20' dy='18'>(Optional)</tspan>
+</text>
+<rect x='20' y='584' width='320' height='30' rx='6' fill='#ffffff' stroke='#d1d5db'/>
+<text x='30' y='604' font-size='12' fill='#4b5563' font-family='Helvetica, Arial, sans-serif'>MM / DD / YYYY (optional)</text>
+<text x='20' y='630' font-size='11' fill='#6b7280' font-weight='normal' font-family='Helvetica, Arial, sans-serif'>
+<tspan x='20' dy='0'>If you don't have one yet, that's completely</tspan>
+<tspan x='20' dy='18'>normal — leave this blank and add it later.</tspan>
+</text>
+<text x='20' y='688' font-size='13' fill='#1f2937' font-weight='bold' font-family='Helvetica, Arial, sans-serif'>
+<tspan x='20' dy='0'>Which state or territory do you live in?</tspan>
+</text>
+<rect x='20' y='712' width='320' height='30' rx='6' fill='#ffffff' stroke='#d1d5db'/>
+<text x='30' y='732' font-size='12' fill='#4b5563' font-family='Helvetica, Arial, sans-serif'>Select a state or territory</text>
+<text x='20' y='758' font-size='11' fill='#6b7280' font-weight='normal' font-family='Helvetica, Arial, sans-serif'>
+<tspan x='20' dy='0'>Some civics questions have answers that depend</tspan>
+<tspan x='20' dy='18'>on where you live — like the name of your</tspan>
+<tspan x='20' dy='18'>state's current governor.</tspan>
+</text>
+<text x='20' y='834' font-size='13' fill='#1f2937' font-weight='bold' font-family='Helvetica, Arial, sans-serif'>
+<tspan x='20' dy='0'>How many minutes a day do you want to</tspan>
+<tspan x='20' dy='18'>aim for?</tspan>
+</text>
+<rect x='20' y='876' width='320' height='30' rx='6' fill='#ffffff' stroke='#d1d5db'/>
+<text x='30' y='896' font-size='12' fill='#4b5563' font-family='Helvetica, Arial, sans-serif'>5</text>
+<text x='20' y='922' font-size='11' fill='#6b7280' font-weight='normal' font-family='Helvetica, Arial, sans-serif'>
+<tspan x='20' dy='0'>Five minutes should matter. Start small — you</tspan>
+<tspan x='20' dy='18'>can always do more, and a short streak beats a</tspan>
+<tspan x='20' dy='18'>skipped week.</tspan>
+</text>
+<text x='20' y='998' font-size='13' fill='#1f2937' font-weight='bold' font-family='Helvetica, Arial, sans-serif'>
+<tspan x='20' dy='0'>What language should we use to explain a</tspan>
+<tspan x='20' dy='18'>tricky answer?</tspan>
+</text>
+<rect x='20' y='1040' width='320' height='30' rx='6' fill='#ffffff' stroke='#d1d5db'/>
+<text x='30' y='1060' font-size='12' fill='#4b5563' font-family='Helvetica, Arial, sans-serif'>English</text>
+<text x='20' y='1086' font-size='11' fill='#6b7280' font-weight='normal' font-family='Helvetica, Arial, sans-serif'>
+<tspan x='20' dy='0'>Questions and official answers stay in English</tspan>
+<tspan x='20' dy='18'>— this is only for extra explanations, so it's</tspan>
+<tspan x='20' dy='18'>easier to understand why an answer is correct.</tspan>
+</text>
+<rect x='20' y='1170' width='180' height='38' rx='8' fill='#2f6fed'/>
+<text x='110' y='1194' font-size='13' fill='#ffffff' text-anchor='middle' font-family='Helvetica, Arial, sans-serif'>Save and continue</text>
+</svg>
