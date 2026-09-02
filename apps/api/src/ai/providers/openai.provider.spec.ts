@@ -6,6 +6,7 @@ import {
   AI_SYSTEM_CREDENTIAL_PURPOSE,
 } from '../ai-credential.constants';
 import type { CredentialsService } from '../../credentials/credentials.service';
+import type { AiUsageService } from '../ai-usage.service';
 
 // =============================================================================
 // OpenAiProvider (issue #29, epic #25)
@@ -56,6 +57,11 @@ function catalogOf(ids: Array<{ id: string; created?: number }>) {
 
 const SERVER_KEY = 'sk-server-abcdefghijklmnopqrst';
 
+/** Recording is exercised in ai-usage.spec.ts; here it only has to exist. */
+function usageStub() {
+  return { record: jest.fn().mockResolvedValue(undefined) } as unknown as AiUsageService;
+}
+
 function credentialsReturning(secret: string | null): CredentialsService {
   return {
     getSecret: jest.fn().mockResolvedValue(secret),
@@ -81,12 +87,12 @@ afterAll(() => {
 
 describe('OpenAiProvider — identity', () => {
   it('declares itself as the openai kind', () => {
-    const p = new OpenAiProvider(credentialsReturning(null));
+    const p = new OpenAiProvider(credentialsReturning(null), usageStub());
     expect(p.kind).toBe('openai');
   });
 
   it('declares every capability family, unlike a chat-only provider would', () => {
-    const p = new OpenAiProvider(credentialsReturning(null));
+    const p = new OpenAiProvider(credentialsReturning(null), usageStub());
     for (const family of [
       'text',
       'realtime',
@@ -104,7 +110,7 @@ describe('OpenAiProvider.listModels', () => {
     // The state of every fresh install. `getSecret` returns null for an absent
     // credential by design, and reporting that as a failure would make a
     // brand-new system look broken.
-    const p = new OpenAiProvider(credentialsReturning(null));
+    const p = new OpenAiProvider(credentialsReturning(null), usageStub());
 
     await expect(p.listModels()).resolves.toEqual({
       success: false,
@@ -119,7 +125,7 @@ describe('OpenAiProvider.listModels', () => {
     const credentials = credentialsReturning(SERVER_KEY);
     listMock.mockReturnValue(catalogOf([{ id: 'gpt-5.4', created: 1_700_000_000 }]));
 
-    await new OpenAiProvider(credentials).listModels();
+    await new OpenAiProvider(credentials, usageStub()).listModels();
 
     expect(credentials.getSecret).toHaveBeenCalledWith(
       AI_SYSTEM_CREDENTIAL_PURPOSE,
@@ -138,6 +144,7 @@ describe('OpenAiProvider.listModels', () => {
 
     const result = await new OpenAiProvider(
       credentialsReturning(SERVER_KEY),
+      usageStub(),
     ).listModels();
 
     expect(result.success).toBe(true);
@@ -162,6 +169,7 @@ describe('OpenAiProvider.listModels', () => {
 
     const result = await new OpenAiProvider(
       credentialsReturning(SERVER_KEY),
+      usageStub(),
     ).listModels();
 
     expect(result.models).toHaveLength(40);
@@ -174,6 +182,7 @@ describe('OpenAiProvider.listModels', () => {
 
     const result = await new OpenAiProvider(
       credentialsReturning(SERVER_KEY),
+      usageStub(),
     ).listModels();
 
     expect(result.success).toBe(false);
@@ -189,6 +198,7 @@ describe('OpenAiProvider.listModels', () => {
 
     const result = await new OpenAiProvider(
       credentialsReturning(SERVER_KEY),
+      usageStub(),
     ).listModels();
 
     expect(result.error).not.toContain(SERVER_KEY);
@@ -203,6 +213,7 @@ describe('OpenAiProvider.listModels', () => {
 
     const result = await new OpenAiProvider(
       credentialsReturning(SERVER_KEY),
+      usageStub(),
     ).listModels();
 
     expect(result.error).not.toContain(SERVER_KEY);
@@ -213,7 +224,7 @@ describe('OpenAiProvider.listModels', () => {
 describe('OpenAiProvider — catalog cache', () => {
   it('serves a second call from cache', async () => {
     listMock.mockReturnValue(catalogOf([{ id: 'gpt-5.4' }]));
-    const p = new OpenAiProvider(credentialsReturning(SERVER_KEY));
+    const p = new OpenAiProvider(credentialsReturning(SERVER_KEY), usageStub());
 
     await p.listModels();
     await p.listModels();
@@ -228,7 +239,10 @@ describe('OpenAiProvider — catalog cache', () => {
       .fn()
       .mockResolvedValueOnce('sk-org-one-aaaaaaaaaaaaaaa')
       .mockResolvedValueOnce('sk-org-two-bbbbbbbbbbbbbbb');
-    const p = new OpenAiProvider({ getSecret } as unknown as CredentialsService);
+    const p = new OpenAiProvider(
+      { getSecret } as unknown as CredentialsService,
+      usageStub(),
+    );
 
     listMock.mockReturnValueOnce(catalogOf([{ id: 'gpt-5.4' }]));
     listMock.mockReturnValueOnce(catalogOf([{ id: 'gpt-5.6' }]));
@@ -244,7 +258,7 @@ describe('OpenAiProvider — catalog cache', () => {
   it('is dropped by invalidateCatalogCache', async () => {
     // The settings service calls this on every write.
     listMock.mockReturnValue(catalogOf([{ id: 'gpt-5.4' }]));
-    const p = new OpenAiProvider(credentialsReturning(SERVER_KEY));
+    const p = new OpenAiProvider(credentialsReturning(SERVER_KEY), usageStub());
 
     await p.listModels();
     p.invalidateCatalogCache();
@@ -262,6 +276,7 @@ describe('OpenAiProvider.testConnection', () => {
 
     const result = await new OpenAiProvider(
       credentialsReturning(null),
+      usageStub(),
     ).testConnection(USER_KEY, [
       { roleKey: 'grader', modelId: 'gpt-5.4-mini', family: 'text' },
     ]);
@@ -282,6 +297,7 @@ describe('OpenAiProvider.testConnection', () => {
 
     const result = await new OpenAiProvider(
       credentialsReturning(null),
+      usageStub(),
     ).testConnection(USER_KEY, [
       { roleKey: 'tutor', modelId: 'gpt-5.4-mini', family: 'text' },
       { roleKey: 'grader', modelId: 'gpt-5.4', family: 'text' },
@@ -304,6 +320,7 @@ describe('OpenAiProvider.testConnection', () => {
 
     const result = await new OpenAiProvider(
       credentialsReturning(null),
+      usageStub(),
     ).testConnection(USER_KEY, [
       { roleKey: 'grader', modelId: 'gpt-5.4', family: 'text' },
     ]);
@@ -317,6 +334,7 @@ describe('OpenAiProvider.testConnection', () => {
 
     const result = await new OpenAiProvider(
       credentialsReturning(null),
+      usageStub(),
     ).testConnection(USER_KEY, [
       { roleKey: 'tutor', modelId: 'gpt-5.4', family: 'text' },
     ]);
@@ -333,6 +351,7 @@ describe('OpenAiProvider.testConnection', () => {
 
     const result = await new OpenAiProvider(
       credentialsReturning(null),
+      usageStub(),
     ).testConnection(USER_KEY, []);
 
     expect(result).toMatchObject({ success: true, authenticated: true });
@@ -342,7 +361,7 @@ describe('OpenAiProvider.testConnection', () => {
     listMock.mockResolvedValue({ data: [] });
     embeddingsCreateMock.mockResolvedValue({ data: [] });
 
-    await new OpenAiProvider(credentialsReturning(null)).testConnection(
+    await new OpenAiProvider(credentialsReturning(null), usageStub()).testConnection(
       USER_KEY,
       [
         {
@@ -367,6 +386,7 @@ describe('OpenAiProvider.testConnection', () => {
 
     const result = await new OpenAiProvider(
       credentialsReturning(null),
+      usageStub(),
     ).testConnection(USER_KEY, [
       { roleKey: 'tutor', modelId: 'a', family: 'text' },
       { roleKey: 'grader', modelId: 'b', family: 'text' },
@@ -384,6 +404,7 @@ describe('OpenAiProvider.testConnection', () => {
 
     const result = await new OpenAiProvider(
       credentialsReturning(null),
+      usageStub(),
     ).testConnection(USER_KEY, [
       { roleKey: 'grader', modelId: 'gpt-5.4', family: 'text' },
     ]);
@@ -395,7 +416,7 @@ describe('OpenAiProvider.testConnection', () => {
   it('bounds the probe with a timeout so a black-holed key fails fast', async () => {
     listMock.mockResolvedValue({ data: [] });
 
-    await new OpenAiProvider(credentialsReturning(null)).testConnection(
+    await new OpenAiProvider(credentialsReturning(null), usageStub()).testConnection(
       USER_KEY,
       [],
     );

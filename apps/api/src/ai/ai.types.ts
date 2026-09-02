@@ -174,3 +174,81 @@ export interface AiUsage {
   completionTokens: number | null;
   totalTokens: number | null;
 }
+
+// -----------------------------------------------------------------------------
+// Inference (issue #37, epic #25)
+// -----------------------------------------------------------------------------
+//
+// The minimum surface needed for usage accounting to be real rather than
+// theoretical. Epic #25 ships no AI FEATURE — no tutor, no grader — but it
+// does ship the path a feature will call, because the accounting decisions
+// (stream_options, null-not-zero) are only testable against a real request
+// builder, and their failure modes are silent.
+
+/** One turn in a completion request. */
+export interface AiMessage {
+  role: 'system' | 'user' | 'assistant';
+  content: string;
+}
+
+/**
+ * A request for one completion, on one caller's key.
+ *
+ * `roleKey` is carried so the usage row records WHICH JOB the call served,
+ * not merely which model. An admin who rebinds `grader` later must still be
+ * able to read last month's rows correctly — see `ai_usage_events`.
+ */
+export interface AiCompletionRequest {
+  /** The model role this call serves: 'tutor', 'grader', … */
+  roleKey: string;
+
+  /** The bound model id. Resolved by the caller from the settings row. */
+  modelId: string;
+
+  messages: AiMessage[];
+
+  /**
+   * Stream the response.
+   *
+   * NOTE FOR IMPLEMENTERS: OpenAI emits `usage` on a streamed response ONLY
+   * when the request sets `stream_options: { include_usage: true }`. Omitting
+   * it silently records zero for every streaming call — the most likely way
+   * usage accounting ends up quietly wrong, because nothing fails.
+   */
+  stream?: boolean;
+
+  maxTokens?: number;
+}
+
+/**
+ * The outcome of one completion.
+ *
+ * NEVER THROWN, always returned — `BaseAiProvider` holds the same never-throw
+ * contract here as everywhere else.
+ */
+export interface AiCompletionResult {
+  success: boolean;
+
+  /** The assistant text, on success. Null on failure. */
+  text: string | null;
+
+  /**
+   * Token counts as the provider reported them.
+   *
+   * EVERY FIELD MAY BE NULL, including on a successful call. See {@link AiUsage}.
+   */
+  usage: AiUsage;
+
+  /**
+   * A short, stable classification of the failure, for the usage row. Null on
+   * success.
+   *
+   * A CODE, NOT A MESSAGE: `ai_usage_events.error_code` is written on every
+   * failed call and is meant to be GROUPed by, which free text cannot be. The
+   * diagnosable text goes in `error`.
+   */
+  errorCode: string | null;
+
+  /** The provider's verbatim message, redacted. Null on success. */
+  error: string | null;
+}
