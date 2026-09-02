@@ -15,7 +15,11 @@ import {
   AI_SYSTEM_CREDENTIAL_NAME,
   AI_SYSTEM_CREDENTIAL_PURPOSE,
 } from './ai-credential.constants';
-import { wiredModelRoles } from './ai-model-roles';
+import { AI_MODEL_ROLES, wiredModelRoles } from './ai-model-roles';
+import { filterCatalog } from './providers/model-classifier';
+import type { AiCapabilityFamily } from './ai-model-roles';
+import type { AiProvider } from './providers/ai-provider.interface';
+import type { AiModelCatalogResponse } from './dto/ai-model-catalog.dto';
 import type { UpdateAiSettingsInput } from './dto/update-ai-settings.dto';
 
 // =============================================================================
@@ -276,6 +280,100 @@ export class AiSettingsService {
       providerConfigured,
       unboundRoles,
     };
+  }
+
+  /**
+   * The model catalog and the role registry, filtered for one admin view
+   * (`GET /api/ai-settings/models`, #31).
+   *
+   * -------------------------------------------------------------------------
+   * THE ROLES ARE ALWAYS RETURNED, EVEN WHEN THE CATALOG COULD NOT BE FETCHED
+   * -------------------------------------------------------------------------
+   *
+   * They come from the code registry, not from the provider, so a missing key
+   * or a provider outage has no bearing on them. Withholding them would leave
+   * the admin page unable to render the very controls that explain what is
+   * wrong — an empty screen instead of six selects and a "no key stored yet"
+   * message.
+   *
+   * -------------------------------------------------------------------------
+   * A PROVIDER FAILURE IS A PAYLOAD, NOT A 500
+   * -------------------------------------------------------------------------
+   *
+   * `listModels` never throws by construction (`BaseAiProvider`), and the two
+   * non-success outcomes are carried separately: `notConfigured` for "no key
+   * stored", which is the state of every fresh install and must not read as an
+   * error, and `error` for a real provider refusal, verbatim after redaction.
+   *
+   * @param provider the configured provider, or `null` when none is selected.
+   *        PASSED IN rather than resolved here: this service must not depend
+   *        on the provider (see `AiModule`'s constructor for why that cycle is
+   *        a boot failure, not a style problem).
+   * @param family restrict to one capability family, for a single role's
+   *        select. Absent returns every family.
+   * @param showAll engage the escape hatch: no floor, every family, including
+   *        ids the classifier did not recognise.
+   */
+  async describeCatalog(
+    provider: AiProvider | null,
+    options: { family?: AiCapabilityFamily; showAll?: boolean } = {},
+  ): Promise<AiModelCatalogResponse> {
+    const showAll = options.showAll === true;
+
+    // The floor comes from the stored configuration, but a corrupt row must
+    // not take this endpoint down — the admin page is where a corrupt row gets
+    // repaired, and `describeForAdmin` reports the problem alongside.
+    let minGeneration = DEFAULT_AI_SETTINGS.minModelGeneration;
+    try {
+      minGeneration = (await this.get()).minModelGeneration;
+    } catch {
+      // Keep the default. `describeForAdmin` is the endpoint that explains it.
+    }
+
+    const roles = AI_MODEL_ROLES.map((role) => ({
+      key: role.key,
+      label: role.label,
+      description: role.description,
+      capability: role.capability,
+      // A role the configured provider cannot serve at all is reported as
+      // unwired for THIS deployment, so the page renders it inert rather than
+      // offering a select whose every choice would fail. A provider that
+      // does not declare a capability cannot be selected for that role — the
+      // gate lives in the provider (#28), and this is it reaching the UI.
+      wired: role.wired && (provider?.supports(role.capability) ?? false),
+    }));
+
+    const base = { roles, minGeneration, showAll };
+
+    if (!provider) {
+      // No provider selected. Not an error and not "not configured" — the
+      // admin has simply not chosen one yet, which the page can see from
+      // `GET /api/ai-settings` and does not need repeated as a failure here.
+      return { ...base, models: [], notConfigured: true, error: null };
+    }
+
+    const catalog = await provider.listModels();
+
+    if (catalog.notConfigured) {
+      return { ...base, models: [], notConfigured: true, error: null };
+    }
+
+    if (!catalog.success) {
+      return { ...base, models: [], notConfigured: false, error: catalog.error };
+    }
+
+    const models = filterCatalog(catalog.models, {
+      family: options.family,
+      minGeneration,
+      showAll,
+    }).map((model) => ({
+      id: model.id,
+      family: model.family,
+      generation: model.generation,
+      createdAt: model.createdAt ? model.createdAt.toISOString() : null,
+    }));
+
+    return { ...base, models, notConfigured: false, error: null };
   }
 
   // ---------------------------------------------------------------------------
