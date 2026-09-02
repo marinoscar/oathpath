@@ -25,12 +25,30 @@ Two caveats, both real:
    acceptable):
 
    ```bash
-   docker run --rm -it -v "$PWD":/w -w /w mcr.microsoft.com/playwright:v1.62.1-noble \
-     npx playwright test --config=tests/visual/playwright.config.ts --update-snapshots
+   # `tests/visual` is NOT an npm workspace and has its own lockfile:
+   npm --prefix tests/visual ci
+
+   docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp \
+     -v "$PWD":/w -w /w/tests/visual \
+     mcr.microsoft.com/playwright:v1.62.1-noble \
+     npx playwright test --config=playwright.config.ts --update-snapshots
    ```
 
-   Seven of the eleven baselines are `fullPage` shots that include the AppBar
-   wordmark; the rail-scoped and drill-down ones are unaffected.
+   **Run it from `/w/tests/visual`, not from the repo root.** `@playwright/test`
+   is installed only under `tests/visual/node_modules`, so `npx` at the root
+   cannot find it and silently fetches a *different* version from the registry.
+   The two copies then collide and every spec dies with `Playwright Test did
+   not expect test.describe() to be called here` — an error that says nothing
+   about the real cause. `-u`/`-e HOME` keep the regenerated files owned by you
+   rather than by root.
+
+   Six of the eleven baselines are `fullPage` shots that show the AppBar
+   wordmark. The rail-scoped shots and the 551px drill-down are unaffected —
+   the drill-down replaces the wordmark with a back arrow and the page title,
+   which is why it survives a rename that the other six do not.
+
+   The harness boots its own Vite dev server (`apps/web/visual/vite.config.ts`)
+   and needs neither the Docker Compose stack nor a database.
 
 2. **The name is not the only identity string.** `CLI_NAME` in
    `apps/cli/src/branding.ts` is deliberately separate and is *not* derived
