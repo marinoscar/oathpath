@@ -76,7 +76,7 @@ a v2.
 |---|---|---|---|---|---|
 | — | AI configuration | Server model-role bindings (admin) plus mandatory per-user BYOK OpenAI keys; the one door (`AiDispatchService`) every later AI feature calls through | Foundation — required before E4, E8, E9, E10, E11 | done | [#25](https://github.com/marinoscar/oathpath/issues/25) |
 | E1 | Journey shell | Four-destination navigation (Home, Learn, Practice, Progress), the `Clock` provider, the learner profile (test version, senior exemption, interview date, state, goal), orientation, and home's `nextAction` contract | — | done | [#50](https://github.com/marinoscar/oathpath/issues/50) |
-| E2 | Civics content | The versioned, provenance-tracked USCIS question bank for both test versions, dynamic answers with effective dates, and the Learn page | E1 | in progress | [#51](https://github.com/marinoscar/oathpath/issues/51) |
+| E2 | Civics content | The versioned, provenance-tracked USCIS question bank for both test versions, dynamic answers with effective dates, and the Learn page | E1 | in progress<sup>†</sup> | [#51](https://github.com/marinoscar/oathpath/issues/51) |
 | E3 | Practice sessions | Deterministic (exact-match + normalisation) practice loop and `practice_attempts`, the one evidence table every later epic reads | E1, E2 | not started | [#52](https://github.com/marinoscar/oathpath/issues/52) |
 | E4 | AI Evaluator and Teacher | `AiDispatchService.run`, the `FakeAiProvider`, semantic grading with failure causes, streaming explanations — the first AI feature | #25, E2, E3 | not started | [#53](https://github.com/marinoscar/oathpath/issues/53) |
 | E5 | Memory | Spaced repetition (`question_mastery`), verified mastery (correct on ≥3 distinct days), the deterministic Study Coach recommender, Progress v1 | E1, E3 | not started | [#54](https://github.com/marinoscar/oathpath/issues/54) |
@@ -93,6 +93,24 @@ issue is closed, CI is green on `main`, and the person who did the work has
 run the epic's Playwright journey spec locally against the compose stack and
 reported it passing (see [§6](#6-definition-of-done-per-epic) — this is a
 human check, not something `main` being green on GitHub implies by itself).
+
+<sup>†</sup> **E2: all ten child issues are merged and CI is green on `main`,
+but the epic is deliberately not marked `done`.** Two of this section's
+criteria are human checks that have not happened yet:
+
+1. **`civics-learn.spec.ts` has never been executed.** It was written against
+   the real component sources and it typechecks and registers, but the
+   environment it was authored in had no Docker daemon, so nobody has run the
+   walk against the compose stack.
+2. **The civics content is not human-verified.** `uscis.gov` was unreachable
+   when the content files were written, so `civics-2008.json` ships as an
+   `UNVERIFIED_MODEL_DRAFT` — every officeholder answer is a
+   `[DRAFT PLACEHOLDER]` string rather than a name — and `civics-2025.json`
+   ships `AWAITING_SOURCE` with zero questions. The loader refuses to load
+   either without `CIVICS_ALLOW_UNVERIFIED_CONTENT=true`, and refuses
+   outright under `NODE_ENV=production`, so this cannot reach a learner by
+   accident. Closing it needs a human with the official USCIS PDFs; see
+   [`docs/runbooks/updating-civics-content.md`](docs/runbooks/updating-civics-content.md).
 
 ---
 
@@ -437,6 +455,37 @@ not have to rediscover why each was deferred:
 ---
 
 ## 9. Decision log
+
+**2026-09-02 — The civics answers partial unique index is on the SLOT, not
+the question.** E2's design issues specified
+`(question_id, state_code) WHERE effective_to IS NULL`. Taken literally that
+permits at most one open answer per question, which makes every genuinely
+multi-answer question unloadable — "Name one branch or part of the
+government" has three simultaneously correct answers, and that is why
+`civics_answers` carries a `sort` column at all. The shipped index is
+`(question_id, COALESCE(state_code, ''), sort) WHERE effective_to IS NULL`.
+The `COALESCE` is load-bearing rather than cosmetic: Postgres treats NULLs as
+distinct in a unique index, so the bare form would not constrain
+`national`-scope answers at all — every "who is the President" row has
+`state_code IS NULL` by definition — and two current Presidents could coexist
+behind something that looked like a real constraint. Proven by execution
+against Postgres 16; see `docs/specs/civics-content.md` §3.1–3.3.
+
+**2026-09-02 — Content provenance carries a trust status, and the loader
+enforces it.** `VISION.md`'s rule that OathPath owns the truth requires civics
+content to be transcribed from the official USCIS PDFs and human-verified,
+never generated from model memory. The environment E2 was built in could not
+reach `uscis.gov`, so rather than ship drafted content behind a provenance
+block implying it was sourced, each content file now carries
+`provenance.transcription.status` (`HUMAN_VERIFIED` | `UNVERIFIED_MODEL_DRAFT`
+| `AWAITING_SOURCE`). The seed loader refuses anything short of
+`HUMAN_VERIFIED` unless `CIVICS_ALLOW_UNVERIFIED_CONTENT=true`, and refuses
+unconditionally under `NODE_ENV=production` regardless of that flag; the
+validator's `--strict` mode is the matching release gate. This turns the
+human-verification rule from a sentence in a spec into something the system
+enforces. The 2025 bank ships empty rather than fabricated: a bank of
+plausible-but-wrong questions would look complete and send a learner into a
+real citizenship interview having studied the wrong material.
 
 **2026-09-02 — Both civics test versions ship.** Applicants who filed Form
 N-400 on or after 20 Oct 2025 take the 2025 test (128 questions in the bank,
