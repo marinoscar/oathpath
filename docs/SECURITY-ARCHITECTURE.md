@@ -1759,7 +1759,7 @@ Implemented in `apps/api/src/common/crypto/secret-cipher.ts`.
 The master key (`SECRETS_ENCRYPTION_KEY`) is never used directly to encrypt or decrypt. Every encrypt/decrypt call goes through a purpose-bound sub-key:
 
 ```
-derivedKey = HMAC-SHA256(masterKey, "enterpriseappbase:secret-cipher:v1:" + purpose)
+derivedKey = HMAC-SHA256(masterKey, "oathpath:secret-cipher:v1:" + purpose)
 ```
 
 `purpose` is a required, non-empty string (e.g. `'smtp'`, `'oauth'`) — never optional, never defaulted.
