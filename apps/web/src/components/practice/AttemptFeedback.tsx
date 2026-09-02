@@ -2,7 +2,11 @@
  * The verdict, the accepted answers, and the way onward — everything a learner
  * sees AFTER an attempt is recorded.
  *
- * Issue #79, epic #52.
+ * Issue #79, epic #52; the verdict block replaced by `AiFeedbackCard` in #125
+ * (E4), which is the ONLY change this screen needed to carry the AI grading
+ * rung's output. The verdict, the failure cause and the coaching line are one
+ * component precisely so this screen and the summary's review rows cannot come
+ * to disagree about a judgement the learner reads twice.
  *
  * =============================================================================
  * THIS COMPONENT EXISTS BECAUSE THE ANSWERS MUST HAVE NOWHERE ELSE TO LIVE
@@ -53,7 +57,6 @@ import {
   Alert,
   Box,
   Button,
-  Chip,
   CircularProgress,
   Divider,
   Stack,
@@ -62,7 +65,7 @@ import {
 
 import type { PracticeAttemptResult } from '../../types';
 import { AcceptedAnswers } from './AcceptedAnswers';
-import { gradingMethodNote, outcomeDisplay } from './outcome';
+import { AiFeedbackCard } from './AiFeedbackCard';
 
 export interface AttemptFeedbackProps {
   /** The graded attempt, straight from the POST that recorded it. */
@@ -87,8 +90,6 @@ export function AttemptFeedback({
   selfMarkError,
 }: AttemptFeedbackProps) {
   const { attempt } = result;
-  const verdict = outcomeDisplay(attempt.outcome);
-  const provenance = gradingMethodNote(attempt.gradingMethod);
 
   /**
    * Is the self-mark route open for this attempt?
@@ -115,26 +116,12 @@ export function AttemptFeedback({
 
   return (
     <Box>
-      <Stack
-        direction="row"
-        spacing={1}
-        sx={{ alignItems: 'center', flexWrap: 'wrap', rowGap: 1 }}
-      >
-        {/* The chip is the verdict at a glance; the sentence beside it is the
-            verdict for anybody reading rather than scanning. Both are text, so
-            neither depends on colour alone — a red chip and a green chip are
-            the same chip to a learner who cannot distinguish them. */}
-        <Chip label={verdict.label} color={verdict.color} size="small" />
-        <Typography variant="body2" color="text.secondary">
-          {verdict.detail}
-        </Typography>
-      </Stack>
-
-      {provenance && (
-        <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-          {provenance}
-        </Typography>
-      )}
+      {/* The verdict, and — only when a grader actually ran — the failure cause
+          and the one line of coaching. THE SAME COMPONENT the summary screen's
+          review rows render, so a learner revisiting this session reads the
+          identical judgement they were given live. See `AiFeedbackCard` for
+          why a deterministic grade shows the plain verdict and nothing else. */}
+      <AiFeedbackCard attempt={attempt} />
 
       <Divider aria-hidden sx={{ my: 2 }} />
 

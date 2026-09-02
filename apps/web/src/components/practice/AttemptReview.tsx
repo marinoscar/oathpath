@@ -34,7 +34,8 @@ import { Box, Chip, Paper, Stack, Typography } from '@mui/material';
 
 import type { PracticeAttempt } from '../../types';
 import { AcceptedAnswers } from './AcceptedAnswers';
-import { gradingMethodNote, outcomeDisplay } from './outcome';
+import { AiFeedbackCard } from './AiFeedbackCard';
+import { outcomeDisplay } from './outcome';
 
 export interface AttemptReviewProps {
   attempt: PracticeAttempt;
@@ -42,7 +43,6 @@ export interface AttemptReviewProps {
 
 export function AttemptReview({ attempt }: AttemptReviewProps) {
   const verdict = outcomeDisplay(attempt.outcome);
-  const provenance = gradingMethodNote(attempt.gradingMethod);
   const response = attempt.responseText?.trim() ?? '';
 
   return (
@@ -101,14 +101,20 @@ export function AttemptReview({ attempt }: AttemptReviewProps) {
         />
       </Box>
 
-      {/* The two facts that make a `correct` weaker, each stated only when it
-          is true. Together they are what stops one number in the tally above
-          from meaning two different things. */}
-      {provenance && (
-        <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>
-          {provenance}
-        </Typography>
-      )}
+      {/* THE SAME JUDGEMENT THE LEARNER SAW LIVE, from the same component the
+          session screen uses — who graded it, why the answer missed, and the
+          one line of coaching. `includeVerdict={false}` because the header row
+          above already carries the verdict chip beside the question number;
+          stating one judgement twice on one card reads as two.
+
+          It contributes NOTHING for a deterministically graded attempt with no
+          note to make — no heading, no spacing, no empty rule — so an ordinary
+          exact-match row reads exactly as it did before E4. */}
+      <AiFeedbackCard attempt={attempt} includeVerdict={false} />
+
+      {/* The other fact that makes a `correct` weaker, stated only when it is
+          true. With the provenance note above, the two are what stop one
+          number in the tally from meaning two different things. */}
       {attempt.revealed && (
         <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
           You asked to see the answer on this one.

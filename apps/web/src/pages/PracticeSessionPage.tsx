@@ -138,6 +138,7 @@ import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import { Link as RouterLink, Navigate, useNavigate, useParams } from 'react-router-dom';
 
 import { AttemptFeedback } from '../components/practice/AttemptFeedback';
+import { ExplainPanel } from '../components/ai/ExplainPanel';
 import { LoadingSpinner } from '../components/common/LoadingSpinner';
 import { usePracticeSession } from '../hooks/usePracticeSession';
 import { useIsMounted } from '../hooks/useIsMounted';
@@ -529,6 +530,32 @@ export default function PracticeSessionPage() {
             </Paper>
           )}
         </Box>
+
+        {/* THE EXPLAIN ACTION, AFTER THE VERDICT AND OUTSIDE THE LIVE REGION
+            ABOVE. Both halves of that placement are deliberate.
+
+            After the verdict, because the answers only exist on this page once
+            an attempt has been recorded — asking "why is that the answer?"
+            before there is an answer on screen would be a request for the one
+            thing this page must not hand over early (see the file header).
+
+            Outside the `role="status"` region, because the explanation streams
+            into a polite live region of its own. Nesting one live region inside
+            another is how a screen-reader user is read the same paragraph twice
+            — once as the explanation arrives, and again as a change to the
+            verdict region that contains it. `StateRequiredNotice` documents the
+            same hazard from the other side.
+
+            The practice loop does not depend on it: `ExplainPanel` renders a
+            disabled control and the shared `AiNotReady` when AI is not set up,
+            and every control above it keeps working exactly as it did in E3. */}
+        {result && (
+          <ExplainPanel
+            questionId={result.attempt.questionId}
+            headingComponent="h3"
+            label="Why is that the answer?"
+          />
+        )}
 
         {finished && (
           <Paper variant="outlined" sx={{ p: { xs: 2, sm: 3 } }}>

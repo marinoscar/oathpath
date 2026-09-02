@@ -881,6 +881,30 @@ export interface AiStatus {
   unboundRoles: string[];
 }
 
+/**
+ * Why an AI call was NOT ATTEMPTED — `AiUnavailableCause` on the API, closed.
+ *
+ * A CLOSED SET OF FOUR, and the closure is load-bearing: every consumer
+ * branches on it exhaustively, which is why `state_required` is its own
+ * terminal frame on the explanation stream rather than a fifth member here.
+ * That fact is not about AI at all (the learner has not set their state), it
+ * is answered on a different screen, and adding it would force a re-audit of
+ * every branch that reads this union.
+ *
+ * NOTHING WAS SPENT AND NOTHING IS BROKEN when one of these arrives. It is not
+ * an error, and it must never be rendered as one — see
+ * `components/ai/ExplainPanel.tsx`.
+ */
+export type AiUnavailableCause =
+  /** The caller has no personal key stored. THE ONLY ONE THAT IS THEIR DOING. */
+  | 'no_user_key'
+  /** An administrator turned the master switch off. */
+  | 'ai_disabled'
+  /** No model is bound to the role this feature needs. */
+  | 'role_unbound'
+  /** The configured provider cannot serve the role, or none is configured. */
+  | 'capability_unsupported';
+
 /** One row of a usage breakdown, by model or by role. */
 export interface AiUsageBreakdown {
   key: string;
@@ -1450,6 +1474,48 @@ export type PracticeOutcome = 'correct' | 'partial' | 'incorrect' | 'skipped';
  */
 export type PracticeGradingMethod = 'exact' | 'self' | 'ai';
 
+/**
+ * Why a response missed, when a grader actually ran — `PracticeFailureCause`.
+ *
+ * SIX VALUES, and this build renders all six even though only four can be
+ * produced today: `misheard` needs E9's transcription confidence and `nervous`
+ * needs E8's interview timing, so `grading.ts` coerces a model that offers
+ * either one to `unknown`. A row written by a later epic must still be
+ * readable by a browser holding this bundle — the same argument
+ * `components/practice/outcome.ts` makes for its own open-set lookups.
+ *
+ * NULL AND `unknown` ARE DIFFERENT ANSWERS and must never be collapsed. Null
+ * (the field's type on `PracticeAttempt`) means no grader ran at all —
+ * `gradingMethod: 'exact'` or `'self'`. `unknown` means one ran, returned a
+ * valid verdict, and honestly could not tell which of the other five this was.
+ * `ai-evaluation.md` §8: one is an absence of evidence, the other is evidence
+ * of ambiguity.
+ */
+export type PracticeFailureCause =
+  | 'not_known'
+  | 'not_recalled'
+  | 'expression'
+  | 'misheard'
+  | 'nervous'
+  | 'unknown';
+
+/**
+ * The grader's structured verdict, verbatim — `gradingVerdictSchema` on the
+ * API, and exactly three fields.
+ *
+ * NOT ONE OF THEM CAN CARRY AN ANSWER. There is no `correctAnswer`, no
+ * `alsoAccept`, no free-form field except `feedback`, which is one sentence for
+ * the learner and is never promoted to truth (`ai-evaluation.md` §7). The
+ * accepted answers on this screen come from the attempt's own frozen snapshot,
+ * never from anything a model said.
+ */
+export interface PracticeAiFeedback {
+  verdict: 'correct' | 'partial' | 'incorrect';
+  failureCause: PracticeFailureCause;
+  /** One short sentence, capped at 240 characters server-side. */
+  feedback: string;
+}
+
 /** One row of `practice_attempts` — the evidence every later epic reads. */
 export interface PracticeAttempt {
   id: string;
@@ -1470,6 +1536,35 @@ export interface PracticeAttempt {
   hintUsed: boolean;
   /** Milliseconds, or null when the client could not report one. Never 0. */
   durationMs: number | null;
+
+  // ---------------------------------------------------------------------------
+  // The AI grading rung's output — ALL THREE NULL TOGETHER (issue #116, E4)
+  // ---------------------------------------------------------------------------
+  //
+  // A DETERMINISTICALLY GRADED ATTEMPT CARRIES NULL FOR ALL THREE, and that is
+  // the ordinary case rather than a degraded one: `gradingMethod: 'exact'` (a
+  // match, a skip, or a miss whose grading call was unavailable or failed) and
+  // `gradingMethod: 'self'` never produce any of these values.
+  //
+  // Nullable rather than optional, mirroring the DTO exactly, and for the
+  // reason the whole ladder exists: a client that received an ABSENT field
+  // could reasonably render a placeholder cause behind nothing, and the one
+  // thing this product must not do is show a learner a diagnosis of themselves
+  // that no grader ever made. `null` is a value a component can branch on.
+
+  /** Why the response missed, when a grader ran. Never a guess. */
+  failureCause: PracticeFailureCause | null;
+
+  /** The grader's verdict, verbatim. See {@link PracticeAiFeedback}. */
+  aiFeedback: PracticeAiFeedback | null;
+
+  /**
+   * The `ai_usage_events` row this attempt's grading call produced, for
+   * tracing a verdict to what it cost. Null when no call was made AND when the
+   * usage write itself failed — nothing on screen reads it.
+   */
+  aiUsageEventId: string | null;
+
   answeredAt: string;
   answerSnapshot: PracticeAnswerSnapshot;
 }

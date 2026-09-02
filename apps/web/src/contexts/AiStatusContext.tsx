@@ -97,6 +97,33 @@ export function useAiStatus(): AiStatusContextValue {
   return context;
 }
 
+/**
+ * Read the AI availability status, or `null` when no provider is mounted.
+ *
+ * Issue #125. The throwing {@link useAiStatus} above is right for a GATE:
+ * `RequireAiKey` decides whether a user may proceed, and a silent `null` there
+ * would make the gate fail open everywhere while looking like it worked.
+ *
+ * It is the wrong shape for a POINT-OF-USE surface. An Explain button lives
+ * inside a practice screen, a question detail and (later) a debrief — trees
+ * whose own reason to exist has nothing to do with AI, and which must render
+ * correctly whether or not this provider happens to be above them. A throw
+ * there turns "we could not tell whether AI is configured" into a blank page
+ * for the whole feature, which is a far worse failure than the one it reports.
+ *
+ * So this accessor returns `null` instead, and its callers treat that exactly
+ * as the provider itself treats a failed status request (see the file header):
+ * DO NOT BLOCK. The feature renders normally, and the endpoint's own
+ * `unavailable` frame — the authority, not this cache — says what is actually
+ * true when the learner asks.
+ *
+ * `AiNotReady` deliberately still uses the throwing accessor: it is only ever
+ * mounted by a caller that has already established a provider is present.
+ */
+export function useOptionalAiStatus(): AiStatusContextValue | null {
+  return useContext(AiStatusContext) ?? null;
+}
+
 interface AiStatusProviderProps {
   /**
    * Children, when mounted directly. Omitted when used as a react-router
