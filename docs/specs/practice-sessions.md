@@ -219,27 +219,35 @@ attempt with **no** enclosing `practice_sessions` row at all (§2.2's
 |---|---|---|---|
 | `id` | `String @id @default(uuid()) @db.Uuid` | no | |
 | `userId` | `String @db.Uuid` | no | FK → `users.id`, `onDelete: Cascade` — a session has no meaning independent of the learner who opened it, the same posture `LearnerProfile.user` already takes, not the `Restrict` posture content tables take. |
-| `kind` | `PracticeSessionKind` (Postgres enum) | no | `quick` \| `category` \| `review` \| `weak` \| `mixed`. §3 covers which two ship in E3 and which three are declared, unwired, for E5. |
-| `categoryId` | `String? @db.Uuid` | yes | FK → `civics_categories.id`, `onDelete: Restrict`. Populated only for `kind: 'category'`; null for every other kind, `quick` included, since a "Quick 5" draws across the learner's whole active test version rather than one section. |
-| `status` | `PracticeSessionStatus` (Postgres enum), default `in_progress` | no | `in_progress` \| `completed` \| `abandoned`. §4 is the full lifecycle; there is no fourth state, and specifically no `paused` — a session a learner walks away from and later resumes is still `in_progress` until it resolves one of the other two ways. |
+| `kind` | `PracticeSessionKind` (Postgres enum) | no | `quick` \| `category` \| `review` \| `weak` \| `mixed`. §4 covers which two ship in E3 and which three are declared, unwired, for E5. |
+| `status` | `PracticeSessionStatus` (Postgres enum), default `in_progress` | no | `in_progress` \| `completed` \| `abandoned`. §5 is the full lifecycle; there is no fourth state, and specifically no `paused` — a session a learner walks away from and later resumes is still `in_progress` until it resolves one of the other two ways. |
+| `testVersionCode` | `String` | no | FK → `civics_test_versions.code`, `onDelete: Restrict` — the same posture `LearnerProfile.testVersion` already takes: a test version cannot be deleted while sessions still reference it. Recorded on the *session*, not derived from the learner's current profile at read time, because a learner's `test_version_code` can in principle change (a corrected filing date), and a session already in progress — or long completed — must keep saying which bank it actually drew its questions from, not whichever bank the profile happens to say today. |
+| `categoryId` | `String? @db.Uuid` | yes | FK → `civics_categories.id`, `onDelete: SetNull`. Populated only for `kind: 'category'`; null for every other kind, `quick` included, since a "Quick 5" draws across the learner's whole active test version rather than one section. `SetNull`, not `Restrict`: the category is a descriptive filter the session was started with, not a dependency the session's own integrity rests on — if a category is later removed, the historical session record should keep existing with `categoryId: null` rather than block the category's deletion or vanish itself. |
 | `plannedCount` | `Int` | no | How many questions this session intends to ask, decided at creation (`5` for Quick 5, a category's remaining unseen count for `kind: 'category'`). Read by the summary screen to render "4 of 5" honestly, and read by E7 as one input to whether a day's goal was met — never itself a promise that exactly this many attempts exist, since a learner can abandon early. |
-| `startedAt` | `DateTime @db.Timestamptz` | no | Set once, at creation, from `Clock.now()`. |
+| `startedAt` | `DateTime @db.Timestamptz`, DB default `now()` | no | Application code sets it explicitly from `Clock.now()` at creation (§11) rather than relying on the column's own `DEFAULT CURRENT_TIMESTAMP` — the default exists as a safety net for a row inserted by something other than the practice service, not as the path the service itself is meant to take. |
 | `completedAt` | `DateTime? @db.Timestamptz` | yes | Null while `in_progress`. Set once, when `status` transitions to `completed` **or** `abandoned` — both are terminal, and both close out the session's open-endedness the same way, which is why one column serves both rather than two mutually-exclusive nullable columns. |
-| `summary` | `Json` | no, default `{}` | Computed once at completion — counts by `outcome`, a duration total, anything the summary screen renders — the same plain `Json` convention `SystemSettings.value`/`UserSettings.value` already use. **Derived, not authoritative**: it is a cached rendering of the session's own `practice_attempts` rows, present so the summary screen and any later "recent sessions" list do not have to re-aggregate on every read, never a second place `outcome` counts are recorded that could drift from the attempts themselves. |
-| `createdAt` / `updatedAt` | `DateTime @db.Timestamptz` | no | House convention. |
+| `summary` | `Json?` | yes | Computed once at completion — counts by `outcome`, a duration total, anything the summary screen renders — the same plain `Json` convention `SystemSettings.value`/`UserSettings.value` already use. **Nullable, and null while `in_progress`**, because there is nothing to summarize yet — not an empty object standing in for "no summary," which would be indistinguishable from a genuinely empty completed session. **Derived, not authoritative**: a cached rendering of the session's own `practice_attempts` rows, present so the summary screen and any later "recent sessions" list do not have to re-aggregate on every read, never a second place `outcome` counts are recorded that could drift from the attempts themselves. |
+| `createdAt` / `updatedAt` | `DateTime @db.Timestamptz` | no | House convention — `updatedAt` moves on every status transition, unlike `practice_attempts` (§2.2), which has no `updatedAt` at all. |
 
 ```
-@@index([userId, status])
-@@index([userId, startedAt(sort: Desc)])
+@@index([userId, startedAt])
 @@map("practice_sessions")
 ```
 
-The first index is what §4's lifecycle rule (at most one `in_progress`
-session per user) is enforced *against* — not a database constraint, for the
-reason given there — and the second is the "recent sessions" list's own
-query, newest first, the identical shape `AiUsageEvent`'s
-`[userId, createdAt(sort: Desc)]` index already establishes for a per-user,
-time-ordered list.
+This is the **entire** index list the migration actually creates — verified
+against `migration.sql` directly, not assumed from the acceptance criteria.
+There is deliberately no second index on `status`: the one query this table
+serves today is "this user's sessions, newest first" (the "recent sessions"
+list, and the same lookup the create-session flow uses to find any existing
+`in_progress` row, §5), and `[userId, startedAt]` already serves both — a
+`WHERE status = 'in_progress'` clause over a small, per-user row set does not
+need its own index to be fast. This is also why the invariant §5 describes
+(at most one `in_progress` session per user) is enforced by the create-session
+service method, never by a database constraint: no partial unique index on
+`status = 'in_progress'` exists in the shipped migration, so nothing at the
+database level currently prevents two concurrent requests from each creating
+one — a gap this document states plainly rather than papering over (see §13's
+rejected alternative on this exact point).
 
 ### 2.2 `practice_attempts` — the single evidence table for the whole product
 
@@ -253,19 +261,19 @@ own justification for shipping two of these ahead of any reader existing.
 | `id` | `String @id @default(uuid()) @db.Uuid` | no | — | |
 | `userId` | `String @db.Uuid` | no | E5, E6, E7 | FK → `users.id`, `onDelete: Cascade` — the user's own evidence, gone with the account, the same `AiUsageEvent.user` posture. |
 | `questionId` | `String @db.Uuid` | no | E5, E6, E8 | FK → `civics_questions.id`, `onDelete: Restrict` — a question cannot be deleted while attempts reference it; content is `Restrict`-protected everywhere in this schema (civics-content.md §2), and an attempt's evidentiary value depends on the question it was an attempt *at* continuing to exist. |
-| `source` | `PracticeAttemptSource` (Postgres enum) | no | E5, E6, E8 | `practice` \| `mock_interview`. §3 below is the full "why one table" argument; this column is the discriminator it turns on. E3 writes only `practice`; E8 (#57) is the epic that ever writes `mock_interview`, into this exact table, not a parallel one. |
-| `sessionId` | `String? @db.Uuid` | yes | web (session/summary screens) | FK → `practice_sessions.id`, `onDelete: Cascade` — an attempt has no identity independent of the session that produced it, the `Cascade` posture matching `CivicsAnswer.question` rather than the `Restrict` posture the *content* tables take. **Non-null for every `source: 'practice'` row and null for `source: 'mock_interview'`**: E3's own module creates the enclosing session before an attempt can exist, but E8's interview groups its answers by whatever concept an interview attempt turns out to need (a `mock_interview_id`, most likely, on a future column) — nothing that has anything to do with `practice_sessions`. Making `session_id` nullable now is what lets E8 write into this table without inventing a `practice_sessions` row that means nothing to it. |
-| `inputMode` | `PracticeInputMode` (Postgres enum) | no | E9, E10 | `typed` \| `spoken`. E3 writes only `typed` — there is no microphone yet. `spoken` is declared now because E9 (Voice foundation) wires it, and epic #52's own text is explicit about why: "recall without hints" and "answered a question they heard" are distinct readiness signals in `PRD.md`, and retrofitting the *column* onto attempts a learner already produced (with no way to know, after the fact, whether an old typed answer was typed or transcribed from speech) is not possible at all, migration or not — the fact has to be captured at the moment of the attempt or it is lost permanently. |
-| `promptMode` | `PracticePromptMode` (Postgres enum) | no | E9 | `read` \| `heard`. E3 writes only `read` — nothing plays audio yet. Same "capture now or lose forever" argument as `inputMode`, and the same epic (E9) is the first real reader of the non-default value. |
-| `responseText` | `String? @db.Text` | yes | E4 (future), debrief screens | The learner's raw, unmodified input — never normalised in place. Null only when `outcome: 'skipped'` and the learner supplied no text at all (they hit skip, or revealed with nothing typed). `@db.Text`: a response has no meaningful length bound at the schema level, though §7 caps what the matcher will *process* at 2000 characters — the column is not the place that cap is enforced. |
+| `source` | `PracticeAttemptSource` (Postgres enum), default `practice` | no | E5, E6, E8 | `practice` \| `mock_interview`. §3 below is the full "why one table" argument; this column is the discriminator it turns on. E3 writes only `practice`; E8 (#57) is the epic that ever writes `mock_interview`, into this exact table, not a parallel one. |
+| `sessionId` | `String? @db.Uuid` | yes | web (session/summary screens) | FK → `practice_sessions.id`, `onDelete: SetNull` — **not** `Cascade`. An attempt is *evidence* that a question was answered, and deleting the session it happened to occur under (a housekeeping purge of old session rows, say) must not silently delete the fact that the learner answered a question; the attempt survives with `sessionId: null`, the identical shape a mock-interview attempt already has. **Non-null for every `source: 'practice'` row and null for `source: 'mock_interview'`**: E3's own module creates the enclosing session before an attempt can exist, but E8's interview groups its answers by whatever concept an interview attempt turns out to need — nothing that has anything to do with `practice_sessions`. Making `session_id` nullable now is what lets E8 write into this table without inventing a `practice_sessions` row that means nothing to it. |
+| `inputMode` | `PracticeInputMode` (Postgres enum), default `typed` | no | E9, E10 | `typed` \| `spoken`. E3 writes only `typed` — there is no microphone yet. `spoken` is declared now because E9 (Voice foundation) wires it: "recall without hints" and "answered a question they heard" are distinct readiness signals in `PRD.md`, and retrofitting the *column* onto attempts a learner already produced (with no way to know, after the fact, whether an old typed answer was typed or transcribed from speech) is not possible at all, migration or not — the fact has to be captured at the moment of the attempt or it is lost permanently. |
+| `promptMode` | `PracticePromptMode` (Postgres enum), default `read` | no | E9 | `read` \| `heard`. E3 writes only `read` — nothing plays audio yet. Same "capture now or lose forever" argument as `inputMode`, and the same epic (E9) is the first real reader of the non-default value. |
+| `responseText` | `String? @db.Text` | yes | debrief screens | The learner's raw, unmodified input — never normalised in place. Null only when `outcome: 'skipped'` and the learner supplied no text at all (they hit skip, or revealed with nothing typed). `@db.Text`: a response has no meaningful length bound at the schema level, though §7 caps what the matcher will *process* at 2000 characters — the column is not the place that cap is enforced. |
 | `outcome` | `PracticeOutcome` (Postgres enum) | no | E5, E6, E7, E8 | `correct` \| `partial` \| `incorrect` \| `skipped`. §8 is the full account of why `partial` is declared now and unreachable from E3's own grading path until E4 exists to produce it. |
-| `gradingMethod` | `PracticeGradingMethod` (Postgres enum) | **yes** | E5 (the mastery discount, §9), E6, E8 | `exact` \| `self` \| `ai`. **Nullable, uniquely among this table's enums** — null means "no grading was attempted," the state of a `skipped` attempt with nothing to grade. `exact` is the only value E3's own deterministic path writes on a fresh attempt; `self` is written only by the self-mark escape hatch (§9); `ai` is declared for E4 and unreachable until it ships (§8). |
+| `gradingMethod` | `PracticeGradingMethod` (Postgres enum) | **no** | E5 (the mastery discount, §9), E6, E8 | `exact` \| `self` \| `ai`. **Not nullable** — every attempt row, `skipped` included, records who or what made the call. §8.1 spells out exactly what value a skip gets and why, since the column's own `NOT NULL` constraint means "no grading happened" is not an option the schema leaves open the way a nullable column would. `exact` is the only value E3's own deterministic path writes on a fresh, response-bearing attempt; `self` is written only by the self-mark escape hatch (§9); `ai` is declared for E4 and unreachable until it ships (§8). |
 | `revealed` | `Boolean`, default `false` | no | E5 (evidence weighting) | True once the learner has seen the accepted answer for this question, whether or not they had already responded. §9.1 covers exactly how this interacts with self-mark. |
 | `hintUsed` | `Boolean`, default `false` | no | E5 (evidence weighting) | True if the learner requested a hint before submitting a response. Distinct from `revealed`: a hint narrows the field without giving away the accepted answer outright, so a correct outcome with `hintUsed: true` is real but *weaker* recall evidence than one with no assistance at all — the same "weaker evidence, not disqualified evidence" posture §9 gives self-mark. |
 | `durationMs` | `Int?` | yes | E6, E8 (pacing, debrief) | Wall-clock time from question shown to response submitted. Null, never `0`, when the client cannot report a duration (a resumed session's first attempt after the page was reloaded, for instance) — the identical "null means unknown, `0` is a false claim of speed" reasoning `ai_usage_events`'s token columns already state in `schema.prisma`, applied to timing instead of tokens. Declared now because — like `inputMode`/`promptMode` — a duration not captured at the moment of the attempt cannot be reconstructed afterward; there is nothing to backfill it from. |
-| `answeredAt` | `DateTime @db.Timestamptz` | no | E5 (distinct-day mastery), E7 (streaks) | The instant the attempt resolved to a terminal outcome — a submitted response, a skip, or a reveal with no response. Set from `Clock.now()`, never client-supplied: E5's "correct on 3 or more distinct days" rule (journey-shell.md §1) depends on this being the server's own clock, in the learner's own local day, not a timestamp a client device could misreport. |
-| `answerSnapshot` | `Json` | no, default `{}` | E5, E6, E8 (debrief and re-grade transparency) | §6 is the complete account of what this holds and why. |
-| `createdAt` / `updatedAt` | `DateTime @db.Timestamptz` | no | — | House convention. `updatedAt` moves exactly once past creation — the self-mark write (§9) — and never again; an attempt otherwise records something that already happened and does not change. |
+| `answeredAt` | `DateTime @db.Timestamptz` | no | E5 (distinct-day mastery), E7 (streaks) | The instant the attempt resolved to a terminal outcome — a submitted response, a skip, or a reveal with no response. Set from `Clock.now()`, never client-supplied and, unlike `practice_sessions.startedAt`, carries **no DB default at all**: the column is `NOT NULL` with nothing to fall back on, so application code must supply it explicitly on every insert. E5's "correct on 3 or more distinct days" rule (journey-shell.md §1) depends on this being the server's own clock, in the learner's own local day, not a timestamp a client device could misreport. |
+| `answerSnapshot` | `Json` | no | E5, E6, E8 (debrief and re-grade transparency) | §6 is the complete account of what this holds and why. No default — the shipped column requires a value on every insert, which is the concrete enforcement of locked decision #4: there is no code path that can write an attempt without also freezing what it was graded against. |
+| `createdAt` | `DateTime @db.Timestamptz` | no | — | House convention. **There is no `updatedAt` on this table at all** — the schema's own comment states it plainly: "An attempt is an immutable record of something that already happened — same reasoning as `AiUsageEvent`." §9 designs the self-mark mechanism around this fact rather than against it: self-marking is never a later mutation of a stored row. |
 
 ```
 @@index([userId, questionId, answeredAt])
@@ -278,7 +286,10 @@ also the index E5's mastery scheduler needs to ask "on how many distinct
 days has this learner answered this question correctly," and the exact
 query shape `civics_answers`'s `[questionId, stateCode]` index serves for a
 different table's version of "give me everything relevant to one question,
-fast."
+fast." The second is the session-detail view's own query — every attempt
+belonging to one session. (A third index, on `aiUsageEventId`, exists in the
+schema as of this writing but belongs to E4's in-flight work named above,
+not to this document's scope.)
 
 ---
 
@@ -378,10 +389,16 @@ ones, and no `paused` state:
   session per user at a time** — a concrete enforcement point: the create-session
   service method closes any existing `in_progress` row (`status: 'abandoned'`,
   `completedAt: Clock.now()`) inside the same transaction that opens the new
-  one, rather than relying on a database constraint that cannot express "at
-  most one open row" any more directly here than `civics_answers`' partial
-  index could express it without the `sort`/`COALESCE` machinery
-  civics-content.md §3 works out in full for a structurally similar problem.
+  one. **This is an application-level invariant, not a database one** — §2.1
+  already states the fact plainly: the shipped migration defines no partial
+  unique index on `status = 'in_progress'`, unlike the genuinely
+  database-enforced invariant civics-content.md §3 works out for
+  `civics_answers` with a `sort`/`COALESCE` partial index. A concurrent pair
+  of requests from the same user (two tabs, a double-tap) could in principle
+  each pass the "is there an open session" check before either has committed
+  and both create one — a narrow, low-consequence race (the loser's row is
+  still `in_progress`, and the *next* session start closes it) that this
+  document accepts rather than proposes a database-level fix for; see §13.
   A UI can still offer "resume" for a session the learner just left seconds
   ago; that is a client-side affordance over the same `in_progress` row, not
   a reason to avoid closing it out once a real new session actually starts.
@@ -463,87 +480,169 @@ debrief screen, never queried or filtered on its internal fields.
 ## 7. Deterministic grading: the normalisation pipeline
 
 E3's entire grading path is one pure module,
-`apps/api/src/practice/answer-matching.ts`, exporting `normalizeAnswer(text)`
-and `matchAnswer(response, acceptedAnswers)` — no Nest, no Prisma, no
-database — the identical shape `test-version-resolution.ts` and
-`answer-resolution.ts` already establish for a rule that must never drift
-and must be testable directly, table of cases and all. **This module
-constructs no `Date` and needs none**; it is a string function, and its
-correctness does not depend on when it runs.
+`apps/api/src/practice/answer-matching.ts` (issue #70) — already written,
+already tested, and cited throughout this section by exact behaviour rather
+than by intent. It exports `normalizeAnswer(text)` and
+`matchAnswer(response, acceptedAnswers)` — no Nest, no Prisma, no database,
+**no import statement at all** — the identical shape
+`test-version-resolution.ts` and `answer-resolution.ts` already establish
+for a rule that must never drift and must be testable directly, table of
+cases and all. This module constructs no `Date` and needs none; it is a
+string function, and the same input yields the same output forever, which
+is what lets a practice attempt be re-graded (§9) or audited months later
+and reach the identical verdict.
 
-`normalizeAnswer` applies these seven steps, **in this order, and this
-order is the contract** — a later step assumes the ones before it have
-already run (article-stripping, for instance, has to happen after the
-filler-opening strip removes "the answer is," or "the" from that phrase
-would be mistaken for the question's own leading article):
+`normalizeAnswer` applies these seven steps, **in this order, and the order
+is the contract**:
 
 | # | Step | Input → output (worked example) |
 |---|---|---|
-| 1 | Unicode NFKC normalise, then lowercase. | `"Ｕ.S.A"` → `"u.s.a"` (full-width characters collapse to ASCII before anything else runs) |
-| 2 | Strip a leading filler opening: `"the answer is"`, `"i think"`, `"i think it's"`, `"it is"`, `"it's"`, `"my answer is"`, `"answer:"`. | `"i think it's the president"` → `"the president"` |
-| 3 | Strip possessives (`'s` / `’s` → ``) and all punctuation except intra-word hyphens (which become spaces), collapsing to single spaces; trim. | `"speaker's role, twenty-seven!"` → `"speaker role twenty seven"` |
-| 4 | Expand abbreviations both directions to a canonical form, as whole-token/phrase replacement, never substring: `us`/`u s`/`usa`/`u s a` → `united states`; `dc` → `district of columbia`; `president of the united states`/`potus` → `president`. | `"potus"` → `"president"`; `"i live in dc"` → `"i live in district of columbia"` |
-| 5 | Drop leading articles (`a`, `an`, `the`) — at the start of the string and after the filler strip already ran. | `"the president"` → `"president"` |
-| 6 | Map number words and ordinals to digits, both directions (a learner typing digits also matches a spelled-out accepted answer, since the accepted answer is normalised through the same pipeline). | `"twenty-seven"` → `"27"`; `"one"` → `"1"`; `"first"` → `"1"`; `"twenty first"` → `"21"` |
-| 7 | Collapse whitespace again; trim. | `"united  states  "` → `"united states"` |
+| 1 | Unicode NFKC normalise, then lowercase, then trim. | `"Ｕ.S.A"` → `"u.s.a"` (full-width characters collapse to ASCII before anything else runs; NFKC also folds ligatures and the several Unicode space characters an IME can produce) |
+| 2 | Strip a leading filler opening, re-applied up to four passes. | `"i think it is the constitution"` → `"the constitution"` (`"i think"` strips on pass one, exposing `"it is"` for pass two) |
+| 3 | Strip a trailing possessive (`'s` / `’s`, both apostrophe forms), then convert every non-letter/non-digit character — punctuation and hyphens alike — to a space and split into tokens. | `"speaker's role, twenty-seven!"` → tokens `["speaker","role","twenty","seven"]` |
+| 4 | Expand abbreviations, whole-token/whole-phrase only, in one left-to-right pass that never rescans its own output. | `"potus"` → `"president"`; `"i live in dc"` → `"i live in district of columbia"` |
+| 5 | Drop leading articles (`a`, `an`, `the`) — every consecutive one at the very start of the token list. | `["the","president"]` → `["president"]` |
+| 6 | Rewrite every maximal run of number words/ordinals to one digit token, composing units + tens + `hundred` the way English does (not a 1–100 lookup table). | `"twenty-seven"` → `"27"`; `"first"` → `"1"`; `"twenty first"` → `"21"` |
+| 7 | Re-join the surviving tokens with single spaces. | free by construction — the token list can carry no empty entries, so joining cannot produce a run or an edge space |
 
-**Step 4's "never substring" is load-bearing, not a style note.** A
-substring replacement of `us` would corrupt any response that merely
-*contains* the letters "us" as part of a longer word — "trust," "discuss,"
-"congress" — into nonsense. The replacement operates on whole tokens (or,
-for the multi-word phrases, whole matched phrases) only.
+**Step 2's exact filler list, longest-first, is nine patterns, not seven
+loosely described ones** — verified against `LEADING_FILLERS` in the source
+file: `"the answer is"`, `"my answer is"`, `"i think it's"` / `"i think
+its"` (both spellings — see below), `"i think"`, `"answer:"`, `"it is"`,
+`"it's"`, `"its"`. Every pattern requires a following whitespace character,
+so none can fire mid-string and none can swallow a whole short answer. Two
+details are load-bearing, not incidental:
 
-**Step 6 runs both directions because the accepted answer goes through the
-identical pipeline.** A `civics_answers` row storing `"twenty-seven"` and a
-learner typing `"27"` both normalise to `"27"`; a row storing `"27"` and a
-learner typing `"twenty-seven"` both normalise to the same value too,
-because the *same function* processes both sides of the comparison — there
-is no separate "canonical accepted form" the response side has to match,
-only one normaliser applied twice.
+- **Both apostrophe characters are matched** (`'` U+0027 and `’` U+2019),
+  because step 1's NFKC pass does **not** unify them — a phone keyboard's
+  smart quote survives normalisation untouched, and a rule written for only
+  the ASCII apostrophe would silently fail on a large share of mobile input.
+- **`"its"` (no apostrophe) is treated as filler too, a known, accepted
+  collision.** "Its" and "it's" are both real English strings, so an answer
+  that genuinely opens with the possessive pronoun "its ..." would lose its
+  first token. The file's own comment states the trade explicitly: no
+  accepted civics answer begins with a possessive pronoun, while "it's the
+  Constitution" is an extremely common way to answer, so this rule is
+  worth the one collision it accepts.
+
+**Step 3's possessive strip deletes rather than spaces**, and that
+distinction is what makes it correct: `"president's"` must become
+`"president"`, not `"president s"` with a stray token nothing on the other
+side of a comparison would have. The general punctuation rule that follows
+*does* space (rather than delete) — hyphens included — which is the specific
+mechanism that lets `"twenty-seven"` reach step 6 as two separate,
+recombinable tokens instead of the single unsplittable token `"twentyseven"`
+deleting the hyphen would produce.
+
+**Step 4's table is a fixed, listed set, not a general abbreviation
+detector**: `president of the united states` → `president`; `u s a` → `united
+states`; `u s` → `united states`; `d c` → `district of columbia`; `usa` →
+`united states`; `us` → `united states`; `dc` → `district of columbia`;
+`potus` → `president`. Two properties of how the table is applied are load-
+bearing:
+
+- **Whole-token/whole-phrase only, never substring.** A naive
+  `.replace('us', 'united states')` over raw text would turn `"houses"` into
+  `"hounited statesnes"`. Because step 3 has already split the input into
+  discrete tokens, the replacement can only ever match a token (or an exact
+  run of tokens) in full.
+- **`us` colliding with the English pronoun "us" is a known, accepted
+  trade**, exactly like step 2's `"its"` collision: on a naturalization
+  civics test, `us`-as-country is overwhelmingly the intended reading, and
+  leaving `"the U.S."` unmatched against `"the United States"` was the
+  headline bug issue #70 was filed to fix. The alternative — dropping the
+  rule to protect a pronoun usage that essentially never occurs among these
+  100–128 questions' accepted answers — fails the common case to guard
+  against one that does not arise in this domain.
+
+**Step 6 runs both directions because the accepted answer is normalised
+through the identical function.** A `civics_answers` row storing
+`"twenty-seven"` and a learner typing `"27"` both normalise to `"27"`; a row
+storing `"27"` and a learner typing `"twenty-seven"` normalise to the same
+value from the other side — there is no separate "canonical accepted form"
+kept anywhere; one function runs over both strings. The scanner enforces two
+ordering guards so it cannot invent a value out of word salad: a units word
+may only add onto a multiple of ten (`"twenty seven"` is `27`, but `"seven
+seven"` stays two separate `7`s), and a tens word may only open a fresh
+hundreds group (`"seven twenty"` is `"7 20"`, not `27`). An ordinal always
+ends the run it appears in, because English ordinals are terminal —
+`"twenty first"` is one number, `"first twenty"` is two.
 
 ### 7.1 `matchAnswer`
 
 ```ts
-function matchAnswer(
-  response: string,
-  acceptedAnswers: ReadonlyArray<{ id: string; text: string }>,
-): {
+interface AcceptedAnswer {
+  readonly id: string;
+  readonly text: string;
+}
+
+type MatchRule = 'exact' | 'normalized';
+
+interface AnswerMatch {
   outcome: 'correct' | 'incorrect';
   matchedAnswerId: string | null;
-  matchedAnswerText: string | null;
-  rule: 'exact' | 'normalized' | null;
+  matchedAnswerText: string | null;   // the answer's ORIGINAL text, never normalised
+  rule: MatchRule | null;
 }
+
+function matchAnswer(
+  response: string,
+  acceptedAnswers: readonly AcceptedAnswer[],
+): AnswerMatch;
 ```
 
-Checked in this order, first match wins:
+`AcceptedAnswer` is deliberately narrower than a `CivicsAnswer` row — only
+`id` and `text`, because that is the entirety of what grading needs. Whoever
+calls `matchAnswer` (the not-yet-written practice service) is responsible
+for first resolving the question's currently-correct rows through
+`civics/answer-resolution.ts` (§1) and passing only their `id`/`text` pairs
+in; building the fuller `answer_snapshot` (§6) — with `sort`, `stateCode`,
+and the rest — is that caller's job, done from the same resolved rows,
+never from `matchAnswer`'s own return value.
 
-1. **`exact`** — the raw response string equals an accepted answer's raw
-   text, **case-sensitively**, with no normalisation applied at all. This
-   exists ahead of normalisation for the case where a learner types the
-   answer exactly as printed and the pipeline's own transformations (say, a
-   hyphen-to-space collapse) are simply unnecessary work — it is a
-   short-circuit, not a different standard of correctness, since anything
-   `exact` catches, `normalized` would catch too.
-2. **`normalized`** — `normalizeAnswer(response)` equals
-   `normalizeAnswer(acceptedAnswer.text)` for some accepted answer.
-3. **No match** — `outcome: 'incorrect'`, `matchedAnswerId: null`,
-   `matchedAnswerText: null`, `rule: null`.
+**The two passes run completely separately — every accepted answer checked
+for an exact match before any is checked for a normalised one — and that
+ordering is deliberate, not an optimisation.** A question with accepted
+answers `"the President"` and `"President"` would, in a single fused loop
+that checked each accepted answer both ways in turn, report a learner who
+typed `"President"` verbatim as a `normalized` match against `"the
+President"` if that row happened to be checked first — the wrong answer id
+*and* the wrong rule, purely as an accident of how the content was seeded.
+Two full passes make the reported `rule` a fact about the learner's
+response, never a fact about row order.
+
+1. **Pass 1 — `exact`.** The response, trimmed, equals some accepted
+   answer's text, also trimmed, compared **case-sensitively** with no
+   normalisation applied at all.
+2. **Pass 2 — `normalized`.** `normalizeAnswer(response)` equals
+   `normalizeAnswer(acceptedAnswer.text)` for some accepted answer — checked
+   only if no exact match was found in pass 1.
+3. **No match** — `{ outcome: 'incorrect', matchedAnswerId: null,
+   matchedAnswerText: null, rule: null }`.
 
 **What this function does NOT do, by design, not by omission:** no edit
-distance, no similarity score, no substring containment. A response that is
-merely *close* to an accepted answer — one letter off, a plausible
-misspelling, a near-miss paraphrase — is `incorrect`, full stop, under this
-function. That is not a gap this epic intends to fill later with a looser
-threshold; it is the exact seam E4 exists to occupy (§8), and blurring it
-here would leave two different, uncoordinated notions of "close enough"
-competing inside the same codebase.
+distance, no similarity score, no substring containment, no "starts with,"
+no token-overlap ratio. A response that is merely *close* to an accepted
+answer — one letter off, a plausible misspelling, a near-miss paraphrase —
+is `incorrect`, full stop. Substring containment in particular fails in both
+directions at once: `"not the president"` contains `"the president"`;
+`"Washington"` is contained by both `"George Washington"` and `"Washington,
+D.C."`, answers to two different questions. There is no threshold that makes
+either safe, so there is no threshold — the near-miss this leaves on the
+table is exactly the seam E4 exists to occupy (§8), and blurring it here
+would leave two different, uncoordinated notions of "close enough" competing
+inside the same codebase.
 
-**Degenerate input never throws.** Empty, whitespace-only, or a response
-longer than 2000 characters returns `{ outcome: 'incorrect', matchedAnswerId:
-null, matchedAnswerText: null, rule: null }` directly, without running the
-normalisation pipeline over content that cannot productively match anything
-— a `matchAnswer` call is never the thing that turns a malformed client
-request into a 500.
+**Degenerate input never throws, and is checked before either pass runs.**
+A non-string, an empty or whitespace-only response, or a response whose *raw*
+length exceeds `MAX_RESPONSE_LENGTH` (2000 characters — checked before any
+regex touches the string, so the bound cannot itself be the expensive part)
+all return `incorrect` immediately. One more edge case worth naming: a
+response that normalises to the **empty string** (e.g. the response was
+nothing but filler and punctuation — `"it's..."` on its own) is also treated
+as no match, even if some pathological accepted-answer row also normalised
+to empty; two empty strings are not allowed to "agree." A `matchAnswer` call
+is never the thing that turns a malformed client request into a 500.
 
 ---
 
@@ -590,6 +689,30 @@ loop this epic ships is not a preview of E4, it is a complete, correct
 product on its own, and E4 only ever makes an `incorrect` verdict *more
 lenient*, never the reverse.
 
+### 8.1 What `grading_method` is for a `skipped` attempt
+
+§2.2 flags this as a fact the shipped schema settles that the issue text
+left open: `grading_method` is `NOT NULL` on every row, `skipped` outcomes
+included, so "no grading was attempted" is not a state the column can
+represent with its own value the way a nullable column would let it. This
+document resolves the apparent tension by reading `grading_method` as
+answering a slightly different question than "did grading happen" — it
+answers **which decision-maker's verdict produced this row's `outcome`**.
+E3's own deterministic pipeline is that decision-maker for every attempt it
+creates, and deciding "this attempt has no response to grade, so the
+outcome is `skipped`" is itself a decision the pipeline makes, in exactly
+the same sense that deciding "this response matches no accepted answer, so
+the outcome is `incorrect`" is. Both are `grading_method: 'exact'`. `'self'`
+and `'ai'` are reserved for the two cases where a *different* verdict —
+the learner's own claim, or a model's judgment — overrides or supplies what
+the deterministic pipeline alone could not: self-mark (§9) upgrades an
+`incorrect` or `skipped` result to `correct`, and E4's grader (§8) will supply its own
+`outcome` when the deterministic pipeline's is `incorrect` and a caller's AI
+is available. Neither of those two cases has anything to say about a skip —
+a learner who skips has given nothing for either a self-mark or an AI
+grader to evaluate — so a skipped attempt's `grading_method` is always
+`'exact'`.
+
 ---
 
 ## 9. Self-mark: a first-class outcome, discounted by E5
@@ -610,17 +733,52 @@ building accurate confidence toward a real interview. `VISION.md`'s
 tone rules already forbid condescension; grading a correct learner as wrong
 with no recourse is a harsher failure than a tone problem.
 
-**The mechanism.** Self-mark is reachable **only after the attempt has been
-revealed** (`revealed: true`) and only while its current `outcome` is not
-already `correct` — a learner cannot self-mark an attempt the deterministic
-path already accepted, because there is nothing left to claim. Revealing
-first is deliberate: self-mark is the learner asserting "I said the right
-thing, the matcher just didn't recognize it," and that assertion is only
-checkable by the learner against the actual accepted answer, not against
-their own unaided memory of what they think the answer probably was. Once
-both conditions hold, a distinct write (§10) sets `outcome: 'correct'`,
-`gradingMethod: 'self'`, and stamps `updatedAt` — the one and only case
-`practice_attempts.updatedAt` moves past its initial write (§2.2).
+**The mechanism has to respect a fact §2.2 already establishes: `practice_attempts`
+has no `updatedAt` column, and its own schema comment calls it an immutable
+record of something that already happened.** Self-mark therefore cannot be a
+later PATCH against an already-persisted row — there is no column that
+would even record when such a mutation happened, and mutating an "immutable"
+row silently would contradict the one property every other reader of this
+table is entitled to assume. So self-mark is folded into the **single**
+write that creates the attempt, not a second write against it:
+
+1. The learner types a response (or types nothing) and, before anything is
+   persisted, the client can ask the practice module to **check** it against
+   the question's currently-resolved accepted answers — a read-only call
+   that runs §7.1's `matchAnswer` and returns its verdict, but writes
+   nothing. This is what "immediate feedback" (epic #52's own phrase) means
+   concretely: the learner sees whether they were right before the attempt
+   is ever committed.
+2. If that check comes back `incorrect`, the learner may ask to see the
+   accepted answer (a **reveal**, §9.1) and, having seen it, assert "I was
+   right" — the self-mark decision.
+3. Exactly one `POST` then creates the `practice_attempts` row, carrying
+   whatever the learner ultimately decided: `revealed` and `hintUsed` as
+   they actually happened, and — the one substantive effect of a self-mark —
+   `outcome: 'correct'`, `gradingMethod: 'self'` in place of whatever the
+   deterministic pipeline would otherwise have recorded. The server does not
+   trust the client's claim blindly: it still runs `matchAnswer` itself
+   (when a `responseText` was even submitted) as part of handling that
+   `POST`, and only honours a client-asserted self-mark when (a) the
+   deterministic result would be `incorrect` **or** `skipped` — self-mark
+   can never be used to downgrade or relitigate a match the pipeline
+   already accepted as `correct` — and (b) the request also asserts
+   `revealed: true` in the same payload, for the reason given below.
+   Allowing self-mark over a would-be `skipped` result, not only an
+   `incorrect` one, is what makes the "flashcard-style" use the schema's own
+   `gradingMethod` comment names possible at all: a learner who never types
+   an answer, only reveals it and self-reports "I knew it," produces exactly
+   this shape of row. There is never a second write against the row: the
+   attempt is created once, already reflecting whatever the learner decided
+   before moving on, which is exactly what a table with no `updatedAt`
+   requires of it.
+
+Revealing before self-marking is required for the identical reason
+regardless of which call carries the flag: self-mark is the learner
+asserting "I said the right thing, the matcher just didn't recognize it,"
+and that assertion is only checkable by the learner against the actual
+accepted answer, not against their own unaided memory of what they think
+the answer probably was.
 
 **Why it is `outcome: 'correct'`, not a fourth outcome value of its own.**
 A self-marked attempt genuinely *is* a correct answer from the product's
@@ -663,14 +821,16 @@ schema to catch it.
 `revealed` and `hint_used` are independent booleans, not states on a
 ladder, and both can be true on the same attempt (a learner takes a hint,
 still cannot answer, and reveals). Neither one *by itself* changes
-`outcome` or `grading_method` — revealing an already-`incorrect` attempt
-does not retroactively make it correct; only an explicit self-mark call
-does that, and only after revealing has happened. A skipped attempt that is
-revealed with no response typed at all stays `outcome: 'skipped'`,
-`gradingMethod: null` — seeing the answer without ever attempting to
-produce one is not evidence of recall in any direction, and recording it as
-`incorrect` would overstate what actually happened exactly as much as
-recording it `correct` would understate the learner's non-attempt.
+`outcome` or `grading_method` — revealing what the accepted answer was does
+not, on its own, retroactively make a response correct; only an explicit
+self-mark decision does that (§9), and only once revealing has already
+happened. A learner who reveals but does **not** self-mark, having typed no
+response at all, gets exactly §8.1's default: `outcome: 'skipped'`,
+`gradingMethod: 'exact'`, `revealed: true` — seeing the answer without ever
+producing or claiming one is not evidence of recall in either direction,
+and recording it as `incorrect` would overstate what actually happened
+exactly as much as recording it `correct` would understate the learner's
+non-attempt.
 
 ---
 
@@ -685,12 +845,11 @@ accepts another user's id, ever.
 
 | Method + path | Notes |
 |---|---|
-| `POST /api/practice/sessions` | Body: `kind` (`quick` \| `category` only — §4), `categoryId?` (required iff `kind: 'category'`). Closes any existing `in_progress` session for the caller first (§5), then creates the new one. |
+| `POST /api/practice/sessions` | Body: `kind` (`quick` \| `category` only — §4), `categoryId?` (required iff `kind: 'category'`). Closes any existing `in_progress` session for the caller first (§5), resolves `testVersionCode` from the caller's own `learner_profiles` row, and creates the new one. |
 | `GET /api/practice/sessions` | Paginated, `page`/`pageSize` per `AllowlistController`'s convention, newest first — the "recent sessions" list. |
 | `GET /api/practice/sessions/:id` | One session plus its attempts so far. Ownership-checked, not permission-checked — the `storage_objects` posture (`CLAUDE.md`'s RBAC section): every authenticated user may read their own, and a `PermissionsGuard` here would reject the ordinary case. |
-| `POST /api/practice/sessions/:id/attempts` | Body: `questionId`, `responseText?`, `hintUsed?`, `durationMs?`. Runs §7's `matchAnswer` against §7.1's civics-content-resolved accepted answers, writes `outcome`/`gradingMethod: 'exact'`/`answerSnapshot` in one transaction, and returns the graded attempt plus the still-current accepted answers so the client can render immediate feedback without a second round trip. |
-| `POST /api/practice/attempts/:id/reveal` | Sets `revealed: true`. Idempotent — revealing an already-revealed attempt is a no-op, not an error. |
-| `POST /api/practice/attempts/:id/self-mark` | §9's mechanism exactly: 409 (not 400 — the request is well-formed, the *state* forbids it) if `revealed` is false or `outcome` is already `correct`; otherwise sets `outcome: 'correct'`, `gradingMethod: 'self'`. |
+| `POST /api/practice/sessions/:id/questions/:questionId/check` | **Read-only — writes nothing.** Body: `responseText?`. Resolves the question's current accepted answers (§1's `answer-resolution.ts`) and runs §7.1's `matchAnswer` against them, returning the verdict and the full resolved answer set so the client can render "immediate feedback" (epic #52's phrase) and, on an incorrect or empty response, offer reveal — all before anything is persisted. Callable any number of times for the same question with no side effect, which is exactly why it is not the endpoint that creates the evidence row. |
+| `POST /api/practice/sessions/:id/attempts` | Body: `questionId`, `responseText?`, `revealed?`, `hintUsed?`, `durationMs?`, `selfMarkCorrect?`. Re-runs `matchAnswer` server-side (never trusts a client-reported verdict), then applies §9's self-mark override when `selfMarkCorrect: true`, `revealed: true`, and the deterministic result is not already `correct`. Writes exactly one `practice_attempts` row — `outcome`, `gradingMethod`, `revealed`, `hintUsed`, `answerSnapshot`, `answeredAt: Clock.now()` — in one transaction, and returns the created attempt. There is no follow-up call that mutates it: §9 designs this around the table's own immutability, not against it. |
 | `POST /api/practice/sessions/:id/complete` | Sets `status: 'completed'`, `completedAt`, and computes `summary` (§2.1) from the session's own attempts. Refuses (409) a session that is not `in_progress`. |
 
 **No new audit action.** Unlike an admin settings write or a role change,
@@ -760,6 +919,9 @@ assembled string.
 | **Requiring `session_id` non-null on every `practice_attempts` row** | Would force E8's mock-interview attempts to reference a `practice_sessions` row that means nothing to an interview flow, purely to satisfy a `NOT NULL` constraint this table's other producer has no honest value for. §2.2. |
 | **Self-mark reachable without first revealing the accepted answer** | Turns self-mark into "mark myself correct because I want to be," with nothing checking the claim against the actual accepted answer the learner is asserting they matched. §9. |
 | **Recording `duration_ms: 0` when a client cannot report a duration** | `0` is a claim — a false one, that the learner answered instantly — for the identical reason `ai_usage_events`' token columns are nullable rather than defaulting to zero on a failed call. §2.2. |
+| **A `PATCH`-style endpoint that mutates an already-persisted attempt for reveal and self-mark** | `practice_attempts` has no `updatedAt` column at all, and the shipped schema's own comment calls it an immutable record — the same posture `AiUsageEvent` takes. Folding reveal and self-mark into the single write that creates the attempt (§9, §10) respects that immutability instead of contradicting it with a mutation the table has no column to timestamp. §9, §10. |
+| **A nullable `grading_method`, so a `skipped` attempt could record "no grading happened"** | The shipped column is `NOT NULL`; reconciling that fact with a skip is this document's job (§8.1), and reading `grading_method` as "which decision-maker's verdict produced this outcome" rather than "did grading occur" answers it without needing a schema change the migration has already foreclosed. §8.1. |
+| **A database-level partial unique index on `practice_sessions(user_id) WHERE status = 'in_progress'`** | Not what the shipped migration does — verified directly against its SQL, which defines only two ordinary indexes. The application-level check in the create-session flow is cheaper to have shipped in the same migration and closes a narrow, low-consequence race (§5) well enough for E3; nothing in this document rules out adding the index later as a tightening, and doing so would not change any contract this document promises. §2.1, §5. |
 
 ---
 
