@@ -113,6 +113,10 @@ export type {
   AiReachabilityRequest,
   AiMessage,
   AiReachabilityResult,
+  AiRecordedCompletionResult,
+  AiStreamEvent,
+  AiStructuredCompletionRequest,
+  AiStructuredCompletionResult,
   AiUsage,
 } from './ai.types';
 export type {

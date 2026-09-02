@@ -105,7 +105,9 @@ describe('usage recording', () => {
 
   beforeEach(() => {
     chatCreateMock.mockReset();
-    record = jest.fn().mockResolvedValue(undefined);
+    // Returns an id, as `AiUsageService.record` has since #96 — a double that
+    // returned nothing would let `usageEventId` be silently dropped.
+    record = jest.fn().mockResolvedValue('usage-row-1');
 
     provider = new OpenAiProvider(
       { getSecret: jest.fn() } as unknown as CredentialsService,
@@ -256,6 +258,21 @@ describe('usage recording', () => {
 
       expect(result.success).toBe(true);
       expect(result.text).toBe('hi');
+      // The completion stands and the link does not: a nullable FK is the
+      // caller's half of the same trade.
+      expect(result.usageEventId).toBeNull();
+    });
+
+    it('hands the recorded row id back to the caller (#96)', async () => {
+      // Issue #110 writes this into `practice_attempts.ai_usage_event_id`.
+      chatCreateMock.mockResolvedValue({
+        choices: [{ message: { content: 'hi' } }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      });
+
+      const result = await provider.complete(ALICE, KEY, REQUEST);
+
+      expect(result.usageEventId).toBe('usage-row-1');
     });
 
     it('writes exactly one row per call, success or failure', async () => {
@@ -314,9 +331,11 @@ describe('AiUsageService.record', () => {
     jest.spyOn(service['logger'], 'error').mockImplementation(() => undefined);
   });
 
-  it('SWALLOWS a database failure rather than raising it', async () => {
+  it('SWALLOWS a database failure, reporting it as a null row id', async () => {
     // A usage write that throws would fail the user's request for the sake of
-    // an accounting row.
+    // an accounting row. `null` rather than `undefined` since #96: it is a
+    // VALUE the caller stores in a nullable FK, not an absence it has to
+    // interpret — see `practice_attempts.ai_usage_event_id` (#110).
     prisma.aiUsageEvent.create.mockRejectedValue(new Error('db down') as never);
 
     await expect(
@@ -330,11 +349,52 @@ describe('AiUsageService.record', () => {
         success: true,
         errorCode: null,
       }),
-    ).resolves.toBeUndefined();
+    ).resolves.toBeNull();
+  });
+
+  it('RETURNS THE ROW ID, so a caller can point a foreign key at it', async () => {
+    // The whole reason this is no longer `Promise<void>`. Recovering the id
+    // afterwards would mean guessing at the most recent row for this user and
+    // model, which races the learner's own next answer and is wrong precisely
+    // when they are answering quickly.
+    prisma.aiUsageEvent.create.mockResolvedValue({ id: 'evt-1' } as never);
+
+    await expect(
+      service.record({
+        userId: ALICE,
+        provider: 'openai',
+        model: 'gpt-5.4',
+        roleKey: 'grader',
+        usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+        latencyMs: 10,
+        success: true,
+        errorCode: null,
+      }),
+    ).resolves.toBe('evt-1');
+  });
+
+  it('selects only the id back, and no content column — there are none', async () => {
+    prisma.aiUsageEvent.create.mockResolvedValue({ id: 'evt-1' } as never);
+
+    await service.record({
+      userId: ALICE,
+      provider: 'openai',
+      model: 'gpt-5.4',
+      roleKey: 'tutor',
+      usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+      latencyMs: 10,
+      success: true,
+      errorCode: null,
+    });
+
+    const written = prisma.aiUsageEvent.create.mock.calls[0][0] as {
+      select: Record<string, boolean>;
+    };
+    expect(written.select).toEqual({ id: true });
   });
 
   it('passes null counts through as null', async () => {
-    prisma.aiUsageEvent.create.mockResolvedValue({} as never);
+    prisma.aiUsageEvent.create.mockResolvedValue({ id: 'evt-1' } as never);
 
     await service.record({
       userId: ALICE,

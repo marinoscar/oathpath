@@ -1,5 +1,6 @@
 import type { Logger } from '@nestjs/common';
 import { SpanStatusCode, trace } from '@opentelemetry/api';
+import { z } from 'zod';
 
 import {
   SecretRedactor,
@@ -13,6 +14,11 @@ import type {
   AiConnectionTestResult,
   AiModelCatalogResult,
   AiReachabilityRequest,
+  AiRecordedCompletionResult,
+  AiStreamEvent,
+  AiStructuredCompletionRequest,
+  AiStructuredCompletionResult,
+  AiUsage,
 } from './ai.types';
 import type { AiUsageService } from './ai-usage.service';
 import type {
@@ -31,9 +37,22 @@ import type {
 // later narrows to "just the API call" while refactoring is all it takes.
 //
 // So the public methods are implemented HERE, once, `final` by convention, and
-// subclasses implement `fetchModels` / `probeConnection` instead. A provider
-// subclass contains no try/catch at all and has no public method to get wrong;
-// the entire never-throw contract is this file.
+// subclasses implement `fetchModels` / `probeConnection` / `runCompletion` /
+// `runStructuredCompletion` / `openStream` instead. A provider subclass
+// contains no try/catch at all and has no public method to get wrong; the
+// entire never-throw contract is this file.
+//
+// -----------------------------------------------------------------------------
+// `stream` IS THE HARD ONE, AND IT IS WHY THE PATTERN WAS WORTH KEEPING (#96)
+// -----------------------------------------------------------------------------
+//
+// A `Promise`-returning method has one exit; an async generator has four, and
+// three of them are easy to miss. It can throw before the first chunk, throw
+// between chunks, complete normally — or be ABANDONED, when the consumer stops
+// iterating because a browser tab closed mid-answer. The tokens were spent in
+// every one of those cases, so a usage row is owed in every one of them, and
+// only the `finally` of a generator sees the fourth. Writing that per provider
+// is writing it wrong once per provider.
 //
 // The catches are deliberately bare `catch` over EVERYTHING — not
 // `catch (e: Error)`, not a filtered rethrow. There is no error class from
@@ -218,6 +237,60 @@ export abstract class BaseAiProvider implements AiProvider {
     redact: SecretRedactor,
   ): Promise<AiCompletionResult>;
 
+  /**
+   * Run one completion constrained to a JSON schema, on the caller's key.
+   *
+   * MAY THROW FREELY, as every hook above may. {@link completeStructured}
+   * turns a throw into a recorded failure with NULL token counts.
+   *
+   * RETURNS THE RAW TEXT, NOT A PARSED OBJECT. Parsing and validating happen
+   * once in {@link completeStructured}, because they are where two of this
+   * surface's three failure modes live (`invalid_json`,
+   * `schema_validation_failed`) and a provider that parsed its own reply is a
+   * provider that can classify those differently from the next one. It is also
+   * the only place that knows the raw text must not reach an error string.
+   *
+   * @param jsonSchema `request.schema` already converted, so a subclass never
+   *        touches zod and cannot convert it with different options than the
+   *        validation on the way back was built from.
+   * @param redact the key is already registered by {@link completeStructured}.
+   * @returns the model's reply verbatim (`null` when it sent no content), and
+   *        whatever usage the provider reported.
+   */
+  protected abstract runStructuredCompletion(
+    apiKey: string,
+    request: AiStructuredCompletionRequest<unknown>,
+    jsonSchema: Record<string, unknown>,
+    redact: SecretRedactor,
+  ): Promise<{ raw: string | null; usage: AiUsage }>;
+
+  /**
+   * Open a streamed completion on the caller's key.
+   *
+   * MAY THROW FREELY, AND MAY THROW MID-ITERATION — which is the case that
+   * matters, because a stream fails after it has started far more often than
+   * before. {@link stream} catches both and turns them into the single
+   * terminal `error` event.
+   *
+   * The yielded shape is deliberately loose (`{ delta?, usage? }`) rather than
+   * the public {@link AiStreamEvent}: a provider reports fragments of a
+   * response, and the terminal-event contract — exactly one, always last — is
+   * not a fragment. Letting a subclass emit `done` would hand it the one
+   * invariant this class exists to keep.
+   *
+   * @param request carries `stream: true` already; {@link stream} sets it, so
+   *        a subclass cannot forget and silently issue a non-streamed call.
+   * @param signal the caller's abort signal. Pass it to the provider's request
+   *        options: without it an abandoned response keeps being generated and
+   *        billed after the reader is gone.
+   */
+  protected abstract openStream(
+    apiKey: string,
+    request: AiCompletionRequest,
+    redact: SecretRedactor,
+    signal?: AbortSignal,
+  ): AsyncIterable<{ delta?: string; usage?: AiUsage }>;
+
   // ---------------------------------------------------------------------------
   // Public surface — NEVER THROWS. Do not override.
   // ---------------------------------------------------------------------------
@@ -372,13 +445,23 @@ export abstract class BaseAiProvider implements AiProvider {
    * invisible one, because zero is a perfectly plausible value. `null` means
    * "unknown", and `success`/`errorCode` are what distinguish the two.
    *
+   * -------------------------------------------------------------------------
+   * THE ROW ID COMES BACK OUT (#96)
+   * -------------------------------------------------------------------------
+   *
+   * `usageEventId` is the `ai_usage_events` row this call wrote, so a caller
+   * can point a foreign key at it — issue #110's
+   * `practice_attempts.ai_usage_event_id`. `null` means the write failed, not
+   * that none was attempted; the completion is returned either way, because
+   * the user asked for an answer and not for bookkeeping.
+   *
    * @param userId the caller whose key this runs on and whose row is written.
    */
   async complete(
     userId: string,
     apiKey: string,
     request: AiCompletionRequest,
-  ): Promise<AiCompletionResult> {
+  ): Promise<AiRecordedCompletionResult> {
     const redact = new SecretRedactor();
 
     // REGISTERED BEFORE ANYTHING THAT CAN THROW WHILE HOLDING IT.
@@ -445,25 +528,375 @@ export abstract class BaseAiProvider implements AiProvider {
     }
     span.end();
 
-    // A FAILED USAGE WRITE MUST NEVER FAIL THE USER'S REQUEST.
-    //
-    // `AiUsageService.record` already swallows internally, and this catch is
-    // deliberately belt-and-braces on top of that rather than redundant: the
-    // guarantee belongs to THIS method, which is the one the user's request
-    // runs through. Trusting the recorder alone means a different recorder — a
-    // test double, a future implementation, an injected decorator — silently
-    // takes the guarantee away, and the symptom would be a user losing a tutor
-    // explanation because an accounting row could not be written.
+    const usageEventId = await this.recordUsage(
+      userId,
+      request,
+      result.usage,
+      latencyMs,
+      result.success,
+      result.errorCode,
+    );
+
+    return { ...result, usageEventId };
+  }
+
+  /**
+   * Run one schema-constrained completion, and record it. NEVER throws.
+   *
+   * -------------------------------------------------------------------------
+   * THE SCHEMA IS A CONSTRAINT ON THE WAY OUT AND A CHECK ON THE WAY BACK
+   * -------------------------------------------------------------------------
+   *
+   * `z.toJSONSchema` sends it to the provider, which will not emit a reply
+   * violating it; `safeParse` then validates the reply anyway. That is not
+   * belt-and-braces for its own sake — `response_format` is honoured by the
+   * models we bind today and is not a property of every model an admin can
+   * bind tomorrow, and the failure it prevents is silent: a reply shaped like
+   * `{ "verdict": "maybe" }` flowing into a grader that branches on
+   * `correct`/`incorrect` does not error, it grades wrongly.
+   *
+   * A reply that fails EITHER step is a failure with `data: null`. Never a
+   * partial object — see {@link AiStructuredCompletionResult.data}.
+   *
+   * -------------------------------------------------------------------------
+   * THE MODEL'S REPLY NEVER REACHES `error`, A LOG LINE OR A SPAN
+   * -------------------------------------------------------------------------
+   *
+   * It is tempting: "expected JSON, got: <the reply>" is the single most useful
+   * thing to see when this fails. It is also, in this application, a model's
+   * commentary on what a learner typed during interview practice — the exact
+   * material `ai_usage_events` was designed to have no column for. So the
+   * failure messages below describe the SHAPE of the problem (not JSON; N zod
+   * issues, of these kinds) and never quote the content. `ai.schema` on the
+   * span is the schema's NAME for the same reason.
+   */
+  async completeStructured<T>(
+    userId: string,
+    apiKey: string,
+    request: AiStructuredCompletionRequest<T>,
+  ): Promise<AiStructuredCompletionResult<T>> {
+    const redact = new SecretRedactor();
+
+    // REGISTERED BEFORE ANYTHING THAT CAN THROW WHILE HOLDING IT.
+    redact.protect(apiKey);
+
+    const span = tracer.startSpan(`${this.providerName}.completeStructured`);
+    span.setAttribute('ai.model', request.modelId);
+    span.setAttribute('ai.role', request.roleKey);
+    // THE NAME, NEVER THE SCHEMA ITSELF. A schema is a description of the
+    // reply we are asking for, and on this surface that is a description of
+    // what we ask a model to say about a learner.
+    span.setAttribute('ai.schema', request.schemaName);
+
+    const startedAt = Date.now();
+
+    let data: T | null = null;
+    let usage: AiUsage = EMPTY_USAGE;
+    let errorCode: string | null = null;
+    let error: string | null = null;
+
     try {
-      await this.usage.record({
+      // INSIDE THE TRY. `z.toJSONSchema` throws on a schema it cannot
+      // represent — a transform, a custom refinement, a lazy cycle — and that
+      // is a perfectly ordinary mistake for a caller to make. Built outside,
+      // it would be the one line in this method that can take the process's
+      // never-throw guarantee away.
+      const jsonSchema = z.toJSONSchema(request.schema, {
+        target: 'draft-7',
+      }) as Record<string, unknown>;
+
+      const outcome = await this.runStructuredCompletion(
+        apiKey,
+        request as AiStructuredCompletionRequest<unknown>,
+        jsonSchema,
+        redact,
+      );
+
+      if (typeof outcome !== 'object' || outcome === null) {
+        // The same malformed-return guard the other public methods carry: a
+        // subclass that falls off the end of a branch yields `undefined`, and
+        // reading `.usage` off it throws one frame outside this try.
+        this.logger.error(
+          `${this.providerName} provider returned no structured result; treating as a failure`,
+        );
+        errorCode = 'malformed_result';
+        error = `${this.providerName} returned no result.`;
+      } else {
+        usage = outcome.usage ?? EMPTY_USAGE;
+
+        const parsed = parseJson(outcome.raw);
+
+        if (!parsed.ok) {
+          // An absent or empty body lands here too, and deliberately shares
+          // the code: "the provider did not return the JSON we constrained it
+          // to" is one operational problem with one remedy, and splitting it
+          // in the usage table would only make the group smaller, not the
+          // diagnosis better.
+          errorCode = 'invalid_json';
+          error = this.formatError(
+            outcome.raw === null || outcome.raw.length === 0
+              ? `The model returned no content for schema ${request.schemaName}.`
+              : `The model's reply for schema ${request.schemaName} was not valid JSON.`,
+            redact,
+          );
+        } else {
+          const validated = request.schema.safeParse(parsed.value);
+
+          if (validated.success) {
+            data = validated.data;
+          } else {
+            errorCode = 'schema_validation_failed';
+            error = this.formatError(
+              `The model's reply did not match schema ${request.schemaName} (${describeIssues(
+                validated.error,
+              )}).`,
+              redact,
+            );
+          }
+        }
+      }
+    } catch (err) {
+      // UNKNOWN USAGE, not zero — `usage` is left at whatever we were told
+      // before the throw, which is all-null unless the provider had already
+      // reported. See `complete`.
+      errorCode = classifyThrow(err);
+      error = this.formatCaught(err, redact);
+    }
+
+    const latencyMs = Date.now() - startedAt;
+    const success = errorCode === null;
+
+    if (success) {
+      span.setStatus({ code: SpanStatusCode.OK });
+    } else {
+      span.setStatus({
+        code: SpanStatusCode.ERROR,
+        message: 'structured completion failed',
+      });
+      this.logger.warn(
+        `${this.providerName} structured completion failed for user ${userId} (${request.roleKey}/${request.modelId}, schema ${request.schemaName}): ${error}`,
+      );
+    }
+
+    // Only when known. An attribute of 0 would be the same lie the column
+    // refuses.
+    if (usage.totalTokens !== null) {
+      span.setAttribute('ai.total_tokens', usage.totalTokens);
+    }
+    span.end();
+
+    const usageEventId = await this.recordUsage(
+      userId,
+      request,
+      usage,
+      latencyMs,
+      success,
+      errorCode,
+    );
+
+    return { success, data, usage, errorCode, error, usageEventId };
+  }
+
+  /**
+   * Stream one completion, and record it. NEVER throws, and NEVER THROWS FROM
+   * THE ITERATOR EITHER.
+   *
+   * -------------------------------------------------------------------------
+   * EXACTLY ONE TERMINAL EVENT, ALWAYS LAST
+   * -------------------------------------------------------------------------
+   *
+   * Every path out of this generator that a consumer can observe ends in one
+   * `done` or one `error`. The consumer is an SSE endpoint: a throw out of the
+   * iterator would skip the terminal event, and a browser waiting for one
+   * holds the connection open forever — a tab spinning on a response that
+   * already failed, and a server holding a socket for a request that is over.
+   *
+   * -------------------------------------------------------------------------
+   * A MID-STREAM FAILURE RECORDS NULL, NEVER ZERO
+   * -------------------------------------------------------------------------
+   *
+   * `usage` is assigned ONLY from a usage-bearing chunk, so a stream that
+   * breaks before the provider reported anything records all-null: we were
+   * never told what it cost, and `0` would state that it cost nothing. A
+   * streamed call reports usage at all only because the provider side sets
+   * `stream_options: { include_usage: true }` — omit that and every streamed
+   * call records nothing, with no error and no warning to notice (#37). That
+   * is why {@link openStream} is the single place a streaming request is
+   * built, and why a test asserts the flag rather than trusting this comment.
+   *
+   * -------------------------------------------------------------------------
+   * A CLIENT DISCONNECT STILL WRITES THE ROW (#120)
+   * -------------------------------------------------------------------------
+   *
+   * A consumer that stops iterating — `break` out of a `for await`, a closed
+   * tab, an aborted SSE response — calls the generator's `return()`, which
+   * runs the `finally` below. The tokens were spent whether or not anyone read
+   * them, so the row is written there. `recorded` is what makes it exactly
+   * once: the normal and failing paths write it themselves, and the `finally`
+   * only covers the abandoned one.
+   *
+   * @param signal aborts the upstream request, so an abandoned generation
+   *        stops being produced and billed rather than running to completion
+   *        into nobody.
+   */
+  async *stream(
+    userId: string,
+    apiKey: string,
+    request: AiCompletionRequest,
+    signal?: AbortSignal,
+  ): AsyncGenerator<AiStreamEvent, void, undefined> {
+    const redact = new SecretRedactor();
+
+    // REGISTERED BEFORE ANYTHING THAT CAN THROW WHILE HOLDING IT. Inside the
+    // generator body rather than before it, because a generator's body does
+    // not run until the first `next()` — a `protect` written above this line
+    // would not have run yet when the first chunk is requested.
+    redact.protect(apiKey);
+
+    const span = tracer.startSpan(`${this.providerName}.stream`);
+    span.setAttribute('ai.model', request.modelId);
+    span.setAttribute('ai.role', request.roleKey);
+    span.setAttribute('ai.stream', true);
+
+    const startedAt = Date.now();
+
+    // Assigned ONLY from a usage-bearing chunk. All-null until then, which is
+    // the honest reading of "the provider has not told us".
+    let usage: AiUsage = EMPTY_USAGE;
+    let recorded = false;
+
+    /** Write the row, at most once, whichever way this generator ends. */
+    const recordOnce = async (
+      success: boolean,
+      errorCode: string | null,
+    ): Promise<string | null> => {
+      if (recorded) return null;
+      recorded = true;
+
+      return this.recordUsage(
+        userId,
+        request,
+        usage,
+        Date.now() - startedAt,
+        success,
+        errorCode,
+      );
+    };
+
+    try {
+      // `stream: true` IS SET HERE, not left to the caller and not left to the
+      // subclass. A streamed call issued without it is a non-streamed call
+      // that happens to work, and it would record its usage under the
+      // streaming path's assumptions.
+      const upstream = this.openStream(
+        apiKey,
+        { ...request, stream: true },
+        redact,
+        signal,
+      );
+
+      for await (const chunk of upstream) {
+        if (chunk.usage) usage = chunk.usage;
+
+        // Empty deltas are dropped rather than forwarded: the provider emits
+        // role-only and finish-only chunks, and an SSE consumer appending
+        // those is an SSE consumer sending empty frames to a browser.
+        if (typeof chunk.delta === 'string' && chunk.delta.length > 0) {
+          yield { type: 'delta', text: chunk.delta };
+        }
+      }
+
+      const usageEventId = await recordOnce(true, null);
+
+      if (usage.totalTokens !== null) {
+        span.setAttribute('ai.total_tokens', usage.totalTokens);
+      }
+      span.setStatus({ code: SpanStatusCode.OK });
+
+      yield { type: 'done', usage, usageEventId };
+    } catch (err) {
+      // ANY throw: from opening the stream, from the middle of the iteration,
+      // from an `AbortError` raised by `signal`. All of them are the same
+      // thing to the reader — the answer is not whole — and all of them leave
+      // by the one terminal event.
+      const errorCode = classifyThrow(err);
+      const error = this.formatCaught(err, redact);
+      const usageEventId = await recordOnce(false, errorCode);
+
+      span.setStatus({ code: SpanStatusCode.ERROR, message: 'stream failed' });
+      this.logger.warn(
+        `${this.providerName} stream failed for user ${userId} (${request.roleKey}/${request.modelId}): ${error}`,
+      );
+
+      yield { type: 'error', errorCode, error, usage, usageEventId };
+    } finally {
+      // THE ABANDONED PATH (#120). Reached when the consumer called `return()`
+      // on this generator before a terminal event — a `break`, a closed tab —
+      // in which case neither branch above ran. Nothing is yielded here: a
+      // generator being closed has no reader left to yield to.
+      //
+      // `success: false` because the completion did not finish, and a distinct
+      // code so an operator reading the table can tell an abandoned stream
+      // from a failed one. They are different problems: one is a user leaving,
+      // the other is the provider.
+      if (!recorded) {
+        await recordOnce(false, 'client_disconnected');
+        span.setStatus({
+          code: SpanStatusCode.ERROR,
+          message: 'stream abandoned by the consumer',
+        });
+      }
+
+      span.end();
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Internals
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Write the `ai_usage_events` row for one call, and hand back its id.
+   *
+   * -------------------------------------------------------------------------
+   * A FAILED USAGE WRITE MUST NEVER FAIL THE USER'S REQUEST
+   * -------------------------------------------------------------------------
+   *
+   * `AiUsageService.record` already swallows internally, and this catch is
+   * deliberately belt-and-braces on top of that rather than redundant: the
+   * guarantee belongs to THIS class, which is what the user's request runs
+   * through. Trusting the recorder alone means a different recorder — a test
+   * double, a future implementation, an injected decorator — silently takes
+   * the guarantee away, and the symptom would be a user losing a tutor
+   * explanation because an accounting row could not be written.
+   *
+   * SHARED BY ALL THREE PUBLIC INFERENCE METHODS (#96) rather than repeated
+   * three times. Recording is the obligation that has no symptom when it is
+   * skipped — nothing fails, a user's consumption is simply absent — so the
+   * version of this code that gets forgotten in one branch is the version that
+   * is never noticed.
+   *
+   * @returns the row id, or `null` when the write failed. `null` is not "no
+   *        row was needed": every call writes one.
+   */
+  private async recordUsage(
+    userId: string,
+    request: AiCompletionRequest,
+    usage: AiUsage,
+    latencyMs: number,
+    success: boolean,
+    errorCode: string | null,
+  ): Promise<string | null> {
+    try {
+      return await this.usage.record({
         userId,
         provider: this.kind,
         model: request.modelId,
         roleKey: request.roleKey,
-        usage: result.usage,
+        usage,
         latencyMs,
-        success: result.success,
-        errorCode: result.errorCode,
+        success,
+        errorCode,
       });
     } catch (err) {
       // The user id and the model are enough to find the gap. Nothing about
@@ -473,14 +906,10 @@ export abstract class BaseAiProvider implements AiProvider {
           err instanceof Error ? err.message : 'unknown error'
         }`,
       );
+
+      return null;
     }
-
-    return result;
   }
-
-  // ---------------------------------------------------------------------------
-  // Internals
-  // ---------------------------------------------------------------------------
 
   /**
    * One place a failed catalog is built, so the span, the log line and the
@@ -544,4 +973,57 @@ export abstract class BaseAiProvider implements AiProvider {
     // on which provider said it.
     return `${this.providerName}: ${truncateProviderError(redact.apply(raw))}`;
   }
+}
+
+// -----------------------------------------------------------------------------
+// Structured-reply helpers
+// -----------------------------------------------------------------------------
+
+/**
+ * Parse a model's reply, reporting failure as a value rather than a throw.
+ *
+ * A separate function so `completeStructured`'s own `try` keeps meaning "the
+ * provider call failed". A `JSON.parse` inside it would land in the same catch
+ * and be classified by {@link classifyThrow}, turning "the model did not
+ * answer in JSON" into the generic `error` code — the one distinction the
+ * `invalid_json` code exists to preserve.
+ *
+ * THE PARSED VALUE IS RETURNED, NOT LOGGED. Nothing here touches the text
+ * beyond parsing it; see `completeStructured` for why the reply must not reach
+ * an error string.
+ */
+function parseJson(
+  raw: string | null,
+): { ok: true; value: unknown } | { ok: false } {
+  if (raw === null || raw.length === 0) return { ok: false };
+
+  try {
+    return { ok: true, value: JSON.parse(raw) as unknown };
+  } catch {
+    return { ok: false };
+  }
+}
+
+/**
+ * Describe a validation failure WITHOUT quoting anything the model wrote.
+ *
+ * This is narrower than it looks, on purpose. The obvious message —
+ * "expected string at `verdict`, received 42" — is the useful one and is not
+ * available: zod's own issue messages can quote received values, and even an
+ * issue PATH is model-derived when the schema contains a `z.record()`, whose
+ * keys come from the reply. On this surface the reply is a model's commentary
+ * on what a learner typed during interview practice, and an error string is
+ * the one field of the result that reaches a log.
+ *
+ * So what is emitted is the part that provably comes from OUR schema and not
+ * from the model: how many issues there were, and which KINDS of issue they
+ * were. `2 issues: invalid_type, too_small` says "the reply is the wrong
+ * shape, in these ways" — which is what an operator watching this fail
+ * repeatedly needs — while carrying nothing to redact.
+ */
+function describeIssues(error: z.ZodError): string {
+  const kinds = [...new Set(error.issues.map((issue) => issue.code))].sort();
+  const count = error.issues.length;
+
+  return `${count} ${count === 1 ? 'issue' : 'issues'}: ${kinds.join(', ')}`;
 }
