@@ -20,6 +20,45 @@ script safely, not a command you can copy-paste as-is.
 
 ---
 
+## 0. Read this first: what a rotation now costs
+
+⚠️ **This is no longer a one-administrator operation.** Epic #25 added
+**per-user OpenAI keys** — one credential per user, at
+`(purpose 'ai-user', name <userId>)` — and every AI request in the application
+runs on the calling user's own key.
+
+So a rotation or key loss that leaves rows unreadable means:
+
+| Before epic #25 | Now |
+|---|---|
+| One administrator re-enters the SMTP password | **Every user re-enters their own OpenAI key** |
+| Email stops sending until they do | **Every user is locked out of the product until they do** |
+| An administrator can fix it for everyone | **Nobody can fix it on anyone's behalf** |
+
+That last row is the one that changes the operational shape. Per-user keys are
+not readable by anyone — not by an administrator, not by this application — and
+nobody but the user has them. There is no bulk remediation, no restore, and no
+support action. A keyless user is hard-blocked from the app by design
+(`RequireAiKey`), so "AI is degraded" is not the failure mode; "signed-in users
+land on the key setup screen and cannot leave it" is.
+
+Practical consequences for planning:
+
+- **Notify users before the window, not after.** They will each need to visit
+  their OpenAI dashboard and create a new key. That is a several-minute task per
+  person and it cannot be done for them.
+- **Count `ai-user` rows first** — `SELECT count(*) FROM credentials WHERE
+  purpose = 'ai-user';` — so the size of the disruption is known before it
+  happens rather than discovered from support volume.
+- **Prefer a re-encryption rotation (§4) over anything that loses the old key.**
+  A correctly executed rotation re-encrypts every row and nobody re-enters
+  anything. The scenario above is §5's — key *loss* — and it is now expensive
+  enough to be worth a second backup of the old key during the window.
+
+The rest of this runbook is unchanged; only the blast radius is larger.
+
+---
+
 ## 1. Before you start
 
 - **Generate the new key first**, so it exists before you need it:
@@ -194,8 +233,38 @@ Once you have that list, contact whoever owns each `purpose`/`name` pair and
 have them re-enter the secret through the normal write path once one exists
 for that purpose.
 
+### `ai-user` rows are the bulk of that list, and they are not yours to re-enter
+
+Every row under `purpose = 'ai-user'` is **one person's own OpenAI key**, and
+`name` is their user id. Nobody but that person can supply it: it is not
+readable, it was never held by this application in a recoverable form, and it
+does not exist anywhere an administrator can reach.
+
+So for those rows the recovery is not an operator task at all — it is a
+communication task:
+
+```sql
+-- Who needs to re-enter a key, and when they last set one.
+SELECT c.name AS user_id, u.email, c.updated_at
+FROM credentials c
+LEFT JOIN users u ON u.id::text = c.name
+WHERE c.purpose = 'ai-user'
+ORDER BY c.updated_at DESC;
+```
+
+Each of those users will be sent to `/setup/ai-key` the next time they load the
+app, which is the correct outcome — the screen explains what to do. What the
+operator owes them is warning, not a fix.
+
+**Delete the unreadable rows once you have the list.** Leaving them in place
+does not help anyone re-enter anything, and `describe` will keep reporting
+`configured: true` for a credential that cannot be used — which makes the key
+form say "a key is saved" to a user whose key is dead. `DELETE FROM credentials
+WHERE purpose = 'ai-user';` after capturing the list above is the honest state.
+
 ## 6. Summary checklist
 
+- [ ] Blast radius understood (§0) — `SELECT count(*) FROM credentials WHERE purpose = 'ai-user';` and users notified in advance
 - [ ] New key generated with `openssl rand -base64 32` and stored outside the repo and the database
 - [ ] Maintenance window scheduled or credential writes frozen
 - [ ] Rotation script written per section 4, decrypting under OLD key and re-encrypting under NEW key in the same process, with an explicit module-cache reload between the two phases

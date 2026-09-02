@@ -227,9 +227,15 @@ If the diff feels “big,” you waited too long. **Split the work and commit so
 
 Every settings surface in this app — admin or per-user — is a **registry-driven
 hub**, not a tab strip and not an ungoverned route. This was established by
-epic #90 (issues #91–#96) and is documented in full, with rationale and
-rejected alternatives, in [`docs/specs/settings-ui.md`](docs/specs/settings-ui.md).
-This section states the rules; that file explains why.
+epic #90 (issues #91–#96).
+
+The rules below are self-contained, including the reasoning that makes each one
+load-bearing. The worked examples in the codebase are the second half of the
+documentation: `apps/web/src/config/adminSections.tsx` and
+`userSettingsSections.tsx` (the registries),
+`apps/web/src/components/settings/SettingsHub.tsx` (the shared hub), and
+`apps/web/src/config/destinations.ts` (whose header explains the
+three-gates-three-answers failure this pattern exists to prevent).
 
 ### Core Rules (MANDATORY)
 
@@ -282,11 +288,22 @@ This section states the rules; that file explains why.
 
    The boundary is `sm` (600px), never `md` (900px) — gating at 900px hands
    the phone treatment to 600–899px tablets, foldables, and landscape
-   phones. There is deliberately no shared constant binding these five: see
-   `docs/specs/settings-ui.md` §5 for why.
+   phones.
 
-See [`docs/specs/settings-ui.md`](docs/specs/settings-ui.md) for the full
-rationale, the rejected alternatives, and the accessibility requirements.
+   **There is deliberately no shared constant binding these five.** A
+   `COMPACT_BREAKPOINT` would make them look coupled while doing nothing to
+   keep them so: three of the five are not breakpoint comparisons at all
+   (`<main>`'s padding is a responsive value, `BottomNav`'s gate is its own
+   `down()`, and `showRail` is an `up()` where the others are `down()`), so a
+   constant would cover the two that already agree and leave the three that
+   actually drift. The real coupling is this list, and it is enforced by
+   reading it.
+
+Accessibility requirements for a settings page are the app-wide ones: a real
+`<label>` on every control, a sensible heading order under the page's single
+`h1`, visible focus, and any result or error in a region assistive technology
+announces. `apps/web/src/pages/Admin/EmailSettingsPage.tsx` and
+`AiSettingsPage.tsx` are the worked examples.
 
 ## Architecture Principles
 
@@ -416,6 +433,20 @@ above. Don't restate any of that here; extend those three instead.
 - `GET /api/pat` - List current user's tokens
 - `DELETE /api/pat/{id}` - Revoke a token
 
+### AI Configuration (Admin)
+- `GET /api/ai-settings` - Get AI settings and masked server-key status
+- `PUT /api/ai-settings` - Replace AI settings (write-only `apiKey`, blank preserves)
+- `GET /api/ai-settings/models` - Classified model catalog + the model-role registry
+- `POST /api/ai-settings/test` - Test the saved server configuration
+
+### AI (Per User)
+- `GET /api/ai/key` - Describe your own stored key (never the key)
+- `PUT /api/ai/key` - Save or replace your own key
+- `DELETE /api/ai/key` - Remove your own key
+- `POST /api/ai/key/test` - Test your key's reachability, per role
+- `GET /api/ai/status` - `userKeyConfigured` and `systemReady`, independently
+- `GET /api/ai/usage` - Your own recorded usage (not a bill)
+
 ### Health
 - `GET /api/health/live` - Liveness check
 - `GET /api/health/ready` - Readiness check (includes DB)
@@ -436,6 +467,12 @@ above. Don't restate any of that here; extend those three instead.
 - `storage:read/write/delete` - Storage object access (own objects)
 - `storage:read_any/write_any/delete_any` - Storage object access (all objects, Admin only)
 
+**AI adds no permission strings.** Admin AI settings gate on
+`system_settings:read`/`:write`; the per-user AI routes are `@Auth()` with no
+permissions, because every authenticated user owns their own credentials — and
+since a keyless user is hard-blocked, gating them would leave the gated role
+unable to use the app at all.
+
 ## Database Tables
 
 - `users` - User accounts with profile info
@@ -451,6 +488,7 @@ above. Don't restate any of that here; extend those three instead.
 - `storage_objects` - File metadata, status, storage references
 - `storage_object_chunks` - Multipart upload chunk tracking
 - `personal_access_tokens` - User-created long-lived API tokens (hashed)
+- `ai_usage_events` - Per-user AI call records (token counts nullable: null means unknown, never zero)
 
 ## Access Control: Email Allowlist
 
@@ -600,6 +638,74 @@ settings hub makes on its own axis (epic #109, wired end to end by #128).
 Live examples of all three steps: `AuthService.handleGoogleLogin`
 (`user.welcome`), `AllowlistService.addEmail` (`allowlist.invitation`), and
 `UsersService.updateUserRoles` (`security.role_changed`, mandatory).
+
+### Adding a New AI Model Role
+
+Three steps and no migration, the same "one registry entry" promise the
+notification registry makes on its own axis (epic #25, `docs/specs/ai-settings.md`).
+
+A **model role** is one job this application asks a model to do. Six are
+declared; `tutor` and `grader` are wired, the other four are declared and inert
+so that adding voice work later is not a settings-schema change and a migration
+over live admin configuration.
+
+1. **Declare the role** in `apps/api/src/ai/ai-model-roles.ts`
+   (`AI_MODEL_ROLES`): a stable `key`, a `label` and `description` written as
+   admin-facing copy, the `capability` family a model must belong to to serve
+   it, and `wired`.
+
+   That one entry feeds the settings schema, the admin page's selects, the
+   connection tests and the usage rows. `AI_MODEL_ROLE_KEYS`,
+   `aiSettingsSchema`'s `models` map and `DEFAULT_AI_SETTINGS.models` are all
+   **derived** from the array, so the slot appears everywhere in the same edit.
+   There is no second list to update.
+
+   `key` is persisted — it is a property name in the `system_settings` row and a
+   column value on every `ai_usage_events` row. **Renaming one is a migration,
+   not a refactor**: an admin's stored binding becomes unreachable, so the role
+   silently reverts to unbound and the feature reports "your administrator
+   hasn't finished setting up the AI models" with nothing in the audit trail to
+   explain why. Add a new key and migrate the row.
+
+2. **Set `wired: true` only when something actually dispatches to it.**
+   `systemReady` (`GET /api/ai/status`) is computed over the wired roles alone,
+   and both test endpoints probe only wired roles that have a binding. Wiring a
+   role nothing uses makes every deployment report itself unready until an admin
+   binds a model for a feature that does not exist.
+
+   An unwired role still renders on `/admin/settings/ai`, inert, using the
+   registry's `disabled` card idiom — an admin can see what is coming without
+   being able to configure something that does nothing.
+
+3. **Check the provider can serve the capability.** `AiProvider.capabilities`
+   declares which families a provider supports, and
+   `GET /api/ai-settings/models` reports a role as unwired for **this
+   deployment** when the configured provider cannot serve it. That is why the
+   web reads `wired` from the endpoint rather than from a constant: it is a
+   per-deployment fact, not a static one. OpenAI declares all six; a future
+   chat-only provider declares a subset and the voice roles render inert on its
+   deployments automatically.
+
+**The registry lives in the API. The web reads it over an endpoint** — never a
+duplicated copy in `apps/web/src/config`. This is option 1 of the three
+`apps/api/src/notifications/notification-events.ts` weighs, for the same reason:
+a duplicate with a test asserting the two agree is *detection* rather than
+prevention (the copies can still disagree in a working tree, in a branch, and in
+any build where the test is not run), and it breaks the one-registry-entry
+promise directly. `wired` makes it worse still, because a static copy would be
+wrong on any deployment whose provider differs.
+
+**Neither API key is ever a setting.** The server key lives at
+`(purpose 'ai', name 'openai')` and each user's at `('ai-user', <their id>)`, in
+the encrypted credential store. `aiSettingsSchema` carries a compile-time proof
+that no secret-bearing field is in it; adding `apiKey` there fails the build.
+
+Live examples: `apps/api/src/ai/ai-model-roles.ts` (the registry),
+`apps/api/src/ai/ai-settings.schema.ts` (what derives from it),
+`apps/api/src/ai/providers/model-classifier.ts` (how a model id is sorted into a
+capability family), and `apps/web/src/pages/Admin/AiSettingsPage.tsx` (the
+selects it drives). The design record, with the rejected alternatives, is
+[`docs/specs/ai-settings.md`](docs/specs/ai-settings.md).
 
 ## Specialized Subagents (MANDATORY)
 

@@ -1046,6 +1046,190 @@ If-Match: 1
 
 ---
 
+### AI Configuration
+
+Two scopes, and the distinction matters for every endpoint below.
+
+The **server** key (`/ai-settings`) is administrator-held. It is used only to
+fetch the model catalog and to prove connectivity — **it never runs a user's
+request**. Every inference call runs on the **calling user's own key**
+(`/ai/key`), so each user sees and pays for their own consumption.
+
+Neither key is ever returned by any endpoint, in any shape. Both live encrypted
+in the credential store; the read paths return a masked, non-secret `hint` and
+carry compile-time proofs that no secret-bearing field can be added to them.
+
+#### GET /ai-settings
+**Requires `system_settings:read`** — the AI configuration plus a masked
+description of the stored server key.
+
+**Response:**
+```json
+{
+  "provider": "openai",
+  "enabled": true,
+  "models": { "tutor": "gpt-5.4", "grader": "gpt-5.4-mini", "realtime": null,
+              "transcribe": null, "speak": null, "embed": null },
+  "minModelGeneration": 5.4,
+  "apiKeyStatus": {
+    "configured": true,
+    "hint": "••••x9fQ",
+    "updatedAt": "2026-08-01T00:00:00.000Z",
+    "updatedByUserId": "…"
+  },
+  "settingsError": null,
+  "version": 3,
+  "updatedAt": "2026-08-01T00:00:00.000Z",
+  "updatedBy": { "id": "…", "email": "admin@example.com" }
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `provider` | enum \| null | `null` is "no provider chosen" — a real state, not an absent key |
+| `enabled` | boolean | Master switch. A separate axis, so AI can be turned off without losing the configuration |
+| `models` | object | Role key → model id. `null` means the role is not bound |
+| `minModelGeneration` | number | The generation floor, applied to the **text families only** |
+| `apiKeyStatus` | object | Whether a key is stored, its mask, and provenance. **Never the key** |
+| `settingsError` | string \| null | Why a stored row would not parse. **Field paths only, never values** |
+| `version` | number | Optimistic-concurrency token; send back as `If-Match` |
+
+---
+
+#### PUT /ai-settings
+**Requires `system_settings:write`** — replace the AI configuration.
+
+`apiKey` is **write-only**, and **blank preserves**: omit it (or send it empty)
+to keep the stored key. There is no way to erase a key through this endpoint —
+that is a separate control.
+
+Selecting a provider while no key is stored **and** none is submitted returns
+**409**, rather than saving a configuration that cannot do anything and letting
+the admin discover it from an empty model dropdown.
+
+**Request Headers (Optional):** `If-Match: 3` — use `0` to assert nothing is
+stored yet.
+
+---
+
+#### GET /ai-settings/models
+**Requires `system_settings:read`** — the classified model catalog **and** the
+model-role registry, in one response.
+
+The roles come back **even when the catalog could not be fetched**: they are
+code, not provider data, so a missing key has no bearing on them.
+
+| Query | Description |
+|-------|-------------|
+| `role` | Restrict to the capability family this role needs. Unknown roles are ignored, not rejected |
+| `family` | Restrict to one family directly. `role` takes precedence |
+| `showAll` | `true` disables the generation floor and includes every family, including unrecognised ids |
+
+`notConfigured: true` means no server key is stored — the state of every fresh
+install, and **not** an error. A provider refusal arrives in `error`, verbatim
+and redacted, with HTTP 200.
+
+The generation floor applies to the **text families only**: transcription, TTS
+and embedding models use entirely different naming, so a numeric floor would
+empty those lists rather than filter them. A model whose generation cannot be
+parsed is **not dropped** — it appears under `showAll`.
+
+---
+
+#### POST /ai-settings/test
+**Requires `system_settings:write`** — not `:read`. It causes the system to
+originate an outbound request on the organisation's credential, and looking is
+not calling.
+
+**There is no target parameter.** It tests the saved configuration; a free-text
+model id would make this a call-arbitrary-endpoint primitive.
+
+**Returns HTTP 200 even when the test failed.** A refused connection is a
+successful diagnosis, and this API's error envelope suppresses detail in
+production — read `success`, and show `error`, which carries the provider's
+verbatim message with any credential redacted.
+
+`authenticated` is reported **separately** from `success`: a key that
+authenticates but cannot reach a bound model is a different problem with a
+different fix, and told only "the test failed" an admin would replace a
+perfectly good key.
+
+Every attempt is audited, including pre-flight refusals. The master switch is
+honoured — testing while AI is off reports that rather than calling out.
+
+---
+
+### AI (Per User)
+
+**Every route below is caller-scoped and takes no user id**, in the path, the
+query, or the body. The credential address is resolved from the authenticated
+session, so no user can read, write, test or delete another's key by any input —
+**and neither can an administrator**. That is enforced structurally rather than
+by a permission check.
+
+All are `@Auth()` with **no permissions**: every authenticated user owns their
+own credentials, and gating them would leave a Viewer unable to use the app at
+all, since a user without a key is blocked from the product.
+
+#### GET /ai/key
+Whether **you** have a key saved, its masked hint, and when it last changed.
+**The key itself is never returned — not even to its owner.** A lost key is
+replaced from OpenAI, not read back from here.
+
+#### PUT /ai/key
+Save or replace **your** key. Stored **byte-for-byte, untrimmed** — a key whose
+surrounding whitespace is significant is a real key, and altering it would
+produce an authentication failure with no visible cause. Blank preserves.
+
+#### DELETE /ai/key
+The only way to erase a stored key, deliberately separate from `PUT`.
+**Idempotent** — removing when nothing is stored is a success, not a 404.
+Removing your key re-arms the first-run gate.
+
+#### POST /ai/key/test
+**Reachability, not validity.** Authenticates your key, then checks that each
+wired role's bound model is actually reachable on it, and reports **per role**.
+
+The administrator binds model ids using the *server* key; your key may sit in a
+different organisation or tier with no access to those models. A check that only
+asked "is this key valid" would pass for a key that cannot run a single request
+this application makes.
+
+Returns 200 on failure, as the admin test does.
+
+#### GET /ai/status
+**Two independent facts, and deliberately no combined flag:**
+
+| Field | Meaning |
+|-------|---------|
+| `userKeyConfigured` | You have a key saved. `false` **hard-blocks** you into the key setup screen |
+| `systemReady` | Provider configured, wired roles bound, master switch on. `false` does **not** block you |
+| `enabled` | The master switch, so a message can name the control that is off |
+| `providerConfigured` | Whether a provider has been chosen |
+| `unboundRoles` | Wired roles with no model bound, by key. Names only |
+
+Merging the first two would tell a user blocked by missing *administrator*
+configuration to add a key they already have.
+
+Cheap by design: **no outbound provider call is ever made on this path**,
+because the client consults it on every navigation and a provider outage must
+not lock every user out of an application that has nothing wrong with it.
+
+#### GET /ai/usage
+**Recorded usage, not a bill.** Token counts are not dollars, this application
+carries no price table, and `callsWithUnknownUsage` counts calls whose
+consumption was never reported — a call that fails mid-stream records nothing
+rather than zero, because zero would be a claim. The authoritative figure is
+your own OpenAI dashboard.
+
+| Query | Description |
+|-------|-------------|
+| `days` | Window size. Defaults to 30, clamped to 1–365. An unparseable value falls back to the default rather than erroring |
+
+Returns totals plus breakdowns by model and by the role each call served.
+
+---
+
 ### Storage Objects
 
 The storage system provides file upload and management capabilities with support for large files (GB scale) through resumable multipart uploads.
