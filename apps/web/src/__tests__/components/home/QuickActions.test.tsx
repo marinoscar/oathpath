@@ -3,7 +3,10 @@ import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { render, mockUser, mockAdminUser } from '../../utils/test-utils';
 import { QuickActions } from '../../../components/home/QuickActions';
-import { DESTINATIONS } from '../../../config/destinations';
+import {
+  CONSOLE_DESTINATION,
+  SETTINGS_DESTINATION,
+} from '../../../config/destinations';
 
 // Mock useNavigate from react-router-dom
 const mockNavigate = vi.fn();
@@ -713,17 +716,37 @@ describe('QuickActions', () => {
       expect(screen.getByRole('button', { name: /user settings/i })).toBeInTheDocument();
     });
 
-    it('takes each action path from the destination table, not a local copy', () => {
+    it('takes each action path from the destination model, not a local copy', () => {
+      // The two destinations #69 moved OFF the bar are exactly the two this
+      // card offers, and it names them (`QUICK_ACTION_DESTINATIONS`) rather
+      // than filtering `DESTINATIONS` — which after #69 would have yielded an
+      // empty card, silently taking the home page's only route into a user's
+      // own settings with it. The labels and paths are still the model's, which
+      // is what this assertion protects.
       setPermissions(['users:read', 'system_settings:read'], true);
 
       render(<QuickActions />, { wrapperOptions: { user: mockAdminUser } });
 
-      for (const destination of DESTINATIONS) {
-        if (destination.key === 'home') continue;
+      for (const destination of [SETTINGS_DESTINATION, CONSOLE_DESTINATION]) {
         expect(
           screen.getByRole('button', { name: new RegExp(destination.label, 'i') }),
           `${destination.label} missing from Quick Actions`,
         ).toBeInTheDocument();
+      }
+    });
+
+    it('offers no shortcut to a bar destination — the rail and bottom bar draw all four', () => {
+      // Home never had one (#55's reasoning: a shortcut duplicating on-screen
+      // chrome is bloat), and #69's three new bar destinations inherit it.
+      setPermissions(['users:read', 'system_settings:read'], true);
+
+      render(<QuickActions />, { wrapperOptions: { user: mockAdminUser } });
+
+      for (const label of ['Home', 'Learn', 'Practice', 'Progress']) {
+        expect(
+          screen.queryByRole('button', { name: new RegExp(`^${label}$`, 'i') }),
+          `${label} should not be a quick action`,
+        ).not.toBeInTheDocument();
       }
     });
 

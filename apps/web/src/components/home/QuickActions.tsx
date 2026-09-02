@@ -2,8 +2,12 @@ import { Card, CardContent, Typography, Grid, Button, Box } from '@mui/material'
 import { Palette as ThemeIcon } from '@mui/icons-material';
 import { useNavigate } from 'react-router-dom';
 import { usePermissions } from '../../hooks/usePermissions';
-import { DESTINATIONS, isDestinationVisible } from '../../config/destinations';
-import type { DestinationKey } from '../../config/destinations';
+import {
+  CONSOLE_DESTINATION,
+  SETTINGS_DESTINATION,
+  isDestinationVisible,
+} from '../../config/destinations';
+import type { Destination, DestinationKey } from '../../config/destinations';
 
 /**
  * Home-page shortcuts.
@@ -21,6 +25,22 @@ import type { DestinationKey } from '../../config/destinations';
  * cannot use.
  */
 
+/**
+ * The destinations this card offers, in order (#69).
+ *
+ * NAMED, not filtered out of `DESTINATIONS`, and the change is not cosmetic.
+ * The two entries here are exactly the two destinations `docs/specs/journey-shell.md`
+ * §2 moved OFF the bar — so a filter over `DESTINATIONS` would now yield an
+ * empty card, silently taking the home page's only route to a user's own
+ * settings with it. The four bar destinations are deliberately absent for the
+ * opposite reason: the rail and the bottom bar draw all four at every width, so
+ * a shortcut to them would be Home duplicating the chrome around it.
+ */
+const QUICK_ACTION_DESTINATIONS: readonly Destination[] = [
+  SETTINGS_DESTINATION,
+  CONSOLE_DESTINATION,
+];
+
 /** Prose keyed by destination. A destination with no entry is not shown here. */
 const ACTION_DESCRIPTIONS: Partial<Record<DestinationKey, string>> = {
   settings: 'Manage your profile and preferences',
@@ -35,7 +55,7 @@ export function QuickActions() {
   const navigate = useNavigate();
   const { hasPermission } = usePermissions();
 
-  const visibleActions = DESTINATIONS.filter(
+  const visibleActions = QUICK_ACTION_DESTINATIONS.filter(
     (destination) =>
       ACTION_DESCRIPTIONS[destination.key] !== undefined &&
       isDestinationVisible(destination, hasPermission),

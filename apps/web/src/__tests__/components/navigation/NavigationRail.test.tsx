@@ -59,27 +59,40 @@ describe('NavigationRail', () => {
   });
 
   describe('Destinations', () => {
-    it('renders all three destinations for a fully permitted user', () => {
-      // THREE, not four: issue #92 merged `User Management` and `System
-      // Settings` into one `Console` row, because two rows both matching
-      // `/admin/*` give the rail two active candidates on every admin route.
+    it('renders the four bar destinations plus the pinned Console for a fully permitted user', () => {
+      // FOUR bar rows since #69 (epic #50) — Home, Learn, Practice, Progress —
+      // and Console, which is not one of them: it is the rail's pinned foot,
+      // asserted structurally in the `Pinned foot section` suite below. Five
+      // links, and only one of them gated.
       setPermissions(ADMIN_PERMISSIONS, true);
 
       render(<NavigationRail />, { wrapperOptions: { user: mockAdminUser } });
 
       const nav = screen.getByRole('navigation', { name: /main navigation/i });
-      expect(within(nav).getAllByRole('link')).toHaveLength(3);
-      expect(screen.getByRole('link', { name: 'Home' })).toBeInTheDocument();
-      expect(screen.getByRole('link', { name: 'User Settings' })).toBeInTheDocument();
-      expect(screen.getByRole('link', { name: 'Console' })).toBeInTheDocument();
+      expect(within(nav).getAllByRole('link')).toHaveLength(5);
+      for (const name of ['Home', 'Learn', 'Practice', 'Progress', 'Console']) {
+        expect(screen.getByRole('link', { name })).toBeInTheDocument();
+      }
     });
 
-    it('hides Console from a user holding neither admin permission', () => {
+    it('hides Console from a user holding neither admin permission, and keeps all four bar rows', () => {
       render(<NavigationRail />);
 
-      expect(screen.getByRole('link', { name: 'Home' })).toBeInTheDocument();
-      expect(screen.getByRole('link', { name: 'User Settings' })).toBeInTheDocument();
+      for (const name of ['Home', 'Learn', 'Practice', 'Progress']) {
+        expect(screen.getByRole('link', { name })).toBeInTheDocument();
+      }
       expect(screen.queryByRole('link', { name: 'Console' })).not.toBeInTheDocument();
+    });
+
+    it('draws no User Settings row — it moved to the user menu (#69)', () => {
+      // Not a loss of reachability: `UserMenu` renders `SETTINGS_DESTINATION`
+      // at every width, and its own suite asserts that. The rail spends its
+      // rows on the four destinations a learner uses daily.
+      setPermissions(ADMIN_PERMISSIONS, true);
+
+      render(<NavigationRail />, { wrapperOptions: { user: mockAdminUser } });
+
+      expect(screen.queryByRole('link', { name: 'User Settings' })).not.toBeInTheDocument();
     });
 
     it('gates on PERMISSION, not on the admin role', () => {
@@ -114,9 +127,14 @@ describe('NavigationRail', () => {
       render(<NavigationRail />, { wrapperOptions: { user: mockAdminUser } });
 
       expect(screen.getByRole('link', { name: 'Home' })).toHaveAttribute('href', '/');
-      expect(screen.getByRole('link', { name: 'User Settings' })).toHaveAttribute(
+      expect(screen.getByRole('link', { name: 'Learn' })).toHaveAttribute('href', '/learn');
+      expect(screen.getByRole('link', { name: 'Practice' })).toHaveAttribute(
         'href',
-        '/settings',
+        '/practice',
+      );
+      expect(screen.getByRole('link', { name: 'Progress' })).toHaveAttribute(
+        'href',
+        '/progress',
       );
       expect(screen.getByRole('link', { name: 'Console' })).toHaveAttribute(
         'href',
@@ -128,10 +146,10 @@ describe('NavigationRail', () => {
       const user = userEvent.setup();
       render(<NavigationRail />, { wrapperOptions: { route: '/' } });
 
-      await user.click(screen.getByRole('link', { name: 'User Settings' }));
+      await user.click(screen.getByRole('link', { name: 'Learn' }));
 
       await waitFor(() => {
-        expect(screen.getByRole('link', { name: 'User Settings' })).toHaveAttribute(
+        expect(screen.getByRole('link', { name: 'Learn' })).toHaveAttribute(
           'aria-current',
           'page',
         );
@@ -141,13 +159,43 @@ describe('NavigationRail', () => {
 
   describe('Active state', () => {
     it('marks the active destination with aria-current="page"', () => {
-      render(<NavigationRail />, { wrapperOptions: { route: '/settings' } });
+      render(<NavigationRail />, { wrapperOptions: { route: '/practice' } });
 
-      expect(screen.getByRole('link', { name: 'User Settings' })).toHaveAttribute(
+      expect(screen.getByRole('link', { name: 'Practice' })).toHaveAttribute(
         'aria-current',
         'page',
       );
       expect(screen.getByRole('link', { name: 'Home' })).not.toHaveAttribute('aria-current');
+    });
+
+    it('marks exactly one bar row active on each of the four routes', () => {
+      for (const [route, name] of [
+        ['/', 'Home'],
+        ['/learn', 'Learn'],
+        ['/practice', 'Practice'],
+        ['/progress', 'Progress'],
+      ] as const) {
+        const { unmount } = render(<NavigationRail />, { wrapperOptions: { route } });
+
+        const current = screen
+          .getAllByRole('link')
+          .filter((link) => link.getAttribute('aria-current') === 'page');
+        expect(current, `${route} active rows`).toHaveLength(1);
+        expect(current[0]).toHaveAccessibleName(name);
+        unmount();
+      }
+    });
+
+    it('marks no bar row active on a settings route the rail no longer draws', () => {
+      // `/settings` still RESOLVES to the `settings` destination (#69 keeps its
+      // route ownership) — there is simply no row here to highlight, and the
+      // rail must not fall back to highlighting an arbitrary one.
+      render(<NavigationRail />, { wrapperOptions: { route: '/settings/profile' } });
+
+      const current = screen
+        .getAllByRole('link')
+        .filter((link) => link.getAttribute('aria-current') === 'page');
+      expect(current).toHaveLength(0);
     });
 
     it('marks exactly one row active on a nested admin route', () => {
@@ -185,11 +233,31 @@ describe('NavigationRail', () => {
   });
 
   describe('Two treatments', () => {
+    /**
+     * The collapsed row's caption, or `null` when the row is expanded.
+     *
+     * WHY STRUCTURE RATHER THAN TWO DIFFERENT STRINGS (#69): the old tests told
+     * the treatments apart by "User Settings" versus its shorter compact label
+     * "Settings". Every bar destination's `compactLabel` is now identical to
+     * its `label` — "Practice" and "Progress" are already at the 8-character
+     * cap — so a text comparison can no longer see the difference at all, and a
+     * test that looked like it still worked would be asserting nothing. The
+     * treatments differ structurally instead: expanded rows render a
+     * `ListItemText`, collapsed rows an `aria-hidden` caption.
+     */
+    function collapsedCaption(name: string): HTMLElement | null {
+      const link = screen.getByRole('link', { name });
+      // `span[aria-hidden]` specifically: MUI's icons are `aria-hidden` SVGs
+      // and are present in BOTH treatments, so a bare `[aria-hidden]` query
+      // would match every row at every width and never fail.
+      return link.querySelector('span[aria-hidden="true"]');
+    }
+
     it('shows full labels as visible text at >= lg', () => {
       render(<NavigationRail />);
 
-      expect(screen.getByText('User Settings')).toBeInTheDocument();
-      expect(screen.queryByText('Settings')).not.toBeInTheDocument();
+      expect(screen.getByText('Practice')).toBeInTheDocument();
+      expect(collapsedCaption('Practice')).toBeNull();
     });
 
     it('shows compact captions below lg, with the full label still accessible', async () => {
@@ -199,8 +267,8 @@ describe('NavigationRail', () => {
 
       // The caption is aria-hidden; the accessible name is still the full label,
       // so the row is findable by it either way.
-      expect(screen.getByText('Settings')).toBeInTheDocument();
-      expect(screen.getByRole('link', { name: 'User Settings' })).toBeInTheDocument();
+      expect(collapsedCaption('Practice')).toHaveTextContent('Practice');
+      expect(screen.getByRole('link', { name: 'Practice' })).toBeInTheDocument();
     });
 
     it('stays collapsed below lg even when the stored preference says expanded', async () => {
@@ -211,8 +279,7 @@ describe('NavigationRail', () => {
 
       await act(async () => setViewportWidth(800));
 
-      expect(screen.getByText('Settings')).toBeInTheDocument();
-      expect(screen.queryByText('User Settings')).not.toBeInTheDocument();
+      expect(collapsedCaption('Home')).not.toBeNull();
     });
 
     it('honours the stored collapse preference at >= lg', () => {
@@ -220,8 +287,7 @@ describe('NavigationRail', () => {
 
       render(<NavigationRail />);
 
-      expect(screen.getByText('Settings')).toBeInTheDocument();
-      expect(screen.queryByText('User Settings')).not.toBeInTheDocument();
+      expect(collapsedCaption('Home')).not.toBeNull();
     });
   });
 
@@ -275,7 +341,9 @@ describe('NavigationRail', () => {
 
       expect(screen.getAllByRole('link').map((link) => link.getAttribute('href'))).toEqual([
         '/',
-        '/settings',
+        '/learn',
+        '/practice',
+        '/progress',
         '/admin/settings',
       ]);
     });
@@ -477,11 +545,12 @@ describe('NavigationRail', () => {
   });
 
   describe('Pinned foot section (#105)', () => {
-    // Console is a MODE, not a third library destination, and its position at
-    // the rail's foot is what says so. The old inline render — Console folded
-    // into `visibleDestinations.map(...)` as the third row — put all three
-    // links in ONE <ul>, which a naive "all three links exist" assertion
-    // cannot tell apart from the fix. Every test below asserts the STRUCTURE
+    // Console is a MODE, not a fifth bar destination, and its position at the
+    // rail's foot is what says so. The old inline render — Console folded into
+    // `visibleDestinations.map(...)` as the last row — put every link in ONE
+    // <ul>, which a naive "all the links exist" assertion cannot tell apart
+    // from the fix. Since #69 Console is not in `DESTINATIONS` at all, and the
+    // rail reads `RAIL_PINNED_DESTINATIONS` for this section. Every test below asserts the STRUCTURE
     // (a separate list, preceded by its own divider) rather than mere
     // presence, so it fails against that inline render.
     function pinnedList(nav: HTMLElement): HTMLElement {
@@ -491,7 +560,7 @@ describe('NavigationRail', () => {
       return list as HTMLElement;
     }
 
-    it('renders Console in a different list than Home and Settings, preceded by a divider', () => {
+    it('renders Console in a different list than the bar destinations, preceded by a divider', () => {
       setPermissions(ADMIN_PERMISSIONS, true);
       render(<NavigationRail />, { wrapperOptions: { user: mockAdminUser } });
 
@@ -518,7 +587,9 @@ describe('NavigationRail', () => {
 
       expect(screen.getAllByRole('link').map((link) => link.getAttribute('href'))).toEqual([
         '/',
-        '/settings',
+        '/learn',
+        '/practice',
+        '/progress',
         '/admin/settings',
       ]);
     });
@@ -591,9 +662,9 @@ describe('NavigationRail', () => {
 
   describe('Collapsed caption chrome (#105)', () => {
     // The bug: `mx: 0.5` + `px: 0.5` (16px of horizontal margin+padding) left
-    // a ~40px caption box inside the 56px collapsed rail, and "Settings" /
-    // "Console" both measure ~41px at the caption's 0.625rem — so both
-    // ellipsised. The fix halves each to 0.25 (8px total), leaving a 48px
+    // a ~40px caption box inside the 56px collapsed rail, and "Console" —
+    // like "Practice" and "Progress", the two 8-character captions #69 added —
+    // measures ~41px at the caption's 0.625rem, so it ellipsised. The fix halves each to 0.25 (8px total), leaving a 48px
     // box. jsdom performs no layout, so a textContent check alone cannot see
     // an ellipsis — only the underlying chrome, asserted here via
     // getComputedStyle, can catch a regression back to the old spacing.
@@ -619,14 +690,17 @@ describe('NavigationRail', () => {
 
       // Queried by the row's accessible name (the full label) — the visible
       // caption is aria-hidden, so it cannot be found by accessible name.
-      const settingsRow = screen.getByRole('link', { name: 'User Settings' });
+      // `Practice` is the longest bar caption (8 characters, at the cap
+      // `destinations.test.ts` enforces) and so the one this chrome is measured
+      // against; Console is the pinned row, drawn by the same `RailRow`.
+      const practiceRow = screen.getByRole('link', { name: 'Practice' });
       const consoleRow = screen.getByRole('link', { name: 'Console' });
 
-      expect(horizontalChrome(settingsRow)).toBeCloseTo(8, 5);
+      expect(horizontalChrome(practiceRow)).toBeCloseTo(8, 5);
       expect(horizontalChrome(consoleRow)).toBeCloseTo(8, 5);
       // RAIL_WIDTH_COLLAPSED (56) minus that chrome is the 48px box the fix's
       // comment measures the captions against.
-      expect(RAIL_WIDTH_COLLAPSED - horizontalChrome(settingsRow)).toBe(48);
+      expect(RAIL_WIDTH_COLLAPSED - horizontalChrome(practiceRow)).toBe(48);
     });
 
     it('renders the collapsed captions as full text content, not an abbreviation', async () => {
@@ -638,8 +712,9 @@ describe('NavigationRail', () => {
       // The caption is aria-hidden; query by literal text rather than by
       // accessible name, which stays the full label either way and would not
       // distinguish a full caption from a shortened one.
-      expect(screen.getByText('Settings')).toBeInTheDocument();
-      expect(screen.getByText('Console')).toBeInTheDocument();
+      for (const caption of ['Home', 'Learn', 'Practice', 'Progress', 'Console']) {
+        expect(screen.getByText(caption), `${caption} caption`).toBeInTheDocument();
+      }
     });
   });
 });

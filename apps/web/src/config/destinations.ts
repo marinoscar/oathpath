@@ -34,14 +34,51 @@
  * candidates and an ambiguous active state on every admin route. So the two are
  * replaced by a single `console` destination that owns the whole `/admin`
  * subtree.
+ *
+ * FOUR BAR DESTINATIONS, SIX KEYS (issue #69, epic #50)
+ * -----------------------------------------------------
+ * `docs/specs/journey-shell.md` §2 replaces the bar's contents with the four
+ * destinations the LEARNER uses day to day — Home, Learn, Practice, Progress —
+ * and moves Settings and Console out of the array. The two halves of the model
+ * come apart here, deliberately:
+ *
+ *   - `DESTINATIONS` answers "what is IN THE BAR", and is now exactly four
+ *     entries. The ceiling in `destinations.test.ts` (`length <= 4`) stops
+ *     being headroom and becomes an equality in practice: a fifth bar
+ *     destination fails an assertion that already exists, with no new test to
+ *     write and no way to widen the ceiling by editing the array.
+ *   - `DESTINATION_ROUTES` answers "what LIGHTS UP", and still carries all six
+ *     keys. `/settings/profile` and `/admin/settings/email` must still resolve
+ *     to an active destination — a route owned by nothing highlights nothing,
+ *     and the ownership test would (correctly) fail the whole `/settings`
+ *     subtree as "neither owned nor deliberately unowned".
+ *
+ * So `settings` and `console` keep their keys, their routes and their
+ * `Destination` objects; what they lose is their seat in the bar. Each is
+ * exported on its own for the ONE surface that still draws it —
+ * `SETTINGS_DESTINATION` for the user menu, `RAIL_PINNED_DESTINATIONS` for the
+ * rail's pinned foot — so a surface has to name what it renders instead of
+ * inheriting it from an array it happens to iterate.
  */
 
 import type { SvgIconComponent } from '@mui/icons-material';
 import HomeIcon from '@mui/icons-material/Home';
+import MenuBookIcon from '@mui/icons-material/MenuBook';
+import RecordVoiceOverIcon from '@mui/icons-material/RecordVoiceOver';
+import InsightsIcon from '@mui/icons-material/Insights';
 import SettingsIcon from '@mui/icons-material/Settings';
 import AdminIcon from '@mui/icons-material/AdminPanelSettings';
 
-export type DestinationKey = 'home' | 'settings' | 'console';
+export type DestinationKey =
+  | 'home'
+  | 'learn'
+  | 'practice'
+  | 'progress'
+  // NOT bar destinations since #69, and still full members of the ownership
+  // table — see the file header. Removing either key here would make every
+  // `/settings/*` and `/admin/*` route unowned.
+  | 'settings'
+  | 'console';
 
 /**
  * Does `prefix` own `path`? True when the path equals the prefix or continues
@@ -58,6 +95,10 @@ export function owns(prefix: string, path: string): boolean {
  * parent prefix (`/admin/settings/users`, `/settings/profile`, …) and do not
  * need their own entries.
  *
+ * ALL SIX KEYS, including the two that are not in `DESTINATIONS` (#69). This
+ * map answers "what lights up", which is a different question from "what is in
+ * the bar" — see the file header.
+ *
  * `console` owns the bare `/admin` rather than `/admin/settings`, even though
  * `/admin/settings` is where it NAVIGATES. The two are different questions:
  * `path` is where the row sends you, `DESTINATION_ROUTES` is what makes the row
@@ -68,6 +109,9 @@ export function owns(prefix: string, path: string): boolean {
  */
 export const DESTINATION_ROUTES: Record<DestinationKey, readonly string[]> = {
   home: ['/'],
+  learn: ['/learn'],
+  practice: ['/practice'],
+  progress: ['/progress'],
   settings: ['/settings'],
   console: ['/admin'],
 };
@@ -95,6 +139,14 @@ export const UNOWNED_ROUTES: readonly string[] = [
   // second reason no destination owns it: highlighting a navigation target the
   // user cannot currently go to would be worse than highlighting nothing.
   '/setup/ai-key',
+  // The orientation screen (#61, epic #50), listed here by #69 ahead of the
+  // route itself for exactly the reasons above, which it shares line for line:
+  // `RequireOrientation` hard-blocks a learner who has not completed it, it
+  // mounts OUTSIDE `Layout` (no rail, no bottom bar, nothing to highlight), and
+  // it is the one screen a blocked learner can reach — so highlighting a
+  // destination they cannot currently navigate to would be worse than
+  // highlighting nothing.
+  '/setup/journey',
 ];
 
 /**
@@ -148,10 +200,12 @@ export interface Destination {
    * not a peer of the library destinations, which is what its position at the
    * foot communicates.
    *
-   * RAIL-ONLY, deliberately. The bottom bar has no foot to pin to (it IS the
-   * foot) and the user menu is a flat list, so both keep reading `DESTINATIONS`
-   * in declaration order and ignore this flag. Ordering here therefore still
-   * has to be the correct order for those surfaces.
+   * RAIL-ONLY, and as of #69 that is enforced by MEMBERSHIP rather than by
+   * every other surface remembering to filter on it: the pinned destinations
+   * live in `RAIL_PINNED_DESTINATIONS`, which only `NavigationRail` reads. The
+   * flag stays because it is what that array MEANS — a test asserts the two
+   * agree in both directions — and because the rail still reads it to decide
+   * where a row is drawn.
    */
   pinned?: boolean;
 }
@@ -176,33 +230,25 @@ export function isDestinationVisible(
 }
 
 /**
- * The three destinations, in navigation order.
+ * The four BAR destinations, in navigation order (#69, `docs/specs/journey-shell.md` §2).
  *
- * Declaration order IS navigation order on every surface. The rail is the one
- * exception, and only for the tail of the list: it lifts `pinned` destinations
- * out to its foot (#105) while leaving the rest in this order.
+ * Declaration order IS navigation order on every surface that reads this array
+ * — the rail's list and the bottom bar — and it follows the journey: meet the
+ * material (Learn), use it (Practice), see where that leaves you (Progress),
+ * with Home as the single recommendation that decides which of the three to
+ * open next.
  *
- * GATING IS BY PERMISSION, NOT BY ROLE, and the permission is the one the API
- * actually enforces — verified against the controllers rather than assumed:
+ * NONE OF THEM CARRIES A PERMISSION, and that is deliberate rather than an
+ * omission. An unoriented, keyless, freshly-created account still needs to see
+ * its own four destinations: whether a ROUTE is reachable (`RequireAiKey`,
+ * `RequireOrientation`) is a different question from whether a DESTINATION
+ * exists to navigate to, and only the route needs a gate here. This is the
+ * reachability-vs-content split `CLAUDE.md`'s Settings UI Pattern draws for
+ * tabs, one layer up.
  *
- *   - `users.controller.ts`           → `users:read`
- *   - `system-settings.controller.ts` → `system_settings:read`
- *
- * `console` is reachable on EITHER of those (see `anyPermission`), because
- * `/admin/settings` fronts pages from both controllers and a user entitled to
- * only one half must still reach the surface. The per-page gates inside
- * `/admin/settings/*` are what decide which cards and routes that user actually
- * gets — `config/adminSections.tsx` declares them, and `App.tsx` wraps each
- * route in the matching `RequirePermission`.
- *
- * That is the same REACHABILITY-vs-CONTENT split this file has always drawn:
- * the Users & Allowlist page gates on `users:read` to be reached, while its
- * Allowlist half gates itself on `allowlist:read` inside the page, because its
- * data comes from `allowlist.controller.ts`.
- *
- * `isAdmin` is no longer a navigation gate anywhere. It still exists (and
- * `AdminOnly` with it) for non-navigation uses, but a role check here is what
- * produced the split-brain described in the file header.
+ * `settings` and `console` are NOT here — see `SETTINGS_DESTINATION` and
+ * `RAIL_PINNED_DESTINATIONS` below, and the file header for why they keep
+ * their keys and their route ownership regardless.
  */
 export const DESTINATIONS: readonly Destination[] = [
   {
@@ -213,25 +259,106 @@ export const DESTINATIONS: readonly Destination[] = [
     path: '/',
   },
   {
-    key: 'settings',
-    label: 'User Settings',
-    compactLabel: 'Settings',
-    Icon: SettingsIcon,
-    path: '/settings',
+    key: 'learn',
+    label: 'Learn',
+    compactLabel: 'Learn',
+    Icon: MenuBookIcon,
+    path: '/learn',
   },
   {
-    key: 'console',
-    label: 'Console',
-    compactLabel: 'Console',
-    Icon: AdminIcon,
-    path: '/admin/settings',
-    anyPermission: ['system_settings:read', 'users:read'],
-    // Pinned at the rail's foot (#105) — a mode, not a third library
-    // destination. The permission gate above still runs first: a user who
-    // cannot reach Console gets no pinned row AND no stray divider.
-    pinned: true,
+    key: 'practice',
+    label: 'Practice',
+    compactLabel: 'Practice',
+    Icon: RecordVoiceOverIcon,
+    path: '/practice',
+  },
+  {
+    key: 'progress',
+    label: 'Progress',
+    compactLabel: 'Progress',
+    Icon: InsightsIcon,
+    path: '/progress',
   },
 ];
+
+/**
+ * User Settings — a destination that is no longer in the bar (#69).
+ *
+ * The `UserMenu` is the ONE surface that draws it, and it is exported as a
+ * single object rather than left in an array so that surface has to name it.
+ * `path` is read out of `DESTINATION_ROUTES` rather than retyped: "where the
+ * row sends you" and "what the row lights up for" are the same string for this
+ * destination, and typing it twice is how they stop being.
+ *
+ * NO PERMISSION, as before: every authenticated user owns their own settings,
+ * and none of the `/settings/*` routes is gated either.
+ */
+export const SETTINGS_DESTINATION: Destination = {
+  key: 'settings',
+  label: 'User Settings',
+  compactLabel: 'Settings',
+  Icon: SettingsIcon,
+  path: DESTINATION_ROUTES.settings[0],
+};
+
+/**
+ * Console — the admin surface, and the whole of the rail's pinned foot.
+ *
+ * GATING IS BY PERMISSION, NOT BY ROLE, and the permission is the one the API
+ * actually enforces — verified against the controllers rather than assumed:
+ *
+ *   - `users.controller.ts`           → `users:read`
+ *   - `system-settings.controller.ts` → `system_settings:read`
+ *
+ * Reachable on EITHER (see `anyPermission`), because `/admin/settings` fronts
+ * pages from both controllers and a user entitled to only one half must still
+ * reach the surface. The per-page gates inside `/admin/settings/*` are what
+ * decide which cards and routes that user actually gets —
+ * `config/adminSections.tsx` declares them, and `App.tsx` wraps each route in
+ * the matching `RequirePermission`.
+ *
+ * That is the same REACHABILITY-vs-CONTENT split this file has always drawn:
+ * the Users & Allowlist page gates on `users:read` to be reached, while its
+ * Allowlist half gates itself on `allowlist:read` inside the page, because its
+ * data comes from `allowlist.controller.ts`.
+ *
+ * `isAdmin` is no longer a navigation gate anywhere. It still exists (and
+ * `AdminOnly` with it) for non-navigation uses, but a role check here is what
+ * produced the split-brain described in the file header.
+ */
+export const CONSOLE_DESTINATION: Destination = {
+  key: 'console',
+  label: 'Console',
+  compactLabel: 'Console',
+  Icon: AdminIcon,
+  path: '/admin/settings',
+  anyPermission: ['system_settings:read', 'users:read'],
+  // Pinned at the rail's foot (#105) — a mode, not a fifth bar destination.
+  // The permission gate above still runs first: a user who cannot reach
+  // Console gets no pinned row AND no stray divider.
+  pinned: true,
+};
+
+/**
+ * The rail's pinned foot section — read by `NavigationRail` and by nothing
+ * else (#69).
+ *
+ * Console used to sit in `DESTINATIONS` with `pinned: true`, which changed only
+ * WHERE the rail drew it: `BottomNav` and `UserMenu` both iterate
+ * `DESTINATIONS` with no `pinned` filter, so it appeared in all three surfaces.
+ * With the bar down to four learner destinations there is no fifth slot to
+ * spend on it, so the flag's promise is now kept by membership — Console is not
+ * in the array those surfaces read, so it cannot leak back into them by
+ * omission.
+ *
+ * `docs/specs/journey-shell.md` §2.2 names the accepted cost plainly: an
+ * administrator below `sm` (where `showRail` does not apply) has no one-tap
+ * path to Console from the nav chrome. Nothing about REACHABILITY changes —
+ * `ProtectedRoute` and `RequirePermission` gate `/admin/settings/*` exactly as
+ * before, and a bookmark or typed URL still works — only discoverability from
+ * primary navigation on a narrow screen.
+ */
+export const RAIL_PINNED_DESTINATIONS: readonly Destination[] = [CONSOLE_DESTINATION];
 
 /**
  * Which destination, if any, owns `pathname`.

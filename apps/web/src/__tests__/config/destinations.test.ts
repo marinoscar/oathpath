@@ -4,8 +4,11 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import {
+  CONSOLE_DESTINATION,
   DESTINATIONS,
   DESTINATION_ROUTES,
+  RAIL_PINNED_DESTINATIONS,
+  SETTINGS_DESTINATION,
   UNOWNED_ROUTES,
   isDestinationVisible,
   owns,
@@ -47,6 +50,15 @@ describe('destinations — route ownership', () => {
     expect(paths).toEqual(
       expect.arrayContaining([
         '/',
+        // The three destinations #69 added to the bar. They are asserted HERE,
+        // in the guard, and not merely covered by the ownership loops below:
+        // the loops iterate whatever the regex found, so a bar destination
+        // whose route was never declared would pass all three of them
+        // vacuously — and the failure that produces in the app is a rail row
+        // that falls through `*` to `/`.
+        '/learn',
+        '/practice',
+        '/progress',
         '/settings',
         '/admin',
         '/admin/users',
@@ -58,7 +70,7 @@ describe('destinations — route ownership', () => {
         '/admin/settings/users',
       ]),
     );
-    expect(paths.length).toBeGreaterThanOrEqual(8);
+    expect(paths.length).toBeGreaterThanOrEqual(11);
   });
 
   it('claims every route in App.tsx exactly once, or deliberately not at all', () => {
@@ -101,12 +113,30 @@ describe('destinations — route ownership', () => {
   });
 
   it('gives every destination in the table a route it owns', () => {
-    for (const destination of DESTINATIONS) {
+    // BOTH HALVES of the model (#69): the four bar destinations, and the two
+    // that moved off the bar while keeping their keys. `settings` and `console`
+    // are the ones this assertion now protects hardest — they are exactly the
+    // entries a future edit could drop from `DESTINATION_ROUTES` without any
+    // surface noticing, because neither is in `DESTINATIONS` any more.
+    for (const destination of [
+      ...DESTINATIONS,
+      SETTINGS_DESTINATION,
+      CONSOLE_DESTINATION,
+    ]) {
       expect(
         resolveActiveDestination(destination.path),
         `${destination.path} should activate ${destination.key}`,
       ).toBe(destination.key);
     }
+  });
+
+  it('keeps every route the four-destination bar names owned by its own destination', () => {
+    // The bar's promise, stated as paths rather than as keys: each of the four
+    // lights up itself and nothing else.
+    expect(resolveActiveDestination('/')).toBe('home');
+    expect(resolveActiveDestination('/learn')).toBe('learn');
+    expect(resolveActiveDestination('/practice')).toBe('practice');
+    expect(resolveActiveDestination('/progress')).toBe('progress');
   });
 });
 
@@ -175,16 +205,28 @@ describe('destinations — reachability regression', () => {
     }
   });
 
-  it('offers three destinations, with the two admin rows merged into Console', () => {
-    // NOT four any more (#92). `/admin/users` stops being a destination PATH
-    // while staying a resolvable route — it redirects to
-    // `/admin/settings/users`, and the assertion above is what proves the
-    // merge cost no reachability.
-    expect(DESTINATIONS.map((destination) => destination.path).sort()).toEqual([
+  it('offers exactly the four bar destinations, in journey order', () => {
+    // #69 replaces the bar's contents wholesale. NOT a `sort()` any more:
+    // declaration order IS navigation order on the rail and the bottom bar, and
+    // a sorted comparison would have passed on any permutation of the four —
+    // including Progress before Learn, which reads as a journey run backwards.
+    expect(DESTINATIONS.map((destination) => destination.path)).toEqual([
       '/',
-      '/admin/settings',
-      '/settings',
+      '/learn',
+      '/practice',
+      '/progress',
     ]);
+  });
+
+  it('keeps Settings and Console reachable off the bar, not deleted from the model', () => {
+    // The reachability claim above is what makes #69's move safe: `settings`
+    // and `console` leave `DESTINATIONS` but keep their keys, their paths and
+    // their route ownership. A surface still draws each — the user menu and the
+    // rail's pinned foot — and the suites for both assert that end of it.
+    expect(SETTINGS_DESTINATION.path).toBe('/settings');
+    expect(CONSOLE_DESTINATION.path).toBe('/admin/settings');
+    expect(DESTINATIONS.map((d) => d.key)).not.toContain('settings');
+    expect(DESTINATIONS.map((d) => d.key)).not.toContain('console');
   });
 });
 
@@ -198,16 +240,15 @@ describe('destinations — the table itself', () => {
     // to get this wrong while merging two destinations into one is to keep
     // whichever permission was typed first and silently strip the other, which
     // would lock a users-only admin out of the surface entirely.
-    const byKey = Object.fromEntries(DESTINATIONS.map((d) => [d.key, d]));
-    expect(byKey.console.permission).toBeUndefined();
-    expect([...(byKey.console.anyPermission ?? [])].sort()).toEqual([
+    expect(CONSOLE_DESTINATION.permission).toBeUndefined();
+    expect([...(CONSOLE_DESTINATION.anyPermission ?? [])].sort()).toEqual([
       'system_settings:read',
       'users:read',
     ]);
   });
 
   it('reads anyPermission as OR, and permission as a hard requirement', () => {
-    const [consoleDestination] = DESTINATIONS.filter((d) => d.key === 'console');
+    const consoleDestination = CONSOLE_DESTINATION;
     const holding = (granted: string[]) => (permission: string) =>
       granted.includes(permission);
 
@@ -232,27 +273,43 @@ describe('destinations — the table itself', () => {
   });
 
   it('leaves the non-admin destinations open to any authenticated user', () => {
-    const byKey = Object.fromEntries(DESTINATIONS.map((d) => [d.key, d]));
-    expect(byKey.home.permission).toBeUndefined();
-    expect(byKey.settings.permission).toBeUndefined();
+    // EVERY bar destination now, not just Home (#69, spec §2.1): an unoriented,
+    // keyless, freshly-created account still has to see its own four. Whether
+    // the ROUTE is reachable is a different question, gated on the route.
+    for (const destination of DESTINATIONS) {
+      expect(destination.permission, `${destination.key} permission`).toBeUndefined();
+      expect(destination.anyPermission, `${destination.key} anyPermission`).toBeUndefined();
+    }
+    expect(SETTINGS_DESTINATION.permission).toBeUndefined();
+    expect(SETTINGS_DESTINATION.anyPermission).toBeUndefined();
   });
 
-  it('marks Console pinned and leaves Home and Settings as ordinary list rows (#105)', () => {
-    // The rail's foot section is driven entirely by this flag — see
-    // `NavigationRail`'s `listDestinations`/`pinnedDestinations` split — so a
-    // console row that stops being flagged `pinned` silently falls back to
-    // rendering inline as a third library destination, with no other signal.
-    const byKey = Object.fromEntries(DESTINATIONS.map((d) => [d.key, d]));
-    expect(byKey.console.pinned).toBe(true);
-    expect(byKey.home.pinned).toBeFalsy();
-    expect(byKey.settings.pinned).toBeFalsy();
+  it('keeps the pinned flag and the rail-pinned array agreeing in both directions (#105, #69)', () => {
+    // The rail's foot section is driven by `RAIL_PINNED_DESTINATIONS` since
+    // #69, and the flag is what that array MEANS. Asserting both directions is
+    // what stops the two from drifting into a pinned destination nothing draws,
+    // or a foot row that is not marked as one.
+    expect(RAIL_PINNED_DESTINATIONS.map((d) => d.key)).toEqual(['console']);
+    for (const destination of RAIL_PINNED_DESTINATIONS) {
+      expect(destination.pinned, `${destination.key} must be marked pinned`).toBe(true);
+    }
+    // No BAR destination may be pinned: the bottom bar has no foot to pin to
+    // (it IS the foot) and would draw the row inline regardless.
+    for (const destination of DESTINATIONS) {
+      expect(destination.pinned, `${destination.key} pinned`).toBeFalsy();
+    }
+    expect(SETTINGS_DESTINATION.pinned).toBeFalsy();
   });
 
   it('declares Icon as a component, never as a rendered element', () => {
     // Surfaces draw the icon at different sizes — the rail at `small` when
     // collapsed and `medium` when expanded — so a pre-rendered element here
     // would bake one size into every surface that consumes the table.
-    for (const destination of DESTINATIONS) {
+    for (const destination of [
+      ...DESTINATIONS,
+      SETTINGS_DESTINATION,
+      CONSOLE_DESTINATION,
+    ]) {
       expect(
         isValidElement(destination.Icon),
         `${destination.key} Icon must be a component, not a rendered element`,
@@ -262,7 +319,15 @@ describe('destinations — the table itself', () => {
   });
 
   it('gives every destination a compactLabel short enough for a 56px rail', () => {
-    for (const destination of DESTINATIONS) {
+    // UNCHANGED AT 8 by #69 — the rail is still 56px and the bottom bar still
+    // gives each of four tabs ~90px at 360px. "Practice" and "Progress" are
+    // exactly 8, which is the measurement this cap was derived from, not a
+    // coincidence to be relaxed the next time a longer word is wanted.
+    for (const destination of [
+      ...DESTINATIONS,
+      SETTINGS_DESTINATION,
+      CONSOLE_DESTINATION,
+    ]) {
       expect(destination.compactLabel.length, `${destination.key} compactLabel`).toBeLessThanOrEqual(
         8,
       );
@@ -270,7 +335,14 @@ describe('destinations — the table itself', () => {
   });
 
   it('caps the destination set at four — the bottom bar ceiling', () => {
+    // DELIBERATELY UNCHANGED by #69, and now an equality in practice: with four
+    // real bar destinations this stops being headroom, so a fifth fails an
+    // assertion that already existed — no new test to write, and no way to
+    // widen the ceiling by editing the array (spec §2.2). Console is NOT the
+    // exception it used to be: it is out of the array entirely rather than
+    // occupying a slot with `pinned: true`.
     expect(DESTINATIONS.length).toBeLessThanOrEqual(4);
+    expect(DESTINATIONS.length).toBe(4);
   });
 });
 
@@ -400,8 +472,7 @@ describe('destinations — route gate matches the console anyPermission (#92)', 
 
   it('gates /admin/settings on exactly the permissions the console destination allows', () => {
     const routePermissions = declaredRoutePermissions('/admin/settings');
-    const byKey = Object.fromEntries(DESTINATIONS.map((d) => [d.key, d]));
-    const destinationPermissions = [...(byKey.console.anyPermission ?? [])];
+    const destinationPermissions = [...(CONSOLE_DESTINATION.anyPermission ?? [])];
 
     // Guards the parser itself: if it silently stopped matching (or the route
     // were ever found ungated), the set-equality check below would pass
