@@ -91,16 +91,25 @@ dynamic-answer endpoints (§9); `apps/api/prisma/content/` holds the content
 files, the structural validator, and the idempotent loader (§6–§7). What has
 **not** shipped:
 
-1. **Neither content file is human-verified.** `civics-2008.json` is
-   `UNVERIFIED_MODEL_DRAFT` — drafted to give the rest of this epic
-   realistic-shaped data to build against, not transcribed from the official
-   USCIS PDF, with every dynamic (officeholder) answer an explicit
-   `"[DRAFT PLACEHOLDER]"` string. `civics-2025.json` is `AWAITING_SOURCE`
-   with **zero** questions — the 128-question bank was deliberately not
-   fabricated. The loader enforces this rather than merely documenting it
-   (§7); see
+1. **Neither content file is human-verified, though they are no longer at the
+   same starting point.** `civics-2008.json` is `UNVERIFIED_MODEL_DRAFT` —
+   drafted to give the rest of this epic realistic-shaped data to build
+   against, not transcribed from the official USCIS PDF, with every dynamic
+   (officeholder) answer an explicit `"[DRAFT PLACEHOLDER]"` string.
+   `civics-2025.json` **was** `AWAITING_SOURCE` with zero questions — the
+   128-question bank was deliberately not fabricated while there was no
+   access to the official source. Issue #212 closed that gap: the file now
+   holds all 128 questions, transcribed from the downloaded, hashed official
+   source (M-1778 (09/25), sha256 recorded in `provenance.sha256`), across the
+   8 real USCIS categories rather than the 3-category "Integrated Civics"
+   scaffold this document used to assume would carry over from 2008 (§2.1
+   below). Its status is still `UNVERIFIED_MODEL_DRAFT`, deliberately not
+   `HUMAN_VERIFIED` — a real source document was read this time, but no human
+   has yet checked the transcription page by page. The loader enforces the
+   `HUMAN_VERIFIED` gate rather than merely documenting it (§7); see
    [`docs/runbooks/updating-civics-content.md`](../runbooks/updating-civics-content.md)
-   for how a human transcribes and verifies either file.
+   for how a human verifies either file, including the page-by-page check
+   `civics-2025.json` still needs.
 2. **The admin dynamic-answer page is UI work in flight**, not yet merged to
    `main` as of this writing — the API surface in §9 it renders against is
    live. (The Learn destination against §8's read API has since shipped,
@@ -176,10 +185,10 @@ that point.
 |---|---|---|---|
 | `id` | `String @id @default(uuid()) @db.Uuid` | no | |
 | `testVersionCode` | `String @map("test_version_code")` | no | FK → `civics_test_versions.code`, `onDelete: Restrict` — a version cannot be deleted while its categories exist, same posture as `LearnerProfile.testVersion`. |
-| `section` | `String` | no | The exam's top-level grouping as USCIS publishes it — e.g. `"AMERICAN GOVERNMENT"`, `"AMERICAN HISTORY"`, `"INTEGRATED CIVICS"`. Free text, not an enum: it is presentation grouping copied verbatim from the source, not a value this application branches on. |
+| `section` | `String` | no | The exam's top-level grouping as USCIS publishes it. Free text, not an enum: it is presentation grouping copied verbatim from the source, not a value this application branches on. **The two versions do not share a section list** — `civics-2008.json` groups its categories under `"AMERICAN GOVERNMENT"`, `"AMERICAN HISTORY"`, `"INTEGRATED CIVICS"`; `civics-2025.json` groups its 8 categories under `"AMERICAN GOVERNMENT"`, `"AMERICAN HISTORY"`, `"SYMBOLS AND HOLIDAYS"` — the 2025 source replaced 2008's single "Integrated Civics" section with separate "Symbols" and "Holidays" categories under a "Symbols and Holidays" heading, not a like-for-like rename. |
 | `code` | `String` | no | A stable slug, e.g. `"principles_of_american_democracy"`. This is what `civics_questions.category_id` really addresses in spirit; the surrogate `id` exists only because Postgres FKs are cheaper over a UUID than a string, per the house convention every other table here follows. |
 | `name` | `String` | no | Display name, e.g. `"Principles of American Democracy"`. |
-| `sortOrder` | `Int @map("sort_order")` | no | Render order within a version — categories are not alphabetical in the official material (Government precedes History precedes Integrated Civics), and this column is the only place that order is recorded. |
+| `sortOrder` | `Int @map("sort_order")` | no | Render order within a version — categories are not alphabetical in the official material (in `civics-2008.json`, Government precedes History precedes Integrated Civics; in `civics-2025.json`, Government precedes History precedes Symbols precedes Holidays), and this column is the only place that order is recorded. |
 | `createdAt` / `updatedAt` | `DateTime @db.Timestamptz` | no | House convention. |
 
 ```
@@ -220,6 +229,23 @@ is not expressible as a Postgres `CHECK` (a check constraint cannot reference
 another table), so — like `seniorEligible`'s count invariant above — it is
 the content loader's job, verified once at seed time, not the database's job,
 verified on every write.
+
+**`dynamicScope` does not have to agree across versions for what looks like
+the "same" question, and `civics-2025.json` deliberately exercises that.**
+`civics-2008.json` models the Vice President and the Chief Justice as
+`dynamicScope: 'none'` — issue #101's narrower scoping, treating those two as
+static content. `civics-2025.json` models its equivalent questions (Q39 Vice
+President, Q57 Chief Justice) as `dynamicScope: 'national'`, alongside Q30
+Speaker of the House and Q38 President, because the 2025 source document
+defers all four to `uscis.gov/citizenship/testupdates` rather than printing
+an answer. This is the schema doing exactly what §1 says it's for — scope is
+a property of one version's question, transcribed at content time, not a
+global fact about "who is Vice President" — so the two files are free to
+disagree, and this is the worked example of them doing so on purpose rather
+than by drift. All four of `civics-2025.json`'s national-scope questions get
+a maintainable slot in `GET`/`PUT /api/civics/dynamic-answers` (§9); their
+seed answers are the explicit `"[DRAFT PLACEHOLDER]"` string, per §6, since
+the source itself gives no name to transcribe.
 
 ### 2.3 `civics_answers`
 
@@ -512,6 +538,19 @@ Each individual `civics_answers` row additionally carries its own
 `sourceNote` (§2.3) — a citation can be more specific than the file-level
 `sourceUrl`, particularly for a `state`-scope answer sourced state by state,
 or for a correction sourced from a different record than the original load.
+
+**One deliberate exception to "transcribed from the source," logged in its
+own `sourceNote`s.** `civics-2025.json`'s Q62 ("What is the capital of your
+state?") is `dynamicScope: 'state'`, but the official source document's own
+answer for it is "Answers will vary." — it names no capitals at all. The
+56 per-state capital answers in the file are not from the USCIS PDF; they
+are stable public facts (each state's and territory's actual capital) filled
+in so the question is answerable rather than shipped as 56 empty rows, and
+every one of those rows' `sourceNote` says plainly that the value came from
+outside the source document, not from it. This is the narrow, logged
+exception the rule above anticipates, not a quiet departure from it — the
+provenance record makes the substitution visible to a reviewer rather than
+indistinguishable from a normal transcription.
 
 ### 6.1 How a reviewer verifies a content PR
 
