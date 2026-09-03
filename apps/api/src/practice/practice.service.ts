@@ -29,10 +29,21 @@ import {
   type PersistableFailureCause,
 } from './grading';
 import {
+  fromStoredMasteryOutcome,
+  toAttemptOutcome,
+  toStoredMasteryOutcome,
+} from './mastery/outcome-mapping';
+import {
   classifyMasteryBucket,
   selectQuestionsV2,
   type QuestionMasterySnapshot,
 } from './mastery/selector';
+import {
+  initialMasteryRecord,
+  nextSchedule,
+  type AttemptOutcome,
+  type MasteryRecord,
+} from './mastery/scheduler';
 import type { CreatePracticeSessionInput } from './dto/create-practice-session.dto';
 import type { RecordAttemptInput } from './dto/record-attempt.dto';
 import type { PracticeSessionQuery } from './dto/practice-session-query.dto';
@@ -643,50 +654,90 @@ export class PracticeService {
       { status, outcome, responseText },
     );
 
-    const attempt = await this.prisma.practiceAttempt.create({
-      data: {
-        userId,
-        questionId: question.id,
-        sessionId: session.id,
-        source: 'practice',
-        inputMode: 'typed',
-        promptMode: 'read',
-        responseText,
-        // The model's verdict when one was reached, rung 1's otherwise. The two
-        // are read together with `gradingMethod` and never merged: "was it
-        // right" and "how do we know" stay independent facts (§9).
-        outcome: aiGrading?.outcome ?? outcome,
-        gradingMethod: aiGrading ? 'ai' : 'exact',
-        // THE THREE AI COLUMNS ARE OMITTED ENTIRELY WHEN NO GRADER RAN, rather
-        // than written as null. Both leave the same NULL in Postgres, but a
-        // nullable `Json` column takes `Prisma.DbNull` rather than `null`, and a
-        // conditional spread keeps this write free of a Prisma-specific null
-        // sentinel that a reader would have to decode. The absence IS the
-        // meaning here: null in all three says no grader ever looked at this
-        // response, which is a different fact from `failureCause: 'unknown'`
-        // (schema.prisma, `PracticeFailureCause`).
-        ...(aiGrading
-          ? {
-              failureCause: aiGrading.failureCause,
-              // THE PARSED VERDICT ONLY — never the prompt, never a raw
-              // completion. The prompt is reconstructable from `responseText`
-              // plus `answerSnapshot` at any time, and a raw completion is
-              // exactly the unbounded provider text this column's own comment
-              // excludes.
-              aiFeedback: aiGrading.aiFeedback as unknown as Prisma.InputJsonValue,
-              aiUsageEventId: aiGrading.aiUsageEventId,
-            }
-          : {}),
-        revealed: input.revealed,
-        hintUsed: input.hintUsed,
-        // Absent stays absent. `0` would be a claim that the learner answered
-        // instantly — see the DTO, and `ai_usage_events`' nullable token counts
-        // for the same argument applied to a different unknown.
-        durationMs: input.durationMs ?? null,
-        answeredAt,
-        answerSnapshot: snapshot as unknown as Prisma.InputJsonValue,
-      },
-      include: { question: { select: QUESTION_SELECT } },
+    // The model's verdict when one was reached, rung 1's otherwise. The two
+    // are read together with `gradingMethod` and never merged: "was it
+    // right" and "how do we know" stay independent facts (§9). Pulled out
+    // here (rather than inlined in the `create` below) because the mastery
+    // scheduling call a few lines down needs the exact same two facts to map
+    // to an `AttemptOutcome` — see `mastery/outcome-mapping.ts`.
+    const finalOutcome = aiGrading?.outcome ?? outcome;
+    const gradingMethod = aiGrading ? 'ai' : 'exact';
+
+    // SYNCHRONOUS MASTERY SCHEDULING (issue #78, epic #54 / E5), inside the
+    // SAME transaction as the attempt write — not a second transaction and
+    // not fire-and-forget. `question_mastery` is derived, live state; a
+    // learner whose next question depends on it (the very next
+    // `nextQuestionFor` call, a few lines below) must see this attempt's
+    // effect already applied, which only holds if both writes commit
+    // together.
+    //
+    // SKIPPED for a `state_required` attempt specifically: `grade()`'s own
+    // comment above already treats that case as "no honest grade available",
+    // recorded as `skipped` rather than `incorrect` so the evidence table is
+    // not entered with a wrong answer nobody actually gave. Feeding the
+    // identical `skipped` outcome into the scheduler would silently lapse a
+    // question's mastery for a system limitation (no state on the learner's
+    // profile) rather than anything the learner did — the same harm `grade()`
+    // already avoids for `practice_attempts.outcome`, applied here to
+    // `question_mastery` too. Question selection never SELECTS such a
+    // question in the first place (`mastery/selector.ts`'s own
+    // `excludeUnanswerable`), so this only matters for a question id a client
+    // posted rather than was handed.
+    const attempt = await this.prisma.$transaction(async (tx) => {
+      const created = await tx.practiceAttempt.create({
+        data: {
+          userId,
+          questionId: question.id,
+          sessionId: session.id,
+          source: 'practice',
+          inputMode: 'typed',
+          promptMode: 'read',
+          responseText,
+          outcome: finalOutcome,
+          gradingMethod,
+          // THE THREE AI COLUMNS ARE OMITTED ENTIRELY WHEN NO GRADER RAN, rather
+          // than written as null. Both leave the same NULL in Postgres, but a
+          // nullable `Json` column takes `Prisma.DbNull` rather than `null`, and a
+          // conditional spread keeps this write free of a Prisma-specific null
+          // sentinel that a reader would have to decode. The absence IS the
+          // meaning here: null in all three says no grader ever looked at this
+          // response, which is a different fact from `failureCause: 'unknown'`
+          // (schema.prisma, `PracticeFailureCause`).
+          ...(aiGrading
+            ? {
+                failureCause: aiGrading.failureCause,
+                // THE PARSED VERDICT ONLY — never the prompt, never a raw
+                // completion. The prompt is reconstructable from `responseText`
+                // plus `answerSnapshot` at any time, and a raw completion is
+                // exactly the unbounded provider text this column's own comment
+                // excludes.
+                aiFeedback: aiGrading.aiFeedback as unknown as Prisma.InputJsonValue,
+                aiUsageEventId: aiGrading.aiUsageEventId,
+              }
+            : {}),
+          revealed: input.revealed,
+          hintUsed: input.hintUsed,
+          // Absent stays absent. `0` would be a claim that the learner answered
+          // instantly — see the DTO, and `ai_usage_events`' nullable token counts
+          // for the same argument applied to a different unknown.
+          durationMs: input.durationMs ?? null,
+          answeredAt,
+          answerSnapshot: snapshot as unknown as Prisma.InputJsonValue,
+        },
+        include: { question: { select: QUESTION_SELECT } },
+      });
+
+      if (status !== 'state_required') {
+        await this.scheduleMastery(
+          tx,
+          userId,
+          question.id,
+          toAttemptOutcome(finalOutcome, gradingMethod),
+          answeredAt,
+        );
+      }
+
+      return created;
     });
 
     const answeredQuestionIds = new Set<string>(
@@ -789,10 +840,31 @@ export class PracticeService {
       );
     }
 
-    const updated = await this.prisma.practiceAttempt.update({
-      where: { id: attempt.id },
-      data: { outcome: 'correct', gradingMethod: 'self' },
-      include: { question: { select: QUESTION_SELECT } },
+    const scheduledAt = this.clock.now();
+
+    // SYNCHRONOUS MASTERY SCHEDULING, in the SAME transaction as the update —
+    // see `recordAttempt`'s identical comment. `toAttemptOutcome('correct',
+    // 'self')` resolves to `'correct_self_marked'`
+    // (`mastery/outcome-mapping.ts`), which is exactly the discounted-credit
+    // case `nextSchedule`'s own header names: half the ease bump and half the
+    // interval growth of a verified match, because a self-mark is a weaker
+    // signal than one (§9 of this file's header; scheduler.ts's own header).
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const result = await tx.practiceAttempt.update({
+        where: { id: attempt.id },
+        data: { outcome: 'correct', gradingMethod: 'self' },
+        include: { question: { select: QUESTION_SELECT } },
+      });
+
+      await this.scheduleMastery(
+        tx,
+        userId,
+        attempt.questionId,
+        toAttemptOutcome('correct', 'self'),
+        scheduledAt,
+      );
+
+      return result;
     });
 
     this.logger.log(
@@ -973,6 +1045,92 @@ export class PracticeService {
     })) as ({ questionId: string } & QuestionMasterySnapshot)[];
 
     return new Map(rows.map((row) => [row.questionId, row] as const));
+  }
+
+  /**
+   * Advance one question's `question_mastery` row by one graded attempt,
+   * inside the CALLER's own transaction (issue #78, epic #54 / E5).
+   *
+   * Three steps, and every one of them delegates rather than re-derives:
+   *
+   *  1. Read the existing row (`tx.questionMastery.findUnique`, by the
+   *     `[userId, questionId]` compound unique key) and map it to a
+   *     `MasteryRecord` — or `initialMasteryRecord()` when this question has
+   *     never been attempted before, exactly as `scheduler.ts`'s own doc
+   *     comment on that function describes.
+   *  2. Call `nextSchedule` — the pure SM-2 variant (issue #75). NOTHING here
+   *     re-implements or approximates its state machine; this method's only
+   *     job is getting a `MasteryRecord` in and a `MasteryRecord` out.
+   *  3. `upsert` the result back, keyed by the same compound unique index —
+   *     `create` for a question with no prior row, `update` for one that
+   *     already had one. One upsert, not a read-then-branch write, so a
+   *     concurrent first attempt at the same question cannot race this method
+   *     into inserting the row twice (the `@@unique([userId, questionId])`
+   *     constraint would reject the loser anyway; `upsert` is what lets that
+   *     loser succeed as an update instead of erroring).
+   *
+   * `outcome` is already the caller's `AttemptOutcome` — `recordAttempt` and
+   * `selfMarkAttempt` both produce it via `mastery/outcome-mapping.ts` before
+   * calling this method, so this method itself needs no knowledge of
+   * `practice_attempts.outcome` or `.gradingMethod` at all.
+   */
+  private async scheduleMastery(
+    tx: Prisma.TransactionClient,
+    userId: string,
+    questionId: string,
+    outcome: AttemptOutcome,
+    now: Date,
+  ): Promise<void> {
+    const existing = await tx.questionMastery.findUnique({
+      where: { userId_questionId: { userId, questionId } },
+    });
+
+    const current: MasteryRecord = existing
+      ? {
+          state: existing.state,
+          dueAt: existing.dueAt,
+          intervalDays: existing.intervalDays,
+          ease: existing.ease,
+          correctStreak: existing.correctStreak,
+          lapses: existing.lapses,
+          totalAttempts: existing.totalAttempts,
+          distinctCorrectDays: existing.distinctCorrectDays,
+          lastOutcome: fromStoredMasteryOutcome(existing.lastOutcome),
+          lastAttemptAt: existing.lastAttemptAt,
+        }
+      : initialMasteryRecord();
+
+    const next = nextSchedule(current, outcome, now);
+
+    await tx.questionMastery.upsert({
+      where: { userId_questionId: { userId, questionId } },
+      create: {
+        userId,
+        questionId,
+        state: next.state,
+        dueAt: next.dueAt,
+        intervalDays: next.intervalDays,
+        ease: next.ease,
+        correctStreak: next.correctStreak,
+        lapses: next.lapses,
+        totalAttempts: next.totalAttempts,
+        distinctCorrectDays: next.distinctCorrectDays,
+        lastOutcome: toStoredMasteryOutcome(outcome),
+        lastAttemptAt: next.lastAttemptAt,
+      },
+      update: {
+        state: next.state,
+        dueAt: next.dueAt,
+        intervalDays: next.intervalDays,
+        ease: next.ease,
+        correctStreak: next.correctStreak,
+        lapses: next.lapses,
+        totalAttempts: next.totalAttempts,
+        distinctCorrectDays: next.distinctCorrectDays,
+        lastOutcome: toStoredMasteryOutcome(outcome),
+        lastAttemptAt: next.lastAttemptAt,
+      },
+    });
   }
 
   /**

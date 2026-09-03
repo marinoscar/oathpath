@@ -192,6 +192,8 @@ describe('PracticeService', () => {
       // an empty `practiceAttempt.groupBy` result.
       questionMastery: {
         findMany: jest.fn().mockResolvedValue([]),
+        findUnique: jest.fn().mockResolvedValue(null),
+        upsert: jest.fn().mockResolvedValue(null),
       },
     };
     prisma.$transaction = jest.fn(async (cb: any) => cb(prisma));

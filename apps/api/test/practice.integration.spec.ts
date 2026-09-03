@@ -292,15 +292,33 @@ function setupPracticeMocks(): void {
     return { ...updated, question: QUESTIONS.find((q) => q.id === updated.questionId) };
   });
 
-  // `question_mastery` (issue #78, epic #54 / E5) — `candidateQuestions`
-  // (v2 selection) reads this for ordering. Empty by default: no row for a
-  // question means it reads as `state: 'new'`.
+  // `question_mastery` (issue #78, epic #54 / E5) — synchronous scheduling
+  // reads and writes this on every `POST .../attempts` and every self-mark,
+  // and `candidateQuestions` reads it for ordering.
   (prismaMock.questionMastery.findMany as jest.Mock).mockImplementation(async ({ where }: any) => {
     const ids: string[] | undefined = where.questionId?.in;
     return Array.from(mastery.values()).filter(
       (row) => row.userId === where.userId && (ids === undefined || ids.includes(row.questionId)),
     );
   });
+
+  (prismaMock.questionMastery.findUnique as jest.Mock).mockImplementation(async ({ where }: any) => {
+    const key = where.userId_questionId;
+    return mastery.get(`${key.userId}:${key.questionId}`) ?? null;
+  });
+
+  (prismaMock.questionMastery.upsert as jest.Mock).mockImplementation(
+    async ({ where, create, update }: any) => {
+      const key = where.userId_questionId;
+      const mapKey = `${key.userId}:${key.questionId}`;
+      const existing = mastery.get(mapKey);
+      const row = existing
+        ? { ...existing, ...update, updatedAt: new Date() }
+        : { id: randomUUID(), createdAt: new Date(), updatedAt: new Date(), ...create };
+      mastery.set(mapKey, row);
+      return { ...row };
+    },
+  );
 }
 
 describe('Practice (Integration)', () => {
