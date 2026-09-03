@@ -46,6 +46,7 @@ import {
 import type {
   CreatePracticeSessionInput,
   JourneyProfile,
+  PracticeQueue,
   PracticeSessionListItem,
   PracticeSessionState,
 } from '../../types';
@@ -124,14 +125,43 @@ function sessionStartResponse(
   };
 }
 
+/**
+ * A brand-new learner's queue: everything is `new`, nothing is due, weak, or
+ * mastered yet. The default so that a test exercising Quick 5, categories or
+ * recent sessions — none of which is ABOUT the queue band — is not also
+ * silently exercising its error state, the way `onUnhandledRequest: 'warn'`
+ * would otherwise make it: an un-mocked `GET /api/practice/queue` fails
+ * outright (there is no real server here), so every test that omits this
+ * handler would see a second, unrelated "Try again" button appear.
+ */
+const DEFAULT_QUEUE: PracticeQueue = {
+  testVersionCode: 'v2008',
+  total: CATEGORIES.length * 10,
+  due: 0,
+  weak: 0,
+  new: {
+    total: CATEGORIES.length * 10,
+    byCategory: CATEGORIES.map((category) => ({
+      categoryId: category.id,
+      categoryName: category.name,
+      newCount: 10,
+    })),
+  },
+  learning: 0,
+  mastered: 0,
+};
+
 interface PracticeHandlerOptions {
   sessions?: PracticeSessionListItem[];
   sessionsStatus?: number;
+  queue?: PracticeQueue;
+  queueStatus?: number;
   onCreateSession?: (input: CreatePracticeSessionInput) => void;
 }
 
 function practiceHandlers(options: PracticeHandlerOptions = {}) {
   const sessions = options.sessions ?? [];
+  const queue = options.queue ?? DEFAULT_QUEUE;
 
   return [
     http.get(`${API_BASE}/practice/sessions`, () => {
@@ -156,6 +186,16 @@ function practiceHandlers(options: PracticeHandlerOptions = {}) {
       const input = (await request.json()) as CreatePracticeSessionInput;
       options.onCreateSession?.(input);
       return HttpResponse.json({ data: sessionStartResponse(input) });
+    }),
+
+    http.get(`${API_BASE}/practice/queue`, () => {
+      if (options.queueStatus && options.queueStatus >= 400) {
+        return HttpResponse.json(
+          { message: 'Your practice queue could not be loaded.' },
+          { status: options.queueStatus },
+        );
+      }
+      return HttpResponse.json({ data: queue });
     }),
   ];
 }
@@ -272,6 +312,154 @@ describe('Quick 5', () => {
     expect(categoryButton).toHaveAttribute('aria-disabled', 'true');
     await expect(user.click(categoryButton)).rejects.toThrow(/pointer-events/i);
   });
+
+  // ---------------------------------------------------------------------
+  // Quick 5's copy and icon bias toward review — same `due + weak` gate
+  // `PracticeQueueSummary`'s own headline uses, still posting `kind: 'quick'`
+  // unchanged (there is no wired `review` session kind to request — see this
+  // page's header).
+  // ---------------------------------------------------------------------
+
+  it('biases Quick 5 toward review when the queue has due-or-weak evidence', async () => {
+    server.use(
+      ...practiceHandlers({
+        sessions: [],
+        queue: { ...DEFAULT_QUEUE, due: 3, weak: 2 },
+      }),
+    );
+    renderPractice();
+
+    expect(
+      await screen.findByRole('button', { name: /review now/i }),
+    ).toBeInTheDocument();
+    expect(screen.getByTestId('AutorenewOutlinedIcon')).toBeInTheDocument();
+    expect(
+      screen.getByText(/due and struggling ones first.*you have 5 of those waiting/i),
+    ).toBeInTheDocument();
+    // Neither the default label nor its icon is left rendered alongside it.
+    expect(
+      screen.queryByRole('button', { name: /start a quick 5/i }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByTestId('BoltIcon')).not.toBeInTheDocument();
+  });
+
+  it('keeps the default Quick 5 copy and icon when nothing is due or weak', async () => {
+    server.use(
+      ...practiceHandlers({ sessions: [], queue: { ...DEFAULT_QUEUE, due: 0, weak: 0 } }),
+    );
+    renderPractice();
+
+    expect(
+      await screen.findByRole('button', { name: /start a quick 5/i }),
+    ).toBeInTheDocument();
+    expect(screen.getByTestId('BoltIcon')).toBeInTheDocument();
+    expect(
+      screen.getByText(/ones you haven.t seen yet come first/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /review now/i })).not.toBeInTheDocument();
+    expect(screen.queryByTestId('AutorenewOutlinedIcon')).not.toBeInTheDocument();
+  });
+
+  it('still POSTs kind: quick when biased toward review — never an unwired kind', async () => {
+    const created: CreatePracticeSessionInput[] = [];
+    server.use(
+      ...practiceHandlers({
+        sessions: [],
+        queue: { ...DEFAULT_QUEUE, due: 3, weak: 2 },
+        onCreateSession: (input) => created.push(input),
+      }),
+    );
+    const user = userEvent.setup();
+    renderPractice();
+
+    await user.click(await screen.findByRole('button', { name: /review now/i }));
+
+    await waitFor(() => expect(created).toHaveLength(1));
+    expect(created[0]).toEqual({ kind: 'quick' });
+  });
+});
+
+// -----------------------------------------------------------------------------
+// The queue band — loading, error and empty-bank states, ahead of any action
+// -----------------------------------------------------------------------------
+
+describe('the queue band', () => {
+  it('shows a loading state, then the real summary once the queue resolves', async () => {
+    server.use(
+      http.get(`${API_BASE}/practice/queue`, async () => {
+        await delay(50);
+        return HttpResponse.json({ data: DEFAULT_QUEUE });
+      }),
+      ...practiceHandlers({ sessions: [] }),
+    );
+    renderPractice();
+
+    expect(
+      await screen.findByRole('status', { name: /loading your queue/i }),
+    ).toBeInTheDocument();
+
+    expect(
+      await screen.findByText(`${DEFAULT_QUEUE.new.total} questions you haven't seen yet.`),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole('status', { name: /loading your queue/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('does not render a blank band when the fetch fails, and offers a retry that recovers', async () => {
+    server.use(
+      ...practiceHandlers({ sessions: [], queueStatus: 500 }),
+    );
+    const user = userEvent.setup();
+    renderPractice();
+
+    expect(
+      await screen.findByText(/practice queue could not be loaded/i),
+    ).toBeInTheDocument();
+    const retry = screen.getByRole('button', { name: /try again/i });
+    expect(retry).toBeInTheDocument();
+
+    // The rest of the page is unaffected — this is a band failure, not a page
+    // failure.
+    expect(
+      screen.getByRole('button', { name: /start a quick 5/i }),
+    ).toBeInTheDocument();
+
+    // Recovering: the retry re-fetches and the error is replaced by the
+    // summary, never left standing beside it.
+    server.use(...practiceHandlers({ sessions: [] }));
+    await user.click(retry);
+
+    expect(
+      await screen.findByText(/questions you haven.t seen yet/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/practice queue could not be loaded/i),
+    ).not.toBeInTheDocument();
+  });
+
+  it('renders an honest "nothing loaded" message, not a zero-valued summary, when the bank itself is empty', async () => {
+    const emptyBankQueue: PracticeQueue = {
+      testVersionCode: 'v2008',
+      total: 0,
+      due: 0,
+      weak: 0,
+      new: { total: 0, byCategory: [] },
+      learning: 0,
+      mastered: 0,
+    };
+    server.use(...practiceHandlers({ sessions: [], queue: emptyBankQueue }));
+    renderPractice();
+
+    expect(
+      await screen.findByText(/no questions loaded for your test version yet/i),
+    ).toBeInTheDocument();
+    // Not the queue summary's own headline — the two states are mutually
+    // exclusive, and this is the "the bank has nothing in it" case, not
+    // "you're caught up".
+    expect(screen.queryByText(/caught up/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/ready to review/i)).not.toBeInTheDocument();
+  });
 });
 
 // -----------------------------------------------------------------------------
@@ -305,6 +493,39 @@ describe('practising one section', () => {
       kind: 'category',
       categoryId: CATEGORY_DEMOCRACY.id,
     });
+  });
+
+  it("shows each section's new-question count from queue.new.byCategory, and omits it once a section has none left", async () => {
+    server.use(
+      ...practiceHandlers({
+        sessions: [],
+        queue: {
+          ...DEFAULT_QUEUE,
+          new: {
+            total: 6,
+            byCategory: [
+              { categoryId: CATEGORY_DEMOCRACY.id, categoryName: CATEGORY_DEMOCRACY.name, newCount: 6 },
+              // No entry at all for the other categories — the real shape a
+              // fully-covered section sends, not a `newCount: 0` row.
+            ],
+          },
+        },
+      }),
+    );
+    renderPractice();
+
+    const democracyButton = await screen.findByRole('button', {
+      name: new RegExp(CATEGORY_DEMOCRACY.name),
+    });
+    expect(democracyButton).toHaveTextContent(`${CATEGORY_DEMOCRACY.section} · 6 new`);
+
+    // A category with nothing in `byCategory` shows its plain section name —
+    // an honest "nothing left", not a discouraging "0 new".
+    for (const category of CATEGORIES.filter((c) => c.id !== CATEGORY_DEMOCRACY.id)) {
+      const button = screen.getByRole('button', { name: new RegExp(category.name) });
+      expect(button).toHaveTextContent(category.section);
+      expect(button).not.toHaveTextContent('new');
+    }
   });
 });
 

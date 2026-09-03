@@ -1102,8 +1102,14 @@ export interface JourneyStage {
  * WIDENED BY EXACTLY ONE MEMBER IN E3 (#81, epic #52): `practice`.
  * `docs/specs/practice-sessions.md` §12 specifies it — `NEXT_ACTION_PATHS`
  * gains `practice: '/practice'` and the `interview_countdown` branch re-points
- * at it now that Practice has real content to send a learner to. E5 and E8 add
- * `review` and `interview` to the same contract later.
+ * at it now that Practice has real content to send a learner to. WIDENED BY
+ * ONE MORE MEMBER IN E5 (#82, epic #54): `review`, produced by
+ * `study-coach.ts`'s `recommendStudyAction` and ranked between
+ * `interview_countdown` and `practice` — see that file for the full ordering.
+ * It shares `/practice` with `interview_countdown` and `practice` (three
+ * kinds naming one destination, not a duplicated branch); the Practice page
+ * reads `nextAction.kind` to decide which action to put forward first. E8
+ * adds `interview` to the same contract later.
  *
  * **This being a closed union is a compile-time convenience, not a runtime
  * guarantee.** The value arrives over the wire from a server that deploys
@@ -1117,6 +1123,7 @@ export interface JourneyStage {
 export type NextActionKind =
   | 'orientation'
   | 'interview_countdown'
+  | 'review'
   | 'explore'
   | 'practice';
 
@@ -1715,6 +1722,47 @@ export interface RecordPracticeAttemptInput {
   skipped?: boolean;
   revealed?: boolean;
   hintUsed?: boolean;
+}
+
+// =============================================================================
+// Practice queue counts — `GET /api/practice/queue` (issue #78, epic #54 / E5)
+// =============================================================================
+//
+// Mirrors `apps/api/src/practice/dto/practice-queue.dto.ts` field for field.
+// Every count comes from `mastery/selector.ts`'s `classifyMasteryBucket` — the
+// SAME function `POST /api/practice/sessions` uses to order a session's
+// questions — so this can never disagree with what starting a session right
+// now would actually select. There is no `kind: 'review' | 'weak' | 'mixed'`
+// request this page can make yet: those `PracticeSessionKind` values are
+// declared but unwired (`CLAUDE.md`'s "Adding a practice session kind"), so
+// `/practice` biases its existing `quick`/`category` actions toward this data
+// rather than requesting a kind the API would 400 on.
+
+/** One category's share of the `new` bucket — never-attempted questions. */
+export interface PracticeQueueCategoryCount {
+  categoryId: string;
+  categoryName: string;
+  newCount: number;
+}
+
+/** `GET /api/practice/queue` — flat counts, not a list, so no page envelope. */
+export interface PracticeQueue {
+  /** The caller's own resolved test version — never sent, only read back. */
+  testVersionCode: string;
+  /** The whole bank's size, scoped exactly like session creation is. */
+  total: number;
+  /** `state IN (review, lapsed)` with `dueAt` already passed. */
+  due: number;
+  /** A `lapsed` question (any `dueAt`), or a struggling `learning`/`review` one. */
+  weak: number;
+  new: {
+    total: number;
+    /** In the test version's own category order — never re-sorted. */
+    byCategory: PracticeQueueCategoryCount[];
+  };
+  /** Attempted, not due, not weak, not yet mastered. */
+  learning: number;
+  mastered: number;
 }
 
 // =============================================================================

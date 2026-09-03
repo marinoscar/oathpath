@@ -42,6 +42,7 @@
  */
 
 import { Box, Button, Card, CardContent, Typography } from '@mui/material';
+import AutorenewOutlinedIcon from '@mui/icons-material/AutorenewOutlined';
 import EventAvailableOutlinedIcon from '@mui/icons-material/EventAvailableOutlined';
 import ExploreOutlinedIcon from '@mui/icons-material/ExploreOutlined';
 import PlaylistAddCheckOutlinedIcon from '@mui/icons-material/PlaylistAddCheckOutlined';
@@ -68,8 +69,8 @@ import type { NextAction, NextActionKind } from '../../types';
  * Typed as a total `Record` over the closed union on purpose: when E5 or E8
  * widens `NextActionKind` (with `review` and `interview`), this map fails to
  * compile until it gets its glyph — a build error is a better reminder than a
- * blank space on the front page. E3 (#81) is the first widening, and `practice`
- * below is what satisfying it looks like.
+ * blank space on the front page. E3 (#81) was the first widening (`practice`
+ * below); E5 (#82) is the second (`review`).
  */
 const KIND_ICONS: Record<NextActionKind, SvgIconComponent> = {
   orientation: PlaylistAddCheckOutlinedIcon,
@@ -79,6 +80,9 @@ const KIND_ICONS: Record<NextActionKind, SvgIconComponent> = {
   // `practice: '/practice'`, and the countdown branch re-points at it now that
   // Practice has real content to send a learner to.
   practice: RecordVoiceOverOutlinedIcon,
+  // E5 (#82). `study-coach.ts`'s `recommendStudyAction` — due/lapsed evidence
+  // to go back over, not new material.
+  review: AutorenewOutlinedIcon,
 };
 
 /**
