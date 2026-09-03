@@ -5,6 +5,7 @@ import type { CivicsTestVersion, LearnerProfile } from '@prisma/client';
 import { Clock } from '../common/clock/clock';
 import { US_STATES_AND_TERRITORIES } from '../common/constants/us-states.constants';
 import { PrismaService } from '../prisma/prisma.service';
+import { PracticeService } from '../practice/practice.service';
 import type {
   CivicsTestVersionOption,
   JourneyProfile,
@@ -12,7 +13,7 @@ import type {
 } from './dto/journey-profile.dto';
 import type { JourneyHomeResponse } from './dto/journey-home.dto';
 import type { UpdateJourneyProfileInput } from './dto/update-journey-profile.dto';
-import { recommendNextAction } from './next-action';
+import { recommendStudyAction } from './study-coach';
 import { filedFromFor, resolveTestVersionCode } from './test-version-resolution';
 
 // =============================================================================
@@ -64,6 +65,7 @@ export class JourneyService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly clock: Clock,
+    private readonly practiceService: PracticeService,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -125,6 +127,10 @@ export class JourneyService {
       today,
       profile.timezone,
     );
+    const { dueCount, lapsedCount } = await this.loadStudyCoachCounts(
+      userId,
+      profile.testVersionCode,
+    );
 
     return {
       stage: profile.stage,
@@ -139,10 +145,12 @@ export class JourneyService {
         // and journey-shell.md §10 — there is deliberately no `minutesToday`.
         tracked: false,
       },
-      nextAction: recommendNextAction({
+      nextAction: recommendStudyAction({
         orientationCompletedAt: profile.orientationCompletedAt,
         daysUntilInterview,
         hasPractisedToday,
+        dueCount,
+        lapsedCount,
       }),
     };
   }
@@ -398,6 +406,35 @@ export class JourneyService {
     }
 
     return calendarDateOf(latest.answeredAt, timeZone) === today;
+  }
+
+  /**
+   * The Study Coach's two mastery inputs (`study-coach.ts`'s `dueCount` /
+   * `lapsedCount`, docs/specs/memory-model.md §6), read through
+   * `PracticeService.getQueue` rather than a second aggregation over
+   * `question_mastery` — the "one shared query, not a duplicate count kept in
+   * sync by convention" `study-coach.ts`'s own header requires.
+   *
+   * **Guarded on `testVersionCode`, not called unconditionally.**
+   * `PracticeService.getQueue` throws a 400 for a learner whose test version
+   * has not been resolved yet (`requireOrientedProfile`'s own guard) — exactly
+   * the learner for whom `recommendStudyAction`'s first branch
+   * (`orientationCompletedAt === null`) already returns `orientation` without
+   * ever looking at these two counts. Rather than let that branch order do
+   * the guarding implicitly (and pay for — or crash on — a query whose result
+   * is thrown away), this reads the one field `isOrientationComplete` also
+   * requires and skips the call entirely when it is absent.
+   */
+  private async loadStudyCoachCounts(
+    userId: string,
+    testVersionCode: string | null,
+  ): Promise<{ dueCount: number; lapsedCount: number }> {
+    if (testVersionCode === null) {
+      return { dueCount: 0, lapsedCount: 0 };
+    }
+
+    const queue = await this.practiceService.getQueue(userId);
+    return { dueCount: queue.due, lapsedCount: queue.weak };
   }
 
   /**

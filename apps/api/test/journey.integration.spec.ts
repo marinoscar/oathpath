@@ -117,6 +117,19 @@ function setupJourneyMocks(): void {
     },
   );
 
+  // `PracticeService.getQueue` reads the profile through `findUnique`, a
+  // DIFFERENT Prisma call from the `upsert`/`update` pair `JourneyService`
+  // itself uses — so it needs its own wire into the same `profiles` map
+  // rather than inheriting one of those. The Study Coach (#82) is what makes
+  // `GET /api/journey/home` reach this method at all, for any learner whose
+  // profile already carries a `testVersionCode`.
+  (prismaMock.learnerProfile.findUnique as jest.Mock).mockImplementation(
+    async ({ where }: any) => {
+      const existing = profiles.get(where.userId);
+      return existing ? { ...existing } : null;
+    },
+  );
+
   (prismaMock.civicsTestVersion.findMany as jest.Mock).mockResolvedValue([
     V2008,
     V2025,
@@ -134,6 +147,14 @@ function setupJourneyMocks(): void {
   // `null` is the state every account starts in, and the one test that cares
   // hands a row back.
   (prismaMock.practiceAttempt.findFirst as jest.Mock).mockResolvedValue(null);
+
+  // This suite's civics bank is empty by default (it is a JOURNEY spec, not
+  // a civics or practice one) — `PracticeService.getQueue` then reports
+  // every mastery count as zero, which is exactly the "nothing due or
+  // lapsed" input every `nextAction` assertion in this file already assumes.
+  // `mastery.getQueue`'s own dedicated coverage (`practice.integration.spec.ts`,
+  // `study-coach.spec.ts`) is where a non-empty bank belongs.
+  (prismaMock.civicsQuestion.findMany as jest.Mock).mockResolvedValue([]);
 }
 
 /** Everything the orientation screen collects, in one request body. */
