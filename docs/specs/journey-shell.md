@@ -181,7 +181,10 @@ Concretely:
   read by `NavigationRail.tsx` alone) plus a single, ordinary "Settings" row
   the `UserMenu` renders directly from `DESTINATION_ROUTES.settings`'s path
   — it does not need the full permission/icon machinery a bar destination
-  does, because every authenticated user can already reach it.
+  does, because every authenticated user can already reach it. (Amended by
+  issue #232: the user menu now draws two rows, not one — "User Settings"
+  unconditionally, and "System Settings" beneath it behind the permission
+  gate. See §2.2's amendment for why.)
 
 ### 2.2 The ceiling is the raw array length, and that is the point
 
@@ -203,7 +206,8 @@ only" is a real behavior change, not a restatement of the status quo:
 `BottomNav` and `UserMenu` must stop reading `console` at all (it is no
 longer in `DESTINATIONS`, so this happens for free), and the rail's pinned
 foot section becomes `console`'s **only** appearance anywhere in the nav
-chrome.
+chrome — until issue #232 gives it a second, permission-gated appearance in
+the user menu; see the amendment below.
 
 **The accepted cost, stated plainly:** an administrator on a phone-width
 viewport (`showRail`'s `up('sm')` gate does not apply below 600px) has no
@@ -217,6 +221,49 @@ surface in every other sense (the rail itself), and the four bar destinations
 exist for the learner using the product day to day, not for the administrator
 configuring it; this narrowing is accepted at MVP for that reason, and named
 here rather than left as a silent difference from today's behavior.
+
+**Amended by issue #232:** the paragraph above is the design record of what
+#69 decided, and it stays — but the gap it accepted turned out to be a real
+reported regression, not just a theoretical one: an administrator could not
+find System Settings anywhere in the user menu, at any width, because the
+menu never named it. That half of the cost is now reversed. The `UserMenu`
+draws a second navigation row, **System Settings**, immediately after **User
+Settings**, gated by `isDestinationVisible(CONSOLE_DESTINATION,
+hasPermission)` — so visibility turns on `CONSOLE_DESTINATION`'s
+`anyPermission` (`system_settings:read` OR `users:read`, the exact strings
+`system-settings.controller.ts` and `users.controller.ts` enforce), never on
+a role, exactly as §2.1 already required for the rail's pinned foot.
+
+What is **not** reversed: `console` stays out of `DESTINATIONS` and out of
+`BottomNav`; the `DESTINATIONS.length <= 4` ceiling above is untouched, and
+the rail's pinned foot is still Console's only appearance in the *rail*. The
+user menu reaches this without spending a bar slot because it was already
+built to name the two destinations it draws (`SETTINGS_DESTINATION`,
+`CONSOLE_DESTINATION`) rather than iterate `DESTINATIONS` — the same
+"surfaces name what they render instead of inheriting it from an array"
+design §2.1 states for exactly this reason.
+
+The user menu is the right home for the second row because it is the one
+settings chrome that exists at every width — the rail is unmounted below
+`sm` (`showRail`'s `up('sm')` gate) — so it is the only surface that can
+close the phone-width gap the original paragraph accepted; the bottom bar
+cannot, because it has no settings-chrome row to extend at all.
+
+One more thing changes with it: `CONSOLE_DESTINATION.label` is now `'System
+Settings'` (it was `'Console'`), because a menu row sitting directly beneath
+"User Settings" only tells an admin which one is theirs if both rows say
+what they open. `compactLabel` stays `'Console'` — the 56px collapsed rail
+was never going to hold "System Settings" — and the rail's own Console
+*mode* vocabulary is unchanged by any of this: its
+`aria-label="Console navigation"`, its "Back to library" row, and
+`adminSections.tsx`'s framing all still say Console, because the mode (a
+swapped-in rail context) and the destination's label (a row you click) are
+different things.
+
+Reachability was never affected by either change, #69's or #232's — only
+discoverability. `ProtectedRoute` and `RequirePermission` gate
+`/admin/settings/*` exactly as before, and a bookmark or typed URL always
+worked.
 
 ### 2.3 Learn, Practice, and Progress ship as real routes in E1
 
@@ -654,5 +701,6 @@ built yet" has picked the wrong branch.
 | **A plain `String` for `learner_profiles.stage`, validated against the API registry (the `NotificationDelivery.eventKey` idiom)** | The analogy looks sound but the sets are on opposite sides of the axis that decides it: `eventKey` is an OPEN set that a registry entry is meant to extend with no migration, while the eight journey stages are `VISION.md`'s named, CLOSED sequence — a ninth stage is a product decision on the order of rewriting the journey model, not a routine addition, and should cost the migration a real enum requires. A plain string would also let an application-layer bug write an invalid ninth value straight into the column with nothing at the database level to stop it. §1, §3.2. |
 | **Computing `test_version_code` live from `filing_date` on every read** | E2's content pipeline and E8's interview engine both need one settled value to join against; recomputing the 20 Oct 2025 cutoff at each call site is a second place that logic can drift from the first the day the cutoff needs a historical carve-out. §3.2. |
 | **A free-form string `nextAction.path`** | Breaks the structural "never redirects to `/`" invariant by letting any future caller point the card at an arbitrary route. The closed `kind` union, each mapped to one hardcoded verified path, is what makes the invariant load-bearing rather than a review note. §4.1. |
-| **Duplicating Console into the bottom bar or user menu for phone reachability** | Would either blow the four-destination ceiling (§2.2) or require a second, `pinned`-ignoring code path in two more components. The accepted cost — an admin loses one-tap phone access to Console, but not route-level reachability — is stated in §2.2 rather than solved by exception. |
+| **Duplicating Console into the bottom bar for phone reachability** | Would blow the four-destination ceiling (§2.2) — `BottomNav` reads `DESTINATIONS` directly, so a fifth entry there is a fifth bar destination, not a free addition. Still rejected; the accepted cost for the bottom bar is unchanged. |
+| **~~Duplicating Console into the user menu for phone reachability~~ — superseded by issue #232** | Rejected here on the assumption it would need a second, `pinned`-ignoring code path and a bar slot like the bottom bar would. Neither turned out to be true: the user menu never read `DESTINATIONS` — it names the destinations it draws — so adding a `CONSOLE_DESTINATION` row behind `isDestinationVisible` cost no ceiling slot and no new code path, only a second named row. §2.2's amendment. |
 | **Stub pages for `/learn`, `/practice`, `/progress` that promise a date ("coming soon")** | This document cannot honestly promise a delivery date any more than a fabricated number could; the stub copy says what the page will do and what to do instead, and stops there. §8, §10. |
