@@ -79,7 +79,7 @@ a v2.
 | E2 | Civics content | The versioned, provenance-tracked USCIS question bank for both test versions, dynamic answers with effective dates, and the Learn page | E1 | done<sup>†</sup> | [#51](https://github.com/marinoscar/oathpath/issues/51) |
 | E3 | Practice sessions | Deterministic (exact-match + normalisation) practice loop and `practice_attempts`, the one evidence table every later epic reads | E1, E2 | in progress<sup>‡</sup> | [#52](https://github.com/marinoscar/oathpath/issues/52) |
 | E4 | AI Evaluator and Teacher | `AiDispatchService.run`, the `FakeAiProvider`, semantic grading with failure causes, streaming explanations — the first AI feature | #25, E2, E3 | in progress<sup>‡</sup> | [#53](https://github.com/marinoscar/oathpath/issues/53) |
-| E5 | Memory | Spaced repetition (`question_mastery`), verified mastery (correct on ≥3 distinct days), the deterministic Study Coach recommender, Progress v1 | E1, E3 | not started | [#54](https://github.com/marinoscar/oathpath/issues/54) |
+| E5 | Memory | Spaced repetition (`question_mastery`), verified mastery (correct on ≥3 distinct days), the deterministic Study Coach recommender, Progress v1 | E1, E3 | done<sup>§</sup> | [#54](https://github.com/marinoscar/oathpath/issues/54) |
 | E6 | Readiness and Progress | The explainable, capped readiness score (`readiness_snapshots`), Progress v2, the readiness-vs-engagement separation | E3, E5 | not started | [#55](https://github.com/marinoscar/oathpath/issues/55) |
 | E7 | Habit | Daily goal, streaks with protection, session-end celebrations, three reminder notification events on an hourly cron | E1, E3, E5 | not started | [#56](https://github.com/marinoscar/oathpath/issues/56) |
 | E8 | Mock interview — text mode | Deterministic interview engine (question selection, pass rules from `civics_test_versions`), text-mode interview and debrief — closes Milestone A | #25 (for `tutor`), E4, E6 | not started | [#57](https://github.com/marinoscar/oathpath/issues/57) |
@@ -155,6 +155,31 @@ not lift it for them: they ground every judgement and every explanation in
 `civics_answers` rows, so "grounded in the database" is exactly as true as the
 database is — a transcription no human has checked page by page is still a
 transcription no human has checked.
+
+<sup>§</sup> **E5 is marked `done` with all ten child issues merged to
+`main`** — #67, #71, #75, #78, #82, #86, #90, #94, #98
+(`tests/e2e/specs/memory.spec.ts`), and #102 (this docs reconciliation). The
+design spec (#67, `docs/specs/memory-model.md`) has been reconciled twice
+against shipped code — once for §2/§3 (scheduler and the `question_mastery`
+table), and again for §5–§8 (selector v2, the Study Coach, stage
+transitions, and the progress endpoint) — so every number, field name, and
+endpoint shape in it is verified against the real, merged `apps/api/src/`
+tree, not aspirational.
+
+Two things a later reader should not assume this footnote settles:
+
+1. **Whether a human has actually run `memory.spec.ts` against the compose
+   stack** — the §6 check this legend requires — is not something this docs
+   reconciliation can confirm one way or the other; it can only confirm the
+   spec file itself exists and is built directly against the real,
+   shipped selector and scheduler (its own header cites both by name). The
+   identical gap is footnoted `done`<sup>†</sup> for E2 and `in progress`<sup>‡</sup>
+   for E3/E4 elsewhere in this table — this repository has not been
+   consistent about which status an unconfirmed run gets, and this entry
+   does not resolve that inconsistency.
+2. **Epic issue #54 itself is still open on GitHub** as of this reconciliation,
+   despite all ten child issues being merged — closing it is a decision for
+   whoever merges #102, not something a docs change can do on its own.
 
 ---
 

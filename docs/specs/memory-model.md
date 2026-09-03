@@ -33,7 +33,7 @@ Source of truth for every claim below:
   and "The system should spend more time on what is weak, revisit what is
   becoming stale, and continue sampling what appears strong so that **mastery
   is verified rather than assumed**" — the sentence §2's `distinct_correct_days`
-  column and §5's mastered-sampling bucket both exist to satisfy.
+  column and §5.2's `mastered`-bucket recency ordering both exist to satisfy.
 - `PRD.md` — the same rule stated as a product requirement: "A user who
   correctly answers ten questions immediately after studying them should not
   appear highly ready."
@@ -50,16 +50,21 @@ Source of truth for every claim below:
   route** performing a real `UPDATE` on an already-persisted row (the reason
   §4 below says scheduling runs inside *two* transactions, not one), and
   §9.1's ruling that a `skipped` attempt is "not evidence of recall in either
-  direction" — the reason §3.2 excludes `skipped` from `nextSchedule` entirely
-  rather than scheduling it as a weak signal.
+  direction" for `practice_attempts.outcome` specifically. **Corrected from
+  an earlier draft**: `question_mastery` does not inherit that ruling — §3.2
+  records that the shipped `outcome-mapping.ts` deliberately schedules an
+  ordinary skip as `'incorrect'` rather than excluding it.
 - `docs/specs/ai-evaluation.md` §6, §8 — the grading ladder's three rungs and
   the `verdict` values (`correct` / `partial` / `incorrect`) rung 2's grader
   can produce. **Corrected from an earlier draft**: the shipped
   `AttemptOutcome` union (§3) has no `partial` case at all — only `correct`,
   `incorrect`, and `correct_self_marked` — so a `partial` AI verdict does not
-  pass through to `nextSchedule` as its own outcome. How the not-yet-written
-  caller (issue #78) collapses a `partial` verdict into one of the three real
-  outcomes is that caller's decision; this document no longer asserts one.
+  pass through to `nextSchedule` as its own outcome. **Now shipped (issue
+  #78)**: `apps/api/src/practice/mastery/outcome-mapping.ts`'s
+  `toAttemptOutcome(outcome, gradingMethod)` is that collapse — a `partial`
+  verdict (like a `skipped` attempt) becomes `'incorrect'` for scheduling
+  purposes, "no correct recall was demonstrated this time," the same footing
+  as an objective miss (§3.2 restates this precisely).
 - `docs/specs/journey-shell.md` §1, §3.2, §6 — the eight-value `JourneyStage`
   enum, the `learner_profiles` columns this epic reads (`stage`, `timezone`)
   and writes (`stage` only — §7), and the "every stage has an owning epic"
@@ -92,29 +97,36 @@ Source of truth for every claim below:
 - `apps/api/src/ai/ai-model-roles.ts` — the `embed` role, declared and
   unwired, cited in §9 as exactly the kind of "declared now, built later"
   seam this document does not reach into for weak-area clustering.
-- `CLAUDE.md`'s "Adding a practice session kind" — the pattern §5 follows to
-  wire `review`/`weak`/`mixed` into `PracticeService.createSession`, already
-  declared in the `PracticeSessionKind` enum and already unwired for exactly
-  this epic to wire.
+- `CLAUDE.md`'s "Adding a practice session kind" — the pattern that would wire
+  `review`/`weak`/`mixed` into `PracticeService.createSession` when a later
+  change does. **Corrected from an earlier draft, which asserted E5 does this
+  wiring**: it does not (§5.3) — those three `PracticeSessionKind` values stay
+  declared and unwired after E5's full merge, and `selectQuestionsV2` (§5)
+  instead gives the two already-wired kinds, `quick` and `category`, a
+  mastery-aware ordering.
 
-**Two child issues have since shipped and are described here as merged
-fact, not proposal — the rest of this document has not caught up yet.**
-Issue #71 (the `question_mastery` table and its backfill) and issue #75
-(`apps/api/src/practice/mastery/scheduler.ts`, `nextSchedule`) are merged to
-`main`; §2 and §3 have been reconciled against that real, shipped code
-(`apps/api/prisma/schema.prisma`'s `QuestionMastery` model, the two
-migrations under `apps/api/prisma/migrations/`, and `scheduler.ts` itself)
-rather than left as the original design. Everything past §3 is still
-proposal: there is no `GET /api/practice/queue`, no
-`GET /api/progress/mastery`, and `recommendNextAction` has no `review`
-branch — §4 onward is what E5's remaining child issues (§11) build
-*against*, not a description of code already in the repository. §11's own
-table records which issue is which; `apps/api/src/practice/mastery/outcome-mapping.ts`
-(§2, §11 — issue #78) is cited by path as a known, described fact even
-though its branch (`feat/practice-queue`) has not merged, the same "verified
-where verifiable, proposed where not" posture this paragraph states
-throughout. A child issue's unit tests should be written straight from §3's
-worked table rather than invented independently.
+**Every child issue through #94 has since shipped and is described here as
+merged fact, not proposal.** Issue #71 (the `question_mastery` table and its
+backfill), #75 (`apps/api/src/practice/mastery/scheduler.ts`, `nextSchedule`),
+#78 (`apps/api/src/practice/mastery/selector.ts`'s `selectQuestionsV2` and
+`GET /api/practice/queue`), #82 (`apps/api/src/journey/study-coach.ts`'s
+`recommendStudyAction` and `apps/api/src/journey/stage-transitions.ts`'s
+`nextStageOnMasteryEvent`), #86 (`GET /api/progress/mastery`), #90 (the
+Practice page's real queue counts and Home's real Next-up card), and #94
+(Progress page v1) are all merged to `main`. §2 through §8 below have been
+reconciled against that real, shipped code — not left as the original
+design — and this reconciliation (issue #102) corrects several places where
+an earlier draft of §5 and §6 specifically described a superseded design
+(`queue-selector.ts`/`buildQueue`, a probabilistic mastered-sample rate, a
+`dueCount`-only Study Coach gate) rather than what actually shipped.
+
+**Only issue #98 remains genuinely unshipped.** `tests/e2e/memory.spec.ts`
+does not exist in this repository yet — unlike #67/#71/#75's own Playwright
+gap (ROADMAP.md's †/‡ footnotes), where a spec file existed but had not been
+run, #98's spec has not been written at all. Nothing in this document is
+written *against* that missing file the way an earlier revision described
+§4 onward as work still to build against; every section below describes code
+that exists, and cites the file that proves it.
 
 ---
 
@@ -154,15 +166,15 @@ for "no grader ran" — journey-shell.md's honesty rule, one table over).
 | `userId` | `String @db.Uuid` | no | FK → `users.id`, `onDelete: Cascade` — the same posture `PracticeAttempt.userId` already takes: a learner's own derived mastery state has no meaning independent of the account it summarizes. |
 | `questionId` | `String @db.Uuid` | no | FK → `civics_questions.id`, `onDelete: Cascade` — corrected here from an earlier draft that claimed `Restrict`, reasoning it should mirror `PracticeAttempt.questionId`. The real schema's own comment says the opposite, deliberately: `PracticeAttempt` is immutable **evidence** that must survive content changes, so `Restrict` protects that; `question_mastery` is the reverse — purely **derived** scheduling state with no independent meaning once the question it tracks is gone — and `Restrict` here would additionally block the exact content deletion `PracticeAttempt.questionId`'s own `Restrict` exists to eventually allow, once the evidence itself has been dealt with. This FK "should just quietly disappear alongside the row it was scheduling" (the schema comment's own words). **No separate `testVersionCode` column** — `civics_questions` already belongs to exactly one test version, and a mastery row's version is implied by its question, the same reasoning `PracticeAttempt` itself uses (only `PracticeSession` carries `testVersionCode` directly). |
 | `state` | `MasteryState` (Postgres enum; corrected here from an earlier draft's `QuestionMasteryState`), default `new` | no | `new` \| `learning` \| `review` \| `lapsed` \| `mastered` — §3 is the complete state machine. **Practically unreachable as a stored value**: because a row is created the moment a question first becomes schedulable, and creation always computes at least one transition out of `new` in the same write (§3.2), no row is ever left sitting in the database with `state: 'new'` in steady state — the default exists so the column type is total, and so a future caller reading a row mid-transaction sees a defined value, not because a query is expected to find one. A question genuinely in the `new` state is a question with **no row at all**. |
-| `dueAt` | `DateTime?` @db.Timestamptz | **yes** | The instant this question re-enters the selector's "due" bucket (§5). **Nullable at the schema level — corrected here from an earlier draft that claimed `NOT NULL`.** The schema's own comment says this is "because a new row has nothing scheduled yet"; in practice, per this document's own analysis, every row this application's code paths actually create already carries a concrete value — `nextSchedule` (§3.3) always computes a real `dueAt` (`now` plus `intervalDays` whole UTC calendar days, no per-learner timezone input) the same write a row is created or updated, and the one-time backfill migration (`20260903012500_backfill_question_mastery`) sets `due_at: CURRENT_TIMESTAMP` on every row it inserts too. |
+| `dueAt` | `DateTime?` @db.Timestamptz | **yes** | The instant this question re-enters the selector's `due` bucket (§5.1). **Nullable at the schema level — corrected here from an earlier draft that claimed `NOT NULL`.** The schema's own comment says this is "because a new row has nothing scheduled yet"; in practice, per this document's own analysis, every row this application's code paths actually create already carries a concrete value — `nextSchedule` (§3.3) always computes a real `dueAt` (`now` plus `intervalDays` whole UTC calendar days, no per-learner timezone input) the same write a row is created or updated, and the one-time backfill migration (`20260903012500_backfill_question_mastery`) sets `due_at: CURRENT_TIMESTAMP` on every row it inserts too. |
 | `intervalDays` | `Int`, default `0` | no | The spacing this row's last schedule computed, in whole days. `0` only as the column's structural default for a row that (per the `state` note above) is never actually read in that shape — every real row's `intervalDays` is at least `LAPSE_INTERVAL_DAYS` (`1`, §3.1) the instant it is created. |
 | `ease` | `Float`, default `2.5` | no | The SM-2-style easiness factor. §3.1 gives the exact bounds (`[1.3, 3.0]`) and deltas; `2.5` is `STARTING_EASE`, the SM-2 convention this variant keeps rather than inventing a different starting point with no external referent. |
 | `correctStreak` | `Int`, default `0` | no | Consecutive correct answers since the last reset, incremented by **any** correct outcome — an objective `correct` and a self-marked `correct_self_marked` credit it identically (§3.4; corrected here from an earlier draft of this design that gated this column to objective corrects only). Self-mark's discount is never expressed by holding this counter back; it is expressed entirely through smaller `ease` and `intervalDays` growth (§3.4). |
 | `lapses` | `Int`, default `0` | no | How many times this question has fallen out of `review`/`mastered` back into `lapsed`. Incremented **exactly once per transition into `lapsed`** — never once per subsequent miss while already there (§3.8's Row 9) — because it answers "how many times has this been forgotten after being verified," not "how many wrong answers has this question ever received." |
-| `totalAttempts` | `Int`, default `0` | no | Count of **schedulable** outcomes this row has been updated for — `correct`, `incorrect`, `correct_self_marked`. **Excludes `skipped`** attempts entirely (§3.2): a skip never touches this row, so it is not counted here either. This is deliberately not the same number as `practice_attempts`'s own per-question attempt count, which does include skips — the two answer different questions, the same way `practice_sessions.summary` and a live `practice_attempts` aggregate can legitimately differ (`practice-sessions.md` §10's "recent sessions" note). |
+| `totalAttempts` | `Int`, default `0` | no | Count of **schedulable** outcomes this row has been updated for — `correct`, `incorrect`, `correct_self_marked`, in `nextSchedule`'s own three-value `AttemptOutcome` sense. **Corrected here from an earlier draft that said this excludes every `skipped` attempt**: §3.2 now records that `outcome-mapping.ts` collapses an ordinary skip to `AttemptOutcome: 'incorrect'` before calling `nextSchedule`, so it DOES increment this column — the one exclusion is a skip on a `state_required` question, which never reaches `scheduleMastery` at all. This is still not the same number as `practice_attempts`'s own per-question attempt count (that table also holds the one excluded `state_required` skip), the same way `practice_sessions.summary` and a live `practice_attempts` aggregate can legitimately differ (`practice-sessions.md` §10's "recent sessions" note). |
 | `distinctCorrectDays` | `Int`, default `0` | no | **The column that makes `VISION.md`'s rule enforceable.** Counts distinct UTC calendar days (corrected here from an earlier draft that said the learner's own timezone — `nextSchedule` has no timezone input at all, §3.3) on which this question has received a **credit-eligible** outcome — `correct` or `correct_self_marked` (`AttemptOutcome` has no `partial` case at all — §3), never more than once per day regardless of how many credit-eligible attempts land on the same day (§3.5). This is *not* a running attempt count and *not* a percentage; it is a count of **days**, specifically so that answering the same question correctly ten times between 2pm and 2:15pm produces `distinctCorrectDays: 1`, not `10` — the exact failure `PRD.md` names by name ("A user who correctly answers ten questions immediately after studying them should not appear highly ready"). A count-of-attempts column could not distinguish "ten correct answers in one sitting" from "one correct answer on each of ten different days"; a count-of-days column cannot help but distinguish them, which is why this is the column the mastery promotion rule (§3.5) reads, not `totalAttempts` or `correctStreak`. |
-| `lastOutcome` | `PracticeOutcome?` (Postgres enum) | **yes** | `correct` \| `partial` \| `incorrect` \| `skipped` — corrected here from an earlier draft that invented a distinct `QuestionMasteryOutcome` type shaped like the scheduler's own `AttemptOutcome`. The real column **reuses `PracticeOutcome`** — the same enum `practice_attempts.outcome` already uses — rather than a second, parallel one; the schema's own comment argues this directly ("inventing a second, parallel enum for the same four-value set would be the same duplication this schema's other comments argue against elsewhere"). **This creates a real type gap `nextSchedule` itself does not close**: the scheduler's own `AttemptOutcome` (§3) is a *different*, narrower three-value type — `correct` \| `incorrect` \| `correct_self_marked` — and `PracticeOutcome` has no `correct_self_marked` member at all. Persisting a `MasteryRecord.lastOutcome` of `correct_self_marked` therefore requires collapsing it first; `apps/api/src/practice/mastery/outcome-mapping.ts` (issue #78, landing on `feat/practice-queue`) is exactly that collapse, mapping `correct_self_marked → correct` at the persistence boundary. Nullable at the schema level; every row this document's own code paths create already has one (a row exists only alongside a schedulable outcome, §3.2), but the one-time backfill migration (`20260903012500_backfill_question_mastery`) can set this to `partial` or `skipped` from a user's pre-existing practice history — values `nextSchedule` itself never writes going forward. |
-| `lastAttemptAt` | `DateTime?` @db.Timestamptz | **yes** | `Clock.now()` at the moment of the schedulable outcome that last updated this row. Nullable at the schema level — corrected here from an earlier draft that claimed `NOT NULL` — for the same structural reason as `dueAt`: no row this application's code paths create is ever actually missing one, since a row exists only once a schedulable outcome has set it. Read by the selector's "weak" bucket ordering (§5), by the Study Coach's recency input (§6), and by `nextSchedule` itself, together with `lastOutcome`, as the one-attempt lookback that decides "already credited today" for `distinctCorrectDays` (§3.5). |
+| `lastOutcome` | `PracticeOutcome?` (Postgres enum) | **yes** | `correct` \| `partial` \| `incorrect` \| `skipped` — corrected here from an earlier draft that invented a distinct `QuestionMasteryOutcome` type shaped like the scheduler's own `AttemptOutcome`. The real column **reuses `PracticeOutcome`** — the same enum `practice_attempts.outcome` already uses — rather than a second, parallel one; the schema's own comment argues this directly ("inventing a second, parallel enum for the same four-value set would be the same duplication this schema's other comments argue against elsewhere"). **This creates a real type gap `nextSchedule` itself does not close**: the scheduler's own `AttemptOutcome` (§3) is a *different*, narrower three-value type — `correct` \| `incorrect` \| `correct_self_marked` — and `PracticeOutcome` has no `correct_self_marked` member at all. Persisting a `MasteryRecord.lastOutcome` of `correct_self_marked` therefore requires collapsing it first; `apps/api/src/practice/mastery/outcome-mapping.ts` (issue #78) is exactly that collapse, mapping `correct_self_marked → correct` at the persistence boundary. Nullable at the schema level; every row this document's own code paths create already has one (a row exists only alongside a schedulable outcome, §3.2), but the one-time backfill migration (`20260903012500_backfill_question_mastery`) can set this to `partial` or `skipped` from a user's pre-existing practice history — values `nextSchedule` itself never writes going forward. |
+| `lastAttemptAt` | `DateTime?` @db.Timestamptz | **yes** | `Clock.now()` at the moment of the schedulable outcome that last updated this row. Nullable at the schema level — corrected here from an earlier draft that claimed `NOT NULL` — for the same structural reason as `dueAt`: no row this application's code paths create is ever actually missing one, since a row exists only once a schedulable outcome has set it. Read by the selector's `weak` and `mastered` bucket ordering (§5.1), by the Study Coach's recency input via `GET /api/practice/queue` (§6), and by `nextSchedule` itself, together with `lastOutcome`, as the one-attempt lookback that decides "already credited today" for `distinctCorrectDays` (§3.5). |
 | `createdAt` / `updatedAt` | `DateTime @db.Timestamptz` | no | House convention, present on every table in this schema; not named in the epic's own column list but added here for the same reason `practice_sessions.updatedAt` exists — `updatedAt` moves on every scheduling write, unlike `practice_attempts`, which is genuinely immutable end to end. |
 
 ```
@@ -175,11 +187,11 @@ These are the shipped migration's complete index list, matching epic #54's
 own acceptance criteria exactly. **An earlier draft of this document added a
 third index, `@@index([userId, state])`, presenting it as shipped — it is
 not; the real migration has only the two above.** That earlier reasoning is
-kept below, relabeled as a **design note, not a fact**: §5's "lapsed and
-weak" bucket filters by `state` directly, unmoderated by `dueAt` — a
-`lapsed` row is eligible for the queue regardless of whether it happens to
-be "due" yet, so a query that can only range-scan `(userId, dueAt)` falls
-back to a sequential scan filtered by `state` for that bucket. Whether that
+kept below, relabeled as a **design note, not a fact**: §5.1's `weak` bucket
+filters partly by `state` directly, unmoderated by `dueAt` — a `lapsed` row
+is eligible for the queue regardless of whether it happens to be "due" yet,
+so a query that can only range-scan `(userId, dueAt)` falls back to a
+sequential scan filtered by `state` for that bucket. Whether that
 scan is worth a dedicated index is a call for whoever tunes this query
 against real data volume (a candidate follow-up on issue #78, not something
 this document should have asserted as already decided); it is **not shipped**
@@ -290,15 +302,37 @@ the earliest a question can be shown again is tomorrow.
 
 ### 3.2 What `nextSchedule` is never called for
 
-**`skipped` is not a member of `AttemptOutcome`, and a skipped attempt never
-reaches this function at all.** `practice-sessions.md` §9.1 already states
-the reason in full for the attempt row itself — "seeing the answer without
-ever producing or claiming one is not evidence of recall in either
-direction" — and this document adopts that ruling rather than re-deriving it:
-a skip leaves the `question_mastery` row, if one exists, completely
-untouched. `totalAttempts` on that row therefore counts strictly fewer
-attempts than the same question's row count in `practice_attempts`, and that
-gap is intentional, not a bug to reconcile.
+**`skipped` is not a member of `AttemptOutcome`, and the literal string
+`'skipped'` never reaches this function.** That much of an earlier draft's
+claim holds. **What does not hold, now that issue #78 has shipped the real
+caller: a skip does NOT leave `question_mastery` untouched.**
+`apps/api/src/practice/mastery/outcome-mapping.ts`'s `toAttemptOutcome`
+collapses `outcome: 'skipped'` to `AttemptOutcome: 'incorrect'` — the same
+collapse a `partial` AI verdict gets (§2's `lastOutcome` row already cites
+this file) — and `PracticeService.recordAttempt` calls `scheduleMastery`
+with that mapped `'incorrect'` for **any** skip except the one specific case
+where the question itself could not be honestly graded at all (a
+`state`-scope question with no state on the learner's profile,
+`status === 'state_required'`) — the file's own comment on the call site
+names that one exclusion precisely. An ordinary skip — the learner saw the
+question and chose not to answer — therefore schedules exactly like a miss:
+`correctStreak` resets to `0`, `ease` drops by `EASE_PENALTY_INCORRECT`, and
+a `review`/`mastered` row lapses.
+
+**This is a deliberate divergence from `practice-sessions.md` §9.1's own
+"not evidence of recall in either direction" ruling, not an oversight** —
+`outcome-mapping.ts`'s own comment states the reasoning for `question_mastery`
+specifically: "a skip is real evidence... and 'was not recalled' is the
+honest thing to tell the scheduler about it." §9.1's ruling still governs
+`practice_attempts.outcome` unchanged — a skip is still recorded as
+`'skipped'`, never silently rewritten to `'incorrect'` in the evidence table
+itself — this collapse happens only at the boundary into the derived
+scheduling table, and only there. `totalAttempts` on a `question_mastery`
+row therefore counts every skip that reached the scheduler (all but the
+`state_required` case) alongside every `correct`/`incorrect` attempt, and is
+smaller than the same question's row count in `practice_attempts` only by
+that one excluded case — not, as an earlier draft of this document claimed,
+by every skip.
 
 ### 3.3 `dueAt` derivation
 
@@ -327,11 +361,12 @@ answer, not at a shared local-midnight instant.
 (`getUTCFullYear`/`getUTCMonth`/`getUTCDate`) for its own same-day check, so
 both of `nextSchedule`'s day-boundary decisions — `dueAt` and same-day
 distinct-day crediting — agree with each other, just not necessarily with
-any individual learner's own local calendar day. Whether a caller normalizes
-`now` to a learner's local time before calling `nextSchedule` — so that
-"day" in the numbers above means something closer to the learner's own day —
-is a decision for that caller (not yet written; #78/#82), not a behavior of
-the pure function documented here.
+any individual learner's own local calendar day. **Now shipped, and settled:
+the real caller does not normalize.** `PracticeService.scheduleMastery`
+(§4, §11) passes `answeredAt = this.clock.now()` straight through as
+`nextSchedule`'s `now` — a plain UTC instant, not localized through
+`Clock.calendarDateIn` — so "day" throughout §3 means a UTC calendar day for
+every learner, not their own local one.
 
 ### 3.4 State transitions, and the rule that gates every one of them
 
@@ -566,95 +601,225 @@ on top of a commit that already happened.
 
 ---
 
-## 5. Selector v2 — `GET /api/practice/queue`
+## 5. Selector v2 — `apps/api/src/practice/mastery/selector.ts` and `GET /api/practice/queue`
 
-`apps/api/src/practice/mastery/queue-selector.ts` (issue #78) exports
-`buildQueue(userId, testVersionCode, options)`, the ordering both the read
-endpoint below and `PracticeService.createSession`'s new `review`/`weak`/
-`mixed` branches (`CLAUDE.md`'s "Adding a practice session kind" pattern —
-these three enum values are already declared, unwired, in
-`PracticeSessionKind`) draw from — one function, so the counts a learner sees
-on the picker screen match what a session started moments later actually
-contains.
+**This section describes shipped code (issue #78), and corrects an earlier
+draft that described a different, superseded design at the same file path**
+(`queue-selector.ts`'s `buildQueue(userId, testVersionCode, options)`, four
+buckets, a probabilistic mastered sample). None of that exists. The real
+file is `apps/api/src/practice/mastery/selector.ts`, and it exports two
+things a caller actually uses:
 
-Four buckets, filled **in order**, each exhausted before the next is
-touched, until the requested count is reached:
+- `classifyMasteryBucket(mastery, now): MasteryBucket` — the single
+  classification rule, shared verbatim by the selector below **and** by
+  `PracticeService.getQueue` (§5's endpoint), so a question's bucket can
+  never disagree between "what a session would select next" and "what the
+  picker's counts say."
+- `selectQuestionsV2<T>(questions, options)` — v1's mastery-*unaware*
+  ordering (`question-selection.ts`'s `selectQuestions`, still used nowhere
+  else that matters here) widened to read `options.masteryByQuestionId`.
+  Unanswerable questions are dropped first via v1's own `excludeUnanswerable`
+  — unchanged, reused, not reimplemented — before bucketing runs.
 
-| # | Bucket | Definition | Order within bucket |
+### 5.1 Five buckets, not four
+
+`MasteryBucket` is `'due' | 'weak' | 'new' | 'steady' | 'mastered'` — **five
+values, not the four an earlier draft of this design named.** `STEADY` is
+necessary glue the issue's own text did not name: an ordinary in-progress
+`learning` question that is not weak, or a `review` question not yet due, is
+neither "new" nor any of the other three named buckets, and every candidate
+question has to land somewhere or the pool `PracticeService.createSession`
+clamps `plannedCount` against would silently shrink. `selectQuestionsV2`
+returns all five buckets concatenated, in this order, each internally
+ordered as shown — a caller that only needs `N` questions takes them off the
+**front** of the result, exactly as v1's contract already worked:
+
+| # | Bucket | `classifyMasteryBucket` rule | Order within bucket |
 |---|---|---|---|
-| 1 | **Due** | `state IN ('review', 'mastered')` AND `dueAt <= now` | `dueAt` ascending — most overdue first. |
-| 2 | **Lapsed and weak** | `state = 'lapsed'` **OR** `lastOutcome = 'incorrect'` (regardless of `state` or `dueAt` — a `lapsed` row is always eligible immediately; a `learning` row whose most recent evidence was a miss counts as "weak" the same way; `AttemptOutcome` has no `partial` case to add to this list — §3) | `lastAttemptAt` ascending — longest-neglected first. |
-| 3 | **New, by category coverage** | Questions with **no** `question_mastery` row at all | Round-robin across `civics_categories` in their existing render `sort` order — one question from each category per pass — rather than exhausting one category before moving to the next, so early practice touches breadth before depth. |
-| 4 | **Sampled mastered** | `state = 'mastered'` AND `dueAt > now` (a due mastered row is already in bucket 1) AND not attempted (any outcome) within the last `MASTERED_SAMPLE_COOLDOWN_DAYS` | Uniform random sample, capped at `MASTERED_SAMPLE_RATE` of the queue's total requested slots |
+| 1 | **`due`** | `state IN ('review', 'lapsed')` AND `dueAt <= now` | `dueAt` ascending — most overdue first. |
+| 2 | **`weak`** | `state = 'lapsed'` (any `dueAt` — a row lapsed moments ago still counts, rather than waiting out its fresh one-day `dueAt`) **OR** (`state IN ('learning', 'review')` AND (`lapses >= WEAK_LAPSES_THRESHOLD` OR `correctStreak = 0`)) | `lapses` descending, then `lastAttemptAt` ascending — the most-lapsed, longest-neglected questions first. |
+| 3 | **`new`** | no `question_mastery` row, or `state = 'new'` | Round-robin across categories: the category with the **fewest `mastered` questions among this call's own candidates** goes first, one question per category per pass (`orderNewByCategoryCoverage`) — never exhausting one category before touching the next. Each category's own members are shuffled first. |
+| 4 | **`steady`** | Everything else with a mastery row — ordinary `learning` progress, or `review` not yet due | Shuffled; no stronger rule than v1's own "seen" bucket had. |
+| 5 | **`mastered`** | `state = 'mastered'` | `lastAttemptAt` ascending — least-recently-attempted first (`orderMasteredByRecency`). |
 
-| Constant | Value |
-|---|---|
-| `MASTERED_SAMPLE_RATE` | `1/20` (5%) of the queue's requested slot count, rounded down |
-| `MASTERED_SAMPLE_COOLDOWN_DAYS` | `14` |
+`WEAK_LAPSES_THRESHOLD` is `2`, not `1`: the scheduler's own state machine
+(§3.4) already treats a single lapse as an ordinary event on the path back
+through `learning` — every regression lapses once. Flagging weak at
+`lapses >= 1` would put every question that has ever slipped a single time
+permanently ahead of fresh content; two or more is a real, repeated pattern.
 
-Bucket 4 exists specifically to satisfy epic #54's own decision 5 and
-`VISION.md`'s "continue sampling what appears strong so that mastery is
-verified rather than assumed" — without it, a `mastered` question with a long
-interval could go unreviewed for months on the strength of a state label
-alone. A **5-question Quick 5 draws zero mastered samples on average**
-(`round(5 × 0.05) = 0`); a 20-question `mixed` session draws one. The
-14-day cooldown exists so the same mastered question is not repeatedly
-sampled across several short sessions in the same week, spreading coverage
-across the whole mastered pool rather than always resurfacing whichever
-mastered question happens to sort first.
+### 5.2 No sampling rate, no cooldown — the mastered bucket's ordering IS the sample
 
-`GET /api/practice/queue` (`@Auth()`, no permission — the same posture every
-other `/api/practice/*` route already takes, `practice-sessions.md` §10) is a
-**read-only counts endpoint**, per the epic's own text ("exposes the counts
-the Practice page renders") — it does not create a session. Response shape:
+**An earlier draft of this design specified a `MASTERED_SAMPLE_RATE` (1/20)
+and a `MASTERED_SAMPLE_COOLDOWN_DAYS` (14) constant, governing a
+probabilistic draw of mastered questions. Neither exists in the shipped
+file.** `selector.ts`'s own header states the reasoning directly: whatever
+slice off the front of the whole result a caller ends up taking (a Quick 5
+that runs out of due/weak/new/steady content and has to reach into mastered
+questions to fill its five) is, by construction, the mastered questions the
+learner has gone **longest** without demonstrating — because the bucket
+itself is ordered `lastAttemptAt` ascending, not drawn at random from. A
+weighted-random draw would occasionally re-serve a recently-mastered
+question ahead of one untouched for months, which is backwards for "keep
+mastery being verified rather than assumed" (epic #54's decision 5,
+`VISION.md`'s "continue sampling what appears strong"): the question most
+overdue for re-verification should be the one most likely to be asked, not
+merely likelier-than-average. Deterministic recency ordering **is** "the
+sample" — there is no separate rate or cooldown layered on top of it.
+
+### 5.3 `selectQuestionsV2` powers `quick` and `category` sessions — not new session kinds
+
+**An earlier draft of this design said `PracticeService.createSession`
+gains new `review`/`weak`/`mixed` branches that call this selector. That has
+not shipped, and #78's own merged code does not add them.**
+`PracticeService`'s private `candidateQuestions` method is the sole caller of
+`selectQuestionsV2`, and it is used for the *existing* `quick` and `category`
+session kinds — the same two `createPracticeSessionSchema` (E3) already
+wired — giving both a mastery-aware ordering they did not have under v1's
+selector. `createPracticeSessionSchema`'s `kind` enum still rejects
+`"review"`, `"weak"`, and `"mixed"` as a 400 naming the field: those three
+`PracticeSessionKind` values remain **declared in the database enum and
+unwired in the API**, exactly as `practice-sessions.md` §4 describes for E3
+— that table's claim that E5 "wires" them is now stale and is corrected
+there in the same reconciliation this document records (§5's own read of the
+shipped code is the source of that correction). A learner acts on the
+queue's counts today by starting an ordinary `quick` or `category` session,
+which the mastery-aware ordering above already serves due and weak content
+from first.
+
+### 5.4 `GET /api/practice/queue`
+
+`PracticeController.getQueue` (`@Auth()`, no permission — the same posture
+every other `/api/practice/*` route already takes, `practice-sessions.md`
+§10), backed by `PracticeService.getQueue`. Guarded by the same
+`requireOrientedProfile` check `candidateQuestions` uses: a caller who has
+not finished orientation gets a 400, not an honest-looking empty queue.
+
+Every count comes from `classifyMasteryBucket` — the identical function
+`candidateQuestions` uses to order a session — so this endpoint can never
+disagree with what starting a session right now would actually select. The
+bank read is scoped exactly like session creation: the caller's own
+`testVersionCode`, `seniorEligible` only under the 65/20 exemption, and
+`excludeUnanswerable` applied over the caller's own `stateCode` so a
+`state`-scope question a learner with no state on their profile could never
+be asked is not counted either (a bug caught and fixed writing this
+endpoint's own integration coverage — `practice.service.ts`'s own comment on
+`getQueue` records it by name).
+
+Response shape (`apps/api/src/practice/dto/practice-queue.dto.ts`'s
+`practiceQueueSchema`):
 
 ```json
 {
   "testVersionCode": "v2025",
+  "total": 128,
   "due": 4,
-  "lapsedOrWeak": 2,
-  "newAvailable": 116,
-  "masteredSampleAvailable": true
+  "weak": 2,
+  "new": {
+    "total": 92,
+    "byCategory": [
+      { "categoryId": "…", "categoryName": "American Government", "newCount": 40 }
+    ]
+  },
+  "learning": 26,
+  "mastered": 4
 }
 ```
 
-A learner who wants to *act* on these counts starts a session with
-`POST /api/practice/sessions`, `kind: 'review' | 'weak' | 'mixed'` — the
-existing endpoint, gaining new selector branches that call the same
-`buildQueue`, exactly the pattern `kind: 'category'` already uses today.
+**`learning` is this response's name for the `steady` bucket** — §5.1's
+"ordinary in-progress, not due, not struggling, not yet mastered" set — the
+DTO's own field comment says so explicitly. The wire field is `learning`;
+the internal bucket `classifyMasteryBucket` returns for the identical rows is
+`'steady'`. Two names for the same count, chosen because "steady" reads as
+internal jargon on a picker screen a learner sees, while `mastery/selector.ts`
+keeps `'steady'` internally to stay distinct from `MasteryState`'s own
+`'learning'` value (a `question_mastery.state` column value, which the
+`steady` bucket only sometimes matches — a `review`-state row not yet due is
+`steady` too). A reader moving between this DTO and `selector.ts` should not
+assume the two `learning`s name the same thing.
+
+`GET /api/journey/home`'s Study Coach (§6) reads this same endpoint's `due`
+and `weak` fields directly — not a duplicate aggregation — for its own
+`dueCount`/`lapsedCount` inputs.
 
 ---
 
 ## 6. The deterministic Study Coach
 
-`apps/api/src/journey/study-coach.ts` (issue #82) widens
-`apps/api/src/journey/next-action.ts`'s closed `NextActionKind` union by
-exactly the one member its own header already anticipates by name: `review`.
-Nothing about the existing four kinds' ordering or paths changes —
+`apps/api/src/journey/study-coach.ts` (issue #82) exports
+`recommendStudyAction`, which **wraps** `apps/api/src/journey/next-action.ts`'s
+`recommendNextAction` rather than reimplementing it, and widens
+`NextActionKind` by exactly the one member that file's own header already
+anticipated by name: `review`. Branches 1, 2, 4, and 5 below are
+`recommendNextAction`'s own branches 1 through 4, called through unchanged;
+`review` is the only new decision `study-coach.ts` makes itself. Ordering is
+unchanged from an earlier draft of this design:
 `orientation > interview_countdown > review > practice > explore` — `review`
-slots in between the two E1/E3 both already gate on "is there an interview
-coming up" and "has the learner practiced today," because reviewing material
-that is due or lapsed is a more specific, more urgent true thing to say than
-a generic five-question nudge, but never more urgent than an actual
-interview date on the calendar.
+slots in between the two E1/E3 branches that already gate on "is there an
+interview coming up" and "has the learner practiced today," because
+reviewing material that is due or lapsed is a more specific, more urgent
+true thing to say than a generic five-question nudge, but never more urgent
+than an actual interview date on the calendar.
 
 ```ts
 // Widens NextActionInput (journey-shell.md §4) with exactly the facts this
 // epic's mastery data adds — nothing broader.
 interface StudyCoachInput extends NextActionInput {
-  dueCount: number;        // question_mastery rows in bucket 1 or 2 of §5
-  lapsedCount: number;     // rows specifically in state 'lapsed'
+  dueCount: number;     // GET /api/practice/queue's own `due` field (§5.4)
+  lapsedCount: number;  // GET /api/practice/queue's own `weak` field (§5.4)
 }
 ```
 
-- **`review`** — fires when `dueCount + lapsedCount > 0`, ranked between
-  `interview_countdown` and `practice`. `path: '/practice'` — the same
-  destination `practice` and `interview_countdown` already share
-  (`next-action.ts`'s own comment: "two kinds naming one destination, not a
-  duplicated branch"); the Practice page reads `nextAction.kind` to decide
-  which session kind to default into. Reason, templated and deterministic:
-  *"You have {dueCount} question{s} ready to review — reviewing what you've
-  already learned keeps it from slipping."*
+`lapsedCount` is named for the design's "lapsed and weak" pool, but the
+figure it actually carries is the selector's **whole WEAK bucket** (§5.1) —
+a `lapsed` row **and** a `learning`/`review` row meeting
+`WEAK_LAPSES_THRESHOLD`'s struggling predicate — not `state = 'lapsed'`
+alone, as an earlier draft of this document specified. Both counts are read
+through `JourneyService.loadStudyCoachCounts`, which calls
+`PracticeService.getQueue` and returns `{ dueCount: queue.due, lapsedCount:
+queue.weak }` — the same shared query §5.4 already promises, never a second
+aggregation over `question_mastery`. That method is guarded on the caller's
+`testVersionCode` being resolved at all: an unoriented learner (whom
+`recommendStudyAction`'s first branch, below, already routes to
+`orientation` without ever looking at these two counts) short-circuits to
+`{ dueCount: 0, lapsedCount: 0 }` rather than calling `getQueue` and risking
+its own 400.
+
+- **1. Not oriented** (`orientationCompletedAt === null`) — delegates to
+  `recommendNextAction` (its own branch 1).
+- **2. An interview date that has not passed** (`daysUntilInterview !== null
+  && daysUntilInterview >= 0`) — delegates to `recommendNextAction` (its own
+  branch 2). A booked date outranks review exactly as it outranks the
+  ordinary practice nudge.
+- **3. `review`** — the one new rung. Fires when `dueCount + lapsedCount >
+  0`, ranked between `interview_countdown` and `practice`. `path:
+  '/practice'` — the same destination `practice` and `interview_countdown`
+  already share (`next-action.ts`'s own comment: "three kinds naming one
+  destination, not a duplicated branch"); the Practice page reads
+  `nextAction.kind` to decide which session kind to default into. Title:
+  `"Review 1 question."` (singular) or `"Review N questions."`, from the
+  file's own `reviewTitle`, mirroring `next-action.ts`'s `countdownTitle`.
+  Reason, templated and deterministic: *"You have {reviewCount} question(s)
+  ready to review — reviewing what you've already learned keeps it from
+  slipping."*
+- **4 & 5. `practice` / `explore`** — no due or lapsed evidence: delegates to
+  `recommendNextAction` (its own branches 3 and 4), decided by
+  `hasPractisedToday` exactly as they always were.
+
+**A judgment call the shipped file flags explicitly in its own header, and
+this document now states rather than silently resolving: the fire condition
+is `dueCount + lapsedCount > 0`, and the reason text's number is the same
+sum — never `dueCount` alone**, which is what an earlier draft's literal
+`"You have {dueCount} question(s)…"` wording would have produced. Read
+literally, a learner with `dueCount: 0, lapsedCount: 3` would both see the
+`review` card fire (because the sum is positive) *and*, under the old
+wording, be told "You have 0 questions ready to review" — a fabricated-
+confidence shape `journey-shell.md` §10 rules out elsewhere. `study-coach.ts`
+computes `const reviewCount = input.dueCount + input.lapsedCount;` once, and
+uses that single value for **both** the gate and the copy, so the number in
+the sentence is always the number that made the card appear in the first
+place. `study-coach.spec.ts` pins this as behavior directly — a case titled
+"interpolates the SUM into the reason text, not dueCount alone."
 
 **Why this must be a pure function, stated as plainly as `next-action.ts`'s
 own header states it, because the reasoning does not change one epic later:**
@@ -670,10 +835,8 @@ exactly reproducible (journey-shell.md §4.1's "never a route that redirects
 to `/`" invariant is enforced by `kind` mapping to one hardcoded path — a
 model choosing `kind` freely would reopen exactly the free-form-string risk
 §4.1 already closed) into something a model call could make nondeterministic.
-
-`dueCount` and `lapsedCount` are computed the same way `GET
-/api/practice/queue`'s response is (§5) — one shared query, not a duplicate
-count kept in sync by convention.
+NO AI CALL HAPPENS HERE, and none ever should — `study-coach.ts`'s own
+header states this in exactly those words.
 
 ---
 
@@ -719,6 +882,15 @@ establishes for `abandoned` sessions. `speaking` and `ready`
 (`journey-shell.md` §1) remain E9's and E6's respectively; nothing here
 touches either.
 
+**Re-verified for this reconciliation (issue #102), per PR #224's own note
+that this section had not yet been checked against shipped code**: the
+function signature, both rules, and their ordering above are quoted
+correctly against the real `stage-transitions.ts` — no correction was
+needed. The one added, more precise fact worth naming: the sole caller is
+`PracticeService.scheduleMastery` (`apps/api/src/practice/practice.service.ts`),
+a **private method**, not a separate `mastery.service.ts` module — see §11's
+corrected file mapping.
+
 ---
 
 ## 8. `GET /api/progress/mastery`
@@ -736,7 +908,7 @@ route in this product already takes.
   "categories": [
     {
       "categoryId": "…",
-      "name": "American Government",
+      "categoryName": "American Government",
       "totalQuestions": 57,
       "byState": { "new": 20, "learning": 10, "review": 15, "lapsed": 2, "mastered": 10 },
       "masteredCount": 10
@@ -744,6 +916,15 @@ route in this product already takes.
   ]
 }
 ```
+
+**`categoryName`, not `name` as an earlier draft of this worked example
+showed.** `apps/api/src/progress/dto/progress-mastery.dto.ts`'s own header
+states the reason: this endpoint's sibling, `GET /api/practice/queue`,
+already shipped `categoryId`/`categoryName` on its own `new.byCategory` rows
+(§5.4, issue #78) before this one shipped, and two endpoints reading the
+same `question_mastery` rows for the same caller should not invent two words
+for the same field — so the DTO follows that shipped precedent over this
+document's own earlier prose.
 
 `totalQuestions` and each category's own count come from `civics_questions`
 (E2's content, scoped to the caller's `testVersionCode`); `byState` is a
@@ -771,8 +952,8 @@ does not mistake a silence in this document for an oversight:
   `embed` role stays declared and unwired through this epic exactly as it
   has since #25 — `ROADMAP.md` §8's post-MVP backlog names retrieval-based
   clustering explicitly as real future value that nothing in E1–E11 needs.
-  §5's "weak" bucket is a simple, explainable rule over `lastOutcome`
-  (§5), never a similarity search.
+  §5.1's `weak` bucket is a simple, explainable rule over `state`, `lapses`,
+  and `correctStreak` (`classifyMasteryBucket`), never a similarity search.
 - **Mock-interview attempts feeding the scheduler.** E8 (#57) is the epic
   that writes `practice_attempts` rows with `source: 'mock_interview'`;
   whether those attempts also produce `question_mastery` updates is E8's own
@@ -797,24 +978,24 @@ does not mistake a silence in this document for an oversight:
 
 ## 11. Worked examples / live examples footer
 
-**#71 and #75's files exist and are merged** (this document's introduction
-and §2/§3 describe them as shipped fact); `apps/api/src/practice/mastery/outcome-mapping.ts`
-(part of #78) exists on the unmerged `feat/practice-queue` branch. Every
-other path below does not exist yet — chosen to match this codebase's
-existing conventions (`apps/api/src/practice/`, `apps/api/src/journey/`)
-rather than invented ad hoc, since #78's remaining files and #82–#98 build
-directly against these locations. The mapping from epic #54's own
-child-issue list to the issue numbers named throughout this document:
+**#71, #75, #78, #82, #86, #90, and #94's files all exist and are merged**
+(this document's introduction and §2 through §8 describe them as shipped
+fact). Only #98's file — `tests/e2e/memory.spec.ts` — does not exist yet.
+#102 is this reconciliation itself. The mapping from epic #54's own
+child-issue list to the issue numbers named throughout this document, **now
+corrected against the real, merged file tree** (an earlier draft of this
+table named `mastery.service.ts` and `queue-selector.ts`, neither of which
+were ever the real paths):
 
 | Issue | Child-issue item (epic #54) | Files this document specifies for it |
 |---|---|---|
 | **#67** (this document) | Design spec | `docs/specs/memory-model.md` |
 | **#71** | Migration — `question_mastery` (+ backfill) | `apps/api/prisma/schema.prisma` (`QuestionMastery` model, `MasteryState` enum — §2; `lastOutcome` reuses the existing `PracticeOutcome` enum, no second enum), `apps/api/prisma/migrations/20260903012203_add_question_mastery/`, `apps/api/prisma/migrations/20260903012500_backfill_question_mastery/` |
 | **#75** | Pure scheduler + tests | `apps/api/src/practice/mastery/scheduler.ts` (`nextSchedule`, `initialMasteryRecord()` — §3), `apps/api/src/practice/mastery/scheduler.spec.ts` (§3.8's table, as literal test cases) |
-| **#78** | Selector v2 and `GET /api/practice/queue` | `apps/api/src/practice/mastery/mastery.service.ts` (the upsert wrapper, calling `nextSchedule` from inside both attempt-write transactions — §4; same-day crediting is computed inside `nextSchedule` itself, §3.5, not by this wrapper), `apps/api/src/practice/mastery/outcome-mapping.ts` (collapses `correct_self_marked → correct` when persisting `lastOutcome` to the `PracticeOutcome`-typed column — §2), `apps/api/src/practice/mastery/queue-selector.ts` (`buildQueue` — §5), `apps/api/src/practice/practice.controller.ts` (the new route), `PracticeService.createSession`'s new `review`/`weak`/`mixed` branches |
-| **#82** | Study-coach recommender and stage transitions | `apps/api/src/journey/study-coach.ts` (§6), `apps/api/src/journey/next-action.ts` (widened `NextActionKind`/`NEXT_ACTION_PATHS`), `apps/api/src/journey/stage-transitions.ts` (`nextStageOnMasteryEvent` — §7) |
-| **#86** | `GET /api/progress/mastery` | `apps/api/src/progress/progress.controller.ts`, `apps/api/src/progress/progress.service.ts` (§8) |
-| **#90** | Practice queue UI and real home Next-up | `apps/web/src/pages/PracticePage.tsx` (real queue counts and session kinds), the Home Next-up card reading `study-coach.ts`'s `review` kind |
+| **#78** | Selector v2 and `GET /api/practice/queue` | `apps/api/src/practice/mastery/selector.ts` (`selectQuestionsV2`, `classifyMasteryBucket`, `WEAK_LAPSES_THRESHOLD` — §5.1/§5.2), `apps/api/src/practice/mastery/selector.spec.ts`, `apps/api/src/practice/mastery/outcome-mapping.ts` (collapses `correct_self_marked → correct` when persisting `lastOutcome` to the `PracticeOutcome`-typed column — §2), `apps/api/src/practice/dto/practice-queue.dto.ts` (the response shape — §5.4), `apps/api/src/practice/practice.controller.ts` (`getQueue`, the new route) and `apps/api/src/practice/practice.service.ts` (`PracticeService.getQueue`, `candidateQuestions`, and the private `scheduleMastery` — the mastery upsert wrapper that calls `nextSchedule` inside both attempt-write transactions, §4; there is no separate `mastery.service.ts` file). **Does NOT include new `review`/`weak`/`mixed` session-kind branches on `createSession`** — those remain declared-and-unwired (§5.3); `createPracticeSessionSchema` still rejects them as a 400. |
+| **#82** | Study-coach recommender and stage transitions | `apps/api/src/journey/study-coach.ts` (`recommendStudyAction` — §6), `apps/api/src/journey/study-coach.spec.ts`, `apps/api/src/journey/next-action.ts` (widened `NextActionKind`/`NEXT_ACTION_PATHS`), `apps/api/src/journey/stage-transitions.ts` (`nextStageOnMasteryEvent` — §7), `apps/api/src/journey/journey.service.ts` (`loadStudyCoachCounts`, wiring `PracticeService.getQueue` into `GET /api/journey/home`) |
+| **#86** | `GET /api/progress/mastery` | `apps/api/src/progress/progress.controller.ts`, `apps/api/src/progress/progress.service.ts`, `apps/api/src/progress/dto/progress-mastery.dto.ts` (§8) |
+| **#90** | Practice queue UI and real home Next-up | `apps/web/src/pages/PracticePage.tsx` (real queue counts from `GET /api/practice/queue`, biasing Quick 5's copy — **not** a new session-kind picker, §5.3), the Home Next-up card reading `study-coach.ts`'s `review` kind |
 | **#94** | Progress page v1 | `apps/web/src/pages/ProgressPage.tsx` — supersedes `journey-shell.md` §8.3's designed empty state, the same **superseded, not deleted-and-forgotten** relationship `practice-sessions.md` §12 records for `/practice` |
-| **#98** | Playwright `memory.spec.ts` | `tests/e2e/memory.spec.ts` — advances `X-Test-Clock` a day to prove §3.8's Row 1 → Row 2 graduation and the queue's "due" bucket without sleeping in real time, per `practice-sessions.md` §11's identical requirement for E3's own spec |
-| **#102** | Docs | `CLAUDE.md` — a new "Adding to the memory model" Common Patterns entry, alongside "Adding a New AI Model Role" and "Adding a practice session kind"; `docs/API.md` — `GET /api/practice/queue` and `GET /api/progress/mastery` |
+| **#98** | Playwright `memory.spec.ts` | `tests/e2e/memory.spec.ts` — **not yet written.** Would advance `X-Test-Clock` a day to prove §3.8's Row 1 → Row 2 graduation and the queue's "due" bucket without sleeping in real time, per `practice-sessions.md` §11's identical requirement for E3's own spec |
+| **#102** | Docs | This reconciliation of §5/§6 (and the §7/§8 spot-checks) against the shipped code above; `ROADMAP.md`'s E5 status row; `docs/API.md`'s `GET /api/practice/queue`, `GET /api/progress/mastery`, and the widened `nextAction.kind` list; `CLAUDE.md`'s Practice and new Progress endpoint entries; the stale-claim fix to `docs/specs/practice-sessions.md` §4 |
