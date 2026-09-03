@@ -7,6 +7,8 @@ import {
   navigationPatchSchema,
   notificationsSchema,
   notificationsPatchSchema,
+  studySchema,
+  studyPatchSchema,
 } from '../../common/schemas/user-settings-namespaces.schema';
 
 // Full replacement (PUT)
@@ -22,6 +24,7 @@ export const updateUserSettingsSchema = z.object({
   dataTables: dataTablesSchema.optional(),
   navigation: navigationSchema.optional(),
   notifications: notificationsSchema.optional(),
+  study: studySchema.optional(),
 });
 
 export class UpdateUserSettingsDto extends createZodDto(
@@ -50,6 +53,12 @@ export const patchUserSettingsSchema = z.object({
   //      preferences page sends when a toggle returns to its default; writing
   //      the default value instead would pin the user to it forever.
   notifications: notificationsPatchSchema.nullable().optional(),
+  // `study` deletes at two levels (epic #56 / E7):
+  //   `study: null`                     -> clear the namespace
+  //   `study: { reminderHour: null }`   -> delete one field, restoring the
+  //      built-in default. Writing `9` instead would pin the learner to
+  //      today's default hour forever.
+  study: studyPatchSchema.nullable().optional(),
 });
 
 export class PatchUserSettingsDto extends createZodDto(

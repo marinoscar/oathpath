@@ -92,19 +92,40 @@
  * before the stage it sits beside does), but never the reverse. This is the
  * identical reasoning `ProgressPage.tsx`'s own header gives for the same
  * choice on `/progress`.
+ *
+ * =============================================================================
+ * THE CONSISTENCY SURFACE (#138, epic #56 / E7) — THE THIRD INDEPENDENT READ
+ * =============================================================================
+ *
+ * `ConsistencyCard` replaces E1's goal-ring placeholder with the measured
+ * value §10 was always waiting for: `GET /api/engagement/summary` now reports
+ * today's practice seconds, the streak and the freeze budget
+ * (`docs/specs/habit-streaks.md` §4.6), so the ring reports a MEASUREMENT
+ * rather than declining to. It reads through its own hook and renders its own
+ * loading and error state, for the same reason the readiness widget does: a
+ * slow engagement call must not hold the stage path off the screen, and a
+ * failed one must leave no ring behind — an invented ring is indistinguishable
+ * from a measured one, which is the half of §10 that E7 does not retire.
+ *
+ * The two answers sit inches apart on this page and speak DIFFERENT
+ * vocabularies on purpose. Readiness answers "does the evidence indicate I am
+ * becoming prepared"; the ring and the streak answer "am I consistently doing
+ * the work" (`PRD.md`, `habit-streaks.md` §8). Neither borrows the other's
+ * words, and a test asserts it.
  */
 
 import { Alert, Box, Button, Container, Typography } from '@mui/material';
 
-import { DailyGoalRing } from '../components/journey/DailyGoalRing';
 import { InterviewCountdown } from '../components/journey/InterviewCountdown';
 import { JourneyPath } from '../components/journey/JourneyPath';
 import { NextUpCard } from '../components/journey/NextUpCard';
 import { TrustFooter } from '../components/journey/TrustFooter';
 import { LoadingSpinner } from '../components/common/LoadingSpinner';
+import { ConsistencyCard } from '../components/home/ConsistencyCard';
 import { ReadinessWidget } from '../components/readiness/ReadinessWidget';
 import { findPreviousReadinessScore } from '../components/progress/readiness';
 import { useAuth } from '../contexts/AuthContext';
+import { useEngagementSummary } from '../hooks/useEngagementSummary';
 import { useJourneyHome } from '../hooks/useJourneyHome';
 import { useReadiness } from '../hooks/useReadiness';
 import { useReadinessHistory } from '../hooks/useReadinessHistory';
@@ -119,6 +140,12 @@ export default function HomePage() {
     refresh: refreshReadiness,
   } = useReadiness();
   const { history: readinessHistory } = useReadinessHistory();
+  const {
+    engagement,
+    isLoading: isEngagementLoading,
+    error: engagementError,
+    refresh: refreshEngagement,
+  } = useEngagementSummary();
 
   // A greeting, not a status. It is the only thing on this page that does not
   // come from the journey API, and it is safe to render immediately because it
@@ -223,8 +250,44 @@ export default function HomePage() {
 
             <InterviewCountdown home={home} headingId="interview-heading" />
 
-            {/* Takes no data on purpose — see the component's header. */}
-            <DailyGoalRing headingId="daily-goal-heading" />
+            {/* The measured goal ring, the streak and the freeze budget
+                (#138, epic #56 / E7) — with its own independent loading and
+                error state, for the identical reason the readiness widget
+                above has one: this is a third, separately complete answer,
+                and a slow engagement read must not hold the stage path, the
+                Next-up card or the countdown off the screen. */}
+            {isEngagementLoading ? (
+              <Box
+                role="status"
+                aria-live="polite"
+                aria-label="Loading your daily goal"
+                sx={{ mb: { xs: 3, sm: 4 } }}
+              >
+                <LoadingSpinner size={28} />
+              </Box>
+            ) : engagementError ? (
+              <Alert
+                severity="error"
+                sx={{ mb: { xs: 3, sm: 4 } }}
+                action={
+                  <Button
+                    color="inherit"
+                    size="small"
+                    onClick={() => void refreshEngagement()}
+                  >
+                    Try again
+                  </Button>
+                }
+              >
+                {/* Named plainly, with NO ring drawn in its place. A ring
+                    painted from a guess is indistinguishable from a measured
+                    one — `journey-shell.md` §10's rule, which E7 satisfies by
+                    measuring rather than by retiring. */}
+                {engagementError}
+              </Alert>
+            ) : engagement ? (
+              <ConsistencyCard engagement={engagement} headingId="daily-goal-heading" />
+            ) : null}
           </>
         )}
 

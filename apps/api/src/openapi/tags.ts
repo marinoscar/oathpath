@@ -205,6 +205,19 @@ export const TAG_GROUPS: OpenApiTagGroup[] = [
           'what it meant on the day it was written. Read-only, and no permission gates it: ' +
           'every signed-in learner owns their own readiness data.',
       },
+      {
+        name: 'Engagement',
+        description:
+          "The habit side of the product: the caller's daily goal, what they have actually " +
+          'done today, their streak, and the freeze budget that protects it. A day counts ' +
+          'when the goal was met **or** a freeze covered it, and every date here is a ' +
+          "**local** calendar day in the learner's own timezone, not a UTC one. Streaks and " +
+          'freezes answer "am I consistently doing the work" — they are **structurally not ' +
+          'inputs to Readiness**, which answers the different question of whether the evidence ' +
+          'shows the caller becoming prepared, and nothing here carries a score. Read-only ' +
+          'from the caller\'s point of view, and no permission gates it: every signed-in ' +
+          'learner owns their own engagement data.',
+      },
     ],
   },
   {

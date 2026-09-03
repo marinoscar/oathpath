@@ -1,6 +1,11 @@
 import { Injectable, Logger } from '@nestjs/common';
 
-import type { RoleChangedEmailData } from '../../email';
+import type {
+  PracticeDailyReminderEmailData,
+  PracticeReviewDueEmailData,
+  RoleChangedEmailData,
+  StreakAtRiskEmailData,
+} from '../../email';
 import { PrismaService } from '../../prisma/prisma.service';
 import { describeThrown } from '../describe-thrown';
 import type { NotificationChannel } from '../notification-events';
@@ -106,12 +111,13 @@ function formatRoles(roles: string[]): string {
  * Notification event key -> its browser renderer.
  *
  * -----------------------------------------------------------------------------
- * FILLED BY #128 — AND ONLY FOR THE ONE EVENT THAT DECLARES THE `browser`
+ * FILLED BY #128 — AND ONLY FOR THE EVENTS THAT DECLARE THE `browser`
  * CHANNEL.
  * -----------------------------------------------------------------------------
  *
- * `security.role_changed` is the sole entry, and the two absences are
- * deliberate rather than unfinished work:
+ * `security.role_changed` was the sole entry until epic #56 / E7 added the
+ * three practice reminders below; the two absences that remain are deliberate
+ * rather than unfinished work:
  *
  *   * `user.welcome` is email-only. It would fire while the user is looking at
  *     the very page that welcomes them — a toast with no reader.
@@ -158,6 +164,59 @@ export const EVENT_BROWSER_TEMPLATES: Partial<
       // not answer the question the notification just raised is worse than
       // leaving the row inert, and `sanitizeLink` would happily accept the
       // useless path.
+    };
+  },
+
+  // ---------------------------------------------------------------------------
+  // Epic #56 / E7's three practice reminders
+  // ---------------------------------------------------------------------------
+  //
+  // All three DO carry a `link`, unlike `security.role_changed` above, and the
+  // difference is that there is a page which answers the question each one
+  // raises: `/practice` is where a learner acts on any of the three. A
+  // reminder whose bell row is inert would leave the reader to navigate there
+  // themselves, having just been told that a few minutes would do it.
+  //
+  // ROOT-RELATIVE, as {@link BrowserNotificationContent.link} requires — never
+  // an absolute URL. The email templates take an `appUrl` and build an
+  // absolute CTA because a mail client has no origin to resolve against; a
+  // bell row is rendered inside the application and does.
+  'practice.daily_reminder': (data: never): BrowserNotificationContent => {
+    const { dailyGoalMinutes } = data as PracticeDailyReminderEmailData;
+
+    return {
+      title: 'Five minutes is enough today',
+      body:
+        `A quick session covers your goal of ${dailyGoalMinutes} ` +
+        `minute${dailyGoalMinutes === 1 ? '' : 's'} a day.`,
+      link: '/practice',
+    };
+  },
+
+  'practice.review_due': (data: never): BrowserNotificationContent => {
+    const { reviewCount } = data as PracticeReviewDueEmailData;
+    const phrase = `${reviewCount} question${reviewCount === 1 ? '' : 's'}`;
+
+    return {
+      // The count is in the TITLE, not only the body: a toast is frequently
+      // read as one line, and the count is the fact that makes this message
+      // worth reading at all (§5.2).
+      title: `${phrase} ready to review`,
+      body: `A few minutes now keeps them from slipping.`,
+      link: '/practice',
+    };
+  },
+
+  'streak.at_risk': (data: never): BrowserNotificationContent => {
+    const { streakDays } = data as StreakAtRiskEmailData;
+
+    return {
+      // Ownership, not warning — §5.3's forbidden shapes apply to this
+      // surface exactly as they do to the email, and a two-line toast is
+      // where a countdown would be most tempting to write.
+      title: 'Your streak is still yours today',
+      body: `You're on a ${streakDays}-day streak. A quick session today keeps it going.`,
+      link: '/practice',
     };
   },
 };

@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 
 import { AiModule } from '../ai/ai.module';
+import { EngagementModule } from '../engagement/engagement.module';
 import { PrismaModule } from '../prisma/prisma.module';
 import { ReadinessModule } from '../readiness/readiness.module';
 import { PracticeController } from './practice.controller';
@@ -58,9 +59,26 @@ import { PracticeService } from './practice.service';
  * recompute run[s] synchronously, inside the request... that produces the
  * evidence"). The dependency runs one way only: `ReadinessModule` does not
  * import this module back — see its own header.
+ *
+ * `EngagementModule` IS imported (issue #119, epic #56 / E7), for
+ * `EngagementService`'s two accrual methods — `recordAttempt` calls one after
+ * its own `$transaction` commits and `completeSession` calls the other after
+ * its completion write does (`docs/specs/habit-streaks.md` §2.1: "Both call
+ * the accrual service after their own write has committed... accrual is not
+ * part of what makes the attempt or the completion valid, so it must not be
+ * able to roll either one back"). Unlike the readiness call beside it, each
+ * accrual call is wrapped so a failure is logged and swallowed — see both
+ * call sites.
+ *
+ * The dependency runs one way only, exactly as it does for readiness:
+ * `EngagementModule` does not import this module back, and must not. It reads
+ * `practice_sessions` and `practice_attempts` directly through Prisma for
+ * §2.3's time slice rather than through `PracticeService` — the same posture
+ * `ProgressService` takes toward `question_mastery` — so importing back would
+ * be a cycle for a dependency it does not have.
  */
 @Module({
-  imports: [PrismaModule, AiModule, ReadinessModule],
+  imports: [PrismaModule, AiModule, ReadinessModule, EngagementModule],
   controllers: [PracticeController],
   providers: [PracticeService],
   exports: [PracticeService],

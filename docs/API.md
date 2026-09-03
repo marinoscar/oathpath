@@ -2525,6 +2525,109 @@ day it was written.
 
 ---
 
+### Engagement
+
+Issue #119/#153, epic #56 (E7 "Habit"). The caller's daily goal, streak and
+freeze budget — what the goal ring, the streak badge and the session-end
+celebration render. Design rationale, including the settlement algorithm and
+the three reminder events, lives in
+[`docs/specs/habit-streaks.md`](specs/habit-streaks.md); this section covers
+only the wire contract.
+
+**`@Auth()` with no permissions**, caller-scoped exactly like every other
+per-user route in this product: the learner is resolved from
+`@CurrentUser('id')`, never from a path, query, or body parameter — every
+authenticated user owns their own engagement data, so gating this route
+would leave the default Viewer role unable to see their own streak.
+
+#### GET /engagement/summary
+The caller's own daily goal, today's counters, current/longest streak, and
+remaining freeze budget, **after this request's own settlement pass**: the
+freeze budget is replenished at most once per 7 days up to a ceiling of 2,
+and a missed day inside an existing streak is covered by writing a real
+`daily_activity` row with `freezeUsed: true`, bounded to 7 days back. A read
+path that persists what it computes, exactly as `GET /api/readiness`
+already does.
+
+This is a **consistency** surface, not a readiness one — `daily_activity`,
+streaks and freezes are structurally not inputs to the readiness engine (see
+[`docs/ARCHITECTURE.md`](ARCHITECTURE.md#56-engagement-model)), and nothing
+in this response carries a score.
+
+`today` is always present, including for a learner with no `daily_activity`
+row yet, with honest zeros and `goalMet: false`. `goalMet` is
+**monotonic** — a day that was earned stays earned, including after the
+learner raises their daily goal.
+
+`streak.current` counts consecutive qualifying local days ending **today or
+yesterday**, so a learner who always practises in the evening is never shown
+`0` at 2pm on a day they fully intend to finish. A day qualifies when the
+goal was met **or** a freeze covered it. `streak.longest` is the longest
+such run anywhere in their history.
+
+Every `date` in this response is a LOCAL calendar day in the caller's own
+`timezone`, never an instant.
+
+**Request Body:** none.
+
+**Response:**
+```json
+{
+  "data": {
+    "dailyGoalMinutes": 5,
+    "today": {
+      "date": "2026-09-03",
+      "practiceSeconds": 180,
+      "attempts": 6,
+      "correct": 5,
+      "goalMet": true
+    },
+    "streak": {
+      "current": 4,
+      "longest": 11
+    },
+    "freezes": {
+      "remaining": 2,
+      "max": 2
+    },
+    "timezone": "America/Los_Angeles",
+    "recentDays": [
+      { "...": "11 earlier days, oldest first" },
+      {
+        "date": "2026-09-01",
+        "goalMet": false,
+        "freezeUsed": true,
+        "practiceSeconds": 0
+      },
+      {
+        "date": "2026-09-02",
+        "goalMet": true,
+        "freezeUsed": false,
+        "practiceSeconds": 210
+      },
+      {
+        "date": "2026-09-03",
+        "goalMet": true,
+        "freezeUsed": false,
+        "practiceSeconds": 180
+      }
+    ]
+  }
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `dailyGoalMinutes` | The learner's own `learner_profiles.daily_goal_minutes` — what the ring is measured against |
+| `freezes.remaining` | Held after this request's settlement — presented as protection the learner already has, never a scarcity counter |
+| `freezes.max` | The ceiling (`STREAK_FREEZE_MAX`, `apps/api/src/engagement/streaks/freeze-settlement.ts`), so a client never hardcodes it |
+| `recentDays` | The last 14 local days, **oldest first**, one entry per day whether or not a row exists — a day with no row reports zeros, which is what actually happened on it |
+| `recentDays[].freezeUsed` | True only for a day settlement covered with a freeze — a recorded freeze, never a fabricated practice day |
+
+**Error Cases:** none beyond standard auth (401).
+
+---
+
 ### Storage Objects
 
 The storage system provides file upload and management capabilities with support for large files (GB scale) through resumable multipart uploads.

@@ -8,6 +8,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { AiDispatchService } from '../ai/ai-dispatch.service';
 import { Clock } from '../common/clock/clock';
 import { PrismaService } from '../prisma/prisma.service';
+import { EngagementService } from '../engagement/engagement.service';
 import { ReadinessService } from '../readiness/readiness.service';
 import { GRADING_SCHEMA_NAME } from './grading';
 import { computeSummary, PracticeService } from './practice.service';
@@ -172,6 +173,24 @@ describe('PracticeService', () => {
    */
   let readiness: { recomputeSnapshot: jest.Mock };
 
+  /**
+   * The two accrual triggers (issue #119, epic #56 / E7), as doubles.
+   *
+   * `recordAttempt` and `completeSession` each await one and do nothing with
+   * its return value, so resolved stubs are all any test here needs — no test
+   * in this file is about `daily_activity`, streaks or freezes (see
+   * `engagement.service.spec.ts` and `streaks/streak-engine.spec.ts`).
+   *
+   * What this file DOES assert about them is the one property the practice
+   * loop owns: a rejected accrual call must never fail the attempt or the
+   * completion it followed (habit-streaks.md §2.4). See "accrual never fails
+   * the triggering action" below.
+   */
+  let engagement: {
+    recordAttemptActivity: jest.Mock;
+    recordSessionCompletionActivity: jest.Mock;
+  };
+
   beforeEach(async () => {
     prisma = {
       civicsCategory: { findFirst: jest.fn().mockResolvedValue(null) },
@@ -236,6 +255,11 @@ describe('PracticeService', () => {
       recomputeSnapshot: jest.fn().mockResolvedValue(undefined),
     };
 
+    engagement = {
+      recordAttemptActivity: jest.fn().mockResolvedValue(undefined),
+      recordSessionCompletionActivity: jest.fn().mockResolvedValue(undefined),
+    };
+
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         PracticeService,
@@ -247,6 +271,7 @@ describe('PracticeService', () => {
         // compiler on every test that stands the service up.
         { provide: AiDispatchService, useValue: dispatch },
         { provide: ReadinessService, useValue: readiness },
+        { provide: EngagementService, useValue: engagement },
       ],
     }).compile();
 
@@ -963,6 +988,99 @@ describe('PracticeService', () => {
   // ===========================================================================
   // The Clock — never a bare `new Date()`
   // ===========================================================================
+
+  // ===========================================================================
+  // Accrual triggers (issue #119, epic #56 / E7 "Habit")
+  // ===========================================================================
+
+  describe('daily activity accrual', () => {
+    beforeEach(() => {
+      mockOwnedSession(sessionRow());
+      prisma.civicsQuestion.findUnique.mockResolvedValue(question());
+      prisma.practiceAttempt.findFirst.mockResolvedValue(null);
+      prisma.practiceAttempt.findMany.mockResolvedValue([]);
+      prisma.civicsAnswer.findMany.mockResolvedValue([answerRow({ text: 'Congress' })]);
+      prisma.practiceAttempt.create.mockImplementation(async ({ data }: any) => ({
+        ...data,
+        id: 'new-attempt',
+        question: question(),
+      }));
+    });
+
+    it('accrues once per recorded attempt, with the attempt’s own answeredAt and outcome', async () => {
+      await service.recordAttempt(
+        USER_A,
+        SESSION_ID,
+        attemptInput({ responseText: 'Congress' }),
+      );
+
+      expect(engagement.recordAttemptActivity).toHaveBeenCalledTimes(1);
+      expect(engagement.recordAttemptActivity).toHaveBeenCalledWith(USER_A, {
+        sessionId: SESSION_ID,
+        answeredAt: NOW,
+        outcome: 'correct',
+      });
+    });
+
+    it('accrues a SKIPPED attempt too — it is still real time on the product', async () => {
+      await service.recordAttempt(USER_A, SESSION_ID, attemptInput({ skipped: true }));
+
+      expect(engagement.recordAttemptActivity).toHaveBeenCalledWith(
+        USER_A,
+        expect.objectContaining({ outcome: 'skipped' }),
+      );
+    });
+
+    it('accrues once per completion, with the SAME instant the session row records', async () => {
+      await service.completeSession(USER_A, SESSION_ID);
+
+      expect(engagement.recordSessionCompletionActivity).toHaveBeenCalledTimes(1);
+      expect(engagement.recordSessionCompletionActivity).toHaveBeenCalledWith(USER_A, {
+        sessionId: SESSION_ID,
+        completedAt: NOW,
+      });
+      expect(prisma.practiceSession.update).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ completedAt: NOW }) }),
+      );
+    });
+
+    it('does not accrue for an already-completed session — the idempotent early return', async () => {
+      mockOwnedSession(sessionRow({ status: 'completed' }));
+
+      await service.completeSession(USER_A, SESSION_ID);
+
+      expect(engagement.recordSessionCompletionActivity).not.toHaveBeenCalled();
+    });
+
+    // -------------------------------------------------------------------------
+    // Accrual never fails the triggering action (habit-streaks.md §2.4)
+    // -------------------------------------------------------------------------
+
+    it('a REJECTED accrual call still returns a graded attempt', async () => {
+      engagement.recordAttemptActivity.mockRejectedValue(new Error('daily_activity is on fire'));
+
+      const result = await service.recordAttempt(
+        USER_A,
+        SESSION_ID,
+        attemptInput({ responseText: 'Congress' }),
+      );
+
+      // The attempt is the EVIDENCE; the day's tally is a derived convenience
+      // on top of it. A transient rollup failure must never turn a correctly
+      // graded answer into a 500.
+      expect(result.attempt.outcome).toBe('correct');
+      expect(prisma.practiceAttempt.create).toHaveBeenCalled();
+    });
+
+    it('a REJECTED accrual call still completes the session', async () => {
+      engagement.recordSessionCompletionActivity.mockRejectedValue(new Error('nope'));
+
+      const completed = await service.completeSession(USER_A, SESSION_ID);
+
+      expect(completed.status).toBe('completed');
+      expect(prisma.practiceSession.update).toHaveBeenCalled();
+    });
+  });
 
   describe('the injected Clock, pinned', () => {
     it('stamps startedAt, answeredAt, and completedAt from the SAME pinned instant the Clock returns', async () => {

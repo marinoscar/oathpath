@@ -60,7 +60,35 @@ const SAMPLE_DATA: { [K in EmailTemplateName]: EmailTemplateDataMap[K] } = {
     changedAt: new Date('2026-01-01T00:00:00.000Z'),
     appUrl: 'https://app.example.com',
   },
+  // Epic #56 / E7's three reminders. Unlike every payload above, these carry
+  // NO free-text field at all — a goal in minutes, a question count, a streak
+  // length, and an `appUrl` the layout puts through `safeUrl` — so there is no
+  // field for a hostile fragment to travel in. That is why the escaping
+  // assertion below skips them: it is gated on the payload actually carrying
+  // the fragment, so a reminder that later gains a free-text field is covered
+  // again the moment its sample payload here does.
+  'practice-daily-reminder': {
+    dailyGoalMinutes: 5,
+    appUrl: 'https://app.example.com',
+  },
+  'practice-review-due': {
+    reviewCount: 4,
+    appUrl: 'https://app.example.com',
+  },
+  'streak-at-risk': {
+    streakDays: 12,
+    appUrl: 'https://app.example.com',
+  },
 };
+
+/**
+ * The tag-shaped fragment `SAMPLE_DATA` plants in every free-text field.
+ *
+ * Named once rather than repeated, because two of the assertions below are
+ * about the SAME string appearing escaped in one part and raw in the other,
+ * and a typo in one of the two copies would silently weaken the check.
+ */
+const HOSTILE_FRAGMENT = '<script>alert(document.cookie)</script>';
 
 function render(name: EmailTemplateName): RenderedEmail {
   const template = EMAIL_TEMPLATES[name] as (data: unknown) => RenderedEmail;
@@ -156,13 +184,29 @@ describe.each(EMAIL_TEMPLATE_NAMES)('template contract: "%s"', (name) => {
   // future change accidentally started HTML-escaping the text part (turning
   // "<script>" into "&lt;script&gt;" for a human reading a text-only
   // client), that would be a readability regression this test would catch.
-  it('does not HTML-escape the text part (only the html part escapes; text is plain text, not markup)', () => {
-    const hostileFragment = '<script>alert(document.cookie)</script>';
-    expect(rendered.html).not.toContain(hostileFragment);
-    expect(rendered.html).toContain('&lt;script&gt;alert(document.cookie)&lt;/script&gt;');
-    expect(rendered.text).toContain(hostileFragment);
-    expect(rendered.text).not.toContain('&lt;script&gt;');
-  });
+  //
+  // GATED ON THE PAYLOAD ACTUALLY CARRYING THE HOSTILE FRAGMENT, and gated on
+  // the DATA rather than on a hardcoded list of template names. Epic #56 / E7's
+  // three reminders render no free text at all — a goal in minutes, a question
+  // count, a streak length — so there is no field for the fragment to travel
+  // in, and asserting it appears in their output would be asserting something
+  // untrue about a template that is structurally incapable of an injection.
+  // Deriving the condition from `SAMPLE_DATA` keeps this automatic: a template
+  // that gains a free-text field, and a sample payload that exercises it, is
+  // covered again the moment the payload changes, with no edit here.
+  const carriesHostileText = JSON.stringify(SAMPLE_DATA[name]).includes(
+    HOSTILE_FRAGMENT,
+  );
+
+  (carriesHostileText ? it : it.skip)(
+    'does not HTML-escape the text part (only the html part escapes; text is plain text, not markup)',
+    () => {
+      expect(rendered.html).not.toContain(HOSTILE_FRAGMENT);
+      expect(rendered.html).toContain('&lt;script&gt;alert(document.cookie)&lt;/script&gt;');
+      expect(rendered.text).toContain(HOSTILE_FRAGMENT);
+      expect(rendered.text).not.toContain('&lt;script&gt;');
+    },
+  );
 
   it('html has no <link>, no <style> block, and no external src=', () => {
     expect(rendered.html).not.toMatch(/<link\b/i);
@@ -179,7 +223,7 @@ describe.each(EMAIL_TEMPLATE_NAMES)('template contract: "%s"', (name) => {
   });
 
   it('escapes the hostile sample data — no raw <script> or unescaped onerror= handler in the rendered html', () => {
-    expect(rendered.html).not.toContain('<script>alert(document.cookie)</script>');
+    expect(rendered.html).not.toContain(HOSTILE_FRAGMENT);
     expect(rendered.html).not.toContain('<img src=x onerror=alert(1)>');
   });
 });

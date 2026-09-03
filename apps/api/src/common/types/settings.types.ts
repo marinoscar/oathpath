@@ -2,6 +2,7 @@ import type {
   DataTablesValue,
   NavigationValue,
   NotificationsValue,
+  StudyValue,
 } from '../schemas/user-settings-namespaces.schema';
 
 // =============================================================================
@@ -42,6 +43,18 @@ export interface UserSettingsValue {
    * notifications/notification-preferences.ts.
    */
   notifications?: NotificationsValue;
+  /**
+   * When — and whether — the hourly practice reminder checks in on this
+   * learner (epic #56 / E7, `docs/specs/habit-streaks.md` §7).
+   *
+   * SPARSE, like its neighbours. Absent namespace and absent field both mean
+   * "use the built-in default", resolved at reminder time by
+   * `PracticeReminderTask` from `DEFAULT_STUDY_REMINDER_HOUR` and
+   * `DEFAULT_STUDY_REMINDER_ENABLED` — never materialised into a row, so a
+   * learner who never chose an hour keeps moving with the default if it
+   * changes.
+   */
+  study?: StudyValue;
 }
 
 /**
@@ -59,12 +72,13 @@ export interface SystemSettingsValue {
 /**
  * Default user settings
  */
-// NOTE: `dataTables`, `navigation` and `notifications` are intentionally NOT
-// listed here.
+// NOTE: `dataTables`, `navigation`, `notifications` and `study` are
+// intentionally NOT listed here.
 // Seeding them would turn "absent" into "explicitly empty", which is exactly
 // the failure mode the namespaces are designed to avoid (a frozen column set
-// that silently hides every column added later, or a notification preference
-// map that freezes a user at the defaults of the day they first saved).
+// that silently hides every column added later, a notification preference map
+// that freezes a user at the defaults of the day they first saved, or a
+// reminder hour nobody ever chose).
 export const DEFAULT_USER_SETTINGS: UserSettingsValue = {
   theme: 'system',
   profile: {

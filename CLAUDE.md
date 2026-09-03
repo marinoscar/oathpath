@@ -523,6 +523,22 @@ their own learner profile, their own practice attempts, and their own
 mastery rows. See
 [`docs/specs/readiness-model.md`](docs/specs/readiness-model.md) §6.
 
+### Engagement (Per User)
+- `GET /api/engagement/summary` - The caller's daily goal, streak and freeze budget: today's counters, `streak.current`/`streak.longest`, and `freezes.remaining`/`freezes.max` — after this request's own settlement pass (freeze replenishment and gap coverage, both persisted, never merely computed)
+
+`@Auth()` with no permissions, adds no permission strings, and for the same
+reason as Journey/Practice/Progress/Readiness above: every authenticated
+learner owns their own engagement data, exactly as they own their own
+learner profile, their own practice attempts, and their own readiness
+snapshots, and no route accepts a user id — `@CurrentUser('id')` is the
+only source of one, so there is no "read another learner's streak"
+permission to add in the first place. This is a **consistency** surface,
+not a readiness one: `daily_activity`, streaks and freezes are structurally
+not inputs to the readiness engine — see
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §5.6 for what enforces that,
+and [`docs/specs/habit-streaks.md`](docs/specs/habit-streaks.md) §4.6 for
+the endpoint's full design.
+
 ### Health
 - `GET /api/health/live` - Liveness check
 - `GET /api/health/ready` - Readiness check (includes DB)
@@ -616,6 +632,13 @@ authenticated learner owns their own readiness data, exactly as they own
 their own mastery rows and their own practice attempts, and no route accepts
 a user id. See [`docs/specs/readiness-model.md`](docs/specs/readiness-model.md) §6.
 
+**Engagement adds no permission strings either, for the same reason.** The
+one `/api/engagement/*` route, `GET /api/engagement/summary`, is `@Auth()`
+with no permissions: every authenticated learner owns their own engagement
+data, exactly as they own their own readiness data and their own practice
+attempts, and no route accepts a user id. See
+[`docs/specs/habit-streaks.md`](docs/specs/habit-streaks.md) §4.6.
+
 ## Database Tables
 
 - `users` - User accounts with profile info
@@ -641,6 +664,8 @@ a user id. See [`docs/specs/readiness-model.md`](docs/specs/readiness-model.md) 
 - `practice_attempts` - One row per question ever answered, from a session or (from E8) a mock interview — the single evidence table E5/E6/E7 read and E8 writes into. Three columns record the AI grading rung (E4, epic #53), null together on every deterministically-graded attempt: `failure_cause` (why it missed, from a closed six-value enum — `null` means no grader ran, `unknown` means one ran and honestly couldn't tell), `ai_feedback` (the grader's structured verdict, verbatim), `ai_usage_event_id` (the `ai_usage_events` row that call wrote)
 - `question_mastery` - One row per `(user, question)` pair once that question first produces a schedulable outcome (E5, epic #54): `state` (`new`/`learning`/`review`/`lapsed`/`mastered`), `due_at`, `interval_days`, `ease`, `correct_streak`, `lapses`, `total_attempts`, `distinct_correct_days` (the column that makes "correct on ≥3 distinct days" enforceable), `last_outcome`, `last_attempt_at`. No row means `new` — never a row that says so. Updated synchronously, inside the same transaction as the `practice_attempts` write that triggers it, by `nextSchedule` (`apps/api/src/practice/mastery/scheduler.ts`); see `docs/specs/memory-model.md` §2-§3
 - `readiness_snapshots` - One row per computed readiness score (E6, epic #55): `score` (0-100, structurally capped at 75 for a typed-only learner — `english`/`spoken`/`interview` sum to 0.25 weight and are 0 with no such evidence), the full `components`/`evidenceCounts` breakdown for all eight components, `cap_reason` (`'typed_only'`/`null`), `top_recommendation`, and the learner's `stage` at computation time, all frozen so a past snapshot stays self-explaining after the mastery rows it summarized move on. `narrative`/`narrative_generated_at` are nullable and filled in lazily, on the caller's own AI key, only from the request path (never the nightly cron). See `docs/specs/readiness-model.md` §4-§5
+- `daily_activity` - One row per `(user, local calendar day)` (E7, epic #56): `activity_date` (`@db.Date`, the learner's LOCAL day, not an instant), `tz_used` (the IANA zone that day was actually computed in, frozen at write time rather than re-derived from the learner's possibly-since-changed profile), `practice_seconds`/`attempts`/`correct`, `goal_met` (monotonic — once true, never flips back for the same row), `freeze_used` (true only when this row exists to record that a streak freeze covered a day with no practice at all). `@@unique([userId, activityDate])` is both the ordinary-accrual upsert key and the freeze-settlement idempotency key. Has no foreign key, relation, or column reachable from `readiness_snapshots` or the readiness engine — not an input to readiness, structurally, never merely by convention; see `docs/ARCHITECTURE.md` §5.6. See `docs/specs/habit-streaks.md` §2-§4
+- `learner_profiles.streak_freezes` / `learner_profiles.streak_freezes_granted_at` - The freeze budget (E7, epic #56): an integer ceiling of 2 (`STREAK_FREEZE_MAX`, `apps/api/src/engagement/streaks/freeze-settlement.ts`), replenished at most once per 7 days, and the timestamp of the last grant. Read and written only by `EngagementService`'s settlement pass (`GET /api/engagement/summary`'s own request path — engagement's sole recompute trigger, deliberately unlike readiness's two). See `docs/specs/habit-streaks.md` §4.3-§4.5
 
 ## Access Control: Email Allowlist
 
@@ -737,6 +762,20 @@ Note: `DATABASE_URL` is constructed automatically from these variables at runtim
 3. Update TypeScript types
 4. Add frontend UI if user-facing
 
+A new **user-settings namespace** (a top-level key like `dataTables`,
+`navigation`, `notifications`, or `study`) is narrower than step 1-3 above
+suggests and has its own fixed shape: declare it once in
+`apps/api/src/common/schemas/user-settings-namespaces.schema.ts`, never with
+a `.default()` (absent must mean "use the built-in default, resolved at
+read time" — see that file's header), and no `.default()` means no
+migration either. `study` (epic #56 / E7 "Habit") — `reminderHour` and
+`reminderEnabled`, read by the hourly `PracticeReminderTask` — is the
+newest worked example, alongside the pre-existing `dataTables` and
+`navigation`. Do not re-derive the list of files a new namespace touches
+here: `docs/specs/habit-streaks.md` §7 names the six explicitly, as a
+checklist rather than a count to take on faith, and that document is the
+one to extend if a seventh namespace ever needs the same walk-through.
+
 ### Using the Clock
 
 Any backend code that needs "now" — a timestamp, a countdown, a day
@@ -805,8 +844,24 @@ settings hub makes on its own axis (epic #109, wired end to end by #128).
    the sparse absent-key contract already defines as "use the event's default".
 
 Live examples of all three steps: `AuthService.handleGoogleLogin`
-(`user.welcome`), `AllowlistService.addEmail` (`allowlist.invitation`), and
-`UsersService.updateUserRoles` (`security.role_changed`, mandatory).
+(`user.welcome`), `AllowlistService.addEmail` (`allowlist.invitation`),
+`UsersService.updateUserRoles` (`security.role_changed`, mandatory), and
+`PracticeReminderTask` (`apps/api/src/engagement/tasks/practice-reminder.task.ts`,
+epic #56 / E7 "Habit"), which raises all three of `practice.daily_reminder`,
+`practice.review_due`, and `streak.at_risk` — ordinary preferences, every
+one, never `mandatory`: `mandatory` is reserved for a fact a user must not
+be able to silence, a privilege or security change, and a study reminder is
+neither. `streak.at_risk` is the one `defaultEnabled: false` among the
+three, stated as a rule and not left implicit in
+`notification-events.ts`'s own comment — it is the only one of the three
+that references something the learner could lose, and an unrequested
+loss-framed message is exactly the pressure `VISION.md` forbids by name:
+"We should never create pressure, shame, fear, or unhealthy compulsion to
+increase engagement metrics." `VISION.md`'s own worked example of
+acceptable copy, the model these templates follow rather than reuse
+verbatim: "Five minutes is enough today. You have four review questions
+ready." See [`docs/specs/habit-streaks.md`](docs/specs/habit-streaks.md)
+§5 and §8.
 
 ### Adding a New AI Model Role
 

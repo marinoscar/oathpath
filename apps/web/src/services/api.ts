@@ -249,6 +249,7 @@ import type {
   ProgressMastery,
   ReadinessSnapshotResponse,
   ReadinessHistoryResponse,
+  EngagementSummary,
 } from '../types';
 
 // Allowlist API
@@ -1181,4 +1182,26 @@ export async function getReadinessHistory(params?: {
   return api.get<ReadinessHistoryResponse>(
     `/readiness/history${query ? `?${query}` : ''}`,
   );
+}
+
+// =============================================================================
+// Engagement — `GET /api/engagement/summary`
+// (issue #138, epic #56 / E7 "Habit")
+// =============================================================================
+
+/**
+ * The caller's daily goal, streak and freeze budget — `GET /api/engagement/summary`.
+ *
+ * `@Auth()` with no permissions, no parameters: the same posture
+ * `getReadiness`/`getProgressMastery`/`getJourneyHome` already take, for the
+ * same reason — every learner owns their own engagement data, resolved from
+ * the JWT, and no route parameter or query field names a user.
+ *
+ * The server settles the freeze budget on this read
+ * (`docs/specs/habit-streaks.md` §4.6) exactly as `GET /api/readiness` lazily
+ * computes a snapshot; this call never performs that work itself, it only
+ * reads the result.
+ */
+export async function getEngagementSummary(): Promise<EngagementSummary> {
+  return api.get<EngagementSummary>('/engagement/summary');
 }

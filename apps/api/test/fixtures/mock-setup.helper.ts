@@ -615,6 +615,44 @@ export function setupReadinessSnapshotMocks(): void {
 }
 
 // ============================================================================
+// Daily activity mocks (issue #119, epic #56 / E7 "Habit")
+// ============================================================================
+
+/**
+ * Generic, spec-agnostic `daily_activity` defaults.
+ *
+ * `PracticeService.recordAttempt` and `.completeSession` now accrue a day
+ * through `EngagementService` on every attempt and every completion
+ * (habit-streaks.md §2.1) — which means EVERY existing integration spec that
+ * answers a question or completes a session touches this table too, whether or
+ * not that spec's own concern is engagement.
+ *
+ * Accrual is wrapped so a failure can never fail the triggering action, so an
+ * unconfigured `mockDeep` method would not break those suites — it would
+ * merely log an error on every attempt, which is noise a reader would have to
+ * learn to ignore. These defaults keep the accrual path silent and honest for
+ * suites that are not asserting on it.
+ *
+ * `engagement.integration.spec.ts` overrides all three with a real in-memory
+ * store, the same "generic default here, a real store where the suite's own
+ * assertions need one" split `setupReadinessSnapshotMocks` above already
+ * documents.
+ */
+export function setupDailyActivityMocks(): void {
+  (prismaMock.dailyActivity.findMany as jest.Mock).mockResolvedValue([]);
+  (prismaMock.dailyActivity.updateMany as jest.Mock).mockResolvedValue({ count: 0 });
+  (prismaMock.dailyActivity.upsert as jest.Mock).mockImplementation(
+    async ({ where, create }: any) => ({
+      id: `daily-activity-${Math.random().toString(36).slice(2)}`,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      ...where.userId_activityDate,
+      ...create,
+    }),
+  );
+}
+
+// ============================================================================
 // Complete Mock Setup
 // ============================================================================
 
@@ -633,6 +671,7 @@ export function setupBaseMocks(): void {
   setupMockSystemSettings();
   setupMockAuditEvents();
   setupReadinessSnapshotMocks();
+  setupDailyActivityMocks();
 
   // Mock transactions
   mockPrismaTransaction();

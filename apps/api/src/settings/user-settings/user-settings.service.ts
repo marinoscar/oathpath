@@ -23,6 +23,8 @@ import {
   NotificationChannelPreferencesValue,
   NotificationsPatchValue,
   NotificationsValue,
+  StudyPatchValue,
+  StudyValue,
 } from '../../common/schemas/user-settings-namespaces.schema';
 import type { NotificationChannel } from '../../notifications/notification-events';
 
@@ -56,6 +58,7 @@ export class UserSettingsService {
       ...(value.notifications !== undefined
         ? { notifications: value.notifications }
         : {}),
+      ...(value.study !== undefined ? { study: value.study } : {}),
       updatedAt,
       version,
     };
@@ -195,6 +198,11 @@ export class UserSettingsService {
       merged.notifications = mergedNotifications;
     }
 
+    const mergedStudy = this.mergeStudy(current.study, dto.study);
+    if (mergedStudy !== undefined) {
+      merged.study = mergedStudy;
+    }
+
     // Enforce the caps AFTER the merge — see assertDataTableLimit.
     this.assertDataTableLimit(merged.dataTables);
     this.assertNotificationLimit(merged.notifications);
@@ -297,6 +305,65 @@ export class UserSettingsService {
       delete merged.railCollapsed;
     } else if (patch.railCollapsed !== undefined) {
       merged.railCollapsed = patch.railCollapsed;
+    }
+
+    return Object.keys(merged).length > 0 ? merged : undefined;
+  }
+
+  /**
+   * Merge the `study` namespace (epic #56 / E7) field-wise.
+   *
+   * The same five cases as {@link mergeNavigation}, and deliberately the same
+   * SHAPE of merge rather than `mergeDataTables`' replace-wholesale: `study`
+   * is a small flat object of INDEPENDENT scalar choices, so a learner who
+   * PATCHes `{ study: { reminderEnabled: false } }` must keep the reminder
+   * hour they picked last month. Replacing wholesale would silently discard it
+   * and hand them back the built-in default the next time they switched
+   * reminders on — a preference lost with no error anywhere.
+   *
+   * - patch absent           -> keep the stored namespace untouched
+   * - patch is `null`        -> clear the whole namespace
+   * - field omitted          -> stored value untouched
+   * - field set to a value   -> replaces the stored value
+   * - field set to `null`    -> deletes the field, so the reminder falls back
+   *   to `DEFAULT_STUDY_REMINDER_HOUR` / `DEFAULT_STUDY_REMINDER_ENABLED`
+   *   rather than to a hard-coded stored copy of today's default
+   *
+   * A SEPARATE METHOD RATHER THAN A SECOND CALL TO `mergeNavigation`, even
+   * though the two are the same shape: `mergeNavigation` names
+   * `railCollapsed` explicitly, and a shared generic "merge a flat object"
+   * helper would have to accept any key — which is precisely the check the
+   * field-wise form performs for free. Two short, total methods that each
+   * fail to compile when their namespace gains a field beat one clever one
+   * that silently accepts anything.
+   *
+   * As with its neighbours, an empty result collapses to `undefined` so the
+   * namespace disappears rather than persisting as `{}`.
+   */
+  private mergeStudy(
+    current: StudyValue | undefined,
+    patch: StudyPatchValue | null | undefined,
+  ): StudyValue | undefined {
+    if (patch === undefined) {
+      return current;
+    }
+
+    if (patch === null) {
+      return undefined;
+    }
+
+    const merged: StudyValue = { ...(current ?? {}) };
+
+    if (patch.reminderHour === null) {
+      delete merged.reminderHour;
+    } else if (patch.reminderHour !== undefined) {
+      merged.reminderHour = patch.reminderHour;
+    }
+
+    if (patch.reminderEnabled === null) {
+      delete merged.reminderEnabled;
+    } else if (patch.reminderEnabled !== undefined) {
+      merged.reminderEnabled = patch.reminderEnabled;
     }
 
     return Object.keys(merged).length > 0 ? merged : undefined;

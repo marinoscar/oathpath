@@ -90,6 +90,14 @@ export const EVENT_EMAIL_TEMPLATES: Partial<Record<string, EmailTemplateName>> =
     'user.welcome': 'user-welcome',
     'allowlist.invitation': 'allowlist-invitation',
     'security.role_changed': 'role-changed',
+    // Epic #56 / E7's three practice reminders. Every one of the three
+    // declares `email`, so every one of the three needs a line here — an
+    // omission would be a recorded FAILED delivery per firing per learner,
+    // hourly, which is exactly the noise the registry-coverage test in
+    // `notification-template-coverage.spec.ts` exists to prevent.
+    'practice.daily_reminder': 'practice-daily-reminder',
+    'practice.review_due': 'practice-review-due',
+    'streak.at_risk': 'streak-at-risk',
   };
 
 @Injectable()

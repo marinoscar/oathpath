@@ -6,6 +6,8 @@ import {
   navigationPatchSchema,
   notificationsSchema,
   notificationsPatchSchema,
+  studySchema,
+  studyPatchSchema,
 } from './user-settings-namespaces.schema';
 
 // =============================================================================
@@ -29,6 +31,10 @@ export const userSettingsSchema = z.object({
   // materialise a preference blob for the whole user base at the first PUT
   // and freeze them at today's defaults. See notification-preferences.ts.
   notifications: notificationsSchema.optional(),
+  // `study` (epic #56 / E7) is optional for the same reason: absent means the
+  // built-in defaults (`DEFAULT_STUDY_REMINDER_HOUR` / `_ENABLED`) resolved at
+  // reminder time, and every existing account is absent.
+  study: studySchema.optional(),
 });
 
 export type UserSettingsDto = z.infer<typeof userSettingsSchema>;
@@ -49,6 +55,9 @@ export const userSettingsPatchSchema = z.object({
   // Three nullable levels, three different deletes: the namespace, one
   // channel, one event key. See notificationsPatchSchema.
   notifications: notificationsPatchSchema.nullable().optional(),
+  // `study: null` clears the namespace; `study: { reminderHour: null }`
+  // deletes one field and restores its built-in default.
+  study: studyPatchSchema.nullable().optional(),
 });
 
 // =============================================================================

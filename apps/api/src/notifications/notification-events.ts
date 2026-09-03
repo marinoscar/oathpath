@@ -183,7 +183,9 @@ export interface NotificationEventDef {
  * The events this application can raise.
  *
  * Seeded with the three #128 wires end to end, so the framework is exercised
- * by real triggers rather than staying theoretical (epic #109, scope item 8).
+ * by real triggers rather than staying theoretical (epic #109, scope item 8),
+ * and extended by epic #56 / E7 with the three practice reminders the hourly
+ * `PracticeReminderTask` raises (`docs/specs/habit-streaks.md` §5).
  *
  * KEYS ARE NAMESPACED `<area>.<event>` so the list stays readable as it grows
  * and so `security.*` is greppable — the class of event that tends to be
@@ -225,6 +227,56 @@ export const NOTIFICATION_EVENTS: NotificationEventDef[] = [
     // whole flag exists for: an account silently gains or loses access and
     // nobody outside the admin console can tell. Not silenceable.
     mandatory: true,
+  },
+
+  // ===========================================================================
+  // The three practice reminders (epic #56 / E7 "Habit")
+  // ===========================================================================
+  //
+  // `docs/specs/habit-streaks.md` §5. All three are raised by ONE trigger —
+  // the hourly `PracticeReminderTask` — and the ladder there picks exactly one
+  // of them per learner per local day, so a learner never receives two of
+  // these on the same day no matter how many of them are switched on.
+  //
+  // NONE OF THE THREE IS `mandatory`, AND THAT IS THE DELIBERATE PART.
+  // `mandatory` is reserved for a fact a user must not be able to silence —
+  // a security or privilege change, which is why `security.role_changed`
+  // above carries it. A study reminder is the opposite kind of message: a
+  // reminder about a habit that a learner cannot switch off is precisely the
+  // "pressure... to increase engagement metrics" `VISION.md` rules out by
+  // name, and a coach who cannot be told "not today" is not a coach. Every
+  // one of these three is switchable per channel like `user.welcome`, and
+  // `study.reminderEnabled` (the `study` namespace) silences all three at
+  // once, before the ladder is even evaluated.
+  {
+    key: 'practice.daily_reminder',
+    label: 'Daily practice reminder',
+    description:
+      "Sent at your chosen reminder time on a day you haven't practised yet, when you have nothing specifically due for review.",
+    channels: ['email', 'browser'],
+    defaultEnabled: true,
+  },
+  {
+    key: 'practice.review_due',
+    label: 'Questions ready to review',
+    description:
+      'Sent at your chosen reminder time when you have questions due for review — material you have learned before that is starting to fade.',
+    channels: ['email', 'browser'],
+    defaultEnabled: true,
+  },
+  {
+    key: 'streak.at_risk',
+    label: 'Keep your streak going',
+    description:
+      'Sent at your chosen reminder time when you have an active streak of two or more days and no freeze available to cover today automatically if you miss it.',
+    channels: ['email', 'browser'],
+    // THE ONLY `defaultEnabled: false` IN THIS REGISTRY, and the reason is
+    // stated rather than left implicit: it is the only one of the three that
+    // references something the learner could LOSE. An unrequested loss-framed
+    // message is exactly the pressure `VISION.md` forbids, so a learner who
+    // wants this nudge turns it on, and a learner who never asked for a
+    // countdown on their own consistency is never handed one.
+    defaultEnabled: false,
   },
 ];
 

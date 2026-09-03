@@ -7,13 +7,19 @@
  * overlaid as text is the low-risk primitive this task's own instructions
  * name for exactly this case.
  *
- * UNLIKE `DailyGoalRing` (`components/journey/DailyGoalRing.tsx`), this ring
- * carries a real `role="progressbar"` with a real `aria-valuenow`. That
- * component's own honesty rule is about NOT claiming a value it cannot
- * back — `dailyGoal.tracked` is `false` all through E1, so there is no
- * number to report. `score` is the opposite case: a real, server-computed
- * value (§5's `round(weightedSum * 100)`), so reporting it as a progressbar
- * is the honest choice, not the dishonest one.
+ * This ring carries a real `role="progressbar"` with a real `aria-valuenow`,
+ * because `score` is a real, server-computed value (§5's
+ * `round(weightedSum * 100)`) — reporting it as a progressbar is the honest
+ * choice, not the dishonest one. E1's goal-ring placeholder was the opposite
+ * case and claimed no role at all: `dailyGoal.tracked` was `false` all
+ * through E1, so there was no number to report. E7 (#138) measured the day
+ * and replaced that placeholder with `components/home/GoalRing.tsx`, which
+ * now claims the role too — on the strength of a measurement, exactly as
+ * this one does.
+ *
+ * The two rings answer DIFFERENT questions and must never borrow each
+ * other's words: this one is readiness, `GoalRing` is consistency
+ * (`docs/specs/habit-streaks.md` §8, `PRD.md`).
  */
 
 import { Box, Chip, CircularProgress, Typography } from '@mui/material';
