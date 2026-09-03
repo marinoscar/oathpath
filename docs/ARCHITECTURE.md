@@ -571,6 +571,93 @@ this suite to its exact grading behavior, or writing directly to
 `practice_attempts` — neither of which is a true end-to-end exercise of the
 product. The spec's own header explains the substitution in full.
 
+### 5.6 Engagement Model
+
+Issue #119/#153, epic #56 (E7 "Habit"). Daily goal tracking, streaks, and
+streak-freeze protection — a **consistency** surface, not a readiness one.
+Full design detail — the accrual formula, the settlement algorithm, the
+reminder ladder, the `study` namespace, the copy rules — lives in
+[`docs/specs/habit-streaks.md`](specs/habit-streaks.md); this section
+covers only the architectural shape.
+
+#### Local days, derived through `Clock`
+
+Every "day" `EngagementService` and `PracticeReminderTask` reason about is a
+LOCAL calendar day in the learner's own `learner_profiles.timezone`, never
+a UTC instant — the same discipline §5.5 states for `Clock.calendarDateIn`,
+extended here by two more `Clock` methods this epic added:
+`localHourIn(timeZone)` (the current local hour, `0`-`23`) and
+`localDayRangeIn(timeZone)` (that local day's UTC instant bounds, as
+`{ start, end }`). All three throw `RangeError` for an unknown timezone
+rather than silently falling back to UTC — a stored `timezone` a learner
+never actually has is a bug worth surfacing, not a countdown or a reminder
+quietly off by one.
+
+Each `daily_activity` row **stores** the IANA zone it was computed in as
+`tz_used`, alongside its `activity_date`, rather than re-deriving the zone
+from the learner's (possibly since-changed) profile at read time. A learner
+who relocates keeps every past row's day exactly as it was written on the
+day it happened — `tz_used` is what makes that row self-explaining after
+the profile that produced it has moved on, the identical reason a
+`readiness_snapshots` row freezes its own inputs (§5.5).
+
+#### The hourly reminder task
+
+`PracticeReminderTask` (`apps/api/src/engagement/tasks/practice-reminder.task.ts`)
+is the one trigger behind all three reminder events
+(`practice.daily_reminder`, `practice.review_due`, `streak.at_risk`). It
+follows `apps/api/src/auth/tasks/token-cleanup.task.ts`'s exact shape — a
+plain `@Injectable()` with a `@Cron` decorator, registered directly in its
+own feature module's `providers` array rather than a separate "tasks
+module" — but where `token-cleanup.task.ts` and `ReadinessRecomputeTask`
+(§5.5) both run `EVERY_DAY_AT_3AM`, this task runs
+**`@Cron(CronExpression.EVERY_HOUR)`**, and the difference is deliberate:
+a single fixed UTC instant is fine for housekeeping and fatal for a
+reminder. `EVERY_DAY_AT_3AM` reaches a Tokyo learner at noon and a Madrid
+learner at 4am — a different local hour for every zone a learner could be
+in, so no single daily expression can express "remind me at 9am" for more
+than one of them at a time. An hourly firing sidesteps the problem rather
+than approximating it: on each run the question is "whose local hour, right
+now, equals the hour they chose" — `Clock.localHourIn`, answerable for
+every zone at once, twenty-four times a day.
+
+The task deliberately never settles freezes — that write is reserved for
+`GET /api/engagement/summary`'s own request path (habit-streaks.md §4.6's
+single recompute trigger), so an hourly background job never spends a
+learner's freeze budget on a schedule nobody asked for.
+
+#### `daily_activity` is not an input to the readiness engine
+
+Stated here as a rule, not an aside: **the readiness engine
+(`apps/api/src/readiness/readiness-engine.ts`, §5.5) never reads
+`daily_activity`, a streak count, or a freeze balance, and never will.**
+`PRD.md` states the separation as a product requirement — "Points, streaks,
+achievements, and challenges encourage the journey. They must never
+artificially increase the user's Readiness Score" — and it is kept
+structurally here, not by a filter applied at read time:
+
+- **No schema relation.** `DailyActivity` (`apps/api/prisma/schema.prisma`)
+  has no foreign key, relation, or column that lets `readiness_snapshots`
+  or `computeReadiness` read out of it.
+- **No module import.** `EngagementModule` does not import
+  `ReadinessModule` — the dependency the other direction runs one way only,
+  `PracticeModule` importing `EngagementModule` to accrue after its own
+  writes commit, exactly as it already imports `ReadinessModule` for the
+  same shape of call.
+- **An integration test holds the line.** The `engagement never moves
+  readiness` describe block in
+  `apps/api/test/engagement.integration.spec.ts` drives a long streak, a
+  spent freeze, and a met goal through the real API and asserts the
+  readiness score and **every** component stay byte-identical before and
+  after — not merely "the score didn't change" — and separately asserts
+  that `GET /api/readiness`'s response carries no streak, freeze, or
+  daily-activity field at all.
+
+A future contributor wanting readiness to feel more responsive to daily
+practice should not wire `daily_activity` into the readiness engine to get
+it — that is the exact coupling this section, the schema comment above
+`DailyActivity`, and the test above all exist to prevent.
+
 ---
 
 ## 6. Data Architecture
@@ -1003,6 +1090,17 @@ Same posture as Journey/Practice/Progress above — no route takes a user id,
 so there is no permission to add. See
 [`docs/specs/readiness-model.md`](specs/readiness-model.md) §6 and §5.5
 above for the architectural shape.
+
+#### Engagement (Per User)
+
+| Method | Path | Auth | Purpose |
+|--------|------|------|---------|
+| `GET` | `/api/engagement/summary` | `@Auth()`, no permissions | The caller's daily goal, streak and freeze budget, after this request's own settlement pass |
+
+Same posture as Journey/Practice/Progress/Readiness above — no route takes
+a user id, so there is no permission to add. See
+[`docs/specs/habit-streaks.md`](specs/habit-streaks.md) §4.6 and §5.6 above
+for the architectural shape.
 
 #### Health
 
