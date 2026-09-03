@@ -3,6 +3,7 @@ import { http, HttpResponse } from 'msw';
 import { JOURNEY_STAGES, homeResponse } from '../utils/journey-fixtures';
 import { civicsHandlers } from '../utils/civics-fixtures';
 import { readinessHistoryResponse, readinessSnapshot } from '../utils/readiness-fixtures';
+import { engagementSummary } from '../utils/engagement-fixtures';
 
 // Use wildcard pattern to match relative URLs
 const API_BASE = '*/api';
@@ -285,6 +286,22 @@ export const handlers = [
 
   http.get(`${API_BASE}/readiness/history`, () => {
     return HttpResponse.json({ data: readinessHistoryResponse([readinessSnapshot()]) });
+  }),
+
+  // ---------------------------------------------------------------------------
+  // Engagement (issue #138, epic #56 / E7 "Habit")
+  //
+  // Defaulted for the same reason the readiness reads above are: `HomePage`
+  // (the goal ring and streak) and `PracticeSummaryPage` (the celebration)
+  // both call `useEngagementSummary` unconditionally, so without a default
+  // every OTHER suite that renders either page falls through to a real fetch
+  // and shows the goal ring's error state for reasons that have nothing to do
+  // with what that suite is testing.
+  //
+  // The suites that actually test engagement override this with `server.use`.
+  // ---------------------------------------------------------------------------
+  http.get(`${API_BASE}/engagement/summary`, () => {
+    return HttpResponse.json({ data: engagementSummary() });
   }),
 
   // ---------------------------------------------------------------------------

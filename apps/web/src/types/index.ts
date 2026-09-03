@@ -1919,3 +1919,59 @@ export interface ReadinessHistoryResponse {
   pageSize: number;
   totalPages: number;
 }
+
+// =============================================================================
+// Engagement — `GET /api/engagement/summary`
+// (issue #138, epic #56 / E7 "Habit")
+// =============================================================================
+//
+// Mirrors `apps/api/src/engagement/dto/engagement-summary.dto.ts` field for
+// field. NOTHING readiness-shaped is here, and that is structural rather than
+// incidental: `docs/specs/habit-streaks.md` §1 keeps engagement out of the
+// readiness engine's inputs entirely, and §8 keeps readiness's vocabulary off
+// the surfaces these types feed. There is no `score` on this shape to render,
+// and no client-side arithmetic that could manufacture one.
+// =============================================================================
+
+/** Today's row — always present, with honest zeros for a day nothing has happened on. */
+export interface EngagementDay {
+  /** `YYYY-MM-DD` — a LOCAL calendar day in `timezone`, never an instant. */
+  date: string;
+  practiceSeconds: number;
+  attempts: number;
+  correct: number;
+  /** Monotonic: once true for a day, never false again. */
+  goalMet: boolean;
+}
+
+/** One of the last 14 local days — a day with no row reports zeros. */
+export interface EngagementRecentDay {
+  date: string;
+  goalMet: boolean;
+  /** True only for a day settlement covered with a freeze — a recorded freeze, never a fabricated practice day. */
+  freezeUsed: boolean;
+  practiceSeconds: number;
+}
+
+/** `GET /api/engagement/summary`. */
+export interface EngagementSummary {
+  /** The learner's own daily goal, in minutes — what the ring is measured against. */
+  dailyGoalMinutes: number;
+  today: EngagementDay;
+  streak: {
+    /** Consecutive qualifying local days ending today OR yesterday. */
+    current: number;
+    /** The longest such run anywhere in this learner's history. */
+    longest: number;
+  };
+  freezes: {
+    /** Held right now. Protection the learner already has — never a countdown. */
+    remaining: number;
+    /** The ceiling, sent by the server so no client hardcodes it. */
+    max: number;
+  };
+  /** The IANA zone every `date` above was computed in. */
+  timezone: string;
+  /** The last 14 local days, OLDEST FIRST. */
+  recentDays: EngagementRecentDay[];
+}

@@ -16,9 +16,12 @@
  *     either side is reworded, with both still rendering something plausible.
  *     Asserted by serving deliberately non-standard strings for a `kind` and
  *     requiring those on screen.
- *  3. **The honesty rule, §10.** The goal ring must show NO DIGIT — not
- *     `dailyGoal.minutes`, and certainly not a fabricated `0`. A zero on a ring
- *     is indistinguishable, to the learner reading it, from a real zero.
+ *  3. **The honesty rule, §10, as E7 leaves it.** The goal ring now reports a
+ *     MEASURED value (`docs/specs/habit-streaks.md` §2) — including a real
+ *     zero, which §10 forbade only while nothing was tracked and a `0` would
+ *     have stood in for an unknown. What still holds is that nothing is
+ *     invented: no ring is drawn when the measurement did not arrive, and no
+ *     number on that surface is one the browser worked out for itself.
  *  4. **The countdown is not recomputed in the browser.** §4.4. Asserted by
  *     serving a `daysUntilInterview` that disagrees with `interviewDate` and
  *     requiring the server's number.
@@ -55,6 +58,10 @@ import {
   readinessHistoryResponse,
   readinessSnapshot,
 } from '../utils/readiness-fixtures';
+import {
+  emptyEngagementSummary,
+  engagementSummary,
+} from '../utils/engagement-fixtures';
 import HomePage from '../../pages/HomePage';
 import { UserMenu } from '../../components/navigation/UserMenu';
 import {
@@ -63,6 +70,7 @@ import {
   SETTINGS_DESTINATION,
 } from '../../config/destinations';
 import type {
+  EngagementSummary,
   JourneyHome,
   JourneyStage,
   NextAction,
@@ -107,6 +115,18 @@ function serveReadiness(
     http.get(`${API_BASE}/readiness`, () => HttpResponse.json({ data: snapshot })),
     http.get(`${API_BASE}/readiness/history`, () =>
       HttpResponse.json({ data: readinessHistoryResponse(history) }),
+    ),
+  );
+}
+
+/**
+ * Serve one engagement summary for the next render (#138, epic #56 / E7).
+ * The goal ring, the streak and the freeze line all read this one response.
+ */
+function serveEngagement(summary: EngagementSummary): void {
+  server.use(
+    http.get(`${API_BASE}/engagement/summary`, () =>
+      HttpResponse.json({ data: summary }),
     ),
   );
 }
@@ -568,44 +588,129 @@ describe('HomePage — the interview countdown', () => {
 });
 
 // =============================================================================
-// 5. The goal ring — the honesty rule, enforced rather than remembered
+// 5. The goal ring, the streak and the freezes (#138, epic #56 / E7 "Habit")
+// =============================================================================
+//
+// THIS SUITE REPLACED THE GOAL-RING PLACEHOLDER'S OWN.
+//
+// Until E7 this section asserted the opposite of what it asserts now: that the
+// ring contained NO DIGIT and claimed NO `progressbar` role.
+// `journey-shell.md` §10 was right to require that while `dailyGoal.tracked`
+// was `false` — a "0 of 5 minutes" drawn from nothing is indistinguishable, to
+// the person reading it, from a learner who genuinely practised for zero
+// minutes. E7 removed the reason rather than the rule: `daily_activity` now
+// measures the day (`docs/specs/habit-streaks.md` §2), so the zero is a real
+// measurement and reporting it is the honest act, not the dishonest one.
+//
+// What survives unchanged is the rule underneath: NOTHING IS INVENTED. A ring
+// still may not appear when the measurement did not arrive, and no number on
+// this surface may be one the browser worked out for itself.
 // =============================================================================
 
-describe('HomePage — the goal-ring placeholder', () => {
-  it('renders §9.2’s copy', async () => {
+describe('HomePage — the goal ring, the streak and the freezes', () => {
+  it('draws the ring, the streak and the freeze line from one response', async () => {
+    serveEngagement(
+      engagementSummary({
+        dailyGoalMinutes: 10,
+        today: {
+          date: '2026-04-10',
+          practiceSeconds: 360,
+          attempts: 6,
+          correct: 5,
+          goalMet: false,
+        },
+        streak: { current: 4, longest: 9 },
+        freezes: { remaining: 2, max: 2 },
+      }),
+    );
     await renderHome();
 
     const ring = screen.getByTestId('daily-goal');
-    for (const quote of specQuotes('9.2')) {
-      // The spec punctuates its label as a sentence ("Not tracked yet."); the
-      // mockups render it without the period. The WORDING is what is asserted.
-      const words = quote.replace(/\.$/, '');
-      expect(
-        within(ring).getByText(new RegExp(words.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))),
-        `the ring does not carry §9.2's copy: ${words.slice(0, 40)}…`,
-      ).toBeInTheDocument();
-    }
+    expect(within(ring).getByRole('progressbar')).toHaveAttribute('aria-valuenow', '6');
+    expect(within(ring).getByRole('progressbar')).toHaveAttribute('aria-valuemax', '10');
+    expect(within(ring).getByText('4')).toBeInTheDocument();
+    expect(within(ring).getByText('days in a row')).toBeInTheDocument();
+    expect(within(ring).getByText('Your longest run so far is 9 days.')).toBeInTheDocument();
+    expect(
+      within(ring).getByText(
+        'Your streak is protected today — you have 2 streak freezes in hand.',
+      ),
+    ).toBeInTheDocument();
   });
 
-  it('contains no digit at all — not a goal, not a zero', async () => {
-    // §10. `dailyGoal.minutes` is 15 in the fixture and `tracked` is false. A
-    // "15" here reads as a measurement rather than as a setting, and a "0"
-    // reads as a real, terrible day. Neither may appear.
-    serveJourney({ dailyGoal: { minutes: 15, tracked: false } });
+  it('invites a learner who has done nothing yet, rather than reporting a deficit', async () => {
+    serveEngagement(emptyEngagementSummary({ dailyGoalMinutes: 5 }));
     await renderHome();
 
     const ring = screen.getByTestId('daily-goal');
-    expect(ring.textContent ?? '').not.toMatch(/\d/);
+    expect(
+      within(ring).getByText('5 minutes is enough today — a quick session covers your goal.'),
+    ).toBeInTheDocument();
+    expect(within(ring).getByText('No streak yet')).toBeInTheDocument();
+    expect(ring.textContent ?? '').not.toMatch(/missed|lost|behind|fail/i);
   });
 
-  it('claims no progressbar role it cannot fill in', async () => {
-    // There is no value, so there is no `aria-valuenow` that could honestly be
-    // supplied — and a `progressbar` with no value announces as an
-    // indeterminate one, which is a different lie.
+  it('draws NO ring at all when the measurement could not be loaded', async () => {
+    // The half of §10 that E7 does not retire: a ring painted from a guess is
+    // indistinguishable from a measured one, so a failed read gets a named
+    // failure and a retry — never a fallback ring.
+    server.use(
+      http.get(`${API_BASE}/engagement/summary`, () => new HttpResponse(null, { status: 500 })),
+    );
+    await renderHome();
+
+    expect(screen.queryByTestId('daily-goal')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('goal-ring')).not.toBeInTheDocument();
+    // The journey itself is unaffected: the engagement read has its own state.
+    expect(screen.getAllByRole('listitem').length).toBe(JOURNEY_STAGES.length);
+  });
+
+  it('offers a retry that actually re-reads the summary', async () => {
+    let attempt = 0;
+    server.use(
+      http.get(`${API_BASE}/engagement/summary`, () => {
+        attempt += 1;
+        return attempt === 1
+          ? new HttpResponse(null, { status: 503 })
+          : HttpResponse.json({ data: engagementSummary({ streak: { current: 6, longest: 6 } }) });
+      }),
+    );
+    await renderHome();
+
+    expect(screen.queryByTestId('daily-goal')).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: /try again/i }));
+
+    const ring = await screen.findByTestId('daily-goal');
+    expect(within(ring).getByText('6')).toBeInTheDocument();
+  });
+
+  it('shows no ring before the summary settles', async () => {
+    render(<HomePage />);
+
+    // The goal ring itself — not `queryByRole('progressbar')`, which the
+    // loading spinner legitimately answers to as an INDETERMINATE one.
+    expect(screen.queryByTestId('goal-ring')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('daily-goal')).not.toBeInTheDocument();
+
+    await waitFor(() =>
+      expect(screen.queryByRole('status', { name: /loading/i })).not.toBeInTheDocument(),
+    );
+    expect(screen.getByTestId('daily-goal')).toBeInTheDocument();
+  });
+
+  it('borrows none of readiness’s vocabulary — PRD.md’s two questions stay apart', async () => {
+    // Home renders BOTH answers: the readiness widget (#142) and this
+    // consistency surface. `docs/specs/habit-streaks.md` §8 is the copy half
+    // of the boundary `readiness-model.md` §2.4 states structurally — the ring
+    // and the streak describe a habit, and "You are 40% ready" is not a
+    // sentence either is entitled to render.
+    serveEngagement(engagementSummary());
     await renderHome();
 
     const ring = screen.getByTestId('daily-goal');
-    expect(within(ring).queryByRole('progressbar')).not.toBeInTheDocument();
+    expect(ring.textContent ?? '').not.toMatch(
+      /\bready\b|\breadiness\b|\bprepared\b|\bscore\b|\bprogress\b/i,
+    );
   });
 });
 
@@ -774,8 +879,10 @@ describe('HomePage — structure, width and theme', () => {
       'components/journey/JourneyPath.tsx',
       'components/journey/NextUpCard.tsx',
       'components/journey/InterviewCountdown.tsx',
-      'components/journey/DailyGoalRing.tsx',
       'components/journey/TrustFooter.tsx',
+      'components/home/ConsistencyCard.tsx',
+      'components/home/GoalRing.tsx',
+      'components/home/StreakBadge.tsx',
       'pages/HomePage.tsx',
     ];
 
@@ -797,8 +904,10 @@ describe('HomePage — structure, width and theme', () => {
       'components/journey/JourneyPath.tsx',
       'components/journey/NextUpCard.tsx',
       'components/journey/InterviewCountdown.tsx',
-      'components/journey/DailyGoalRing.tsx',
       'components/journey/TrustFooter.tsx',
+      'components/home/ConsistencyCard.tsx',
+      'components/home/GoalRing.tsx',
+      'components/home/StreakBadge.tsx',
     ];
 
     for (const file of files) {

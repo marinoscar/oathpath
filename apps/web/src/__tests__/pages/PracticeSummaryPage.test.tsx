@@ -25,12 +25,14 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { CssBaseline, ThemeProvider, createTheme } from '@mui/material';
 
 import { server } from '../mocks/server';
+import { emptyEngagementSummary, engagementSummary } from '../utils/engagement-fixtures';
 import { setViewportWidth } from '../setup';
 import { mockUser } from '../utils/test-utils';
 import { AuthContext } from '../../contexts/AuthContext';
 import PracticeSummaryPage from '../../pages/PracticeSummaryPage';
 import type {
   CreatePracticeSessionInput,
+  EngagementSummary,
   PracticeAttempt,
   PracticeQuestion,
   PracticeSession,
@@ -242,6 +244,15 @@ function renderSummary(
   );
 }
 
+/** Serve one engagement summary for the celebration's own read (#138). */
+function serveEngagement(summary: EngagementSummary): void {
+  server.use(
+    http.get(`${API_BASE}/engagement/summary`, () =>
+      HttpResponse.json({ data: summary }),
+    ),
+  );
+}
+
 // -----------------------------------------------------------------------------
 // Rendered entirely from the fetched session
 // -----------------------------------------------------------------------------
@@ -404,6 +415,113 @@ describe('actions', () => {
 
 // -----------------------------------------------------------------------------
 // Mobile and theme
+
+// -----------------------------------------------------------------------------
+// The session-end celebration (#138, epic #56 / E7 "Habit")
+//
+// `docs/specs/habit-streaks.md` §8: "Specific and earned, derived from real
+// response fields — never a generic exclamation." The RULE is unit-tested in
+// `components/home/celebration-copy.test.ts`; what these tests protect is the
+// wiring — that this page feeds the rule real response fields, renders what it
+// returns, and shows NOTHING when the measurement is not there.
+// -----------------------------------------------------------------------------
+
+describe('the session-end celebration', () => {
+  it('names the goal the learner actually met, with the minutes they actually spent', async () => {
+    serveEngagement(
+      engagementSummary({
+        dailyGoalMinutes: 5,
+        today: {
+          date: '2026-04-10',
+          practiceSeconds: 300,
+          attempts: 5,
+          correct: 4,
+          goalMet: true,
+        },
+        streak: { current: 4, longest: 9 },
+      }),
+    );
+    renderSummary({ detail: detailFor() });
+
+    const celebration = await screen.findByTestId('session-celebration');
+    expect(celebration).toHaveTextContent('That is 5 minutes today — your goal.');
+    expect(celebration).toHaveTextContent('That makes 4 days in a row.');
+  });
+
+  it('names the week when the goal was missed but the habit is real', async () => {
+    serveEngagement(
+      engagementSummary({
+        dailyGoalMinutes: 10,
+        today: {
+          date: '2026-04-10',
+          practiceSeconds: 120,
+          attempts: 2,
+          correct: 1,
+          goalMet: false,
+        },
+        streak: { current: 0, longest: 3 },
+        // Practised today and two earlier days inside the window.
+        recentDays: engagementSummary().recentDays,
+      }),
+    );
+    renderSummary({ detail: detailFor() });
+
+    const celebration = await screen.findByTestId('session-celebration');
+    expect(celebration).toHaveTextContent(
+      'You practised on 4 different days this week.',
+    );
+  });
+
+  it('shows no celebration at all when the summary could not be measured', async () => {
+    // §8's standard: no sentence beats a sentence that would have fitted
+    // anybody. A failed engagement read must not fall back to encouragement.
+    server.use(
+      http.get(`${API_BASE}/engagement/summary`, () => new HttpResponse(null, { status: 500 })),
+    );
+    renderSummary({ detail: detailFor() });
+
+    await screen.findByRole('heading', { level: 1, name: 'Practice summary' });
+    // The debrief itself is unaffected — the celebration is not part of its
+    // loading gate.
+    expect(screen.getByText('You answered 2 of 2.')).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.queryByTestId('session-celebration')).not.toBeInTheDocument(),
+    );
+  });
+
+  it('shows no celebration when the day holds nothing measurable', async () => {
+    serveEngagement(emptyEngagementSummary());
+    renderSummary({ detail: detailFor() });
+
+    await screen.findByRole('heading', { level: 1, name: 'Practice summary' });
+    await waitFor(() =>
+      expect(screen.queryByTestId('session-celebration')).not.toBeInTheDocument(),
+    );
+  });
+
+  it('shows no celebration on an abandoned session, which has no summary at all', async () => {
+    serveEngagement(engagementSummary());
+    renderSummary({
+      detail: detailFor({
+        session: { ...COMPLETED_SESSION, status: 'abandoned', summary: null },
+      }),
+    });
+
+    await screen.findByRole('heading', { level: 1, name: 'Practice summary' });
+    expect(screen.queryByTestId('session-celebration')).not.toBeInTheDocument();
+  });
+
+  it('says nothing readiness-shaped — PRD.md’s two questions stay apart', async () => {
+    serveEngagement(engagementSummary());
+    renderSummary({ detail: detailFor() });
+
+    const celebration = await screen.findByTestId('session-celebration');
+    expect(celebration.textContent ?? '').not.toMatch(
+      /\bready\b|\breadiness\b|\bprepared\b|\bscore\b|\bpass\b/i,
+    );
+  });
+});
+
 // -----------------------------------------------------------------------------
 
 describe('at 360px and in both themes', () => {

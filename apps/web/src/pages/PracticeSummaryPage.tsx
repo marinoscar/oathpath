@@ -39,6 +39,28 @@
  *     partial score presented as a result.
  *
  * =============================================================================
+ * THE SESSION-END CELEBRATION (#138, epic #56 / E7) IS EARNED, OR ABSENT
+ * =============================================================================
+ *
+ * `docs/specs/habit-streaks.md` §8: the copy is "specific and earned, derived
+ * from real response fields — never a generic exclamation". So the celebration
+ * reads `GET /api/engagement/summary` and hands its fields to
+ * `selectCelebrationCopy` (`components/home/celebration-copy.ts`), a pure
+ * function tested against a table; this page renders whatever it returns and
+ * NOTHING when it returns `null`.
+ *
+ * The engagement read is deliberately NOT part of this page's loading gate.
+ * The tally and the per-question review are what this page owes the learner,
+ * and neither depends on today's minutes; blocking them behind a third request
+ * would make a slow engagement summary look like a slow debrief. A celebration
+ * that arrives a moment later, or not at all, costs nothing — a WRONG one, or
+ * a generic one standing in for a missing measurement, is what §8 forbids.
+ *
+ * It also carries no readiness wording, ever (§8, `PRD.md`): consistency and
+ * readiness answer two different questions and this surface only ever speaks
+ * about the first.
+ *
+ * =============================================================================
  * WIDTH, HEADINGS AND WHAT THIS PAGE IS NOT
  * =============================================================================
  *
@@ -67,12 +89,18 @@ import ReplayIcon from '@mui/icons-material/Replay';
 import { Link as RouterLink, Navigate, useNavigate, useParams } from 'react-router-dom';
 
 import { AttemptReview } from '../components/practice/AttemptReview';
+import { SessionCelebration } from '../components/home/SessionCelebration';
+import {
+  countDaysPractisedThisWeek,
+  selectCelebrationCopy,
+} from '../components/home/celebration-copy';
 import { SummaryTally } from '../components/practice/SummaryTally';
 import {
   formatSessionDate,
   sessionKindLabel,
 } from '../components/practice/outcome';
 import { LoadingSpinner } from '../components/common/LoadingSpinner';
+import { useEngagementSummary } from '../hooks/useEngagementSummary';
 import { usePracticeSession } from '../hooks/usePracticeSession';
 import { useIsMounted } from '../hooks/useIsMounted';
 import { createPracticeSession } from '../services/api';
@@ -82,6 +110,13 @@ export default function PracticeSummaryPage() {
   const navigate = useNavigate();
   const isMounted = useIsMounted();
   const { detail, isLoading, error, refresh } = usePracticeSession(id);
+  // The celebration's own read (#138, epic #56 / E7). It is never awaited
+  // before the debrief renders: the tally and the per-question review are
+  // this page's job, and a slow or unavailable engagement summary must not
+  // hold either off the screen. When it has not arrived — or failed — there
+  // is simply no celebration, which is what `docs/specs/habit-streaks.md` §8
+  // asks for over a sentence that would have fitted anybody.
+  const { engagement } = useEngagementSummary();
 
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
@@ -173,6 +208,33 @@ export default function PracticeSummaryPage() {
 
   const started = formatSessionDate(session.startedAt);
 
+  /**
+   * The session-end celebration (§8) — SELECTED BY THE PURE FUNCTION, NEVER
+   * BY THIS PAGE.
+   *
+   * Every input is a field of a response: today's measured seconds and the
+   * server's own `goalMet`, the streak the streak engine computed, the
+   * `recentDays` window, and the answered count on the summary that was
+   * persisted at completion. Nothing is derived from navigation state or from
+   * how long this page happened to be open.
+   *
+   * `null` in three cases, all of which render nothing at all: no engagement
+   * summary yet (still loading, or the read failed), no stored summary (an
+   * abandoned session, which has no tally either), or a session that produced
+   * nothing measurable.
+   */
+  const celebration =
+    engagement && session.summary
+      ? selectCelebrationCopy({
+          goalMinutes: engagement.dailyGoalMinutes,
+          practiceSecondsToday: engagement.today.practiceSeconds,
+          goalMetToday: engagement.today.goalMet,
+          streakCurrent: engagement.streak.current,
+          daysPractisedThisWeek: countDaysPractisedThisWeek(engagement.recentDays),
+          sessionAnswered: session.summary.answered,
+        })
+      : null;
+
   return (
     <Container maxWidth="md" disableGutters>
       <Box sx={{ py: { xs: 1, sm: 2 } }}>
@@ -191,6 +253,8 @@ export default function PracticeSummaryPage() {
             {startError}
           </Alert>
         )}
+
+        {celebration && <SessionCelebration copy={celebration} />}
 
         {session.summary ? (
           <SummaryTally summary={session.summary} headingId="summary-tally-heading" />
