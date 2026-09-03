@@ -16,6 +16,7 @@ import { AllowlistModule } from './allowlist/allowlist.module';
 import { JourneyModule } from './journey/journey.module';
 import { CivicsModule } from './civics/civics.module';
 import { PracticeModule } from './practice/practice.module';
+import { ProgressModule } from './progress/progress.module';
 import { DeviceAuthModule } from './device-auth/device-auth.module';
 import { StorageModule } from './storage/storage.module';
 import { PatModule } from './pat/pat.module';
@@ -86,6 +87,13 @@ import configuration from './config/configuration';
     // route is `@Auth()` with no permissions and resolves the learner from
     // `@CurrentUser('id')`; another learner's session is a 404, not a 403.
     PracticeModule,
+    // The Progress page's read API (#86, epic #54 / E5): coverage and
+    // mastery by category, aggregated from the same `question_mastery` rows
+    // `PracticeModule` writes. Registered next to it for the same reason
+    // `PracticeModule` sits next to `CivicsModule` — related content, no
+    // shared provider. `@Auth()` with no permissions, no route parameter
+    // carrying a user id.
+    ProgressModule,
     DeviceAuthModule,
     StorageModule,
     PatModule,
