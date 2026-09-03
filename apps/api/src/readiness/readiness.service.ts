@@ -46,15 +46,20 @@ import type { ReadinessSnapshotResponse } from './dto/readiness-snapshot.dto';
 // derived from `this.clock.now()`, never a bare `new Date()`.
 //
 // -----------------------------------------------------------------------------
-// THREE EVIDENCE SOURCES THE SCHEMA DOES NOT YET SUPPORT (§10's honesty rule)
+// THE EVIDENCE SOURCES THE SCHEMA DOES NOT YET SUPPORT (§10's honesty rule)
 // -----------------------------------------------------------------------------
 //
-// `distinctQuestionsCorrectSpokenInEnglish` (english, §2.6) and
-// `mockInterviewsPassed` (interview, §2.8) are always `0` today — see
-// {@link assembleEvidence}'s own comments on each for exactly why, and which
-// future epic (E11, E8) is expected to add the column or the grouping key
-// that would let this service compute a real value. Never faked, never
-// inferred from a proxy.
+// `distinctQuestionsCorrectSpokenInEnglish` (english, §2.6) is always `0`
+// today — see {@link assembleEvidence}'s own comment for exactly why, and
+// which future epic (E11) is expected to add the column that would let this
+// service compute a real value. Never faked, never inferred from a proxy.
+//
+// `mockInterviewsPassed` (interview, §2.8) WAS the second of these and is not
+// any more: #133 (epic #57 / E8) shipped `mock_interviews`, the grouping key
+// its own literal-zero comment was waiting for, and it is now a real count of
+// completed, passed interviews. `computeInterview` did not change — it always
+// read whatever number it was handed; this epic only stopped that number being
+// hardcoded.
 // =============================================================================
 
 /** Milliseconds in a calendar day. Pure arithmetic on an already-resolved instant, never a clock read of its own. */
@@ -543,16 +548,38 @@ export class ReadinessService {
     // faked evidence §5/§10 rule out.
     const distinctQuestionsCorrectSpokenInEnglish = 0;
 
-    // `interview` (§2.8) — LITERAL 0, always, for now. `practice_attempts`
-    // rows with `source: 'mock_interview'` have `sessionId: null` (E8 is
-    // not shipped), so there is no grouping key today that turns a set of
-    // mock-interview attempt rows into discrete "interview sessions" a
-    // pass/fail can be judged against. E8 is the epic that will need to add
-    // whatever grouping key (a `mock_interview_sessions` table, or a
-    // reused/new session id) makes that derivable; a heuristic grouping
-    // invented here (e.g. by elapsed time between rows) would be exactly
-    // the invented-session-concept §10 rules out.
-    const mockInterviewsPassed = 0;
+    // `interview` (§2.8) — REAL, since #133 (epic #57 / E8). This was a
+    // literal `0` with a comment saying `practice_attempts` rows carrying
+    // `source: 'mock_interview'` had `sessionId: null` and therefore no
+    // grouping key that could turn a set of attempt rows into discrete
+    // interviews a pass/fail could be judged against; it named E8 as the
+    // epic that would have to supply one.
+    //
+    // E8 supplied it: `mock_interviews` is that grouping key, and this is
+    // the count the old comment was waiting for — this user's rows with
+    // `status: 'completed'` AND `passedCivics: true`. Not attempts, not
+    // questions: whole interviews the learner finished and passed the
+    // civics section of, which is the unit `computeInterview`'s
+    // `min(mockInterviewsPassed / 2, 1)` and `PRD.md`'s own "completing two
+    // mock interviews" are both stated in.
+    //
+    // NO HEURISTIC GROUPING over `practice_attempts` by elapsed time or any
+    // other proxy — the "invented-session-concept" §10 rules out and the old
+    // comment specifically refused. The table is real now, so nothing has to
+    // be inferred.
+    //
+    // READ DIRECTLY THROUGH PRISMA, exactly as this service already reads
+    // `practice_attempts` and `question_mastery`. `ReadinessModule` does NOT
+    // import `InterviewsModule` and must not: `InterviewsModule` imports
+    // THIS one (its `completeInterview` calls `recomputeSnapshot`
+    // synchronously, §7(a)), so a back-import would be a cycle for a
+    // dependency this service does not have. It needs one count, and the
+    // `[userId, status, passedCivics]` composite index on `mock_interviews`
+    // exists for precisely this query — an equality filter on all three
+    // columns, no sort.
+    const mockInterviewsPassed = await this.prisma.mockInterview.count({
+      where: { userId, status: 'completed', passedCivics: true },
+    });
 
     return {
       totalQuestionsInVersion,

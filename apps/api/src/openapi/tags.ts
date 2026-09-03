@@ -195,6 +195,26 @@ export const TAG_GROUPS: OpenApiTagGroup[] = [
           'owns their own mastery data.',
       },
       {
+        name: 'Interviews',
+        description:
+          'The mock interview: a rehearsal of the real USCIS interview, conducted turn by ' +
+          'turn by an officer who greets the applicant, goes over the shape of their ' +
+          'application without ever asking for a real answer to it, asks the civics ' +
+          'questions, and closes. **The application decides; the model only speaks** — which ' +
+          'question comes next, whether an answer was right, when the civics section stops ' +
+          'and whether the learner passed are all computed from the caller\'s own test ' +
+          'version row and the same grading ladder Practice uses; the model supplies only ' +
+          'the officer\'s phrasing, and the question text is appended verbatim from the ' +
+          'database so it can never be paraphrased or invented. **No feedback is returned ' +
+          'until the interview is completed**: the real interview gives no per-question ' +
+          'signal, and a rehearsal that does is coaching the learner to expect reassurance ' +
+          'the actual event will never provide. **OathPath never asks for, collects, or ' +
+          'stores real application answers**, and keeping the transcript of what the learner ' +
+          'said is a per-interview choice that defaults to off. Every route resolves the ' +
+          'learner from the authenticated session and takes no user id; another learner\'s ' +
+          'interview is a **404**, not a 403. No permission gates any of it.',
+      },
+      {
         name: 'Readiness',
         description:
           'The eight-component readiness score: how ready the caller actually is for the ' +

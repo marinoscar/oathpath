@@ -24,7 +24,16 @@ import {
 const ORIENTED_AT = new Date('2026-01-01T12:00:00Z');
 
 /** Every path the recommender is permitted to emit. Real, mounted routes. */
-const ALLOWED_PATHS = ['/setup/journey', '/learn', '/practice'];
+const ALLOWED_PATHS = [
+  '/setup/journey',
+  '/learn',
+  '/practice',
+  // E8's mock interview list (#133). Mounted UNDER the `/practice` prefix, not
+  // a new bar destination — `mock-interview.md` §14 states why a route
+  // reachable only from inside an existing destination needs no registry entry
+  // of its own.
+  '/practice/interviews',
+];
 
 /**
  * An oriented learner with nothing else going on, plus whatever the test is
@@ -45,20 +54,37 @@ function input(overrides: Partial<NextActionInput> = {}): NextActionInput {
 
 describe('recommendNextAction', () => {
   describe('the closed union and its hardcoded paths', () => {
-    it('caps kind at the five values that have a destination', () => {
-      // `review` (E5, #82) is produced by `study-coach.ts`'s
-      // `recommendStudyAction`, never by `recommendNextAction` itself — none
-      // of the input fixtures below can make `recommendNextAction` return it,
-      // since this function has no mastery data to decide that branch with.
-      // It still belongs in this closed set: `NEXT_ACTION_KINDS` is the ONE
-      // union both functions share, per journey-shell.md §4.1.
+    it('caps kind at the six values that have a destination', () => {
+      // `review` (E5, #82) and `interview` (E8, #133) are both produced by
+      // `study-coach.ts`'s `recommendStudyAction`, never by
+      // `recommendNextAction` itself — none of the input fixtures below can
+      // make `recommendNextAction` return either, since this function has
+      // neither mastery data nor a journey stage to decide those branches
+      // with. They still belong in this closed set: `NEXT_ACTION_KINDS` is the
+      // ONE union both functions share, per journey-shell.md §4.1.
+      //
+      // THE ORDER IS ASSERTED, not just the membership: the array is declared
+      // in ranking order and `study-coach.ts`'s chain runs top to bottom
+      // through it, so a reordering here would be a silent reordering of what
+      // the product recommends.
       expect([...NEXT_ACTION_KINDS]).toEqual([
         'orientation',
         'interview_countdown',
         'review',
         'practice',
+        'interview',
         'explore',
       ]);
+    });
+
+    it('points `interview` at the mock-interview route, not the practice page', () => {
+      // The rule `top-recommendation.ts`'s own cap message now follows too: a
+      // recommendation must point at the destination it NAMES. A card inviting
+      // a learner to rehearse a full interview that landed them on the
+      // five-question drill page would be the product contradicting itself one
+      // step short of the redirect case this map was written for.
+      expect(NEXT_ACTION_PATHS.interview).toBe('/practice/interviews');
+      expect(NEXT_ACTION_PATHS.interview).not.toBe(NEXT_ACTION_PATHS.practice);
     });
 
     it('maps every kind to one of the verified, non-redirecting routes', () => {
