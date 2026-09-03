@@ -137,10 +137,10 @@ for "no grader ran" — journey-shell.md's honesty rule, one table over).
 | `questionId` | `String @db.Uuid` | no | FK → `civics_questions.id`, `onDelete: Restrict` — mirrors `PracticeAttempt.questionId` exactly, for the identical reason: a question cannot be deleted while a learner's mastery of it is still on record. **No separate `testVersionCode` column** — `civics_questions` already belongs to exactly one test version, and a mastery row's version is implied by its question, the same reasoning `PracticeAttempt` itself uses (only `PracticeSession` carries `testVersionCode` directly). |
 | `state` | `QuestionMasteryState` (Postgres enum), default `new` | no | `new` \| `learning` \| `review` \| `lapsed` \| `mastered` — §3 is the complete state machine. **Practically unreachable as a stored value**: because a row is created the moment a question first becomes schedulable, and creation always computes at least one transition out of `new` in the same write (§3.2), no row is ever left sitting in the database with `state: 'new'` in steady state — the default exists so the column type is total, and so a future caller reading a row mid-transaction sees a defined value, not because a query is expected to find one. A question genuinely in the `new` state is a question with **no row at all**. |
 | `dueAt` | `DateTime @db.Timestamptz` | no | The instant this question re-enters the selector's "due" bucket (§5). **Not nullable, and always set on creation** — §3.3 gives the exact derivation (local-midnight arithmetic in the learner's own timezone, per `ROADMAP.md` §7's "local days are explicit" rule), which always produces a real value, even for a question's very first scheduled row. |
-| `intervalDays` | `Int`, default `0` | no | The spacing this row's last schedule computed, in whole days. `0` only as the column's structural default for a row that (per the `state` note above) is never actually read in that shape — every real row's `intervalDays` is at least `LEARNING_STEP_DAYS` (`1`, §3.1) the instant it is created. |
-| `ease` | `Float`, default `2.5` | no | The SM-2-style easiness factor. §3.1 gives the exact bounds (`[1.3, 3.0]`) and deltas; `2.5` is `EASE_DEFAULT`, the SM-2 convention this variant keeps rather than inventing a different starting point with no external referent. |
-| `correctStreak` | `Int`, default `0` | no | Consecutive **objectively**-graded (`gradingMethod` `'exact'` or `'ai'`, outcome `correct`) answers since the last reset. §3.4 states, as its own named rule, why this column is the one gate `correct_self`/`partial` can never advance — the mechanism that makes self-mark's discount concrete for state *transitions*, distinct from §3.5's mechanism for the distinct-day count. |
-| `lapses` | `Int`, default `0` | no | How many times this question has fallen out of `review`/`mastered` back into `lapsed`. Incremented **exactly once per transition into `lapsed`** — never once per subsequent miss while already there (§3's Row 8) — because it answers "how many times has this been forgotten after being verified," not "how many wrong answers has this question ever received." |
+| `intervalDays` | `Int`, default `0` | no | The spacing this row's last schedule computed, in whole days. `0` only as the column's structural default for a row that (per the `state` note above) is never actually read in that shape — every real row's `intervalDays` is at least `LAPSE_INTERVAL_DAYS` (`1`, §3.1) the instant it is created. |
+| `ease` | `Float`, default `2.5` | no | The SM-2-style easiness factor. §3.1 gives the exact bounds (`[1.3, 3.0]`) and deltas; `2.5` is `STARTING_EASE`, the SM-2 convention this variant keeps rather than inventing a different starting point with no external referent. |
+| `correctStreak` | `Int`, default `0` | no | Consecutive correct answers since the last reset, incremented by **any** correct outcome — an objective `correct` and a self-marked `correct_self` credit it identically (§3.4; corrected here from an earlier draft of this design that gated this column to objective corrects only). Self-mark's discount is never expressed by holding this counter back; it is expressed entirely through smaller `ease` and `intervalDays` growth (§3.4). |
+| `lapses` | `Int`, default `0` | no | How many times this question has fallen out of `review`/`mastered` back into `lapsed`. Incremented **exactly once per transition into `lapsed`** — never once per subsequent miss while already there (§3.8's Row 10) — because it answers "how many times has this been forgotten after being verified," not "how many wrong answers has this question ever received." |
 | `totalAttempts` | `Int`, default `0` | no | Count of **schedulable** outcomes this row has been updated for — `correct`, `correct_self`, `partial`, `incorrect`. **Excludes `skipped`** attempts entirely (§3.2): a skip never touches this row, so it is not counted here either. This is deliberately not the same number as `practice_attempts`'s own per-question attempt count, which does include skips — the two answer different questions, the same way `practice_sessions.summary` and a live `practice_attempts` aggregate can legitimately differ (`practice-sessions.md` §10's "recent sessions" note). |
 | `distinctCorrectDays` | `Int`, default `0` | no | **The column that makes `VISION.md`'s rule enforceable.** Counts distinct calendar days (learner's own timezone) on which this question has received a **credit-eligible** outcome — `correct` or `correct_self`, never `partial`, never more than once per day regardless of how many credit-eligible attempts land on the same day (§3.5). This is *not* a running attempt count and *not* a percentage; it is a count of **days**, specifically so that answering the same question correctly ten times between 2pm and 2:15pm produces `distinctCorrectDays: 1`, not `10` — the exact failure `PRD.md` names by name ("A user who correctly answers ten questions immediately after studying them should not appear highly ready"). A count-of-attempts column could not distinguish "ten correct answers in one sitting" from "one correct answer on each of ten different days"; a count-of-days column cannot help but distinguish them, which is why this is the column the mastery promotion rule (§3.5) reads, not `totalAttempts` or `correctStreak`. |
 | `lastOutcome` | `QuestionMasteryOutcome` (Postgres enum) | no | `correct` \| `correct_self` \| `partial` \| `incorrect` — the outcome that produced this row's current shape. **Not nullable**: a row only exists once at least one schedulable outcome has been recorded, so there is no "row exists but nothing has happened yet" state to represent (the same reasoning that keeps `PracticeAttempt.gradingMethod` `NOT NULL`, `practice-sessions.md` §8.1). A distinct enum from `PracticeOutcome` on purpose — `skipped` is not a member, because it is never a value this column can hold (§3.2). |
@@ -230,21 +230,31 @@ export function nextSchedule(
 
 | Constant | Value | Meaning |
 |---|---|---|
-| `EASE_DEFAULT` | `2.5` | SM-2's own convention — no external referent to invent a different starting point from. |
-| `EASE_MIN` | `1.3` | Floor. A row this hard still reviews, just at the shortest cadence this algorithm produces. |
-| `EASE_MAX` | `3.0` | Ceiling. Prevents an unbroken correct streak from producing runaway multi-year intervals. |
-| `EASE_DELTA_CORRECT` | `+0.1` | Applied only for an **objective** `correct` outcome. |
-| `EASE_DELTA_INCORRECT` | `-0.2` | Applied for `incorrect`, regardless of prior state. |
-| `LEARNING_STEP_DAYS` | `1` | The fixed interval used for every row in `learning` or `lapsed` state below the graduation gate. |
-| `GRADUATION_STREAK` | `2` | The `correctStreak` value that promotes `learning`/`lapsed` → `review`. |
-| `GRADUATION_INTERVAL_DAYS` | `6` | The flat interval a row is given the instant it graduates — deliberately **not** ease-multiplied, so the graduation row in a worked table is hand-verifiable without compounding two prior ease bumps. |
-| `REVIEW_MULTIPLIER_FULL` | `1.0` | Interval growth multiplier in `review`/`mastered` state for an objective `correct`. |
-| `REVIEW_MULTIPLIER_DISCOUNTED` | `0.5` | Interval growth multiplier for `correct_self` and `partial` — the concrete number behind "advances the schedule less" (§3.4). |
-| `MASTERY_DISTINCT_DAYS_REQUIRED` | `3` | §3.5's promotion threshold, taken directly from `VISION.md`/`PRD.md`. |
+| `STARTING_EASE` | `2.5` | SM-2's own convention — no external referent to invent a different starting point from. |
+| `MIN_EASE` | `1.3` | Floor. A row this hard still reviews, just at the shortest cadence this algorithm produces. |
+| `MAX_EASE` | `3.0` | Ceiling. Prevents an unbroken correct streak from producing runaway multi-year intervals. |
+| `EASE_BUMP_CORRECT` | `+0.1` | Applied for an objectively-graded `correct` outcome. |
+| `EASE_BUMP_SELF_MARKED` | `+0.05` | Exactly half of `EASE_BUMP_CORRECT` — the entire ease side of the self-mark discount (§3.4). |
+| `EASE_PENALTY_INCORRECT` | `-0.2` | Applied for `incorrect`, regardless of prior state. |
+| `LAPSE_INTERVAL_DAYS` | `1` | The interval a row is given on its first-ever correct repetition, **and** the interval any `incorrect` outcome collapses or resets to. One constant serves both roles in the shipped scheduler — there is no separate "first learning step" constant. |
+| `SECOND_REPETITION_INTERVAL_DAYS` | `3` | The interval for a row's *second* correct repetition (`correctStreak` reaching `2`), before ease-driven growth begins. |
+| `SELF_MARKED_INTERVAL_DISCOUNT` | `0.5` | Applied to the same base interval an objective `correct` would have computed for this repetition, then floored at `1` day — the entire interval side of the self-mark discount (§3.4). |
+| `MASTERY_PROMOTION_THRESHOLD` | `3` | The `distinctCorrectDays` value that promotes `review` → `mastered`. §3.5/§3.7 record why this is the only gate on that promotion, self-mark included. |
+
+**Interval progression for an objectively-graded `correct`:** 1st correct
+repetition → `LAPSE_INTERVAL_DAYS` (1 day); 2nd →
+`SECOND_REPETITION_INTERVAL_DAYS` (3 days); 3rd and every one after →
+`round(previousIntervalDays × ease)`, floored at `1`. `correct_self` reuses
+this exact same base — computed from the same `correctStreak`, the same
+prior `ease`, the same prior `intervalDays` — and then applies
+`SELF_MARKED_INTERVAL_DISCOUNT` to that base, floored at `1` day. There is
+no second, independent interval progression for self-mark; the two variants
+can never silently drift apart because one is always defined in terms of the
+other.
 
 Interval results are always rounded to the nearest whole day (round-half-up)
 and floored at `1` — a `dueAt` of "today" is never produced by this function;
-the earliest a question can be shown again is tomorrow, local time.
+the earliest a question can be shown again is tomorrow.
 
 ### 3.2 What `nextSchedule` is never called for
 
@@ -280,74 +290,93 @@ here to scheduling instead of engagement.
 ### 3.4 State transitions, and the rule that gates every one of them
 
 Five states, four real transitions (`new` is never itself a stored value —
-§2):
+§2). The shipped scheduler states these as two short lists rather than a
+single crossing diagram, and this document now mirrors that rather than the
+more elaborate (and, on the correct-outcome side, wrong) diagram an earlier
+draft drew:
 
 ```
-(no row)
-   │  any schedulable outcome
-   ▼
-learning ──2 consecutive OBJECTIVE 'correct' (GRADUATION_STREAK)──▶ review
-   ▲                                                                  │
-   │ 1 objective 'correct'                                            │ miss
-   │ (re-graduation, same gate as above)                              ▼
-lapsed ◀──────────────────── miss (from review OR mastered) ──── mastered
-                                                                       ▲
-                                                          distinctCorrectDays
-                                                          reaches 3, state
-                                                          already 'review'
+On any correct outcome (objective or self-marked, identically):
+  new      -> learning
+  learning -> review
+  lapsed   -> learning   (rebuilding after a regression)
+  review   -> mastered   (only once distinctCorrectDays >= 3), else stays review
+  mastered -> mastered
+
+On an incorrect outcome:
+  review, mastered      -> lapsed     (an actual regression; `lapses` increments)
+  new, learning, lapsed -> learning   (a miss on a question not yet verified,
+                                        not a regression; `lapses` unchanged)
 ```
 
-**The load-bearing rule, stated once, referenced everywhere below:**
-`correctStreak` — the column every state-*crossing* transition in the diagram
-above is gated on — is incremented **only** by an objective `correct`
-outcome (`gradingMethod` `'exact'` or `'ai'`). `correct_self` and `partial`
-leave it exactly where it was: neither incremented (they are not confirmed
-recall) nor reset (they are not evidence *against* recall either).
-Consequently:
+**The load-bearing rule, stated once, referenced everywhere below, and the
+single biggest correction this document makes relative to an earlier
+draft:** `correctStreak` is incremented **unconditionally by any correct
+outcome** — an objective `correct` and a self-marked `correct_self` credit
+it identically. There is no gate anywhere in the shipped scheduler that
+blocks `correct_self` from advancing this counter, and — because every
+state-*crossing* transition above is driven by the row's **current `state`
+alone**, never by `correctStreak`'s value or by which outcome variant
+produced it — there is no gate that blocks `correct_self` from crossing a
+state boundary either:
 
-- **`learning`/`lapsed` → `review` requires two objective corrects.** A row
-  sitting at `correctStreak: 1` because of an objective correct, then given a
-  `correct_self` or a `partial`, stays at `correctStreak: 1` and does not
-  graduate — the row's `dueAt` still moves (it "holds at the current step,"
-  below), but the state boundary does not.
-- **`lapsed` → `learning` requires the *first* objective correct after the
-  lapse.** A `correct_self` or `partial` recorded while `lapsed` leaves the
-  row `lapsed`, for the identical reason.
+- **`learning` → `review` fires on the very next correct answer**, full
+  stop — objective or self-marked, and regardless of `correctStreak`'s
+  numeric value. A row that has never had more than one correct answer in
+  its life still graduates the moment that one answer lands while the row is
+  sitting in `learning`. There is no two-consecutive-corrects gate anywhere
+  in the shipped code; `correctStreak` is tracked and reported, but nothing
+  in this transition reads it.
+- **`lapsed` → `learning` fires on the very next correct answer after the
+  lapse** — the identical rule; self-mark rebuilds a lapsed row exactly as an
+  objective correct would.
+- **`review` → `mastered` is the one transition this design gates on more
+  than the row's current state alone** — it additionally requires
+  `distinctCorrectDays >= MASTERY_PROMOTION_THRESHOLD` (3), and a
+  self-marked correct advances that counter on the same footing as an
+  objective one (§3.5). This is the *only* place self-mark's weaker evidence
+  is allowed to matter for *whether* a transition happens; everywhere else,
+  the discount is expressed purely through smaller numbers, never through a
+  blocked transition (§3.7 restates why this used to be described
+  differently, and is not).
 
-**Interval effect of `correct_self`/`partial` while in `learning`/`lapsed`
-("holding the step"):** because these two outcomes never move
-`correctStreak`, and `LEARNING_STEP_DAYS` is a flat constant rather than an
-ease-multiplied one, the row is simply re-scheduled at the *same* step —
-`intervalDays` stays `LEARNING_STEP_DAYS` (`1`) and `dueAt` moves to
-tomorrow, exactly as if the row had just entered `learning` for the first
-time. There is no fractional or fifty-percent version of a one-day step to
-express; the discount here is expressed entirely through what these outcomes
-*cannot* do (advance the streak, cross the graduation gate), not through a
-smaller number.
+**Self-mark's discount is never expressed by holding a transition back.** It
+is expressed entirely through two smaller numbers, applied identically no
+matter which state the row is in:
 
-**Interval effect in `review`/`mastered`:** here the discount *is* a number,
-because the interval is already ease-multiplied and a smaller multiplier is
-a real, visible difference: `intervalDays = round(intervalDays * ease *
-REVIEW_MULTIPLIER)`, where `REVIEW_MULTIPLIER` is `1.0` for `correct` and
-`0.5` for `correct_self`/`partial` (§3's Row 4 vs. Row 6 for exact size).
+- **Ease**: an objective `correct` adds `EASE_BUMP_CORRECT` (`0.1`); a
+  `correct_self` adds `EASE_BUMP_SELF_MARKED` (`0.05`, exactly half),
+  clamped to `[MIN_EASE, MAX_EASE]`.
+- **Interval**: both variants compute the *same* base interval from
+  `correctStreak`, the prior `ease`, and the prior `intervalDays` (§3.1's
+  progression); `correct_self` then multiplies that base by
+  `SELF_MARKED_INTERVAL_DISCOUNT` (`0.5`), floored at `1` day. An objective
+  `correct` uses the base unchanged.
 
 **A miss (`incorrect`) from `review` or `mastered` is a lapse; a miss from
-`learning` or `lapsed` is not.** Only the first increments `lapses` and moves
-`distinctCorrectDays` back to `0` (§3.6) — a question that was never
-verified in the first place cannot fall *out of* verified status, so a miss
-while still learning simply resets the streak and interval, exactly as a
-fresh `learning` row would, without touching `lapses` at all. A repeated
-miss while **already** `lapsed` does not increment `lapses` a second time
-(§3's Row 8) — the counter answers "how many times has this been forgotten,"
-which is a fact about *transitions into* `lapsed`, not about every subsequent
-wrong answer recorded while already there.
+`new`, `learning`, or `lapsed` is not.** Only the first increments `lapses` —
+a question that was never verified in the first place cannot fall *out of*
+verified status. In both cases the row's `correctStreak` resets to `0`, its
+`ease` drops by `EASE_PENALTY_INCORRECT` (`0.2`, still clamped to
+`MIN_EASE`), and its interval collapses to `LAPSE_INTERVAL_DAYS` (`1` day) —
+but the two cases land in **different states**: a miss from `review` or
+`mastered` moves the row to `lapsed`; a miss from `new`, `learning`, **or
+`lapsed` itself** moves the row to `learning`. That last case corrects an
+earlier draft's claim that a repeated miss while already `lapsed` leaves the
+row sitting at `lapsed` — the shipped scheduler routes it to `learning`
+instead, the same destination as any other non-regression miss (§3.8's Row
+10). `distinctCorrectDays` is left completely unchanged by any miss, of
+either kind — never reset, never decremented (§3.5, §3.6).
 
 ### 3.5 `distinctCorrectDays`: the axis self-mark is never discounted on
 
 `distinctCorrectDays` increments by **at most one per calendar day**, on
 outcome `correct` **or** `correct_self` — never `partial`, which is real but
-substantively incomplete evidence, not a correct answer. It resets to `0`
-the instant a row lapses (§3.6 explains why zero, not a partial reduction).
+substantively incomplete evidence, not a correct answer. **It is left
+completely unchanged by an incorrect outcome** — a lapse does not reset it to
+`0`, or to any smaller value; it simply holds at whatever it already was
+(§3.6 explains why, and corrects an earlier draft of this design that
+claimed a full reset).
 
 **The `alreadyCreditedToday` boolean cannot be derived from `question_mastery`'s
 own columns, and that is stated here explicitly because a naive
@@ -371,46 +400,59 @@ summary row with no per-day history; `practice_attempts` is the table that
 actually has one, and this is the one place the scheduler needs to consult it
 rather than its own cached summary.
 
-### 3.6 Why a lapse resets `distinctCorrectDays` to zero, not partially
+### 3.6 Why a lapse leaves `distinctCorrectDays` untouched
 
-A softer alternative — halving the count, or decaying it — was considered
-and rejected. `VISION.md`'s own language is "revisit what is becoming
-stale," and a lapse is the concrete event that makes a question's prior
-evidence stale: the fact that it was once answered correctly on three
-different days does not change, but it stops being a reliable *predictor* of
-today's recall the moment the learner demonstrably forgets it. A partial
-reset (say, to `1`) would let a single fresh correct answer after a lapse
-put the row back at `distinctCorrectDays: 2` and one more ordinary review
-away from `mastered` again — re-earning "verified" status without the
-multi-day re-confirmation `VISION.md` requires the first time. Zero is the
-only value that makes "mastered again" require the same fresh, multi-day
-evidence "mastered" required the first time.
+An earlier draft of this design specified a **full reset to `0`** on every
+lapse, reasoning (from `VISION.md`'s "revisit what is becoming stale") that
+a lapse makes a question's prior evidence stale enough that re-earning
+`mastered` should require the same fresh, multi-day evidence the first
+promotion required, and that a softer partial reset would let one fresh
+correct answer re-approach `mastered` without genuinely fresh confirmation.
 
-### 3.7 Why self-mark can complete mastery but can never start it
+The shipped scheduler does **neither** a full reset nor a partial one:
+`distinctCorrectDays` is copied forward unchanged on the `incorrect` branch
+of `nextSchedule` (`distinctCorrectDays: mastery.distinctCorrectDays`) — it
+is never decremented anywhere in the function.
 
-Two different gates in this design, deliberately asymmetric, and named here
-because the asymmetry is easy to mistake for an inconsistency rather than a
-decision:
+Concretely, this means a question that lapses after three distinct correct
+days does **not** have to rebuild those three days from scratch to be
+re-promoted: a lapsed row returns to `mastered` the moment `review` is
+reached again (§3.4's `lapsed → learning → review` path) **and**
+`distinctCorrectDays` is still at or above `MASTERY_PROMOTION_THRESHOLD` —
+which, since the count never went down, it already is.
+`MasteryRecord` stores a single running counter with no per-day history
+behind it (the same structural limitation §3.5's `lastOutcome`/
+`lastAttemptAt` lookback already lives with), and there is no code path
+anywhere in `nextSchedule` that subtracts from it. This document no longer
+claims otherwise: the correct statement is that `distinctCorrectDays` only
+ever grows, or holds flat on a same-day repeat — it is monotonic for the
+life of the row, lapses included.
 
-- **`learning`/`lapsed` → `review`** is gated on `correctStreak`, which only
-  an objective `correct` advances. Self-mark **cannot** promote a question
-  into verified territory in the first place — a row with no independently-
-  confirmed correct answer at all never leaves active learning no matter how
-  many times the learner self-marks it.
-- **`review` → `mastered`** is gated on `distinctCorrectDays`, which a
-  `correct_self` **does** advance. Self-mark **can** supply the third
-  distinct day that completes a mastery claim already substantially
-  supported by objective evidence.
+### 3.7 Self-mark's one real gate: `review` → `mastered`
 
-The distinction is what "already substantially supported" means concretely:
-by the time a row is sitting in `review` at all, it has already graduated
-through two independent, machine-confirmed correct answers (§3.4). A
-self-mark at that point is corroborating testimony added to a claim with
-real evidence behind it, not the sole basis for the claim — which is exactly
-epic #54's own decision 2, "discounted, not ignored," read literally: ignored
-would mean self-mark counts for nothing on the axis that defines mastery;
-discounted means it counts, but only ever as the *completing* signal, never
-the *founding* one.
+An earlier draft of this design asserted an asymmetry — that self-mark could
+*complete* a mastery claim (advance `distinctCorrectDays` toward the
+`review` → `mastered` promotion) but could never *start* one, because
+`correctStreak` supposedly never moved for a self-marked outcome. That
+premise does not hold: `correctStreak` moves identically for both variants
+(§3.4), so `correct_self` alone — with **no independently confirmed correct
+answer anywhere in the row's history** — can carry a question from `new`
+through `learning` and into `review` exactly as fast as an unbroken run of
+objective corrects would (§3.8's Rows 3–4 work this case end to end).
+
+The one place self-mark's weaker evidence genuinely does matter for
+*whether* a transition fires, not just for its size, is the `review` →
+`mastered` promotion's `distinctCorrectDays >= MASTERY_PROMOTION_THRESHOLD`
+gate — and even there, a `correct_self` counts toward that threshold on the
+same footing as an objective `correct` (§3.5); it is not blocked from
+completing the promotion either. So there is, in the shipped design, no
+state transition anywhere that self-mark is excluded from. What self-mark
+genuinely never does is earn the *full-strength* ease bump or interval
+growth an objective correct earns (§3.4) — that is the entirety of "the
+discount," and it is a discount on magnitude, not on which transitions are
+reachable. Epic #54's own decision 2, "discounted, not ignored," is
+satisfied by that discount alone; this document no longer claims a second,
+gate-based discount that the shipped scheduler does not implement.
 
 ### 3.8 Worked transitions
 
@@ -421,13 +463,15 @@ learner's own timezone, not a literal date.
 | # | Scenario | Prior state | Prior fields (`interval`/`ease`/`streak`/`lapses`/`total`/`distinctDays`) | `outcome` | credited today? | New state | New fields | `dueAt` | Why |
 |---|---|---|---|---|---|---|---|---|---|
 | 1 | Brand-new question, first-ever attempt, exact match | *(no row)* | `0`/`2.5`/`0`/`0`/`0`/`0` | `correct` | no | `learning` | `1`/`2.6`/`1`/`0`/`1`/`1` | Day 2 | First schedulable outcome creates the row and immediately advances it past the implicit `new` state — §2's "no row ever persists `state: 'new'`" claim, in practice. |
-| 2 | Same question, Day 2, second consecutive objective correct | `learning` | `1`/`2.6`/`1`/`0`/`1`/`1` | `correct` | no | `review` | `6`/`2.7`/`2`/`0`/`2`/`2` | Day 8 | `correctStreak` reaches `GRADUATION_STREAK` (2) — graduates to `review` at the flat `GRADUATION_INTERVAL_DAYS` (6), not an ease-multiplied value. |
-| 3 | A **different** brand-new question, first-ever attempt is a **miss** | *(no row)* | `0`/`2.5`/`0`/`0`/`0`/`0` | `incorrect` | — | `learning` | `1`/`2.3`/`0`/`0`/`1`/`0` | Day 2 | Never entered `review`/`mastered`, so this is not a lapse (`lapses` stays `0`) — just the ordinary start of learning, one miss in. |
-| 4 | Row 2's question, Day 8, third distinct day, objective correct | `review` | `6`/`2.7`/`2`/`0`/`2`/`2` | `correct` | no | **`mastered`** | `16`/`2.8`/`3`/`0`/`3`/`3` | Day 24 | `distinctCorrectDays` reaches `MASTERY_DISTINCT_DAYS_REQUIRED` (3) while `state: 'review'` — promotion. Interval math is unchanged by the promotion (`round(6 × 2.7 × 1.0) = 16`); only the `state` label changes. |
-| 5 | Row 4's question, much later, a miss while `mastered` | `mastered` | `16`/`2.8`/`3`/`0`/`3`/`3` | `incorrect` | — | `lapsed` | `1`/`2.6`/`0`/`1`/`4`/`0` | +1 day | A real lapse: `lapses` increments, `distinctCorrectDays` resets to `0` (§3.6), interval collapses to `LEARNING_STEP_DAYS`. |
-| 6 | Row 5's question, next day, **self-marked** correct | `lapsed` | `1`/`2.6`/`0`/`1`/`4`/`0` | `correct_self` | no | `lapsed` (**unchanged**) | `1`/`2.6`/`0`/`1`/`5`/`1` | +1 day | `correctStreak` never moves for `correct_self`, so the row cannot cross `lapsed → learning` (§3.7) — it "holds the step," due again tomorrow. `distinctCorrectDays` **does** credit (`0→1`): the discount lives in the state gate, not the day count. |
-| 7 | An established `review` question receives an **AI partial verdict** | `review` | `10`/`2.5`/`4`/`0`/`6`/`2` | `partial` | no | `review` (**unchanged**) | `13`/`2.5`/`4`/`0`/`7`/`2` | +13 days | `intervalDays = round(10 × 2.5 × 0.5) = 13` — real but half-strength growth (an objective correct here would have produced `round(10 × 2.5 × 1.0) = 25`). `distinctCorrectDays` does **not** credit — `partial` is not a correct answer. |
-| 8 | A **repeated** miss while already `lapsed` | `lapsed` | `1`/`1.35`/`0`/`2`/`9`/`0` | `incorrect` | — | `lapsed` (**unchanged**) | `1`/`1.3`/`0`/`2`/`10`/`0` | +1 day | `lapses` stays `2` — only the `review`/`mastered → lapsed` *transition* increments it, not every subsequent miss while already there. `ease` floors at `EASE_MIN` (`1.3`), not the uncapped `1.15`. |
+| 2 | Same question, Day 2, second consecutive objective correct | `learning` | `1`/`2.6`/`1`/`0`/`1`/`1` | `correct` | no | `review` | `3`/`2.7`/`2`/`0`/`2`/`2` | Day 5 | `learning` → `review` fires on the very next correct answer regardless of `correctStreak`'s value (§3.4) — reaching `correctStreak: 2` here is incidental, not a gate. Interval uses the scheduler's second-repetition step (`SECOND_REPETITION_INTERVAL_DAYS`, `3`), not a flat graduation constant — there isn't one in the shipped scheduler. |
+| 3 | A **different** brand-new question, first-ever attempt is **self-marked** correct | *(no row)* | `0`/`2.5`/`0`/`0`/`0`/`0` | `correct_self` | no | `learning` | `1`/`2.55`/`1`/`0`/`1`/`1` | Day 2 | Self-mark starts a row exactly like an objective correct does — the `new → learning` transition reads no outcome variant (§3.4). The only difference from Row 1 is the smaller ease bump (`EASE_BUMP_SELF_MARKED`, `0.05`, vs. `0.1`); the interval is identical (`LAPSE_INTERVAL_DAYS`, both variants) because the discount only bites once the base interval is above the 1-day floor. |
+| 4 | Row 3's question, Day 2, second consecutive **self-marked** correct | `learning` | `1`/`2.55`/`1`/`0`/`1`/`1` | `correct_self` | no | `review` | `2`/`2.6`/`2`/`0`/`2`/`2` | Day 4 | Self-mark alone — with **no objectively-graded correct answer anywhere in this row's history** — crosses `learning` → `review`, contradicting an earlier draft of this design that claimed self-mark could never start or complete this transition (§3.7). The discount is visible only in the smaller numbers: interval `2` days here vs. Row 2's `3` days for the objective equivalent (`round(3 × 0.5) = 2`), and ease `+0.05` vs. `+0.10`. |
+| 5 | A third brand-new question, first-ever attempt is a **miss** | *(no row)* | `0`/`2.5`/`0`/`0`/`0`/`0` | `incorrect` | — | `learning` | `1`/`2.3`/`0`/`0`/`1`/`0` | Day 2 | Never entered `review`/`mastered`, so this is not a lapse (`lapses` stays `0`) — just the ordinary start of learning, one miss in. |
+| 6 | Row 2's question, on its due date (Day 5), third distinct day, objective correct | `review` | `3`/`2.7`/`2`/`0`/`2`/`2` | `correct` | no | **`mastered`** | `8`/`2.8`/`3`/`0`/`3`/`3` | Day 13 | `distinctCorrectDays` reaches `MASTERY_PROMOTION_THRESHOLD` (3) while `state: 'review'` — promotion, exactly as an earlier draft described. What changes here is only the interval math: the third-and-later repetition uses `round(previousIntervalDays × ease) = round(3 × 2.7) = 8`, not a flat graduation constant. |
+| 7 | Row 6's question, much later, a miss while `mastered` | `mastered` | `8`/`2.8`/`3`/`0`/`3`/`3` | `incorrect` | — | `lapsed` | `1`/`2.6`/`0`/`1`/`4`/**`3`** | +1 day | A real lapse: `lapses` increments, interval collapses to `LAPSE_INTERVAL_DAYS`. **`distinctCorrectDays` is left at `3`, not reset to `0`** — an earlier draft of this design claimed a reset here; the shipped scheduler copies the field forward unchanged on every `incorrect` outcome (§3.6). |
+| 8 | Row 7's question, next day, **self-marked** correct | `lapsed` | `1`/`2.6`/`0`/`1`/`4`/`3` | `correct_self` | no | `learning` | `1`/`2.65`/`1`/`1`/`5`/**`4`** | +1 day | Self-mark rebuilds a lapsed row exactly like an objective correct would (§3.4) — `lapsed → learning`, not the unchanged `lapsed` an earlier draft claimed. `distinctCorrectDays` continues from its **persisted** value, `3 → 4`, rather than rebuilding from `0` — Rows 7–8 are the same correction, viewed from either side of the lapse. |
+| 9 | An established `review` question receives an **AI partial verdict** | `review` | `10`/`2.5`/`4`/`0`/`6`/`2` | `partial` | no | `review` (**unchanged**) | `13`/`2.5`/`4`/`0`/`7`/`2` | +13 days | `intervalDays = round(10 × 2.5 × 0.5) = 13` — real but half-strength growth (an objective correct here would have produced `round(10 × 2.5 × 1.0) = 25`). `distinctCorrectDays` does **not** credit — `partial` is not a correct answer. |
+| 10 | A **repeated** miss while already `lapsed` | `lapsed` | `1`/`1.35`/`0`/`2`/`9`/`0` | `incorrect` | — | **`learning`** | `1`/`1.3`/`0`/`2`/`10`/`0` | +1 day | `lapses` stays `2` — only a miss **from** `review`/`mastered` increments it, and a miss while already `lapsed` is not a further regression. Corrected here from an earlier draft: the state moves to `learning`, not staying at `lapsed` — every non-regression miss (from `new`, `learning`, or `lapsed`) lands at the same `learning` destination (§3.4). `ease` floors at `MIN_EASE` (`1.3`), not the uncapped `1.15`. |
 
 ---
 
@@ -603,7 +647,7 @@ here exactly as named:
   unconditionally — "the spaced-repetition scheduler begins tracking
   questions for this learner" is true the instant **any** schedulable
   outcome produces a `question_mastery` row, whether that outcome was
-  `correct` or `incorrect` (Row 3, §3.8). Because `stage` only ever moves
+  `correct` (§3.8's Row 1) or `incorrect` (§3.8's Row 5). Because `stage` only ever moves
   forward and this check reads the profile's *current* stage inside the same
   transaction, "the first time this fires" and "every time this fires while
   still `oriented`" are the same event — there is no separate "is this
@@ -613,7 +657,7 @@ here exactly as named:
   `priorMasteryState !== 'mastered' && nextMasteryState === 'mastered'` — a
   question was just verified as mastered for the first time. Both facts are
   already sitting in `nextSchedule`'s own return value from the same
-  transaction (§3.8's Row 4 is exactly this event); no separate count of
+  transaction (§3.8's Row 6 is exactly this event); no separate count of
   "how many mastered rows does this user have" is computed, for the same
   reason the `oriented` guard needs none.
 
@@ -693,10 +737,10 @@ does not mistake a silence in this document for an oversight:
 | **FSRS instead of an SM-2 variant** | FSRS's own parameters (stability, difficulty, retrievability) are fit from a large corpus of real review logs this product has none of on day one; an untrained, default-parameter FSRS is not demonstrably better than a well-understood SM-2 variant and is materially harder to specify exactly enough for issue #67's own acceptance criterion — "a table of cases the sibling scheduler's unit tests can be written straight from." §3's constants and worked table are hand-verifiable line by line; nothing about this design forecloses swapping `nextSchedule`'s internals later, since every caller depends only on its pure signature. |
 | **A job queue for scheduling** | `ROADMAP.md` §7's "No job queue" rule, restated by `notifications.service.ts`'s own header for a different feature and inherited here rather than re-derived (§4): no broker, no worker process, and no second failure mode anywhere in this app for a computation this cheap. Mastery scheduling additionally cannot tolerate the detached, best-effort posture a queue (or `notify()`'s own fire-and-forget shape) would imply — §4 states the divergence explicitly. |
 | **An AI-chosen next action** | `ROADMAP.md`'s 2026-09-02 decision log states the requirement outright: deterministic, identical across two consecutive loads, explainable in one sentence, and working with no AI key configured — none of which an inference call can guarantee. `next-action.ts`'s own header makes the identical argument one epic earlier: "a model call would make that a coin flip and would put a provider outage in front of the application's front page." §6. |
-| **Withholding distinct-day credit entirely from self-marked answers** | Would make the discount indistinguishable from disqualification on the one axis — verified mastery — the epic's decision 2 ("discounted, not ignored") most directly protects. The chosen design discounts self-mark on the state-transition axis instead (§3.4, §3.7), so "weaker evidence" and "no evidence" stay genuinely different outcomes. |
+| **Withholding distinct-day credit entirely from self-marked answers** | Would make the discount indistinguishable from disqualification on the one axis — verified mastery — the epic's decision 2 ("discounted, not ignored") most directly protects. The chosen design discounts self-mark through smaller ease and interval growth instead (§3.4), never through a blocked transition, so "weaker evidence" and "no evidence" stay genuinely different outcomes. |
 | **Deriving `alreadyCreditedToday` from `question_mastery`'s own `lastAttemptAt`/`lastOutcome`** | Breaks on the ordinary same-day incorrect-then-self-marked sequence self-mark itself produces (§3.5) — a summary row that remembers only the single most recent attempt cannot answer "was *any* attempt today already credited." The caller queries `practice_attempts` directly instead, over an index that already exists. |
-| **Resetting `distinctCorrectDays` partially (e.g., halving) on a lapse rather than to zero** | A partial reset still lets a single fresh correct answer after a lapse re-reach `mastered` without genuinely fresh multi-day evidence, failing `VISION.md`'s "revisit what is becoming stale" standard almost as surely as not resetting at all. §3.6. |
-| **Letting `correct_self` advance `correctStreak`, treating it as equivalent to an objective correct for graduation purposes** | Would let a learner talk their way from `learning` straight to `review` — and, chained with an unmodified promotion rule, all the way to `mastered` — on self-assertion alone, with no independently-confirmed correct answer anywhere in the row's history. §3.4, §3.7. |
+| **Resetting `distinctCorrectDays` on a lapse — fully to zero, or partially (e.g., halving)** | An earlier draft of this design chose a full reset to `0`, reasoning that re-earning `mastered` should require fresh multi-day evidence each time, and that a partial reset would concede too much of that standard. The shipped scheduler does neither: `distinctCorrectDays` is copied forward unchanged on every `incorrect` outcome (§3.6). This row is kept to record that both a full and a partial reset were considered and are **not** what shipped. |
+| **Blocking `correct_self` from advancing `correctStreak` (and thus from state transitions)** | This is the position an earlier draft of this design took, deliberately — it argued this would prevent a learner from self-marking through the entire ladder with no independently-confirmed answer. **It is not what shipped.** The real scheduler treats `correct_self` and an objective `correct` identically for `correctStreak` and every state transition (§3.4, §3.7); a row genuinely can reach `mastered` on self-marks alone. Recorded here, inverted, because the risk this earlier position named is real and worth a deliberate decision — accept it, or file a follow-up issue against `scheduler.ts` — rather than silently dropped. |
 
 ---
 
