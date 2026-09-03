@@ -4,8 +4,9 @@
  * Mirrors the component's own header: `title`/`reason`/`path` are rendered
  * VERBATIM, with no local copy keyed on `kind`, and `kind` is used for
  * exactly one presentational thing — the icon. This file asserts both halves
- * directly, plus the newest kind — `review` (E5, epic #54 / #90, #82) — which
- * the source added to `KIND_ICONS` alongside the four E1–E3 kinds.
+ * directly, one case per declared kind — including the newest, `interview`
+ * (E8, epic #57 / #140), which the source added to `KIND_ICONS` alongside
+ * `review` (E5) and the four E1–E3 kinds.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -85,6 +86,23 @@ const CASES: Record<
     iconTestId: 'AutorenewOutlinedIcon',
     buttonName: 'Go to Practice',
   },
+  // The newest kind (E8, #140): a full mock interview. The ONE kind whose
+  // path is not `/practice` itself — `/practice/interviews` is its own screen,
+  // and a card inviting a learner to rehearse an interview that landed them on
+  // the five-question drill would be exactly the mismatch `NEXT_ACTION_PATHS`
+  // exists to prevent. The button still reads "Go to Practice" because
+  // `owns('/practice', …)` covers the subtree: it is content within that
+  // destination, not a destination of its own.
+  interview: {
+    action: {
+      kind: 'interview',
+      title: 'Try a full mock interview.',
+      reason: 'You have practised enough to rehearse the real thing.',
+      path: '/practice/interviews',
+    },
+    iconTestId: 'HistoryEduOutlinedIcon',
+    buttonName: 'Go to Practice',
+  },
 };
 
 describe('NextUpCard — one case per kind', () => {
@@ -135,8 +153,15 @@ describe('NextUpCard — no local copy keyed on kind', () => {
     // `iconFor`'s documented fallback: an older bundle receiving a `kind` a
     // newer server has started sending. Must render the card's actual copy,
     // never crash the page.
+    //
+    // This case used `interview` as its stand-in until E8 (#140) shipped that
+    // kind for real, at which point the stand-in stopped standing in for
+    // anything — the point of this test is a kind `KIND_ICONS` genuinely does
+    // NOT hold, so it needs one that is still unclaimed. E9/E11's voice work is
+    // the next plausible widening, and if it ever lands this line moves on to
+    // whatever is unclaimed then.
     renderCard({
-      kind: 'interview' as NextActionKind,
+      kind: 'voice_interview' as NextActionKind,
       title: 'Your interview is coming up.',
       reason: 'A kind this bundle has never heard of.',
       path: '/practice',

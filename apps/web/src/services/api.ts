@@ -249,6 +249,10 @@ import type {
   ProgressMastery,
   ReadinessSnapshotResponse,
   ReadinessHistoryResponse,
+  CreateInterviewInput,
+  InterviewDebrief,
+  InterviewDetail,
+  InterviewState,
   EngagementSummary,
 } from '../types';
 
@@ -1204,4 +1208,95 @@ export async function getReadinessHistory(params?: {
  */
 export async function getEngagementSummary(): Promise<EngagementSummary> {
   return api.get<EngagementSummary>('/engagement/summary');
+}
+
+// =============================================================================
+// Mock interview — start it, read it, finish it
+// (issue #140, epic #57 / E8 "Mock interview")
+// =============================================================================
+//
+// Three calls. The fourth thing this feature does — taking a turn — is not
+// here, because it is not JSON: `POST /api/interviews/:id/turns` answers with
+// `text/event-stream` and lives in `services/interviewStream.ts`, beside the
+// frame decoder, exactly as the explain stream does. The fifth route the API
+// serves (`GET /api/interviews`, the history list) is issue #145's and is
+// deliberately not bound yet.
+//
+// Every route is `@Auth()` with NO permission and resolves the learner from the
+// token, the same posture the practice, readiness and engagement blocks above
+// take, for the same reason: a learner's own interview history is exactly as
+// unconditionally theirs as their own practice attempts. Somebody else's
+// interview is a 404, not a 403 — confirming that an id names a real interview
+// would itself be the leak.
+//
+// -----------------------------------------------------------------------------
+// NO CALL HERE SENDS A TEST VERSION, A SENIOR FLAG OR A STATE CODE
+// -----------------------------------------------------------------------------
+//
+// All three are resolved server-side from the caller's own `learner_profiles`
+// row and frozen onto the interview at creation. `CreateInterviewInput` has one
+// field, and the API's DTO carries a compile-time proof that no bank-shaped or
+// identity-shaped field can be added to it. A browser that "helpfully" sent the
+// values it happens to hold would be claiming an accommodation the profile does
+// not grant — `mock-interview.md` calls that the most expensive lie this
+// product could tell, because the learner would be told they passed a test they
+// were never given.
+// =============================================================================
+
+/**
+ * Start an interview — `POST /api/interviews`.
+ *
+ * Returns the interview together with the officer's OPENING TURN, so the
+ * screen that follows has something to render before it asks for anything.
+ * There is no second call to fetch the greeting.
+ *
+ * `transcriptRetained` is the learner's own per-interview choice, made before
+ * the interview starts and never offered again mid-interview — there is
+ * nothing to retain yet at the moment it is asked, which is the point
+ * (`mock-interview.md` §8.1, and §15's rejected "retention as a user setting").
+ *
+ * A 400 means the caller has no resolved test version — unfinished setup rather
+ * than a failure, and rendered as prose exactly like `createPracticeSession`'s
+ * own 400.
+ */
+export async function createInterview(
+  input: CreateInterviewInput = {},
+): Promise<InterviewState> {
+  return api.post<InterviewState>('/interviews', input);
+}
+
+/**
+ * Resume an interview, or re-read a finished one — `GET /api/interviews/:id`.
+ *
+ * THE ONLY SOURCE OF TRUTH FOR THE INTERVIEW SCREEN, for the same reason
+ * `getPracticeSession` is for the practice screen: a reload, a second tab or a
+ * dropped connection resumes at the same place with every recorded turn intact,
+ * because resuming IS this request. Nothing is carried through navigation
+ * state and no turn is buffered in the browser.
+ *
+ * `debrief` is null until the interview is `completed`, and no shape on this
+ * response carries a per-question outcome before then.
+ */
+export async function getInterview(id: string): Promise<InterviewDetail> {
+  return api.get<InterviewDetail>(`/interviews/${id}`);
+}
+
+/**
+ * Finish the interview and get the debrief —
+ * `POST /api/interviews/:id/complete`.
+ *
+ * The first moment any performance information exists where the learner can
+ * see it. Also triggers a readiness recompute server-side, which is why the
+ * response carries the new score and its delta rather than the client asking
+ * for them separately.
+ *
+ * IDEMPOTENT: completing an already-completed interview returns the identical
+ * stored debrief and recomputes nothing, so a double-tap cannot write a second
+ * readiness snapshot for one interview. That is what makes it safe to call from
+ * an end control that is reachable in every phase, including mid-stream.
+ *
+ * A 409 means the interview was abandoned and has no completion to record.
+ */
+export async function completeInterview(id: string): Promise<InterviewDebrief> {
+  return api.post<InterviewDebrief>(`/interviews/${id}/complete`, {});
 }

@@ -45,6 +45,7 @@ import { Box, Button, Card, CardContent, Typography } from '@mui/material';
 import AutorenewOutlinedIcon from '@mui/icons-material/AutorenewOutlined';
 import EventAvailableOutlinedIcon from '@mui/icons-material/EventAvailableOutlined';
 import ExploreOutlinedIcon from '@mui/icons-material/ExploreOutlined';
+import HistoryEduOutlinedIcon from '@mui/icons-material/HistoryEduOutlined';
 import PlaylistAddCheckOutlinedIcon from '@mui/icons-material/PlaylistAddCheckOutlined';
 import RecordVoiceOverOutlinedIcon from '@mui/icons-material/RecordVoiceOverOutlined';
 import type { SvgIconComponent } from '@mui/icons-material';
@@ -66,11 +67,11 @@ import type { NextAction, NextActionKind } from '../../types';
  * rather than the product telling a learner something untrue. That is the whole
  * reason this map is acceptable where a map of titles would not be.
  *
- * Typed as a total `Record` over the closed union on purpose: when E5 or E8
- * widens `NextActionKind` (with `review` and `interview`), this map fails to
- * compile until it gets its glyph — a build error is a better reminder than a
- * blank space on the front page. E3 (#81) was the first widening (`practice`
- * below); E5 (#82) is the second (`review`).
+ * Typed as a total `Record` over the closed union on purpose: each time
+ * `NextActionKind` is widened, this map fails to compile until it gets its
+ * glyph — a build error is a better reminder than a blank space on the front
+ * page. E3 (#81) was the first widening (`practice` below), E5 (#82) the second
+ * (`review`), and E8 (#140) the third (`interview`).
  */
 const KIND_ICONS: Record<NextActionKind, SvgIconComponent> = {
   orientation: PlaylistAddCheckOutlinedIcon,
@@ -83,6 +84,10 @@ const KIND_ICONS: Record<NextActionKind, SvgIconComponent> = {
   // E5 (#82). `study-coach.ts`'s `recommendStudyAction` — due/lapsed evidence
   // to go back over, not new material.
   review: AutorenewOutlinedIcon,
+  // E8 (#140). The mock interview, ranked between `practice` and `explore` and
+  // offered only from stage `practicing` onward. The one kind whose path is not
+  // `/practice` — `/practice/interviews`, its own screen.
+  interview: HistoryEduOutlinedIcon,
 };
 
 /**

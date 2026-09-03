@@ -34,6 +34,12 @@ const ProgressPage = lazy(() => import("./pages/ProgressPage"));
 // new `DESTINATION_ROUTES` entry is needed or wanted.
 const PracticeSessionPage = lazy(() => import("./pages/PracticeSessionPage"));
 const PracticeSummaryPage = lazy(() => import("./pages/PracticeSummaryPage"));
+// Issue #140, epic #57 / E8 — the mock interview, two more screens UNDER the
+// same Practice destination and owned by the same `/practice` prefix. The
+// debrief route (`/practice/interviews/:id/debrief`) is issue #145's and is
+// deliberately not mounted here yet.
+const InterviewStartPage = lazy(() => import("./pages/InterviewStartPage"));
+const InterviewPage = lazy(() => import("./pages/InterviewPage"));
 const AiKeySetupPage = lazy(() => import("./pages/AiKeySetupPage"));
 // Issue #72, epic #50 — the orientation screen behind `RequireOrientation`.
 const OrientationPage = lazy(() => import("./pages/OrientationPage"));
@@ -240,6 +246,42 @@ function AppRoutes() {
                         <Route
                           path="/practice/sessions/:id/summary"
                           element={<PracticeSummaryPage />}
+                        />
+                        {/* The mock interview (#140, epic #57 / E8), in this
+                        same `RequireOrientation` group and ungated beyond it for
+                        the identical reason the practice loop above is: every
+                        `/api/interviews/*` route is `@Auth()` with no
+                        permission, because a learner's own interview history is
+                        exactly as unconditionally theirs as their own practice
+                        attempts, so there is no permission string a gate here
+                        could honestly mirror and one would leave a Viewer — the
+                        default role — unable to rehearse at all.
+
+                        `config/destinations.ts` GAINS NOTHING, exactly as it
+                        gained nothing for `/practice/sessions/:id`:
+                        `owns('/practice', …)` matches on segment boundaries and
+                        already covers this whole subtree, so the rail keeps
+                        highlighting Practice inside an interview and no new
+                        `DESTINATION_ROUTES` entry is needed or wanted.
+                        `docs/specs/mock-interview.md` §14 states the same
+                        reachability-versus-content distinction: these are
+                        content WITHIN the Practice destination, never a
+                        destination of their own — which is also why
+                        `NEXT_ACTION_PATHS`' `interview` may point straight at
+                        `/practice/interviews` without one.
+
+                        Two real routes rather than views in a query string, for
+                        the same reason the two above are: an interview NAMES A
+                        SERVER RESOURCE with an id, resumable from a reload in
+                        another tab and linkable from a history list weeks
+                        later. */}
+                        <Route
+                          path="/practice/interviews"
+                          element={<InterviewStartPage />}
+                        />
+                        <Route
+                          path="/practice/interviews/:id"
+                          element={<InterviewPage />}
                         />
                         <Route path="/progress" element={<ProgressPage />} />
                         {/* The per-user settings surface (#96, epic #90) — the same
