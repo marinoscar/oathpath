@@ -10,6 +10,7 @@ import { Clock } from '../common/clock/clock';
 import { PrismaService } from '../prisma/prisma.service';
 import { EngagementService } from '../engagement/engagement.service';
 import { ReadinessService } from '../readiness/readiness.service';
+import { AttemptGradingService } from './attempt-grading.service';
 import { GRADING_SCHEMA_NAME } from './grading';
 import { computeSummary, PracticeService } from './practice.service';
 import type { CreatePracticeSessionInput } from './dto/create-practice-session.dto';
@@ -263,12 +264,23 @@ describe('PracticeService', () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         PracticeService,
+        // THE REAL GRADING LADDER, NOT A MOCK OF IT (issue #133, epic #57 / E8).
+        // The four operations these tests exercise through `recordAttempt` and
+        // `selfMarkAttempt` — answer resolution, the deterministic rung, the
+        // grader escalation, the `question_mastery` write — moved out of
+        // `PracticeService` into `AttemptGradingService`, and standing the real
+        // one up over the same Prisma and dispatch stubs is what keeps every
+        // assertion below an assertion about the LADDER rather than about a
+        // seam. Mocking it here would leave the ladder's behaviour untested
+        // from this file and would pass whatever a future edit broke.
+        AttemptGradingService,
         { provide: PrismaService, useValue: prisma },
         { provide: Clock, useValue: clock },
-        // THE DISPATCHER, NOT A PROVIDER AND NOT A CREDENTIAL STORE. The service
-        // can only be constructed with this one AI dependency, which is the
-        // module-level property `ai-evaluation.md` §3 asks for, checked by the
-        // compiler on every test that stands the service up.
+        // THE DISPATCHER, NOT A PROVIDER AND NOT A CREDENTIAL STORE. It is now
+        // `AttemptGradingService` that injects it — this is the whole AI
+        // dependency of the two classes together, which is the module-level
+        // property `ai-evaluation.md` §3 asks for, checked by the compiler on
+        // every test that stands them up.
         { provide: AiDispatchService, useValue: dispatch },
         { provide: ReadinessService, useValue: readiness },
         { provide: EngagementService, useValue: engagement },

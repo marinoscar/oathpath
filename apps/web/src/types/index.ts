@@ -1157,8 +1157,16 @@ export interface JourneyStage {
  * `interview_countdown` and `practice` — see that file for the full ordering.
  * It shares `/practice` with `interview_countdown` and `practice` (three
  * kinds naming one destination, not a duplicated branch); the Practice page
- * reads `nextAction.kind` to decide which action to put forward first. E8
- * adds `interview` to the same contract later.
+ * reads `nextAction.kind` to decide which action to put forward first. WIDENED
+ * BY ONE MORE MEMBER IN E8 (#140, epic #57): `interview`. The API ships it
+ * today — `NEXT_ACTION_KINDS` has the member and `NEXT_ACTION_PATHS` maps it to
+ * `/practice/interviews`, the one path in that map that is deliberately NOT
+ * `/practice` (a card inviting a learner to rehearse a whole interview that
+ * landed them on the five-question drill would be the "points at a route that
+ * does not do what the card said" failure that map exists to prevent). It is
+ * ranked between `practice` and `explore` by `study-coach.ts` and offered only
+ * at stage `practicing` or beyond; `docs/specs/mock-interview.md` §14.1 has the
+ * ordering argument.
  *
  * **This being a closed union is a compile-time convenience, not a runtime
  * guarantee.** The value arrives over the wire from a server that deploys
@@ -1174,7 +1182,8 @@ export type NextActionKind =
   | 'interview_countdown'
   | 'review'
   | 'explore'
-  | 'practice';
+  | 'practice'
+  | 'interview';
 
 /** The one recommendation Home renders — `journey-shell.md` §4. */
 export interface NextAction {
@@ -2023,4 +2032,271 @@ export interface EngagementSummary {
   timezone: string;
   /** The last 14 local days, OLDEST FIRST. */
   recentDays: EngagementRecentDay[];
+}
+
+// =============================================================================
+// Mock interview — `POST /api/interviews`, `GET /api/interviews/:id`,
+// `POST /api/interviews/:id/complete` (issue #140, epic #57 / E8)
+// =============================================================================
+//
+// Hand-written mirrors of `apps/api/src/interviews/dto/interview.dto.ts` and
+// `dto/interview-debrief.dto.ts`, transcribed FIELD BY FIELD against those Zod
+// schemas rather than approximated — the same discipline the practice, civics
+// and readiness blocks above follow. The SSE frames the turn endpoint answers
+// with are NOT here: they live in `services/interviewStream.ts` beside the
+// decoder that produces them, exactly as the explain frames live in
+// `services/explainStream.ts`.
+//
+// -----------------------------------------------------------------------------
+// THE ONE PROPERTY OF THIS BLOCK THAT IS LOAD-BEARING
+// -----------------------------------------------------------------------------
+//
+// **NO SHAPE HERE CARRIES A VERDICT WHILE THE INTERVIEW IS RUNNING.** There is
+// no outcome field on {@link InterviewTurnRecord}, no `civicsCorrect` on
+// {@link InterviewProgress}, and {@link InterviewDetail.debrief} is null until
+// the interview is `completed`. That is `docs/specs/mock-interview.md` §10 as a
+// shape rather than as a rule somebody has to remember: the engine knew whether
+// each answer was right the moment it graded it, recorded it, and used it to
+// choose the next question — and deliberately does not send it, because the
+// real interview gives no per-question feedback and a rehearsal that does is
+// coaching a learner to expect reassurance the actual event will never give.
+//
+// A client that widened any of these types "so the screen can show progress
+// better" would defeat that from this end, with every endpoint still returning
+// 200 and every other test still passing.
+// =============================================================================
+
+/** `mock_interviews.status`. */
+export type InterviewStatus = 'in_progress' | 'completed' | 'abandoned';
+
+/** Text or voice. `text` for every interview this epic can produce; E9/E11 wire the other. */
+export type InterviewMode = 'text' | 'voice';
+
+/**
+ * The six phases of an interview, in the order they are conducted.
+ *
+ * `reading` and `writing` are DECLARED AND SKIPPED in text mode: the officer
+ * says plainly that this rehearsal does not include those tests yet, and the
+ * phase is recorded as `skipped` rather than omitted. A learner who was never
+ * told they exist could walk into the real interview believing they rehearsed a
+ * segment they never saw — `mock-interview.md` §2.4 states the cost in full,
+ * and it is why the web renders those turns honestly instead of hiding them.
+ */
+export type InterviewPhase =
+  | 'smalltalk'
+  | 'n400'
+  | 'civics'
+  | 'reading'
+  | 'writing'
+  | 'closing';
+
+/** Who spoke. */
+export type InterviewTurnRole = 'officer' | 'applicant';
+
+/** Why the civics phase ended — the engine's own stop rule. */
+export type InterviewStopReason =
+  | 'threshold_reached'
+  | 'threshold_unreachable'
+  | 'all_asked';
+
+/**
+ * One interview's header row.
+ *
+ * `passedCivics` is `false` on every `in_progress` row, which is honest rather
+ * than premature — the civics phase has not finished, so it has not been
+ * passed. Nothing on the live interview screen renders it; it belongs to the
+ * debrief and to the history list (#145).
+ */
+export interface Interview {
+  id: string;
+  mode: InterviewMode;
+  status: InterviewStatus;
+  /** The bank and pass rule this interview was created against. */
+  testVersionCode: string;
+  /** Frozen from the profile at start time, never re-read at completion. */
+  seniorExemption: boolean;
+  /** The per-interview choice, made before the interview started (§8.1). */
+  transcriptRetained: boolean;
+  startedAt: string;
+  completedAt: string | null;
+  civicsAsked: number;
+  civicsCorrect: number;
+  passedCivics: boolean;
+}
+
+/**
+ * One line of the transcript.
+ *
+ * `text` MAY BE EMPTY, AND EMPTY IS MEANINGFUL. With `transcriptRetained: false`
+ * an applicant turn is written with `text: ''` deliberately (§8.2): the
+ * interview's structure survives — a turn happened, in this phase, in this
+ * order, naming this question — while the learner's own words do not.
+ *
+ * A renderer must therefore never present an empty applicant turn as "said
+ * nothing". The web's answer is simpler than a disclaimer: the interview screen
+ * renders the OFFICER's turns only, so there is no place for that
+ * misreading to occur at all. See `InterviewPage.tsx`'s header.
+ */
+export interface InterviewTurnRecord {
+  id: string;
+  turnIndex: number;
+  role: InterviewTurnRole;
+  phase: InterviewPhase;
+  /** Set only on a civics OFFICER turn — which question was read. */
+  questionId: string | null;
+  text: string;
+  createdAt: string;
+}
+
+/**
+ * How far through the civics section this interview is.
+ *
+ * PACING, NEVER SCORE. There is no `civicsCorrect` here even though the header
+ * row above has one: "6 of 10 asked" is a fact the real interview also gives a
+ * learner, and "4 of 6 correct" is a running score it never does.
+ */
+export interface InterviewProgress {
+  civicsAsked: number;
+  /** N, from the `civics_test_versions` row. Never a constant in this bundle. */
+  civicsPlanned: number;
+}
+
+/** What `POST /api/interviews` returns: the interview and the opening turn. */
+export interface InterviewState {
+  interview: Interview;
+  /**
+   * The officer turns this exchange produced, in order — usually one.
+   *
+   * AN ARRAY BECAUSE ONE EXCHANGE CAN PRODUCE SEVERAL: the reading and writing
+   * phases consume no applicant answer and neither does the closing statement,
+   * so the last civics answer of an interview is followed by three officer
+   * turns at once.
+   */
+  officerTurns: InterviewTurnRecord[];
+  progress: InterviewProgress;
+  /** True once the only remaining action is `complete`. */
+  awaitingCompletion: boolean;
+}
+
+/** The civics section's result — only ever inside a debrief. */
+export interface InterviewCivicsResult {
+  /** N — how many questions the ask-list was drawn for. From the version row. */
+  planned: number;
+  /** How many the early stop or the exhausted plan actually reached. */
+  asked: number;
+  correct: number;
+  /** T — how many had to be correct. From the version row, never a constant. */
+  threshold: number;
+  passed: boolean;
+  /** True when `asked < planned` — the stop rule fired before the plan ran out. */
+  stoppedEarly: boolean;
+  stopReason: InterviewStopReason;
+}
+
+/** One civics question as it was actually asked and graded. */
+export interface InterviewDebriefQuestion {
+  questionId: string;
+  number: number;
+  prompt: string;
+  categoryName: string;
+  outcome: PracticeOutcome;
+  /** From the FROZEN answer snapshot on the attempt row, never a live re-query. */
+  acceptedAnswers: string[];
+}
+
+/** Whether this rehearsal conducted a phase, or named it and skipped it. */
+export interface InterviewPhaseStatus {
+  kind: InterviewPhase;
+  status: 'completed' | 'skipped';
+}
+
+/** The readiness recompute this completion produced. */
+export interface InterviewReadinessSummary {
+  score: number;
+  previousScore: number | null;
+  delta: number | null;
+  capReason: ReadinessCapReason;
+  /** The fixed cap copy, server-written, or null. Rendered verbatim. */
+  capMessage: string | null;
+  interviewComponent: { value: number; evidenceCount: number };
+}
+
+/**
+ * The debrief — the FIRST moment any performance information exists where the
+ * learner can see it.
+ *
+ * Declared here in full even though this epic's slice renders none of it: the
+ * debrief screen is issue #145, and `InterviewDetail.debrief` below is typed
+ * against this shape so that screen inherits a transcription that was checked
+ * against the API's own Zod schema rather than one written from memory later.
+ */
+export interface InterviewDebrief {
+  civics: InterviewCivicsResult;
+  questions: InterviewDebriefQuestion[];
+  phases: InterviewPhaseStatus[];
+  /** Category names with at least one miss. Deterministic, never model-written. */
+  focusAreas: string[];
+  readiness: InterviewReadinessSummary;
+}
+
+/**
+ * What `GET /api/interviews/:id` returns — one route for a live interview and
+ * for a finished one.
+ *
+ * `debrief` is null while the interview is not `completed`. A debrief available
+ * mid-interview would be the verdict no turn frame is allowed to carry,
+ * reachable through a second door.
+ */
+export interface InterviewDetail {
+  interview: Interview;
+  /** The whole transcript so far, oldest first. */
+  turns: InterviewTurnRecord[];
+  progress: InterviewProgress;
+  awaitingCompletion: boolean;
+  debrief: InterviewDebrief | null;
+}
+
+/**
+ * The whole body of `POST /api/interviews`.
+ *
+ * ONE FIELD, and the omissions are the design: there is no `testVersionCode`
+ * and no `seniorExemption`, because both are read from the caller's own
+ * `learner_profiles` row and a request that could set either would let a
+ * learner sit a smaller pool against a lower pass mark and be told they passed
+ * a test they were never given.
+ */
+export interface CreateInterviewInput {
+  /**
+   * Whether this interview keeps the learner's own words. Defaults to `false`
+   * in the DTO *and* at the database level; the web sends it explicitly anyway,
+   * because on this screen it is a choice a learner actually made.
+   */
+  transcriptRetained?: boolean;
+}
+
+/**
+ * A row in the caller's interview history — `GET /api/interviews`.
+ *
+ * The header row and nothing else, exactly as the API's own
+ * `interviewListItemSchema` declares it (an alias of `interviewSchema`, not a
+ * narrower shape). §12 states what the endpoint is for and therefore what a row
+ * has to carry: "did I do better on my second mock interview than my first" is
+ * the question, and `civicsAsked` / `civicsCorrect` / `passedCivics` on the
+ * header already answer it. A learner who wants the per-question detail opens
+ * the interview's debrief.
+ *
+ * Declared as its own name rather than used as `Interview` at the call site so
+ * that the day the API narrows the list row — a real possibility, since a list
+ * has no need for `transcriptRetained` — this alias is the one place that
+ * changes.
+ */
+export type InterviewListItem = Interview;
+
+/** `GET /api/interviews` — the same flat pagination shape every list uses. */
+export interface InterviewPage {
+  items: InterviewListItem[];
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
 }

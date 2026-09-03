@@ -20,9 +20,21 @@ import type { ReadinessComponentKey, ReadinessResult } from './readiness-engine'
 // among the five earnable components — a capped learner is told about the
 // cap every time, because it is the single most consequential true thing
 // this product can say to them, ahead of any smaller headroom optimization.
-// `path: '/practice'` — the same destination `interview_countdown`/`review`/
-// `practice` already share (`journey-shell.md`/`memory-model.md` §6); E8
-// will re-point this once a dedicated mock-interview route exists.
+//
+// `path: '/practice/interviews'` since #133 (epic #57 / E8), and it used to
+// be `/practice` with a note saying E8 would re-point it once a dedicated
+// mock-interview route existed. This is that re-point, and the rule it
+// follows is worth stating rather than leaving to the diff: A RECOMMENDATION
+// MUST POINT AT THE DESTINATION IT NAMES. This card's copy says "completing
+// two mock interviews is the best way to strengthen your readiness now", and
+// until this epic there was nowhere to send a learner who acted on it — the
+// tap landed on the general practice page, which offers Quick 5 and category
+// drills and no mock interview at all. That is the same self-contradiction
+// `next-action.ts`'s header forbids for its own kinds ("a learner who taps
+// 'Continue' and lands back on the screen the card was on has just watched
+// the product contradict itself"), and the reason its `NEXT_ACTION_PATHS`
+// only gains a member when the route exists. `/practice/interviews` is a
+// real, mounted route from this epic on.
 //
 // -----------------------------------------------------------------------------
 // UNCAPPED: GREATEST `weight * (1 - value)`, TIE-BROKEN BY DECLARED ORDER
@@ -68,7 +80,9 @@ function cappedRecommendation(): ReadinessTopRecommendation {
     reason:
       'Your civics knowledge is strong, but you have limited interview practice. ' +
       'Completing two mock interviews is the best way to strengthen your readiness now.',
-    path: '/practice',
+    // The route this epic mounted. See the header: the copy above names mock
+    // interviews, so this has to be where mock interviews are.
+    path: '/practice/interviews',
   };
 }
 

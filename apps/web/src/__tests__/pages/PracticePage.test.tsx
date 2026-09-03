@@ -18,7 +18,13 @@
  *  4. **Loading, empty and failed stay three different screens.** A failed
  *     fetch must never render as a blank page or as a quiet "you have no
  *     history" — `usePracticeSessions`'s header names this explicitly.
- *  5. **Legible at 360px and correct in the dark theme**, because this is a
+ *  5. **The mock interview is reachable from here (#145, epic #57 / E8)**, as
+ *     its own band, and its copy says what the thing IS before a learner
+ *     commits twenty minutes to it: longer than five questions, and no feedback
+ *     until the end. `docs/specs/mock-interview.md` §10's reason reaches one
+ *     screen back — a learner who was not told there is no per-question signal
+ *     reads its absence as the product being broken.
+ *  6. **Legible at 360px and correct in the dark theme**, because this is a
  *     screen a learner opens from Home's one recommendation, most often on a
  *     phone.
  */
@@ -239,6 +245,10 @@ function renderPractice(
             <Route element={<LearnerProfileProvider />}>
               <Route path="/practice" element={<PracticePage />} />
               <Route path="/practice/sessions/:id" element={<SessionStub />} />
+              <Route
+                path="/practice/interviews"
+                element={<h1>Mock interview</h1>}
+              />
               <Route path="/settings/journey" element={<h1>Your plan</h1>} />
             </Route>
           </Routes>
@@ -626,6 +636,73 @@ describe('loading and unfinished setup', () => {
     // No Quick 5 button to click when there is nothing to practise.
     expect(
       screen.queryByRole('button', { name: /start a quick 5/i }),
+    ).not.toBeInTheDocument();
+  });
+});
+
+// -----------------------------------------------------------------------------
+// The mock interview band (#145, epic #57 / E8)
+// -----------------------------------------------------------------------------
+
+describe('the mock interview band', () => {
+  it('offers the mock interview as its own band, pointing at a real route', async () => {
+    server.use(...practiceHandlers({ sessions: [] }));
+    renderPractice();
+
+    const link = await screen.findByRole('link', {
+      name: /start a mock interview/i,
+    });
+    // The START SCREEN, not a session id this page invented: unlike Quick 5,
+    // an interview needs the retention decision (§8.1) that screen asks for
+    // before one exists at all.
+    expect(link).toHaveAttribute('href', '/practice/interviews');
+
+    // Its own `h2`, alongside Quick 5's and the category band's — not a third
+    // button inside "Start practising". A Quick 5 and a rehearsal are not the
+    // same kind of act, and presenting them as peers inside one band would let
+    // a learner tap into the second expecting the first.
+    const headings = screen
+      .getAllByRole('heading', { level: 2 })
+      .map((h) => h.textContent);
+    expect(headings).toContain('Mock interview');
+    expect(headings).toContain('Start practising');
+  });
+
+  it('says what an interview is before the learner commits to one', async () => {
+    // Both surprises, stated here rather than discovered mid-rehearsal: it
+    // runs longer than five questions, and it says nothing until it finishes.
+    server.use(...practiceHandlers({ sessions: [] }));
+    renderPractice();
+
+    const copy = await screen.findByText(/longer than five questions/i);
+    expect(copy).toBeInTheDocument();
+    expect(copy).toHaveTextContent(/tells you nothing until it finishes/i);
+  });
+
+  it('navigates to the mock interview screen', async () => {
+    server.use(...practiceHandlers({ sessions: [] }));
+    const user = userEvent.setup();
+    renderPractice();
+
+    await user.click(
+      await screen.findByRole('link', { name: /start a mock interview/i }),
+    );
+
+    expect(
+      await screen.findByRole('heading', { level: 1, name: 'Mock interview' }),
+    ).toBeInTheDocument();
+  });
+
+  it('is not offered when there is no test version to interview against', async () => {
+    // The same gate the rest of the page's actions sit behind: with no
+    // resolved test version there are no questions, so there is no interview
+    // to sit either.
+    server.use(...practiceHandlers({ sessions: [] }));
+    renderPractice({ profile: UNORIENTED_PROFILE });
+
+    expect(await screen.findByRole('link', { name: /open your plan/i })).toBeInTheDocument();
+    expect(
+      screen.queryByRole('link', { name: /start a mock interview/i }),
     ).not.toBeInTheDocument();
   });
 });

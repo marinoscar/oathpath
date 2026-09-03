@@ -653,6 +653,43 @@ export function setupDailyActivityMocks(): void {
 }
 
 // ============================================================================
+// Mock interview mocks (issue #133, epic #57 / E8)
+// ============================================================================
+
+/**
+ * Generic, spec-agnostic `mock_interviews` defaults.
+ *
+ * `ReadinessService.assembleEvidence` now reads this table — a real
+ * `mockInterview.count` — on EVERY readiness recompute (readiness.service.ts's
+ * own `interview` comment), and `PracticeService.completeSession` triggers a
+ * recompute synchronously on every session completion. That means EVERY
+ * existing integration spec that completes a practice session touches
+ * `mock_interviews` too, whether or not that spec's own concern is interviews.
+ *
+ * Without a default here, `mockInterview.count` (an unconfigured `mockDeep`
+ * method) resolves to `undefined`, `computeInterview`'s
+ * `mockInterviewsPassed / 2` becomes `undefined / 2` — `NaN`, not a thrown
+ * error — and a `NaN` component silently makes the whole weighted score `NaN`,
+ * which serialises over the wire as `null`. So the symptom of a missing mock
+ * here is a wrong score (`null`), not a crash — the harder kind to diagnose,
+ * because nothing points at `mock_interviews` at all.
+ *
+ * `findFirst`/`findMany` are deliberately NOT stubbed here:
+ * `EngagementService`'s own `mockInterview.findFirst` read is reached only
+ * through the interview-shaped accrual key (`kind: 'interview'`), which is
+ * only ever constructed when an interview attempt itself is recorded — never
+ * by ordinary practice-session completion, the path every generic spec
+ * exercises. A spec asserting on interview evidence itself (or on engagement
+ * accrual from an interview) should override these with its own in-memory
+ * store, the same "generic default here, a real store where the suite's own
+ * assertions need one" split `setupReadinessSnapshotMocks` and
+ * `setupDailyActivityMocks` above already document.
+ */
+export function setupMockInterviewMocks(): void {
+  (prismaMock.mockInterview.count as jest.Mock).mockResolvedValue(0);
+}
+
+// ============================================================================
 // Complete Mock Setup
 // ============================================================================
 
@@ -672,6 +709,7 @@ export function setupBaseMocks(): void {
   setupMockAuditEvents();
   setupReadinessSnapshotMocks();
   setupDailyActivityMocks();
+  setupMockInterviewMocks();
 
   // Mock transactions
   mockPrismaTransaction();

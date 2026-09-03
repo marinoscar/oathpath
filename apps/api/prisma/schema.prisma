@@ -47,6 +47,7 @@ model User {
   questionMastery        QuestionMastery[]      @relation("UserQuestionMastery")
   readinessSnapshots     ReadinessSnapshot[]    @relation("UserReadinessSnapshots")
   dailyActivity          DailyActivity[]        @relation("UserDailyActivity")
+  mockInterviews         MockInterview[]        @relation("UserMockInterviews")
 
   @@map("users")
 }
@@ -805,6 +806,7 @@ model CivicsTestVersion {
   categories       CivicsCategory[]
   questions        CivicsQuestion[]
   practiceSessions PracticeSession[]
+  mockInterviews   MockInterview[]
 
   @@map("civics_test_versions")
 }
@@ -1002,6 +1004,12 @@ model CivicsQuestion {
   answers     CivicsAnswer[]
   attempts    PracticeAttempt[]
   mastery     QuestionMastery[]
+
+  // Reverse lookup for `MockInterviewTurn.questionId` (issue #115, epic
+  // #57) — the officer-turn "which question was read" reference. Same
+  // "content the schema cares about protecting" posture as `attempts`
+  // above: an already-asked interview question cannot be deleted.
+  mockInterviewTurns MockInterviewTurn[]
 
   // The seed loader's stable upsert key: re-running a loader against the same
   // (version, official number) must resolve to the same row, never create a
@@ -1420,11 +1428,31 @@ model PracticeAttempt {
   // never cascades away the evidence rows it produced.
   sessionId String? @map("session_id") @db.Uuid
 
+  // Nullable for the mirror-image reason `sessionId` above is: an ordinary
+  // practice attempt has no interview to belong to. Set only when
+  // `source: mock_interview` (issue #115, epic #57). onDelete: SetNull for
+  // the IDENTICAL "evidence must outlive its bookkeeping" reason `sessionId`
+  // and `aiUsageEventId` below already give: deleting a mock interview must
+  // leave the attempts it produced intact with this FK cleared, because
+  // mastery (#54) and readiness (#55) keep reading ONE `practice_attempts`
+  // table with no UNION against a second, interview-only evidence table.
+  mockInterviewId String? @map("mock_interview_id") @db.Uuid
+
   inputMode PracticeInputMode @default(typed) @map("input_mode")
 
   promptMode PracticePromptMode @default(read) @map("prompt_mode")
 
   // Null for a skip — there is no response to record.
+  //
+  // A SECOND, DISTINCT REASON THIS IS NULL (issue #115, epic #57): also null
+  // for a mock-interview attempt (`source: mock_interview`) whose interview
+  // has `transcriptRetained: false`. The outcome, grading method, failure
+  // cause, and `answerSnapshot` are all retained exactly as for any other
+  // attempt — the evidence a readiness/mastery read needs survives — but the
+  // learner's own words deliberately do not, because a mock interview is the
+  // most sensitive conversation this product records. See
+  // `MockInterview.transcriptRetained` and
+  // `docs/specs/mock-interview.md` §8 for the retention design in full.
   responseText String? @map("response_text") @db.Text
 
   outcome PracticeOutcome
@@ -1510,10 +1538,18 @@ model PracticeAttempt {
   // already happened — same reasoning as `AiUsageEvent` above.
 
   // Relations
-  user         User             @relation("UserPracticeAttempts", fields: [userId], references: [id], onDelete: Cascade)
-  question     CivicsQuestion   @relation(fields: [questionId], references: [id], onDelete: Restrict)
-  session      PracticeSession? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
-  aiUsageEvent AiUsageEvent?    @relation("AiUsageEventPracticeAttempts", fields: [aiUsageEventId], references: [id], onDelete: SetNull)
+  user          User             @relation("UserPracticeAttempts", fields: [userId], references: [id], onDelete: Cascade)
+  question      CivicsQuestion   @relation(fields: [questionId], references: [id], onDelete: Restrict)
+  session       PracticeSession? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+  mockInterview MockInterview?   @relation(fields: [mockInterviewId], references: [id], onDelete: SetNull)
+  aiUsageEvent  AiUsageEvent?    @relation("AiUsageEventPracticeAttempts", fields: [aiUsageEventId], references: [id], onDelete: SetNull)
+
+  // Reverse lookup for `MockInterviewTurn.attemptId` (issue #115, epic
+  // #57) — the applicant-turn "which graded attempt did this become"
+  // reference. No `onDelete` to set here: the FK and its `SetNull` behavior
+  // live on `MockInterviewTurn`, the owning side, matching how
+  // `AiUsageEvent.practiceAttempts` above documents the identical shape.
+  mockInterviewTurns MockInterviewTurn[]
 
   // The readiness model's core query: this user's history with this
   // question, in order — "has this learner ever answered this correctly,
@@ -1521,6 +1557,10 @@ model PracticeAttempt {
   @@index([userId, questionId, answeredAt])
   // Session detail view: all attempts belonging to one session.
   @@index([sessionId])
+  // Interview detail view / readiness rollup: all attempts belonging to one
+  // mock interview — the identical shape as the `sessionId` index above,
+  // one row over.
+  @@index([mockInterviewId])
   // Reverse lookup from a usage row to the attempt(s) it graded — the
   // AiUsageEvent side of the relationship this column exists to answer.
   @@index([aiUsageEventId])
@@ -1929,4 +1969,250 @@ model DailyActivity {
   // reason — it would earn no query the unique index doesn't already answer.
   @@unique([userId, activityDate])
   @@map("daily_activity")
+}
+
+// =============================================================================
+// Mock Interviews — Text Mode (issue #115, epic #57 "Mock Interview")
+// =============================================================================
+//
+// Full design: docs/specs/mock-interview.md. This comment is the pointer for
+// what is genuinely load-bearing about the SCHEMA; the transcript format,
+// phase sequencing, and debrief shape live in that document, not duplicated
+// here.
+//
+// A mock interview simulates the N-400 naturalization interview end to end —
+// small talk, the N-400 review, the civics questions, (E10) reading and
+// writing, and closing — as one continuous conversation between an "officer"
+// (the AI) and the "applicant" (the learner). `MockInterview` is the header
+// row for one such run; `MockInterviewTurn` is one line of that
+// conversation, in order.
+//
+// This is deliberately NOT a third, parallel copy of
+// `PracticeSession`/`PracticeAttempt` for the civics portion. The civics
+// questions asked during an interview are graded and recorded through the
+// SAME `practice_attempts` table `PracticeSession` already writes into
+// (`source: mock_interview`, `sessionId: null`) — see that enum's own "FOUR
+// COLUMNS THIS EPIC WRITES ONLY ONE VALUE OF" comment above, which named
+// this exact table one epic ahead of this one. `MockInterview` and
+// `MockInterviewTurn` exist to record the INTERVIEW STRUCTURE — the
+// conversational shell around that evidence — not to duplicate the evidence
+// itself. One evidence table, one readiness query, same as
+// `PracticeAttempt`'s own header comment already argues for practice vs.
+// interview attempts generally.
+
+// `voice` is declared now, unwired: E8 (this epic) only ever writes `text`.
+// E9/E11 add spoken interviews by changing the TRANSPORT the same turns flow
+// through, not by adding a column here — the same "declare the full set
+// while the table is empty" reasoning `PracticeAttemptSource.mock_interview`
+// and `PracticeSessionKind`'s `review`/`weak`/`mixed` already apply to their
+// own enums, one epic ahead of the epic that wires each value.
+enum MockInterviewMode {
+  text
+  voice
+}
+
+// Mirrors `PracticeSessionStatus`'s three-value shape and reasoning verbatim:
+// `abandoned` (as opposed to leaving an interview `in_progress` forever) is
+// what makes "interviews currently in progress" mean interviews the learner
+// is actually still in, not every interview anyone ever navigated away from.
+enum MockInterviewStatus {
+  in_progress
+  completed
+  abandoned
+}
+
+enum MockInterviewTurnRole {
+  officer
+  applicant
+}
+
+// The sections of a real N-400 interview, in the order they occur. `reading`
+// and `writing` are declared now even though E8 skips them — E10 supplies
+// their content and behavior; this enum simply names the phases, the same
+// "declare the full closed set before every value is wired" posture
+// `MockInterviewMode.voice` above and `PracticeFailureCause`'s `misheard`/
+// `nervous` values already take.
+enum MockInterviewPhase {
+  smalltalk
+  n400
+  civics
+  reading
+  writing
+  closing
+}
+
+// One row per mock interview run — the header record for the conversation
+// `MockInterviewTurn` rows narrate line by line, mirroring how
+// `PracticeSession` is the header record for a batch of `PracticeAttempt`
+// rows.
+model MockInterview {
+  // This id is not only the row's identity — it is ALSO the deterministic
+  // seed the interview engine shuffles the question pool with, so replaying
+  // the SAME interview (a resumed session, a debrief re-render) always
+  // produces the same questions in the same order from the same seed. A
+  // genuinely load-bearing second use of the primary key, not a coincidence
+  // worth losing sight of.
+  id String @id @default(uuid()) @db.Uuid
+
+  // onDelete: Cascade — see `PracticeSession.userId`'s own "both onDelete:
+  // Cascade" reasoning above: this is the user's own history with no reader
+  // once the account is gone.
+  userId String @map("user_id") @db.Uuid
+
+  mode MockInterviewMode @default(text)
+
+  status MockInterviewStatus @default(in_progress)
+
+  // Which question bank (and pass rule) this interview is drawn from and
+  // graded against. NON-NULL, unlike `LearnerProfile.testVersionCode` — an
+  // interview without a resolvable pass rule must be unrepresentable, because
+  // `passedCivics` below is computed FROM this row's threshold, never from a
+  // constant duplicated at the call site. onDelete: Restrict, matching
+  // `PracticeSession.testVersion` — a test version cannot be deleted while
+  // interviews still reference it.
+  testVersionCode String @map("test_version_code")
+
+  // FROZEN AT START TIME from `learner_profiles.senior_exemption`,
+  // deliberately NOT re-read at complete time: which pair of columns on the
+  // test-version row governs this interview (`questions_asked`/
+  // `pass_threshold` vs. `senior_questions_asked`/`senior_pass_threshold`)
+  // must not change halfway through an interview because the learner edited
+  // their profile in another tab mid-session. Same "frozen at write time"
+  // reasoning `DailyActivity.tzUsed` already states for a different column.
+  seniorExemption Boolean @default(false) @map("senior_exemption")
+
+  startedAt   DateTime  @default(now()) @map("started_at") @db.Timestamptz
+  completedAt DateTime? @map("completed_at") @db.Timestamptz
+
+  // The DERIVED running tally of the civics portion — not a second source of
+  // truth. The `practice_attempts` rows carrying this interview's id (via
+  // `mockInterviewId`, `source: mock_interview`) are the evidence; these
+  // three columns exist so the readiness query and the in-progress UI can
+  // read a running count by primary key instead of re-aggregating attempts
+  // on every read — the identical "derived, mutable summary of an immutable
+  // ledger" argument `QuestionMastery`'s own header comment makes, applied
+  // here to one interview instead of one (user, question) pair.
+  civicsAsked   Int     @default(0) @map("civics_asked")
+  civicsCorrect Int     @default(0) @map("civics_correct")
+  passedCivics  Boolean @default(false) @map("passed_civics")
+
+  // The cached debrief, written once at completion — score, per-phase
+  // breakdown, feedback. Mirrors `PracticeSession.summary`'s own reasoning
+  // exactly (computed once and persisted rather than recomputed from turns
+  // and attempts on every read): nullable because an in-progress interview
+  // has nothing to summarize yet.
+  result Json?
+
+  // A per-interview CHOICE the learner makes BEFORE starting — not a user
+  // setting, and not read from `user_settings`. Whether this interview's
+  // applicant turns keep the learner's own words (see
+  // `MockInterviewTurn.text` below) or are recorded structurally-only.
+  //
+  // `@default(false)` IS THE SAFETY PROPERTY, ENFORCED AT THE DATABASE
+  // LEVEL, NOT ONLY IN APPLICATION CODE. A mock interview is the most
+  // sensitive conversation this product records — a rehearsal of exactly the
+  // words an applicant plans to say to a federal immigration officer. If a
+  // code path ever forgets to pass this flag explicitly (a bug, a new entry
+  // point, a script), the column itself still refuses to retain the
+  // learner's words by default. The conservative stance must survive a bug,
+  // not merely a correctly-written call site.
+  transcriptRetained Boolean @default(false) @map("transcript_retained")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  // Relations
+  user        User                @relation("UserMockInterviews", fields: [userId], references: [id], onDelete: Cascade)
+  testVersion CivicsTestVersion   @relation(fields: [testVersionCode], references: [code], onDelete: Restrict)
+  turns       MockInterviewTurn[]
+  attempts    PracticeAttempt[]
+
+  // The learner's interview list, newest first — mirrors `PracticeSession`'s
+  // own `[userId, startedAt]` index exactly, same shape, same reason.
+  @@index([userId, startedAt])
+  // The readiness count `readiness.service.ts` reads directly: completed,
+  // passed interviews for one user — an equality filter on all three
+  // columns, not a range, so this composite serves it without a sort.
+  @@index([userId, status, passedCivics])
+  @@map("mock_interviews")
+}
+
+// One row per line of a mock interview's conversation, in order — the
+// narration `MockInterview` above is the header record for.
+model MockInterviewTurn {
+  id String @id @default(uuid()) @db.Uuid
+
+  // onDelete: Cascade — a turn has no identity independent of the interview
+  // it belongs to, the same "no identity independent of its parent" posture
+  // `CivicsAnswer.question` already takes toward its own question.
+  mockInterviewId String @map("mock_interview_id") @db.Uuid
+
+  // This interview's turns, in order. The unique constraint below is both
+  // the ordering guarantee and the idempotency key a resumed/replayed
+  // interview writes through.
+  turnIndex Int @map("turn_index")
+
+  role MockInterviewTurnRole
+
+  // Named `phase`, not `kind` — `kind` already means something else one
+  // table over (`PracticeSession.kind`, the practice-run type), and reusing
+  // it here for a different concept on a neighboring table is exactly the
+  // ambiguity this schema's naming otherwise avoids. `@map("phase")` because
+  // that is genuinely what this column is: which section of the interview
+  // this turn belongs to.
+  phase MockInterviewPhase @map("phase")
+
+  // Set only on a civics OFFICER turn — which question was read aloud. Null
+  // on every other turn (small talk, N-400, closing, and every applicant
+  // turn). onDelete: Restrict, matching `PracticeAttempt.questionId` above:
+  // a question that has already been asked in a real interview transcript
+  // cannot be deleted out from under that record.
+  //
+  // Nullable and independent of `MockInterviewTurn.text` on purpose: this is
+  // what lets a transcript still name WHICH question was asked even when
+  // `transcriptRetained` is false and the applicant's own words are not
+  // kept.
+  questionId String? @map("question_id") @db.Uuid
+
+  // Set only on a civics APPLICANT turn — which `practice_attempts` row this
+  // turn's answer was graded into. Nullable for the same reason
+  // `questionId` is: only civics applicant turns have one. onDelete:
+  // SetNull, matching `PracticeAttempt.sessionId`'s own "evidence must
+  // outlive its bookkeeping" reasoning: pruning a turn (or the interview it
+  // belongs to) must never delete the graded attempt it produced.
+  attemptId String? @map("attempt_id") @db.Uuid
+
+  // MAY BE EMPTY, AND EMPTY IS MEANINGFUL, NOT A BUG. With
+  // `mockInterview.transcriptRetained = false`, an applicant turn is written
+  // with `text: ""` deliberately — the interview's STRUCTURE (that a turn
+  // happened, in this phase, in this order, possibly naming a question via
+  // `questionId` or an outcome via `attemptId`) survives so the transcript
+  // still renders and the debrief still makes sense, while the learner's own
+  // words do not. See `PracticeAttempt.responseText`'s own comment (extended
+  // for this same reason) and `docs/specs/mock-interview.md` §8 for the
+  // retention design in full.
+  text String @db.Text
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  // NO `updatedAt` — a turn is an immutable record of something that already
+  // happened, same reasoning as `PracticeAttempt` above.
+
+  // Relations
+  mockInterview MockInterview    @relation(fields: [mockInterviewId], references: [id], onDelete: Cascade)
+  question      CivicsQuestion?  @relation(fields: [questionId], references: [id], onDelete: Restrict)
+  attempt       PracticeAttempt? @relation(fields: [attemptId], references: [id], onDelete: SetNull)
+
+  // Ordering + idempotency key: one turn per (interview, index).
+  // `[mockInterviewId, turnIndex]` as a separate `@@index` would be
+  // redundant with this unique constraint — Postgres already serves both the
+  // uniqueness check and an ordered scan from the same underlying index, the
+  // same "no second index over the same columns" reasoning `DailyActivity`'s
+  // own unique-key comment gives.
+  @@unique([mockInterviewId, turnIndex])
+  // The reverse lookup from a graded attempt to the turn it came from —
+  // matches how `PracticeAttempt` itself indexes `aiUsageEventId` for the
+  // identical reverse-lookup shape.
+  @@index([attemptId])
+  @@map("mock_interview_turns")
 }

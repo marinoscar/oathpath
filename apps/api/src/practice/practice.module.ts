@@ -4,6 +4,7 @@ import { AiModule } from '../ai/ai.module';
 import { EngagementModule } from '../engagement/engagement.module';
 import { PrismaModule } from '../prisma/prisma.module';
 import { ReadinessModule } from '../readiness/readiness.module';
+import { AttemptGradingService } from './attempt-grading.service';
 import { PracticeController } from './practice.controller';
 import { PracticeService } from './practice.service';
 
@@ -37,10 +38,11 @@ import { PracticeService } from './practice.service';
  * reach it should stay a list a person can read, which means every consumer
  * writes this import and shows up in a diff. This is that diff.
  *
- * What that import buys is `AiDispatchService` and nothing else. `AiModule`
- * exports the provider token too, and `PracticeService` must never inject it:
- * a caller holding a provider resolves its own model id and its own key, which
- * reopens both holes `ai-evaluation.md` §3 closed — a per-answer grading call
+ * What that import buys is `AiDispatchService` and nothing else, and since
+ * #133 exactly one class in this module injects it: `AttemptGradingService`.
+ * `AiModule` exports the provider token too, and neither of this module's
+ * services may ever inject THAT: a caller holding a provider resolves its own
+ * model id and its own key, which reopens both holes `ai-evaluation.md` §3 closed — a per-answer grading call
  * bound to whatever model an admin configured for a costlier role, and an
  * inference path that could read a credential other than the caller's own. The
  * grading ladder asks for a ROLE and gets whatever the administrator bound to
@@ -51,6 +53,25 @@ import { PracticeService } from './practice.service';
  * (practice-sessions.md §10). `PracticeService` is exported because E4 (#53)
  * extends the grading path and E5 reads this module's evidence — both of which
  * are a service injection, not a new copy of the loop.
+ *
+ * TWO PROVIDERS ARE EXPORTED, AND THE SECOND IS THE POINT OF #133.
+ * `AttemptGradingService` owns the two-rung grading ladder and the
+ * `question_mastery` write that follows it — code that used to be four private
+ * methods on `PracticeService`, reachable only from `recordAttempt`. E8's mock
+ * interview must grade a civics answer by the EXACT same ladder, so
+ * `InterviewsModule` imports THIS module and injects that service rather than
+ * carrying a second copy of the rules: `mock-interview.md` §6 asks for "one
+ * shared injectable so there is only one ladder in the codebase", and an
+ * export is what makes that reachable without one.
+ *
+ * A second ladder is not a hypothetical tidiness concern. The rungs encode
+ * product decisions that must not diverge between the two surfaces — the
+ * short-circuit that spends no AI credit on a verified match, the refusal to
+ * escalate a `state_required` attempt with an empty answer list, and rung 3's
+ * rule that an unconfigured or exhausted key degrades to the deterministic
+ * verdict instead of a 500. A copy would drift on each of those silently, and
+ * a learner would be graded differently depending on which screen they were
+ * looking at.
  *
  * `ReadinessModule` IS imported (issue #122, epic #55 / E6), for
  * `ReadinessService.recomputeSnapshot` — `completeSession` calls it
@@ -80,7 +101,7 @@ import { PracticeService } from './practice.service';
 @Module({
   imports: [PrismaModule, AiModule, ReadinessModule, EngagementModule],
   controllers: [PracticeController],
-  providers: [PracticeService],
-  exports: [PracticeService],
+  providers: [AttemptGradingService, PracticeService],
+  exports: [AttemptGradingService, PracticeService],
 })
 export class PracticeModule {}

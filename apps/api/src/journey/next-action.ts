@@ -66,24 +66,38 @@
 // destination-exists discipline this file's own header already promised: it
 // is produced by `study-coach.ts`'s `recommendStudyAction`, which wraps this
 // file's `recommendNextAction` rather than duplicating branches 1, 2, and 4 —
-// see that file for the ordering `orientation > interview_countdown > review
-// > practice > explore`. E8's `interview` is still unclaimed; neither route
-// exists yet, so neither member does either.
+// see that file for the ordering.
+//
+// E8 CLAIMS `interview` (#133, epic #57). This block used to end "E8's
+// `interview` is still unclaimed; neither route exists yet, so neither member
+// does either", and the second half of that sentence is exactly the condition
+// that has now been met: `/practice/interviews` is a real, mounted route from
+// this epic on, so the member exists too. One more hardcoded, verified path in
+// the same closed map; nothing about the mechanism changed. Like `review`, it
+// is produced by `study-coach.ts` and never by this file's own
+// `recommendNextAction`, which has no journey stage to decide it with — the
+// ordering is `orientation > interview_countdown > review > practice >
+// interview > explore`.
 // =============================================================================
 
 /**
- * The five recommendations this recommender's closed union can carry.
+ * The six recommendations this recommender's closed union can carry.
  *
- * `practice` is E3's addition (#81); `review` is E5's (#82) — produced by
- * `study-coach.ts`, never by this file's own `recommendNextAction`, which
- * still only ever returns one of the other four. E8 adds one more,
- * `interview`, when its route exists to receive it.
+ * `practice` is E3's addition (#81); `review` is E5's (#82) and `interview` is
+ * E8's (#133) — both produced by `study-coach.ts`, never by this file's own
+ * `recommendNextAction`, which still only ever returns one of the other four.
+ * It has neither mastery counts nor a journey stage to decide those two
+ * branches with, by design.
+ *
+ * Declared in ranking order, which is not decorative: `study-coach.ts`'s chain
+ * runs top to bottom through this list.
  */
 export const NEXT_ACTION_KINDS = [
   'orientation',
   'interview_countdown',
   'review',
   'practice',
+  'interview',
   'explore',
 ] as const;
 
@@ -101,6 +115,12 @@ export type NextActionKind = (typeof NEXT_ACTION_KINDS)[number];
  *     (§2.3) and a real destination since E3: it runs the sessions
  *     `practice.controller.ts` serves.
  *   - `/learn` — likewise a bar destination, carrying E2's civics content.
+ *   - `/practice/interviews` — E8's mock interview list and start screen
+ *     (#133). Not a new destination: it mounts UNDER the existing `/practice`
+ *     prefix, exactly as `/practice/sessions/:id` already does, so
+ *     `destinations.ts` gains no entry. `mock-interview.md` §14 states the
+ *     reachability-vs-content distinction that makes it content within a
+ *     destination rather than a destination of its own.
  *
  * `interview_countdown`, `review`, and `practice` deliberately share
  * `/practice`. That is three kinds naming one destination, not a duplicated
@@ -111,6 +131,13 @@ export type NextActionKind = (typeof NEXT_ACTION_KINDS)[number];
  * `nextAction.kind` to decide which session kind (`review` vs. the default) to
  * default into.
  *
+ * `interview` does NOT share it, and that is the point of adding a fourth
+ * hardcoded path rather than a fifth kind pointing at `/practice`: a card that
+ * invites a learner to rehearse a full interview and then lands them on the
+ * five-question drill page would be the "points at a route that does not do
+ * what the card said" failure this map exists to prevent, one step short of the
+ * redirect case it was written for.
+ *
  * Frozen because this is process-lifetime state a serialiser or a careless
  * `Object.assign` must not be able to repoint.
  */
@@ -120,6 +147,7 @@ export const NEXT_ACTION_PATHS: Readonly<Record<NextActionKind, string>> =
     interview_countdown: '/practice',
     review: '/practice',
     practice: '/practice',
+    interview: '/practice/interviews',
     explore: '/learn',
   });
 
@@ -180,13 +208,12 @@ export interface NextActionInput {
  *
  *   orientation  >  interview_countdown  >  practice  >  explore
  *
- * `study-coach.ts`'s `recommendStudyAction` (E5, #82) wraps this function
- * with a fifth rung, `review`, ranked between `interview_countdown` and
- * `practice` — reviewing due/lapsed evidence is a more specific, more urgent
- * true thing to say than a generic five-question nudge, but never more
- * urgent than an actual interview date on the calendar. This function itself
- * is unchanged and still never returns `review`: it has no mastery data to
- * decide that branch with, by design (see that file's header).
+ * `study-coach.ts`'s `recommendStudyAction` wraps this function with two more
+ * rungs: `review` (E5, #82), ranked between `interview_countdown` and
+ * `practice`, and `interview` (E8, #133), ranked between `practice` and
+ * `explore`. This function itself is unchanged and still never returns either:
+ * it has no mastery data and no journey stage to decide those branches with, by
+ * design (see that file's header).
  *
  * A learner who has not finished setup has nothing useful to be told about a
  * date they entered halfway through it. A learner with a date on the calendar

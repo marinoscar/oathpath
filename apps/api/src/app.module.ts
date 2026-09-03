@@ -19,6 +19,7 @@ import { PracticeModule } from './practice/practice.module';
 import { ProgressModule } from './progress/progress.module';
 import { ReadinessModule } from './readiness/readiness.module';
 import { EngagementModule } from './engagement/engagement.module';
+import { InterviewsModule } from './interviews/interviews.module';
 import { DeviceAuthModule } from './device-auth/device-auth.module';
 import { StorageModule } from './storage/storage.module';
 import { PatModule } from './pat/pat.module';
@@ -120,6 +121,24 @@ import configuration from './config/configuration';
     // commit, per habit-streaks.md §2.1. `@Auth()` with no permissions, no
     // route parameter carrying a user id.
     EngagementModule,
+    // The mock interview (#133, epic #57 / E8): the deterministic interview
+    // engine, five routes, and the officer's streamed phrasing. Registered next
+    // to EngagementModule because it closes the loop the last four modules
+    // opened — it WRITES into `practice_attempts` with `source:
+    // 'mock_interview'` (the value declared unreachable since E3), which is
+    // what finally gives ReadinessModule's `interview` component something to
+    // count and what makes an interview answer accrue toward the day exactly as
+    // a practice answer does.
+    //
+    // It imports PracticeModule for `AttemptGradingService` — the ONE grading
+    // ladder, so a civics answer is graded identically whichever screen it was
+    // typed on (`mock-interview.md` §6) — plus ReadinessModule and
+    // EngagementModule for the recompute and the accrual it triggers after its
+    // own writes commit. All three dependencies run one way only; none of them
+    // imports this module back. `@Auth()` with no permissions, no route
+    // parameter carrying a user id, and another learner's interview is a 404,
+    // not a 403.
+    InterviewsModule,
     DeviceAuthModule,
     StorageModule,
     PatModule,

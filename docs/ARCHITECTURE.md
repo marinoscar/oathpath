@@ -658,6 +658,104 @@ practice should not wire `daily_activity` into the readiness engine to get
 it — that is the exact coupling this section, the schema comment above
 `DailyActivity`, and the test above all exist to prevent.
 
+### 5.7 Mock Interview: the Engine/Model Boundary
+
+Issue #133, epic #57 (E8 "Mock interview — text mode"). A scripted
+rehearsal of the civics portion of the naturalization interview, built on
+a rule this section states because it is the rule most likely to erode
+under a future change that only wants the officer to sound more natural.
+Full design — the phase sequence, the seeded question selection, the PII
+stance — lives in
+[`docs/specs/mock-interview.md`](specs/mock-interview.md); this section
+covers the one architectural boundary.
+
+**The engine decides. The model speaks.** `apps/api/src/interviews/engine/`
+is a pure module (no Nest, no Prisma, no `Clock`, no `Date` — the same
+shape §5.5's `computeReadiness` and §5.6's scheduler already take) that
+owns:
+
+- **Question selection** — a deterministic, seeded shuffle of the caller's
+  eligible pool, so the same interview always asks the same questions in
+  the same order.
+- **Phase order** — `smalltalk → n400 → civics → reading → writing →
+  closing`, fixed and code-owned.
+- **The pass rule, read from a row, never a constant.** How many civics
+  questions are asked and how many must be correct both come from the
+  `civics_test_versions` row resolved from the caller's own
+  `learner_profiles` — as illustration only, today's seeded values are
+  2008: 6 of 10, 2025: 12 of 20, with a senior variant of each from its own
+  columns (`senior_questions_asked`/`senior_pass_threshold`). The rule that
+  matters is not those numbers; it is that the engine has no threshold
+  literal anywhere in its own source, ever — a later content correction is
+  a row update, never a code change.
+
+The `tutor` role, dispatched through `AiDispatchService.run`/`.runStream`
+(§5.5's pure-engine/service split, applied here to a conversational turn),
+supplies exactly one thing: the officer's acknowledgement sentence. It is
+never asked to choose a question, judge an answer, or decide when the
+civics section stops — every decision the turn needs to communicate has
+already been made by the time the model is called.
+
+**The structural enforcement.** `assembleOfficerTurn`
+(`apps/api/src/interviews/officer-prompt.ts`) builds the officer's civics
+turn by string concatenation the code controls:
+
+```
+officerTurnText = <the model's acknowledgement sentence>
+                   + "\n\n"
+                   + <civics_questions.prompt, read VERBATIM from the database>
+```
+
+The question text is never part of what the model is asked to produce —
+there is no field in its response it could occupy — so it has no channel
+through which to paraphrase, translate, simplify, or invent a question.
+This is checked mechanically, not merely asserted: a unit test confirms
+the question's exact `prompt` string appears byte-for-byte inside the
+assembled turn for every civics-phase exchange.
+
+**An `unavailable` or `failed` dispatch result changes the wording, and
+never the outcome.** When `AiDispatchService` cannot produce an
+acknowledgement, the engine substitutes a fixed, code-owned neutral line
+and proceeds exactly as if the call had succeeded — same next question,
+same grade, same stop evaluation, same interview result. A learner with no
+AI configured still completes a fully, correctly graded interview.
+
+**The failure mode of crossing this boundary.** A model that chose
+questions or judged answers would make "you passed the civics section"
+unreproducible and unauditable — the single most consequential claim this
+product makes. Two runs against identical answers could disagree, with no
+way to explain why one run said "passed" and the other said "failed"
+beyond "the model felt differently that time." Every other engine in this
+product goes to real lengths to keep its central number explainable
+(§5.5's frozen snapshot, §5.6's schema-isolated engagement data); a mock
+interview whose verdict crossed into model judgment would be the one place
+in the product where the most emotionally loaded result a learner ever
+receives came from a source that cannot be explained, replayed, or held to
+a fixed rule.
+
+**Interview answers are `practice_attempts` rows, not a second evidence
+table.** A graded civics answer is written with `source: 'mock_interview'`,
+`sessionId: null`, and `mockInterviewId` set to the interview it belongs
+to — the identical table `question_mastery` scheduling and the readiness
+engine already read for ordinary practice attempts, with no `UNION`
+required to answer "this learner's complete answer history to a question."
+`PracticeAttempt.sessionId` was made nullable specifically so this epic
+would never need a parallel table to hold interview evidence.
+
+**Readiness's `interview` component now has real evidence, and no new
+stage rule.** `ReadinessService.assembleEvidence`'s `mockInterviewsPassed`
+— previously a literal `0`, with a comment naming this epic as the one
+that would supply a grouping key — is now a real count of the caller's
+`mock_interviews` rows with `status: 'completed'` and `passedCivics: true`.
+`computeReadiness`'s `min(mockInterviewsPassed / 2, 1)` formula (§5.5) is
+unchanged; only the number it is handed stopped being hardcoded. Passing a
+first interview also lifts the structural 75-point cap the instant any
+real evidence exists (§5.5). **E8 adds no new stage transition**: the move
+to `performing` remains `readiness-stage-transitions.ts`'s existing
+`practicing → performing` transition at score ≥ 65 — this epic supplies
+evidence the score formula already knows how to use, never a rule of its
+own about when a stage advances.
+
 ---
 
 ## 6. Data Architecture

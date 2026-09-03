@@ -92,9 +92,33 @@ interface EngagementProfile {
   streakFreezesGrantedAt: Date | null;
 }
 
+/**
+ * What one accrual event's time slice is measured within.
+ *
+ * A DISCRIMINATED UNION, ADDED BY #133 (epic #57 / E8), because an interview
+ * answer is practice too. §2.3's formula needs two things from whatever the
+ * attempt belongs to — a `startedAt` to measure the first slice from, and a way
+ * to find the previous attempt in the same run — and `practice_sessions` was
+ * the only thing that had them until `mock_interviews` existed.
+ *
+ * WHY A KEY AND NOT A SECOND `recordInterviewAttemptActivity` WITH ITS OWN
+ * COPY OF `sliceSeconds`: the formula is not the easy part to keep in step.
+ * The `lte` bound, the `skip: 1` for the event's own row, the 120-second cap
+ * and the floor at zero each exist for a reason stated at length below, and a
+ * second implementation would have to keep all four correct forever, on a path
+ * whose failure mode is a streak that silently overcounts. One method, two
+ * shapes of key.
+ */
+type ActivityGroupingKey =
+  /** A practice session — `practice_attempts.session_id`. */
+  | { kind: 'session'; id: string }
+  /** A mock interview — `practice_attempts.mock_interview_id` (E8). */
+  | { kind: 'interview'; id: string };
+
 /** One accrual event's effect on the day's counters, before the write. */
 interface AccrualDelta {
-  sessionId: string;
+  /** What the slice is measured within — a session, or an interview. */
+  key: ActivityGroupingKey;
   /** The event's instant: the attempt's `answeredAt`, or the completion timestamp. */
   at: Date;
   attempts: number;
@@ -160,12 +184,46 @@ export class EngagementService {
     input: { sessionId: string; answeredAt: Date; outcome: PracticeOutcome },
   ): Promise<void> {
     await this.accrue(userId, {
-      sessionId: input.sessionId,
+      key: { kind: 'session', id: input.sessionId },
       at: input.answeredAt,
       attempts: 1,
       correct: input.outcome === 'correct' ? 1 : 0,
       // The attempt row this call is FOR is already committed (§2.1), so the
       // previous-event lookup will see it at exactly `at`.
+      ownAttemptRow: true,
+    });
+  }
+
+  /**
+   * ACCRUAL EVENT (a), FOR A MOCK INTERVIEW (issue #133, epic #57 / E8).
+   *
+   * The same event as {@link recordAttemptActivity}, measured within an
+   * interview instead of a session. `docs/specs/mock-interview.md` §7: an
+   * answer given under interview conditions is at least as good evidence as a
+   * practice attempt, "not lesser evidence requiring special-casing" — so it
+   * accrues toward the day's practice time, its attempt count and its correct
+   * count on exactly the same terms, through exactly the same
+   * {@link accrue}/{@link sliceSeconds} path.
+   *
+   * There is deliberately no interview equivalent of
+   * {@link recordSessionCompletionActivity}. A practice session's completion
+   * closes a real gap — the learner read their summary — whereas an interview's
+   * closing turns are read, not answered, and crediting unmeasured reading time
+   * to a streak is what `ATTEMPT_SECONDS_CAP` exists to bound. The gap
+   * undercounts rather than overcounts, which is the direction §2.3 prefers.
+   */
+  async recordInterviewAttemptActivity(
+    userId: string,
+    input: { mockInterviewId: string; answeredAt: Date; outcome: PracticeOutcome },
+  ): Promise<void> {
+    await this.accrue(userId, {
+      key: { kind: 'interview', id: input.mockInterviewId },
+      at: input.answeredAt,
+      attempts: 1,
+      correct: input.outcome === 'correct' ? 1 : 0,
+      // Same as the practice path: `InterviewsService` accrues AFTER its own
+      // transaction commits, so this event's own attempt row is visible to the
+      // previous-event lookup at exactly `at`.
       ownAttemptRow: true,
     });
   }
@@ -188,7 +246,7 @@ export class EngagementService {
     input: { sessionId: string; completedAt: Date },
   ): Promise<void> {
     await this.accrue(userId, {
-      sessionId: input.sessionId,
+      key: { kind: 'session', id: input.sessionId },
       at: input.completedAt,
       attempts: 0,
       correct: 0,
@@ -222,7 +280,7 @@ export class EngagementService {
     const activityDate = this.clock.calendarDateIn(profile.timezone);
     const seconds = await this.sliceSeconds(
       userId,
-      delta.sessionId,
+      delta.key,
       delta.at,
       delta.ownAttemptRow,
     );
@@ -274,8 +332,10 @@ export class EngagementService {
    * still has to be RIGHT to help the learner — a duration has no downstream
    * check that would catch the lie. This method reads that column not at all.
    *
-   * `previousEventTimestamp` is the prior attempt's `answeredAt` in this
-   * session if one exists, else the session's own `startedAt`.
+   * `previousEventTimestamp` is the prior attempt's `answeredAt` in this RUN if
+   * one exists, else the run's own `startedAt` — where "run" is a practice
+   * session or, since #133 (epic #57 / E8), a mock interview. Which one is
+   * {@link ActivityGroupingKey}'s job to say; the formula does not care.
    *
    * THE BOUND IS `lte`, INCLUSIVE, AND MUST NOT BE "TIDIED" BACK TO `lt`. Two
    * events of the same session can land on the identical instant — routinely
@@ -307,24 +367,41 @@ export class EngagementService {
    */
   private async sliceSeconds(
     userId: string,
-    sessionId: string,
+    key: ActivityGroupingKey,
     at: Date,
     ownAttemptRow: boolean,
   ): Promise<number> {
-    const [session, previous] = await Promise.all([
-      this.prisma.practiceSession.findFirst({
-        where: { id: sessionId, userId },
-        select: { startedAt: true },
-      }),
+    // THE ONLY TWO PLACES THE KEY'S SHAPE MATTERS (issue #133): which table
+    // carries the run's `startedAt`, and which column on `practice_attempts`
+    // groups the run's attempts. Everything after this — the `lte` bound, the
+    // `skip: 1`, the `max`, the cap, the floor — is identical for a session and
+    // for an interview, which is the whole reason this method took a key rather
+    // than growing a twin.
+    const [run, previous] = await Promise.all([
+      key.kind === 'session'
+        ? this.prisma.practiceSession.findFirst({
+            where: { id: key.id, userId },
+            select: { startedAt: true },
+          })
+        : this.prisma.mockInterview.findFirst({
+            where: { id: key.id, userId },
+            select: { startedAt: true },
+          }),
       this.prisma.practiceAttempt.findFirst({
-        where: { sessionId, userId, answeredAt: { lte: at } },
+        where: {
+          ...(key.kind === 'session'
+            ? { sessionId: key.id }
+            : { mockInterviewId: key.id }),
+          userId,
+          answeredAt: { lte: at },
+        },
         orderBy: { answeredAt: 'desc' },
         skip: ownAttemptRow ? 1 : 0,
         select: { answeredAt: true },
       }),
     ]);
 
-    const startedAt = session?.startedAt ?? at;
+    const startedAt = run?.startedAt ?? at;
     const base = previous
       ? new Date(Math.max(startedAt.getTime(), previous.answeredAt.getTime()))
       : startedAt;

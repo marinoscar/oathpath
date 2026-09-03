@@ -187,11 +187,18 @@ export const ALTERNATE_STAGES: JourneyStage[] = [
  * that file so a test asserting "the card renders what the server sent" is
  * asserting it against the real strings.
  *
- * `practice` is E3's addition (#81, `practice-sessions.md` §12) — the one
- * member `NextActionKind` gains in this epic. Keyed as a TOTAL `Record` over
- * the union on purpose: a widened union with no fixture for its new member
- * fails to compile here, which is a better reminder than a suite that silently
- * never exercises the new kind.
+ * `practice` is E3's addition (#81, `practice-sessions.md` §12), `review` is
+ * E5's (#82, `memory-model.md` §6) and `interview` is E8's (#133,
+ * `mock-interview.md` §14.1) — the last two produced by `study-coach.ts`'s
+ * `recommendStudyAction` rather than by `next-action.ts` itself, which has
+ * neither mastery counts nor a journey stage to decide them with.
+ *
+ * Keyed as a TOTAL `Record` over the union on purpose: a widened union with no
+ * fixture for its new member fails to compile here, which is a better reminder
+ * than a suite that silently never exercises the new kind. (`tsconfig.json`
+ * excludes `src/__tests__`, so that failure surfaces in an editor and in
+ * review rather than in `npm run typecheck` — which is why the two members
+ * added between #82 and #145 could go missing at all.)
  */
 export const NEXT_ACTIONS: Record<NextAction['kind'], NextAction> = {
   orientation: {
@@ -218,6 +225,35 @@ export const NEXT_ACTIONS: Record<NextAction['kind'], NextAction> = {
     title: 'Practise five questions.',
     reason: 'Answering in your own words is what makes an answer stick.',
     path: '/practice',
+  },
+  review: {
+    kind: 'review',
+    title: 'Review 4 questions.',
+    reason:
+      "You have 4 questions ready to review — reviewing what you've already learned keeps it from slipping.",
+    path: '/practice',
+  },
+  /**
+   * E8's rung (#133), copied from `study-coach.ts`'s own branch 5.
+   *
+   * `path` is the ONE next-action path that is not `/practice`, `/learn` or
+   * `/setup/journey`: `NEXT_ACTION_PATHS.interview` is `/practice/interviews`,
+   * because a card inviting a learner to rehearse a full interview that landed
+   * them on the five-question drill page would be the "points at a route that
+   * does not do what the card said" failure that map exists to prevent.
+   *
+   * The copy is an INVITATION, not a push — no countdown, no streak, nothing
+   * they could lose. `VISION.md` forbids manufacturing pressure by name, and a
+   * full rehearsal is the card most tempting to sell with urgency.
+   */
+  interview: {
+    kind: 'interview',
+    title: 'Try a practice interview.',
+    reason:
+      "You've done today's practice. When you have a quiet twenty minutes, a full " +
+      'practice interview is the closest this gets to the real thing — and the more ' +
+      'familiar the day feels, the easier it is.',
+    path: '/practice/interviews',
   },
 };
 

@@ -151,6 +151,14 @@ export class JourneyService {
         hasPractisedToday,
         dueCount,
         lapsedCount,
+        // #133 (epic #57 / E8). The learner's own stage, read off the profile
+        // this method already loaded — it gates `recommendStudyAction`'s
+        // `interview` rung and nothing else. `mock-interview.md` §14.1: a mock
+        // interview presumes real civics competence to rehearse against, so
+        // recommending one to a learner still in `remembering` or earlier would
+        // be inviting them to sit a likely-failing rehearsal of a test they
+        // have not yet shown readiness for the ordinary way.
+        stage: profile.stage,
       }),
     };
   }

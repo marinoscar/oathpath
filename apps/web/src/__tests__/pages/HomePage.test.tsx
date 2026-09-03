@@ -345,6 +345,12 @@ describe('HomePage — the Next-up card', () => {
     'orientation',
     'interview_countdown',
     'explore',
+    // E8's rung (#145, epic #57). It is in this list rather than in a suite of
+    // its own because the two assertions below are exactly what it needs
+    // checking for — the card renders the server's copy verbatim, and its path
+    // is a real, mounted, non-redirecting route — and running them over every
+    // kind is what stops a new kind being added without either.
+    'interview',
   ];
 
   it.each(KINDS)('renders the server’s %s action verbatim', async (kind) => {
@@ -392,6 +398,41 @@ describe('HomePage — the Next-up card', () => {
       screen.getByText('A reason invented purely by this test.'),
     ).toBeInTheDocument();
     expect(screen.queryByText(NEXT_ACTIONS.explore.title)).not.toBeInTheDocument();
+  });
+
+  it('sends a learner at stage practicing to the mock interview, and adds no copy of its own', async () => {
+    // END TO END for E8's entry point (#145). The SERVER decides that a
+    // learner at `practicing` or beyond is the one to recommend an interview
+    // to — `study-coach.ts`'s `INTERVIEW_STAGES`, `mock-interview.md` §14.1 —
+    // so what the web owes is to render whatever arrives and to send them
+    // somewhere real.
+    serveJourney({
+      stage: 'practicing',
+      interviewDate: null,
+      daysUntilInterview: null,
+      interviewPast: false,
+      nextAction: NEXT_ACTIONS.interview,
+    });
+    await renderHome();
+
+    // VERBATIM. `NextUpCard`'s stated rule is that the only thing keyed on
+    // `kind` is a decorative icon; a `switch (kind)` writing this copy in the
+    // browser would agree with the server today and diverge the first time
+    // either is reworded, with both still rendering something plausible.
+    expect(screen.getByText(NEXT_ACTIONS.interview.title)).toBeInTheDocument();
+    expect(screen.getByText(NEXT_ACTIONS.interview.reason)).toBeInTheDocument();
+
+    const link = screen
+      .getAllByRole('link')
+      .find((a) => a.getAttribute('href') === '/practice/interviews');
+    expect(link, 'no link to /practice/interviews').toBeDefined();
+
+    // A REAL, MOUNTED, NON-REDIRECTING ROUTE, checked against the live route
+    // table rather than by eye — §4.1's invariant, and the one that would
+    // otherwise put a learner following the day's one recommendation on the
+    // catch-all redirect to `/`.
+    expect(declaredRoutePaths()).toContain('/practice/interviews');
+    expect(redirectRoutePaths()).not.toContain('/practice/interviews');
   });
 
   it('names the button after the destination it leads to', async () => {
