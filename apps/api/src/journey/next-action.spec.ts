@@ -45,10 +45,17 @@ function input(overrides: Partial<NextActionInput> = {}): NextActionInput {
 
 describe('recommendNextAction', () => {
   describe('the closed union and its hardcoded paths', () => {
-    it('caps kind at the four values that have a destination', () => {
+    it('caps kind at the five values that have a destination', () => {
+      // `review` (E5, #82) is produced by `study-coach.ts`'s
+      // `recommendStudyAction`, never by `recommendNextAction` itself — none
+      // of the input fixtures below can make `recommendNextAction` return it,
+      // since this function has no mastery data to decide that branch with.
+      // It still belongs in this closed set: `NEXT_ACTION_KINDS` is the ONE
+      // union both functions share, per journey-shell.md §4.1.
       expect([...NEXT_ACTION_KINDS]).toEqual([
         'orientation',
         'interview_countdown',
+        'review',
         'practice',
         'explore',
       ]);

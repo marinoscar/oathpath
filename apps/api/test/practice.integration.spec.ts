@@ -237,8 +237,23 @@ const ANSWERS = [
   answerRow({ id: 'd5', questionId: Q3, text: 'Gavin Newsom', sort: 0, stateCode: 'CA' }),
 ];
 
-/** The `learner_profiles` facts practice reads, for the duration of one test. */
-let profiles: Map<string, { stateCode: string | null; testVersionCode: string | null; seniorExemption: boolean }>;
+/**
+ * The `learner_profiles` facts practice reads, for the duration of one test.
+ *
+ * `stage` is optional: every existing fixture in this file omits it, exactly
+ * as `loadProfile`'s own `select` never reads it — only `scheduleMastery`'s
+ * stage-transition step (issue #82, epic #54 / E5 "Memory") does, through its
+ * own separate `findUnique`/`update` pair below.
+ */
+let profiles: Map<
+  string,
+  {
+    stateCode: string | null;
+    testVersionCode: string | null;
+    seniorExemption: boolean;
+    stage?: string;
+  }
+>;
 /** The `practice_sessions` table, in-memory. */
 let sessions: Map<string, Record<string, any>>;
 /** The `practice_attempts` table, in-memory. */
@@ -261,6 +276,25 @@ function setupPracticeMocks(): void {
 
   (prismaMock.learnerProfile.findUnique as jest.Mock).mockImplementation(
     async ({ where }: any) => profiles.get(where.userId) ?? null,
+  );
+
+  // `scheduleMastery`'s stage-transition step (issue #82, epic #54 / E5
+  // "Memory") reads `learner_profiles.stage` and, when
+  // `nextStageOnMasteryEvent` says to, writes the new stage back — inside
+  // the SAME transaction as the mastery upsert. Writes land in the SAME
+  // `profiles` map `findUnique` above reads, so a stage a test seeds is
+  // visible to the write, and a stage the write produces is visible to a
+  // follow-up read.
+  (prismaMock.learnerProfile.update as jest.Mock).mockImplementation(
+    async ({ where, data }: any) => {
+      const existing = profiles.get(where.userId);
+      if (!existing) {
+        throw new Error(`no learner_profiles row for ${where.userId}`);
+      }
+      const next = { ...existing, ...data };
+      profiles.set(where.userId, next);
+      return { ...next };
+    },
   );
 
   (prismaMock.civicsCategory.findFirst as jest.Mock).mockImplementation(
@@ -1011,6 +1045,114 @@ describe('Practice (Integration)', () => {
       // 2-value form (mastery/outcome-mapping.ts) — never the 3-value
       // AttemptOutcome the scheduler itself returned.
       expect(afterSelfMark!.lastOutcome).toBe('correct');
+    });
+
+    // -------------------------------------------------------------------------
+    // Stage transitions (issue #82, epic #54 / E5 "Memory")
+    // -------------------------------------------------------------------------
+    //
+    // `nextStageOnMasteryEvent`'s own unit coverage
+    // (`journey/stage-transitions.spec.ts`) proves the decision in isolation;
+    // this proves it survives the wire — inside the SAME transaction as the
+    // `question_mastery` write that produced it, per
+    // `PracticeService.scheduleMastery`'s own header.
+    it('advances stage to remembering when an attempt promotes a question to mastered while the learner is still learning', async () => {
+      profiles.set(learnerA.id, {
+        ...profiles.get(learnerA.id)!,
+        stage: 'learning',
+      });
+
+      const created = await startSession(learnerA, { kind: 'quick', plannedCount: 2 });
+      const questionId = created.nextQuestion.id;
+
+      // Directly seed the mastery row one distinct correct day short of the
+      // `review -> mastered` promotion threshold (`MASTERY_PROMOTION_THRESHOLD`
+      // = 3, `scheduler.ts`) — bypassing the API, exactly as `seedMastery` in
+      // the queue-counts fixtures above does, since this test is about the
+      // STAGE consequence of a crossing, not about how the crossing was
+      // reached.
+      mastery.set(`${learnerA.id}:${questionId}`, {
+        id: randomUUID(),
+        userId: learnerA.id,
+        questionId,
+        state: 'review',
+        dueAt: new Date('2026-07-05T00:00:00.000Z'),
+        intervalDays: 3,
+        ease: 2.6,
+        correctStreak: 2,
+        lapses: 0,
+        totalAttempts: 2,
+        distinctCorrectDays: 2,
+        lastOutcome: 'correct',
+        lastAttemptAt: new Date('2026-07-01T09:00:00.000Z'),
+        createdAt: new Date('2026-06-01T00:00:00.000Z'),
+        updatedAt: new Date('2026-07-01T09:00:00.000Z'),
+      });
+
+      // A DIFFERENT UTC calendar day from the seeded `lastAttemptAt`, so
+      // `nextSchedule`'s distinct-day rule actually increments the counter
+      // to 3 rather than treating this as a same-day repeat.
+      const answeredAt = '2026-07-10T09:00:00.000Z';
+
+      await request(server())
+        .post(`/api/practice/sessions/${created.session.id}/attempts`)
+        .set(authHeader(learnerA.accessToken))
+        .set('X-Test-Clock', answeredAt)
+        .send({ questionId, responseText: correctAnswerFor(questionId) })
+        .expect(201);
+
+      // The crossing actually happened — the precondition this test is
+      // about, not an incidental detail.
+      const row = mastery.get(`${learnerA.id}:${questionId}`);
+      expect(row!.state).toBe('mastered');
+      expect(row!.distinctCorrectDays).toBe(3);
+
+      // The stage advanced in the SAME request, persisted to the SAME
+      // in-memory `learner_profiles` row a follow-up read would see —
+      // the pattern this file's other mastery-scheduling tests already use
+      // for asserting a persisted side effect (`mastery.get(...)` above).
+      expect(profiles.get(learnerA.id)?.stage).toBe('remembering');
+    });
+
+    it('does NOT advance stage on an attempt that does not cross into mastered', async () => {
+      profiles.set(learnerA.id, {
+        ...profiles.get(learnerA.id)!,
+        stage: 'learning',
+      });
+
+      const created = await startSession(learnerA, { kind: 'quick', plannedCount: 2 });
+      const questionId = created.nextQuestion.id;
+
+      // No mastery row at all — this attempt only advances `new -> learning`,
+      // nowhere near a `mastered` crossing.
+      await request(server())
+        .post(`/api/practice/sessions/${created.session.id}/attempts`)
+        .set(authHeader(learnerA.accessToken))
+        .set('X-Test-Clock', '2026-07-10T09:00:00.000Z')
+        .send({ questionId, responseText: correctAnswerFor(questionId) })
+        .expect(201);
+
+      expect(mastery.get(`${learnerA.id}:${questionId}`)!.state).toBe('learning');
+      expect(profiles.get(learnerA.id)?.stage).toBe('learning');
+    });
+
+    it('advances stage to learning on ANY schedulable outcome while still oriented — even an incorrect one', async () => {
+      profiles.set(learnerA.id, {
+        ...profiles.get(learnerA.id)!,
+        stage: 'oriented',
+      });
+
+      const created = await startSession(learnerA, { kind: 'quick', plannedCount: 2 });
+      const questionId = created.nextQuestion.id;
+
+      await request(server())
+        .post(`/api/practice/sessions/${created.session.id}/attempts`)
+        .set(authHeader(learnerA.accessToken))
+        .set('X-Test-Clock', '2026-07-10T09:00:00.000Z')
+        .send({ questionId, responseText: 'definitely not it' })
+        .expect(201);
+
+      expect(profiles.get(learnerA.id)?.stage).toBe('learning');
     });
 
     it('a state_required attempt does NOT create or advance a question_mastery row', async () => {
