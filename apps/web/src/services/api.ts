@@ -244,6 +244,7 @@ import type {
   PracticeSessionDetail,
   PracticeSessionPage,
   PracticeSessionState,
+  PracticeQueue,
   RecordPracticeAttemptInput,
 } from '../types';
 
@@ -1106,4 +1107,17 @@ export async function completePracticeSession(
   id: string,
 ): Promise<PracticeSession> {
   return api.post<PracticeSession>(`/practice/sessions/${id}/complete`, {});
+}
+
+/**
+ * The caller's queue counts — `GET /api/practice/queue` (#78, epic #54).
+ *
+ * Read-only: it reports what a session started right now would draw from
+ * (`mastery/selector.ts`'s bucket order), it never creates one. A 400 means
+ * the caller has no resolved test version — unfinished setup, exactly like
+ * `createPracticeSession`'s own 400, and rendered the same way: as prose, not
+ * a stack trace.
+ */
+export async function getPracticeQueue(): Promise<PracticeQueue> {
+  return api.get<PracticeQueue>('/practice/queue');
 }
