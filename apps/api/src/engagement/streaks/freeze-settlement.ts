@@ -68,6 +68,29 @@ export interface FreezeSettlementPlan {
 
   /** The balance after granting and spending — what the summary reports. */
   streakFreezesAfter: number;
+
+  /**
+   * True when this pass CHANGES the balance — granting or spending — and the
+   * caller must therefore stamp `learner_profiles.streak_freezes_granted_at`
+   * with this pass's instant (§4.3).
+   *
+   * IT IS NOT `grantFreeze`, AND A LATER READER MUST NOT COLLAPSE IT BACK INTO
+   * ONE. Stamping only on a grant leaves the column at its `null` "never
+   * replenished" value after a pass that only CONSUMED — and `null` is exactly
+   * what {@link settleStreakFreezes} reads, one line above, as "the cooldown
+   * does not apply". The very next pass would then see a below-ceiling balance
+   * with no cooldown and grant the freeze straight back, one call after it was
+   * spent, defeating `FREEZE_REPLENISH_INTERVAL_DAYS` entirely. That next pass
+   * is not hypothetical: React 18 StrictMode double-invokes the mount effect
+   * behind `GET /api/engagement/summary`, so a dev build fires two of these
+   * back to back on essentially every page load.
+   *
+   * A consume therefore STARTS the seven-day clock, which is also what a
+   * learner would expect the rule to be: you get a freeze back seven days
+   * after you spend one. A pass that changes nothing leaves the column alone,
+   * so `null` keeps meaning "this balance has never moved; a grant is due".
+   */
+  stampGrantedAt: boolean;
 }
 
 /** `YYYY-MM-DD` → days since the Unix epoch. Pure; see `streak-engine.ts`'s own copy. */
@@ -158,5 +181,10 @@ export function settleStreakFreezes(input: FreezeSettlementInput): FreezeSettlem
     // Oldest first, so the rows are written in the order the days happened.
     freezeDays: freezeDays.reverse(),
     streakFreezesAfter: budget,
+    // The DECISION about when the replenishment clock restarts lives here,
+    // with the rest of the freeze rule, and not in the service that writes it
+    // — see {@link FreezeSettlementPlan.stampGrantedAt} for why "granting or
+    // spending" and not "granting" alone.
+    stampGrantedAt: grantFreeze || freezeDays.length > 0,
   };
 }

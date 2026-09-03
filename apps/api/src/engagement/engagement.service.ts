@@ -99,6 +99,13 @@ interface AccrualDelta {
   at: Date;
   attempts: number;
   correct: number;
+  /**
+   * True when THIS event's own `practice_attempts` row is already committed and
+   * therefore visible to the previous-event lookup — accrual event (a) only.
+   * A completion (event (b)) writes no attempt row, so nothing at `at` belongs
+   * to it. See {@link EngagementService.sliceSeconds}.
+   */
+  ownAttemptRow: boolean;
 }
 
 /** A `YYYY-MM-DD` local day as the midnight-UTC instant a `@db.Date` column round-trips. */
@@ -157,6 +164,9 @@ export class EngagementService {
       at: input.answeredAt,
       attempts: 1,
       correct: input.outcome === 'correct' ? 1 : 0,
+      // The attempt row this call is FOR is already committed (§2.1), so the
+      // previous-event lookup will see it at exactly `at`.
+      ownAttemptRow: true,
     });
   }
 
@@ -182,6 +192,9 @@ export class EngagementService {
       at: input.completedAt,
       attempts: 0,
       correct: 0,
+      // A completion writes no `practice_attempts` row, so an attempt found at
+      // exactly this instant is a genuinely EARLIER event, never this one.
+      ownAttemptRow: false,
     });
   }
 
@@ -207,7 +220,12 @@ export class EngagementService {
   private async accrue(userId: string, delta: AccrualDelta): Promise<void> {
     const profile = await this.loadProfile(userId);
     const activityDate = this.clock.calendarDateIn(profile.timezone);
-    const seconds = await this.sliceSeconds(userId, delta.sessionId, delta.at);
+    const seconds = await this.sliceSeconds(
+      userId,
+      delta.sessionId,
+      delta.at,
+      delta.ownAttemptRow,
+    );
 
     const key = {
       userId_activityDate: { userId, activityDate: toDateColumn(activityDate) },
@@ -257,24 +275,51 @@ export class EngagementService {
    * check that would catch the lie. This method reads that column not at all.
    *
    * `previousEventTimestamp` is the prior attempt's `answeredAt` in this
-   * session if one exists, else the session's own `startedAt`. The `lt` bound
-   * is what excludes the attempt this accrual is FOR: accrual runs after that
-   * row has already committed (§2.1), so the just-written attempt is visible
-   * to this query and must not be mistaken for its own predecessor.
+   * session if one exists, else the session's own `startedAt`.
+   *
+   * THE BOUND IS `lte`, INCLUSIVE, AND MUST NOT BE "TIDIED" BACK TO `lt`. Two
+   * events of the same session can land on the identical instant — routinely
+   * under a pinned `X-Test-Clock`, and possible in production whenever a
+   * completion follows its last attempt inside the same clock tick. With a
+   * strict `lt` that attempt is not found, the completion's slice is measured
+   * from `session.startedAt` all over again, and every second already credited
+   * to the attempt is credited a SECOND time. `practice_seconds` then
+   * overstates what the learner actually practised — precisely the dishonest
+   * engagement metric §2.3's cap exists to prevent. An inclusive bound yields a
+   * zero-length slice instead, which is the truthful answer: no time passed
+   * between two events at the same instant.
+   *
+   * `lte` alone is not sufficient, because of what accrual event (a) has
+   * already written. It runs AFTER its own attempt row commits (§2.1), so that
+   * row is itself a match at exactly `at`, and an inclusive bound would make
+   * every attempt its own predecessor — a permanent zero. `skip: 1` is the
+   * narrow fix: it discards exactly ONE row at the top of the descending
+   * ordering, which is the event's own, while still finding a genuinely
+   * earlier event that happens to share the instant. Ties need no tie-breaker
+   * for this to be correct — if any other row shares `at`, whichever of them
+   * survives the skip carries the same `answeredAt`, so the slice is zero
+   * either way. A completion (event (b)) writes no attempt row and so skips
+   * nothing.
    *
    * A negative interval (a clock the caller pinned backwards, a session row
    * that outran its attempt) floors at zero rather than subtracting time a
    * learner never spent.
    */
-  private async sliceSeconds(userId: string, sessionId: string, at: Date): Promise<number> {
+  private async sliceSeconds(
+    userId: string,
+    sessionId: string,
+    at: Date,
+    ownAttemptRow: boolean,
+  ): Promise<number> {
     const [session, previous] = await Promise.all([
       this.prisma.practiceSession.findFirst({
         where: { id: sessionId, userId },
         select: { startedAt: true },
       }),
       this.prisma.practiceAttempt.findFirst({
-        where: { sessionId, userId, answeredAt: { lt: at } },
+        where: { sessionId, userId, answeredAt: { lte: at } },
         orderBy: { answeredAt: 'desc' },
+        skip: ownAttemptRow ? 1 : 0,
         select: { answeredAt: true },
       }),
     ]);
@@ -372,8 +417,13 @@ export class EngagementService {
    *
    * Idempotent by construction: a second call finds the freeze rows already
    * written (so they qualify and the walk passes straight over them) and
-   * `streakFreezesGrantedAt` freshly stamped (so no second grant is due), and
-   * writes nothing at all.
+   * `streakFreezesGrantedAt` freshly stamped — by a pass that GRANTED or one
+   * that merely SPENT, which is why the stamp is `plan.stampGrantedAt` below
+   * and not `plan.grantFreeze` — so no grant is due either, and it writes
+   * nothing at all. That second call is the ordinary case, not an edge one:
+   * React 18 StrictMode double-invokes the mount effect behind
+   * `GET /api/engagement/summary`, so a dev build makes this pass twice per
+   * page load.
    */
   private async settle(
     userId: string,
@@ -396,7 +446,10 @@ export class EngagementService {
       daysSinceLastGrant: this.daysSince(profile.streakFreezesGrantedAt),
     });
 
-    if (!plan.grantFreeze && plan.freezeDays.length === 0) {
+    // Nothing granted and nothing spent: the balance did not move, so there is
+    // no row to write and — by the same rule — no clock to restart. This is
+    // exactly `plan.stampGrantedAt === false`.
+    if (!plan.stampGrantedAt) {
       return { days, streakFreezes: profile.streakFreezes };
     }
 
@@ -425,7 +478,14 @@ export class EngagementService {
       where: { userId },
       data: {
         streakFreezes: plan.streakFreezesAfter,
-        ...(plan.grantFreeze ? { streakFreezesGrantedAt: this.clock.now() } : {}),
+        // `plan.stampGrantedAt`, NEVER `plan.grantFreeze` — the pure module
+        // decides when the replenishment clock restarts and this line only
+        // writes it (see `FreezeSettlementPlan.stampGrantedAt`). A pass that
+        // only SPENT a freeze must restart the clock too: leaving the column
+        // `null` would leave it reading "never replenished", and the next pass
+        // — StrictMode's second mount, moments later — would grant the freeze
+        // straight back.
+        ...(plan.stampGrantedAt ? { streakFreezesGrantedAt: this.clock.now() } : {}),
       },
     });
 

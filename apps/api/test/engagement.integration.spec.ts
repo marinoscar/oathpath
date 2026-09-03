@@ -277,6 +277,10 @@ function setupEngagementMocks(): void {
     if (gte && row.answeredAt.getTime() < gte.getTime()) return false;
     const lt = where.answeredAt?.lt as Date | undefined;
     if (lt && row.answeredAt.getTime() >= lt.getTime()) return false;
+    // INCLUSIVE, because `EngagementService.sliceSeconds` is: an event at the
+    // same instant as this one is a previous event, not a missing one.
+    const lte = where.answeredAt?.lte as Date | undefined;
+    if (lte && row.answeredAt.getTime() > lte.getTime()) return false;
     return true;
   }
 
@@ -315,12 +319,17 @@ function setupEngagementMocks(): void {
   });
 
   (prismaMock.practiceAttempt.findFirst as jest.Mock).mockImplementation(
-    async ({ where = {}, orderBy }: any) => {
+    async ({ where = {}, orderBy, skip }: any) => {
       const rows = sortAttempts(
         Array.from(attempts.values()).filter((row) => matchesAttemptWhere(row, where)),
         orderBy,
       );
-      return rows[0] ? withQuestion(rows[0]) : null;
+      // `skip` is load-bearing for `sliceSeconds`: accrual event (a) runs after
+      // its own attempt row commits, so it skips exactly that row rather than
+      // treating itself as its own predecessor. A stub that dropped `skip`
+      // would silently report every attempt as zero seconds.
+      const row = rows[skip ?? 0];
+      return row ? withQuestion(row) : null;
     },
   );
 
@@ -685,6 +694,32 @@ describe('Engagement (Integration)', () => {
       });
     });
 
+    it('a completion at the SAME pinned instant as its last attempt bills that time once', async () => {
+      // The shape a live run hits under a pinned `X-Test-Clock`, and the one
+      // production hits whenever a completion lands in the same clock tick as
+      // the attempt before it. The slice between two events at one instant is
+      // zero — the seconds before them already belong to the earlier event,
+      // and billing them twice overstates what the learner practised.
+      const created = await startSession(learnerA, '2026-04-10T12:00:00.000Z');
+      const sessionId = created.session.id;
+
+      await answer(learnerA, '2026-04-10T12:00:40.000Z', sessionId, created.nextQuestion.id);
+
+      await at(learnerA, '2026-04-10T12:00:40.000Z')
+        .post(`/api/practice/sessions/${sessionId}/complete`)
+        .expect(201);
+
+      const response = await at(learnerA, '2026-04-10T12:02:00.000Z')
+        .get('/api/engagement/summary')
+        .expect(200);
+
+      expect(response.body.data.today).toMatchObject({
+        date: '2026-04-10',
+        attempts: 1,
+        practiceSeconds: 40,
+      });
+    });
+
     it('a completion adds seconds but never attempts or correct (§2.2)', async () => {
       const created = await startSession(learnerA, '2026-04-10T12:00:00.000Z');
       await answer(learnerA, '2026-04-10T12:00:30.000Z', created.session.id, created.nextQuestion.id);
@@ -737,6 +772,33 @@ describe('Engagement (Integration)', () => {
       expect(activityFor(learnerA.id)).toEqual(rowsAfterFirst);
       expect(second.body.data.freezes.remaining).toBe(STREAK_FREEZE_MAX - 1);
       expect(second.body.data.streak).toEqual(first.body.data.streak);
+    });
+
+    it('a FIRST-EVER spend starts the replenishment cooldown, so StrictMode’s second GET regrants nothing', async () => {
+      // The test above seeds `streakFreezesGrantedAt` a day back, so the
+      // cooldown is already running and a regrant is blocked for a reason that
+      // has nothing to do with the spend. This one leaves it at its honest
+      // `null` — the learner has never replenished — which is the state a real
+      // first freeze spend happens in, and the state React 18 StrictMode's
+      // double-invoked mount effect hits twice in a row on a dev page load.
+      seedMetDay(learnerA.id, '2026-04-07');
+      seedMetDay(learnerA.id, '2026-04-08');
+      expect(profiles.get(learnerA.id)!.streakFreezesGrantedAt).toBeNull();
+
+      const first = await at(learnerA, '2026-04-10T12:00:00.000Z')
+        .get('/api/engagement/summary')
+        .expect(200);
+      expect(first.body.data.freezes.remaining).toBe(STREAK_FREEZE_MAX - 1);
+      expect(profiles.get(learnerA.id)!.streakFreezesGrantedAt).toEqual(
+        new Date('2026-04-10T12:00:00.000Z'),
+      );
+
+      const second = await at(learnerA, '2026-04-10T12:00:00.100Z')
+        .get('/api/engagement/summary')
+        .expect(200);
+
+      expect(second.body.data.freezes.remaining).toBe(STREAK_FREEZE_MAX - 1);
+      expect(profiles.get(learnerA.id)!.streakFreezes).toBe(STREAK_FREEZE_MAX - 1);
     });
   });
 

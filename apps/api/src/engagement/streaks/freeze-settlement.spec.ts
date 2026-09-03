@@ -166,6 +166,50 @@ describe('settleStreakFreezes', () => {
   });
 
   // ---------------------------------------------------------------------------
+  // stampGrantedAt — when the replenishment clock restarts (§4.3)
+  // ---------------------------------------------------------------------------
+
+  describe('stampGrantedAt', () => {
+    it('is false when the pass changes nothing — `null` must keep meaning "never moved"', () => {
+      expect(
+        plan({ days: [met('2026-04-08'), met('2026-04-09')], streakFreezes: STREAK_FREEZE_MAX }),
+      ).toMatchObject({ grantFreeze: false, freezeDays: [], stampGrantedAt: false });
+    });
+
+    it('is true on a grant', () => {
+      expect(plan({ streakFreezes: 0, daysSinceLastGrant: null })).toMatchObject({
+        grantFreeze: true,
+        stampGrantedAt: true,
+      });
+    });
+
+    it('is true on a pass that only SPENDS — the cooldown starts when a freeze is used', () => {
+      // The balance is already at the ceiling, so nothing is granted; one gap
+      // is covered. Reporting `false` here is what let the next pass regrant
+      // the freeze immediately, defeating the seven-day interval entirely.
+      const result = plan({
+        days: [met('2026-04-07'), met('2026-04-08')],
+        streakFreezes: STREAK_FREEZE_MAX,
+        daysSinceLastGrant: null,
+      });
+
+      expect(result.grantFreeze).toBe(false);
+      expect(result.freezeDays).toEqual(['2026-04-09']);
+      expect(result.stampGrantedAt).toBe(true);
+    });
+
+    it('is true when a pass both grants and spends', () => {
+      expect(
+        plan({
+          days: [met('2026-04-07'), met('2026-04-08')],
+          streakFreezes: 0,
+          daysSinceLastGrant: null,
+        }),
+      ).toMatchObject({ grantFreeze: true, freezeDays: ['2026-04-09'], stampGrantedAt: true });
+    });
+  });
+
+  // ---------------------------------------------------------------------------
   // The two halves together
   // ---------------------------------------------------------------------------
 

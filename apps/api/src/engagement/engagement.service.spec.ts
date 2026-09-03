@@ -170,17 +170,23 @@ class PrismaStub {
   };
 
   readonly practiceAttempt = {
-    findFirst: async ({ where }: any) => {
+    /**
+     * `lte` and `skip` for real — both are load-bearing for `sliceSeconds`'
+     * previous-event lookup, and a stub that quietly ignored either would let
+     * the same-instant double-count this file asserts against pass unnoticed.
+     */
+    findFirst: async ({ where, skip }: any) => {
       const rows = this.attempts
         .filter(
           (row) =>
             row.sessionId === where.sessionId &&
             row.userId === where.userId &&
-            (where.answeredAt?.lt === undefined ||
-              row.answeredAt.getTime() < where.answeredAt.lt.getTime()),
+            (where.answeredAt?.lte === undefined ||
+              row.answeredAt.getTime() <= where.answeredAt.lte.getTime()),
         )
         .sort((a, b) => b.answeredAt.getTime() - a.answeredAt.getTime());
-      return rows[0] ? { answeredAt: rows[0].answeredAt } : null;
+      const row = rows[skip ?? 0];
+      return row ? { answeredAt: row.answeredAt } : null;
     },
   };
 }
@@ -281,6 +287,52 @@ describe('EngagementService', () => {
       expect(row.correct).toBe(1);
       // 30s to the attempt, then 40s from that attempt to the completion.
       expect(row.practiceSeconds).toBe(70);
+    });
+  });
+
+  // ===========================================================================
+  // Two events at the SAME instant (§2.3)
+  // ===========================================================================
+
+  describe('events sharing one instant', () => {
+    // A pinned `X-Test-Clock` makes this routine, and a completion landing in
+    // the same clock tick as its own last attempt makes it possible in
+    // production. The slice between two events at one instant is ZERO — the
+    // time before them was already credited to the earlier one, and crediting
+    // it twice would overstate what the learner actually practised, which is
+    // exactly the dishonest metric the cap in §2.3 exists to prevent.
+
+    it('a completion at the identical instant as its last attempt accrues that time ONCE', async () => {
+      await attemptAt('2026-04-10T12:00:40.000Z');
+      expect(prisma.rowsFor(USER)[0].practiceSeconds).toBe(40);
+
+      // The same instant, not a later one — the pinned clock never moved.
+      const completedAt = new Date('2026-04-10T12:00:40.000Z');
+      clock.set(completedAt);
+      await service.recordSessionCompletionActivity(USER, { sessionId: SESSION, completedAt });
+
+      const row = prisma.rowsFor(USER)[0];
+      expect(row.practiceSeconds).toBe(40);
+      // And the completion still never credits an answer (§2.2).
+      expect(row.attempts).toBe(1);
+    });
+
+    it('two attempts at the identical instant credit the elapsed seconds once', async () => {
+      await attemptAt('2026-04-10T12:00:40.000Z');
+      await attemptAt('2026-04-10T12:00:40.000Z');
+
+      const row = prisma.rowsFor(USER)[0];
+      expect(row.attempts).toBe(2);
+      expect(row.practiceSeconds).toBe(40);
+    });
+
+    it('still measures a real gap: an attempt is never its own predecessor', async () => {
+      // The inclusive bound must not collapse into "always zero" — the
+      // just-committed attempt row is skipped, not matched.
+      await attemptAt('2026-04-10T12:00:40.000Z');
+      await attemptAt('2026-04-10T12:01:10.000Z');
+
+      expect(prisma.rowsFor(USER)[0].practiceSeconds).toBe(70);
     });
   });
 
@@ -474,6 +526,93 @@ describe('EngagementService', () => {
       clock.set(new Date('2026-10-01T12:00:00.000Z'));
       expect((await service.getSummary(USER)).freezes.remaining).toBe(STREAK_FREEZE_MAX);
       expect(prisma.profiles.get(USER)!.streakFreezes).toBe(STREAK_FREEZE_MAX);
+    });
+  });
+
+  // ===========================================================================
+  // Settlement — the cooldown starts on a SPEND, not only on a grant (§4.3)
+  // ===========================================================================
+
+  describe('freeze replenishment after a spend', () => {
+    /** A day the learner met their goal on, written straight into the store. */
+    function seedMetDay(date: string): void {
+      prisma.activity.set(`${USER}|${date}`, {
+        userId: USER,
+        activityDate: new Date(`${date}T00:00:00.000Z`),
+        tzUsed: 'UTC',
+        practiceSeconds: 600,
+        attempts: 5,
+        correct: 5,
+        goalMet: true,
+        freezeUsed: false,
+      });
+    }
+
+    beforeEach(() => {
+      // A full budget that has never been replenished — `null` is the honest
+      // "this balance has never moved" state, and the learner has a real
+      // streak with one gap in it (2026-04-09) for a freeze to cover.
+      prisma.profiles.set(USER, {
+        timezone: 'UTC',
+        dailyGoalMinutes: 5,
+        streakFreezes: STREAK_FREEZE_MAX,
+        streakFreezesGrantedAt: null,
+      });
+      seedMetDay('2026-04-07');
+      seedMetDay('2026-04-08');
+    });
+
+    it('a pass that only CONSUMES stamps the grant timestamp, so the next pass grants nothing', async () => {
+      const first = await service.getSummary(USER);
+
+      expect(first.freezes.remaining).toBe(STREAK_FREEZE_MAX - 1);
+      // The spend is what starts the seven-day clock. Leaving this `null`
+      // would leave it reading "never replenished", and the very next pass
+      // would hand the freeze straight back.
+      expect(prisma.profiles.get(USER)!.streakFreezesGrantedAt).toEqual(SESSION_START);
+
+      const second = await service.getSummary(USER);
+
+      expect(second.freezes.remaining).toBe(STREAK_FREEZE_MAX - 1);
+      expect(prisma.profiles.get(USER)!.streakFreezes).toBe(STREAK_FREEZE_MAX - 1);
+    });
+
+    it('grants the spent freeze back after the interval, and not a day before', async () => {
+      await service.getSummary(USER); // spends one on 2026-04-09
+
+      // Days the learner then genuinely practises, so the walk finds no new
+      // gap and this test is about REPLENISHMENT alone.
+      for (const date of [
+        '2026-04-10',
+        '2026-04-11',
+        '2026-04-12',
+        '2026-04-13',
+        '2026-04-14',
+        '2026-04-15',
+        '2026-04-16',
+      ]) {
+        seedMetDay(date);
+      }
+
+      clock.set(new Date('2026-04-16T12:00:00.000Z')); // six days after the spend
+      expect((await service.getSummary(USER)).freezes.remaining).toBe(STREAK_FREEZE_MAX - 1);
+
+      clock.set(new Date('2026-04-17T12:00:00.000Z')); // seven
+      expect((await service.getSummary(USER)).freezes.remaining).toBe(STREAK_FREEZE_MAX);
+    });
+
+    it('survives StrictMode’s double-mounted GET: the second call leaves the balance where the first did', async () => {
+      // React 18 StrictMode double-invokes the mount effect in the dev build,
+      // so `GET /api/engagement/summary` fires twice on essentially every page
+      // load — back to back, against the row the first call just wrote.
+      const first = await service.getSummary(USER);
+      const second = await service.getSummary(USER);
+
+      expect(first.freezes.remaining).toBe(STREAK_FREEZE_MAX - 1);
+      expect(second.freezes.remaining).toBe(first.freezes.remaining);
+      expect(prisma.profiles.get(USER)!.streakFreezes).toBe(STREAK_FREEZE_MAX - 1);
+      // And the day it covered is still covered exactly once.
+      expect(prisma.rowOn(USER, '2026-04-09')).toMatchObject({ freezeUsed: true });
     });
   });
 
