@@ -37,6 +37,41 @@ export interface DataTableSettings {
 }
 
 // =============================================================================
+// Study — the reminder-time preference (issue #143, epic #56 / E7 "Habit")
+// =============================================================================
+//
+// Mirrors `studySchema` / `studyPatchSchema` in
+// `apps/api/src/common/schemas/user-settings-namespaces.schema.ts`, and carries
+// that file's rule across the wire unchanged: BOTH FIELDS ARE OPTIONAL AND AN
+// ABSENT FIELD MEANS "use the built-in default", resolved at read time by
+// whoever is reading — the hourly `PracticeReminderTask` on the server, the
+// control on `/settings/notifications` on the client.
+//
+// So the web app must never materialise these. A page that renders the default
+// and saves it has frozen a learner at today's 9am forever, including after a
+// future release decides the default should move — see
+// `components/settings/StudyReminderSettings.tsx`, which renders the default
+// without writing it and sends a NULL-DELETE when a learner returns to it.
+// =============================================================================
+
+/** The stored `study` namespace. Absent, or an absent field, means the default. */
+export interface StudySettings {
+  /** 0-23, in the learner's own `learner_profiles.timezone`. */
+  reminderHour?: number;
+  /** Whether the hourly task considers this learner AT ALL, for any reminder. */
+  reminderEnabled?: boolean;
+}
+
+/**
+ * PATCH form of `study`: each field may additionally be `null`, meaning "delete
+ * this field and fall back to the built-in default" — the same shape, for the
+ * same reason, as `NavigationSettingsPatch` below.
+ */
+export type StudySettingsPatch = {
+  [K in keyof StudySettings]?: StudySettings[K] | null;
+};
+
+// =============================================================================
 // Notifications — the registry (#124) and the stored preferences (#126, epic #109)
 // =============================================================================
 //
@@ -275,6 +310,14 @@ export interface UserSettings {
    * registry default. Never backfill it with a materialised object.
    */
   notifications?: NotificationPreferences;
+  /**
+   * When — and whether — this learner is reminded to practise (#143, epic #56).
+   *
+   * OPTIONAL, AND ABSENT IS THE NORMAL CASE, exactly as `notifications` above:
+   * no account has this key until the learner moves one of the two controls, and
+   * absent resolves to the built-in defaults (hour 9, enabled). Never backfill.
+   */
+  study?: StudySettings;
   updatedAt: string;
   version: number;
 }
@@ -323,6 +366,12 @@ export interface UserSettingsUpdate {
    * exactly the one key it changed and leave every other preference absent.
    */
   notifications?: NotificationPreferencesPatch | null;
+  /**
+   * Reminder preferences (#143). Field-wise merged server-side like
+   * `navigation`, so a control sends only the one field it changed — and sends
+   * `null` for it when the learner has moved back to the built-in default.
+   */
+  study?: StudySettingsPatch | null;
 }
 
 export interface SystemSettings {

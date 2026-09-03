@@ -30,10 +30,34 @@ vi.mock('../../hooks/useBrowserNotificationPermission', () => ({
   useBrowserNotificationPermission: vi.fn(),
 }));
 
+/**
+ * The learner profile, mocked (#143).
+ *
+ * The page reads ONE field from it — the timezone the reminder hour is named
+ * in — and `useLearnerProfile` throws outside its provider by design, so a
+ * suite that renders this page bare has to supply one. Mocked rather than
+ * wrapped in the real `LearnerProfileProvider` because nothing in THIS file is
+ * about the profile: the reminder section's own behaviour, including the zone
+ * beside the control, is exercised end to end over MSW in
+ * `UserNotificationsPage.reminders.test.tsx`.
+ */
+vi.mock('../../contexts/LearnerProfileContext', () => ({
+  useLearnerProfile: () => ({
+    profile: ORIENTED_PROFILE,
+    testVersions: [],
+    states: [],
+    isLoading: false,
+    hasError: false,
+    refresh: vi.fn(),
+    applyProfile: vi.fn(),
+  }),
+}));
+
 import { useUserSettings } from '../../hooks/useUserSettings';
 import { useNotificationEvents } from '../../hooks/useNotificationEvents';
 import { useBrowserNotificationPermission } from '../../hooks/useBrowserNotificationPermission';
 import UserNotificationsPage from '../../pages/UserNotificationsPage';
+import { ORIENTED_PROFILE } from '../utils/journey-fixtures';
 import type { NotificationEventDef } from '../../types';
 
 const mockUseUserSettings = vi.mocked(useUserSettings);
