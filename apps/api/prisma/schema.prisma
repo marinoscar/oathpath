@@ -46,6 +46,7 @@ model User {
   practiceAttempts       PracticeAttempt[]      @relation("UserPracticeAttempts")
   questionMastery        QuestionMastery[]      @relation("UserQuestionMastery")
   readinessSnapshots     ReadinessSnapshot[]    @relation("UserReadinessSnapshots")
+  dailyActivity          DailyActivity[]        @relation("UserDailyActivity")
 
   @@map("users")
 }
@@ -866,6 +867,32 @@ model LearnerProfile {
   // Null until orientation is submitted. This is the literal field
   // `RequireOrientation` checks.
   orientationCompletedAt DateTime? @map("orientation_completed_at") @db.Timestamptz
+
+  // ---------------------------------------------------------------------------
+  // Streak Freezes (issue #112, epic #56 "Habit")
+  // ---------------------------------------------------------------------------
+  // How many streak freezes this learner currently HOLDS — a freeze is spent
+  // by settlement writing a `DailyActivity` row with `freezeUsed: true` for a
+  // day the learner did not actually practise, so a single missed day does
+  // not reset a streak the same way `distinctCorrectDays` (`QuestionMastery`'s
+  // own comment) refuses to let one lucky session fabricate mastery. Default
+  // `2`, and that default is not just "a reasonable starting balance for a
+  // brand-new row" — it is what an `ALTER TABLE ... ADD COLUMN` writes into
+  // every LearnerProfile row that already exists at migration time. The
+  // product's stated posture is protection, not scarcity (VISION.md), so an
+  // existing learner mid-streak the day this ships starts protected, exactly
+  // like a learner who signs up tomorrow.
+  streakFreezes Int @default(2) @map("streak_freezes")
+
+  // When the freeze budget was last topped up. Nullable, and null is a real,
+  // distinct state — "never replenished" — not "replenished at some unknown
+  // time": the accrual service treats null as eligible-for-replenishment on
+  // sight, with no sentinel epoch value to special-case. Every row that
+  // exists before this migration is null for the same honest reason
+  // `LearnerProfile.testVersionCode` starts null (§10's honesty rule,
+  // referenced on that field above) — nothing here has actually happened yet,
+  // so nothing should claim it has.
+  streakFreezesGrantedAt DateTime? @map("streak_freezes_granted_at") @db.Timestamptz
 
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
   updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz
@@ -1751,4 +1778,155 @@ model ReadinessSnapshot {
   // already index for their own "this user's rows, in time order" reads.
   @@index([userId, computedAt])
   @@map("readiness_snapshots")
+}
+
+// =============================================================================
+// Daily Activity & Streak Freezes (issue #112, epic #56 "Habit")
+// =============================================================================
+//
+// One row per (user, LOCAL calendar day) — the ledger a streak is counted
+// from. This is deliberately a FOURTH kind of per-learner table, next to the
+// three `ReadinessSnapshot`'s own header comment already distinguishes:
+// `PracticeAttempt` is immutable evidence per QUESTION, `QuestionMastery` is
+// derived scheduling state per QUESTION, `ReadinessSnapshot` is a frozen
+// point-in-time SCORE. `DailyActivity` is none of those — it is a rollup per
+// DAY, the grain a streak ("how many days in a row") is actually counted in,
+// and no combination of the other three answers "did this learner show up
+// today" without re-deriving a calendar-day boundary from timestamps on every
+// read, in every caller, forever.
+//
+// -----------------------------------------------------------------------------
+// activity_date — `@db.Date`, the SAME reasoning as `LearnerProfile.interviewDate`,
+// and the ONLY OTHER `@db.Date` COLUMN IN THIS SCHEMA
+// -----------------------------------------------------------------------------
+// "Did this learner practise today" is a question about a LOCAL calendar day
+// in `learner_profiles.timezone`, not a UTC window — exactly the distinction
+// `LearnerProfile.interviewDate`'s own comment draws for a booked interview
+// ("an interview is booked for a day, not an instant"). A `@db.Timestamptz`
+// column would be wrong here for the identical reason it would be wrong
+// there: a learner in `America/Los_Angeles` who practises at 11:30 PM is
+// still practising on THEIR Tuesday, and storing an instant would force every
+// reader to re-derive the day boundary from a timezone that can itself change
+// later (see `tzUsed` immediately below). Storing the day itself, already
+// resolved, is what makes every later read of this table a plain date
+// comparison instead of a per-row timezone calculation.
+//
+// -----------------------------------------------------------------------------
+// tz_used — STORED, not derived at read time
+// -----------------------------------------------------------------------------
+// The IANA zone the day boundary was actually computed in, frozen onto the
+// row at write time rather than looked up fresh from `learner_profiles.timezone`
+// whenever this table is read. That distinction matters the moment a learner's
+// timezone changes: a learner who logs their Tuesday practice while in
+// `America/Los_Angeles` and later moves their profile to `Europe/Madrid` must
+// not have that old Tuesday reinterpreted under Madrid's clock — the
+// boundary that decided "which day was this" is a fact about the moment the
+// row was written, not about whatever the profile says today. Re-deriving it
+// live would silently rewrite history every time a learner's `timezone`
+// changes, exactly the failure mode `ReadinessSnapshot`'s own header comment
+// rejects for readiness scores ("re-deriving the score on every read would
+// silently re-describe today's evidence under yesterday's date"), applied
+// here to which day evidence belongs to instead of what it's worth.
+//
+// -----------------------------------------------------------------------------
+// goal_met — a Boolean, and MONOTONIC: once true it never flips back
+// -----------------------------------------------------------------------------
+// A day either reached the learner's `dailyGoalMinutes` or it didn't, but the
+// column is written progressively as practice accrues through the day — the
+// monotonic rule is what keeps a later write from ever un-setting a goal
+// already met earlier the same day (e.g. a session-abandon path that
+// recomputes partial progress). Once `true`, an accrual write may only leave
+// it `true` or extend `practiceSeconds`/`attempts`/`correct` further; it may
+// never set it back to `false` for the same row.
+//
+// -----------------------------------------------------------------------------
+// freeze_used — WHY THIS ROW CAN EXIST WITH ZERO PRACTICE AT ALL
+// -----------------------------------------------------------------------------
+// Every other column on this table describes practice that happened.
+// `freezeUsed` describes the opposite case: a day with `attempts = 0` and
+// `goalMet = false` that settlement has decided to COVER with one of the
+// learner's `LearnerProfile.streakFreezes`, so the streak counter does not
+// reset over it. Persisting that consumption ON THE UNIQUE KEY below (rather
+// than, say, only decrementing `streakFreezes` and leaving no per-day record)
+// is what makes two things true at once: settlement is an UPSERT, so running
+// it twice for the same missed day spends the freeze once, not twice
+// (idempotency), and the learner's own history stays fully auditable — a
+// later "why did my streak survive that gap" view has a real row to read,
+// not just a decremented counter with no explanation of which day it paid
+// for.
+//
+// -----------------------------------------------------------------------------
+// The unique key IS the idempotency mechanism, for BOTH writers
+// -----------------------------------------------------------------------------
+// `@@unique([userId, activityDate])` is what turns ordinary accrual (practice
+// happening throughout a day) into an UPSERT rather than an ever-growing
+// append-only log of partial progress — the same row is found and added to
+// on every attempt within one calendar day. It is also what makes freeze
+// settlement idempotent for exactly the reason above: a retried or re-run
+// settlement job resolves to the same row via this key rather than double
+// spending a freeze or creating a duplicate "missed day" record.
+//
+// -----------------------------------------------------------------------------
+// NO PATH FROM THIS TABLE TO THE READINESS ENGINE — ENFORCED HERE AS A RULE,
+// NOT LEFT TO CONVENTION
+// -----------------------------------------------------------------------------
+// This table has no foreign key, no relation, and no column that lets
+// `readiness_snapshots` or `computeReadiness` (`readiness-model.md` §5) read
+// out of `daily_activity`. That is deliberate and this comment is the rule,
+// not just a description of the current state: engagement (did the learner
+// show up) and readiness (is the learner ready for the test) are answering
+// two different questions PRD.md and VISION.md keep separate on purpose — a
+// streak measures habit, not competence, and letting a readiness component
+// read a streak would let mere attendance inflate a score meant to reflect
+// demonstrated recall. Any future change that wires this table into the
+// readiness engine is a product decision that must be made explicitly and
+// documented there, never introduced quietly as a schema convenience here.
+//
+// `userId`: `onDelete: Cascade`, identical posture to every other per-learner
+// table in this schema (`PracticeAttempt.userId`, `QuestionMastery.userId`,
+// `ReadinessSnapshot.userId`) — a day's activity rollup has no meaning
+// independent of the account it summarizes.
+model DailyActivity {
+  id String @id @default(uuid()) @db.Uuid
+
+  userId String @map("user_id") @db.Uuid
+
+  // The learner's LOCAL calendar day — see "activity_date" above for why this
+  // is `@db.Date` and not `@db.Timestamptz`.
+  activityDate DateTime @map("activity_date") @db.Date
+
+  // The IANA zone this row's day boundary was actually computed in, frozen at
+  // write time — see "tz_used" above for why this is stored rather than
+  // re-derived from the learner's (possibly since-changed) profile timezone.
+  tzUsed String @map("tz_used")
+
+  practiceSeconds Int @default(0) @map("practice_seconds")
+  attempts        Int @default(0)
+  correct         Int @default(0)
+
+  // See "goal_met" above — monotonic: once true, never flips back to false
+  // for the same row.
+  goalMet Boolean @default(false) @map("goal_met")
+
+  // See "freeze_used" above — true only when this row exists to record that
+  // a streak freeze covered a day with no practice at all.
+  freezeUsed Boolean @default(false) @map("freeze_used")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  // Relations
+  user User @relation("UserDailyActivity", fields: [userId], references: [id], onDelete: Cascade)
+
+  // The idempotency key for BOTH writers (ordinary accrual and freeze
+  // settlement) — see "The unique key IS the idempotency mechanism" above.
+  // This composite index already serves the descending streak walk below
+  // ("give me this user's most recent days, going backward, until the streak
+  // breaks"): Postgres can walk a `(userId, activityDate)` B-tree backwards
+  // as cheaply as forwards, so a second, separately-declared index over the
+  // same two columns would duplicate this one for no read this table
+  // actually needs to serve. No `@@index` is added beneath it for that
+  // reason — it would earn no query the unique index doesn't already answer.
+  @@unique([userId, activityDate])
+  @@map("daily_activity")
 }
