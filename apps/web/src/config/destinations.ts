@@ -325,10 +325,32 @@ export const SETTINGS_DESTINATION: Destination = {
  * `isAdmin` is no longer a navigation gate anywhere. It still exists (and
  * `AdminOnly` with it) for non-navigation uses, but a role check here is what
  * produced the split-brain described in the file header.
+ *
+ * LABEL "SYSTEM SETTINGS", COMPACT LABEL "CONSOLE" (issue #232)
+ * -------------------------------------------------------------
+ * `label` is what the USER MENU and the EXPANDED RAIL draw, so it has to read
+ * as the admin settings surface it opens — it sits directly beneath
+ * `SETTINGS_DESTINATION`'s "User Settings" in the same menu, and the pair only
+ * tells an admin which one is theirs and which one is the deployment's if both
+ * say what they are. "Console" there named the MODE rather than the
+ * destination, which is how #232's missing menu row stayed invisible: nothing
+ * in the chrome said the words "System Settings" at all.
+ *
+ * `compactLabel` stays "Console" because the 56px collapsed rail will not hold
+ * "System Settings" — exactly what the `Destination.compactLabel` field comment
+ * above already says, and the reason the two fields are separate.
+ *
+ * The rail's Console MODE vocabulary is deliberately UNCHANGED by this: its
+ * `aria-label="Console navigation"`, its "Back to library" row, and
+ * `config/adminSections.tsx`'s header all still say Console, because the mode
+ * (a swapped-in rail context you enter and leave) and the destination label (a
+ * row you click) are different things. Renaming the mode to match the row would
+ * make "Back to library" the exit from "System Settings", which is not what it
+ * does.
  */
 export const CONSOLE_DESTINATION: Destination = {
   key: 'console',
-  label: 'Console',
+  label: 'System Settings',
   compactLabel: 'Console',
   Icon: AdminIcon,
   path: '/admin/settings',
@@ -351,12 +373,19 @@ export const CONSOLE_DESTINATION: Destination = {
  * in the array those surfaces read, so it cannot leak back into them by
  * omission.
  *
- * `docs/specs/journey-shell.md` §2.2 names the accepted cost plainly: an
- * administrator below `sm` (where `showRail` does not apply) has no one-tap
- * path to Console from the nav chrome. Nothing about REACHABILITY changes —
- * `ProtectedRoute` and `RequirePermission` gate `/admin/settings/*` exactly as
- * before, and a bookmark or typed URL still works — only discoverability from
- * primary navigation on a narrow screen.
+ * `docs/specs/journey-shell.md` §2.2 named the accepted cost plainly: an
+ * administrator below `sm` (where `showRail` does not apply) had no one-tap
+ * path to Console from the nav chrome. Nothing about REACHABILITY ever changed
+ * — `ProtectedRoute` and `RequirePermission` gate `/admin/settings/*` exactly
+ * as before, and a bookmark or typed URL still works — only discoverability
+ * from primary navigation on a narrow screen.
+ *
+ * Issue #232 reverses that cost WITHOUT reversing this membership rule:
+ * `UserMenu` now draws `CONSOLE_DESTINATION` as a second row, gated through
+ * `isDestinationVisible`. The menu is the one settings chrome that exists at
+ * every width, and it NAMES the two destinations it draws — so Console still
+ * cannot leak back into `DESTINATIONS`, `BottomNav`, or the four-bar ceiling by
+ * omission.
  */
 export const RAIL_PINNED_DESTINATIONS: readonly Destination[] = [CONSOLE_DESTINATION];
 
