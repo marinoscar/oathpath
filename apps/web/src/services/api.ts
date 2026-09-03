@@ -244,7 +244,9 @@ import type {
   PracticeSessionDetail,
   PracticeSessionPage,
   PracticeSessionState,
+  PracticeQueue,
   RecordPracticeAttemptInput,
+  ProgressMastery,
 } from '../types';
 
 // Allowlist API
@@ -1106,4 +1108,34 @@ export async function completePracticeSession(
   id: string,
 ): Promise<PracticeSession> {
   return api.post<PracticeSession>(`/practice/sessions/${id}/complete`, {});
+}
+
+/**
+ * The caller's queue counts — `GET /api/practice/queue` (#78, epic #54).
+ *
+ * Read-only: it reports what a session started right now would draw from
+ * (`mastery/selector.ts`'s bucket order), it never creates one. A 400 means
+ * the caller has no resolved test version — unfinished setup, exactly like
+ * `createPracticeSession`'s own 400, and rendered the same way: as prose, not
+ * a stack trace.
+ */
+export async function getPracticeQueue(): Promise<PracticeQueue> {
+  return api.get<PracticeQueue>('/practice/queue');
+}
+
+// =============================================================================
+// Progress — `GET /api/progress/mastery` (issue #94, epic #54 / E5 "Memory")
+// =============================================================================
+
+/**
+ * The caller's own coverage and mastery, by category — `GET /api/progress/mastery`.
+ *
+ * `@Auth()` with no permissions, no parameters: exactly the same posture
+ * `getJourneyProfile`/`getPracticeSessions` already take, for the same reason
+ * — every learner owns their own mastery data, resolved from the JWT. A 400
+ * means the caller has no resolved test version yet (unfinished setup), the
+ * same shape `createPracticeSession` already documents.
+ */
+export async function getProgressMastery(): Promise<ProgressMastery> {
+  return api.get<ProgressMastery>('/progress/mastery');
 }

@@ -2,6 +2,7 @@ import { BadRequestException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 
 import { Clock } from '../common/clock/clock';
+import { PracticeService } from '../practice/practice.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { JourneyService } from './journey.service';
 
@@ -79,6 +80,15 @@ describe('JourneyService', () => {
     practiceAttempt: { findFirst: jest.Mock };
   };
   let clock: { now: jest.Mock; calendarDateIn: jest.Mock };
+  /**
+   * The Study Coach's mastery counts (issue #82), as a double. Every fixture
+   * in this file leaves `testVersionCode: null` (see `blankProfile`), so
+   * `getHome` never actually calls this — `loadStudyCoachCounts`'s own guard
+   * short-circuits before it does. It is still provided, because NestJS
+   * resolves `JourneyService`'s full constructor at module compile time
+   * regardless of which branch a given test reaches.
+   */
+  let practiceService: { getQueue: jest.Mock };
 
   beforeEach(async () => {
     prisma = {
@@ -112,12 +122,24 @@ describe('JourneyService', () => {
       now: jest.fn().mockReturnValue(new Date('2026-02-01T10:00:00Z')),
       calendarDateIn: jest.fn().mockReturnValue('2026-02-01'),
     };
+    practiceService = {
+      getQueue: jest.fn().mockResolvedValue({
+        testVersionCode: 'v2025',
+        total: 0,
+        due: 0,
+        weak: 0,
+        learning: 0,
+        mastered: 0,
+        new: { total: 0, byCategory: [] },
+      }),
+    };
 
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         JourneyService,
         { provide: PrismaService, useValue: prisma },
         { provide: Clock, useValue: clock },
+        { provide: PracticeService, useValue: practiceService },
       ],
     }).compile();
 

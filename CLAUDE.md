@@ -498,10 +498,20 @@ Reused permissions, not invented — see [`docs/specs/civics-content.md`](docs/s
 - `POST /api/practice/sessions/{id}/attempts` - Answer a question; graded by a two-rung ladder (deterministic match, then an AI grader on a miss) and recorded as one `practice_attempts` row
 - `POST /api/practice/sessions/{id}/attempts/{attemptId}/self-mark` - Flip a recorded `incorrect`/`skipped` attempt to `correct` after revealing the accepted answer
 - `POST /api/practice/sessions/{id}/complete` - Finish a session and compute its summary
+- `GET /api/practice/queue` - Picker counts (due/weak/new-by-category/learning/mastered) from `mastery/selector.ts`'s own bucket rule, so they can never disagree with what starting a session right now would select
 
-All six are `@Auth()` with no permissions, and another learner's session (or
-an attempt inside it) is a **404, not a 403**. See
-[`docs/specs/practice-sessions.md`](docs/specs/practice-sessions.md) §10.
+All seven are `@Auth()` with no permissions, and another learner's session
+(or an attempt inside it) is a **404, not a 403**. See
+[`docs/specs/practice-sessions.md`](docs/specs/practice-sessions.md) §10 and
+[`docs/specs/memory-model.md`](docs/specs/memory-model.md) §5 (the queue
+endpoint).
+
+### Progress (Per User)
+- `GET /api/progress/mastery` - Coverage and mastery by category, for the caller's own resolved test version
+
+`@Auth()` with no permissions, no user-id parameter — every authenticated
+learner owns their own mastery data. See
+[`docs/specs/memory-model.md`](docs/specs/memory-model.md) §8.
 
 ### Health
 - `GET /api/health/live` - Liveness check
@@ -576,11 +586,19 @@ resolved from the authenticated session — so there is no "read/write any
 learner's profile" permission to add in the first place. See
 [`docs/specs/journey-shell.md`](docs/specs/journey-shell.md) §4.1 and §5.
 
-**Practice adds no permission strings either, for the same reason.** All six
-`/api/practice/*` routes are `@Auth()` with no permissions: every
-authenticated learner owns their own practice attempts, exactly as they own
-their own learner profile and their own AI key, and no route accepts a user
-id. See [`docs/specs/practice-sessions.md`](docs/specs/practice-sessions.md) §10.
+**Practice adds no permission strings either, for the same reason.** All
+seven `/api/practice/*` routes (including `GET /api/practice/queue`, E5) are
+`@Auth()` with no permissions: every authenticated learner owns their own
+practice attempts, exactly as they own their own learner profile and their
+own AI key, and no route accepts a user id. See
+[`docs/specs/practice-sessions.md`](docs/specs/practice-sessions.md) §10 and
+[`docs/specs/memory-model.md`](docs/specs/memory-model.md) §5.
+
+**Progress adds no permission strings either, for the same reason.** The one
+`/api/progress/*` route, `GET /api/progress/mastery`, is `@Auth()` with no
+permissions: every authenticated learner owns their own mastery data,
+exactly as they own their own practice attempts, and no route accepts a user
+id. See [`docs/specs/memory-model.md`](docs/specs/memory-model.md) §8.
 
 ## Database Tables
 
@@ -605,6 +623,7 @@ id. See [`docs/specs/practice-sessions.md`](docs/specs/practice-sessions.md) §1
 - `civics_answers` - Accepted answers per question/state/slot; `effective_to IS NULL` means currently correct (no `is_current` flag — see `docs/specs/civics-content.md` §3)
 - `practice_sessions` - One row per practice run (Quick 5 or by-category): kind, status, planned count, cached completion `summary`
 - `practice_attempts` - One row per question ever answered, from a session or (from E8) a mock interview — the single evidence table E5/E6/E7 read and E8 writes into. Three columns record the AI grading rung (E4, epic #53), null together on every deterministically-graded attempt: `failure_cause` (why it missed, from a closed six-value enum — `null` means no grader ran, `unknown` means one ran and honestly couldn't tell), `ai_feedback` (the grader's structured verdict, verbatim), `ai_usage_event_id` (the `ai_usage_events` row that call wrote)
+- `question_mastery` - One row per `(user, question)` pair once that question first produces a schedulable outcome (E5, epic #54): `state` (`new`/`learning`/`review`/`lapsed`/`mastered`), `due_at`, `interval_days`, `ease`, `correct_streak`, `lapses`, `total_attempts`, `distinct_correct_days` (the column that makes "correct on ≥3 distinct days" enforceable), `last_outcome`, `last_attempt_at`. No row means `new` — never a row that says so. Updated synchronously, inside the same transaction as the `practice_attempts` write that triggers it, by `nextSchedule` (`apps/api/src/practice/mastery/scheduler.ts`); see `docs/specs/memory-model.md` §2-§3
 
 ## Access Control: Email Allowlist
 

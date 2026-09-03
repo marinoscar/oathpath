@@ -7,11 +7,34 @@
  * stub — `docs/specs/practice-sessions.md` §12 records it explicitly, and
  * `journey-shell.md` §8.2 still describes the copy this replaces.
  *
- * Three things, in the order a learner needs them:
+ * Four things, in the order a learner needs them:
  *
- *  1. **Quick 5** — one click, one request, straight into a session.
- *  2. **By category** — the sections of their own test version.
+ *  0. **Your queue** — real counts from `GET /api/practice/queue` (issue #90,
+ *     epic #54 / E5 "Memory"), read as a coach's assessment rather than a
+ *     dashboard: what is due or struggling, what is still new, what is
+ *     mastered. Comes BEFORE any action, on purpose — see
+ *     `components/practice/PracticeQueueSummary.tsx`'s own header.
+ *  1. **Quick 5** — one click, one request, straight into a session. Its
+ *     copy and icon are biased by the same due-or-weak count `0` shows, but
+ *     it still POSTs `kind: 'quick'` unchanged (see the section below on why
+ *     there is no `kind: 'review'` to request yet).
+ *  2. **By category** — the sections of their own test version, each showing
+ *     how many of its questions are still new (`queue.new.byCategory`).
  *  3. **Recent sessions** — what they were just doing, and the way back into it.
+ *
+ * =============================================================================
+ * THERE IS NO `kind: 'review' | 'weak' | 'mixed'` REQUEST ON THIS PAGE
+ * =============================================================================
+ *
+ * `PracticeSessionKind` already declares those three values
+ * (`CLAUDE.md`'s "Adding a practice session kind"), but
+ * `createPracticeSessionSchema` has not been widened to accept them yet, so
+ * requesting one here would be a 400 the picker caused rather than the
+ * coaching this page is supposed to do. Selector v2 (`mastery/selector.ts`)
+ * already orders a `quick` session's questions due-first, so band 1 biases
+ * its COPY toward what starting one will actually surface instead of
+ * inventing a session kind the API does not yet accept. Widening the schema
+ * to offer a genuine "review session" is a separate, later change.
  *
  * =============================================================================
  * QUICK 5 IS ONE CLICK, NOT A CONFIGURATION FORM
@@ -73,12 +96,13 @@
  * WIDTH AND HEADINGS
  * =============================================================================
  *
- * One `h1` ("Practice") with an `h2` on each of the three bands. Mobile-first,
+ * One `h1` ("Practice") with an `h2` on each of the four bands (Your queue,
+ * Start practising, Practise one section, Recent sessions). Mobile-first,
  * every responsive value steps at `sm` (600px), and none of `CLAUDE.md`'s five
  * coupled gates is touched — this page only agrees with them.
  */
 
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import {
   Alert,
   Box,
@@ -91,11 +115,13 @@ import {
   ListItemText,
   Typography,
 } from '@mui/material';
+import AutorenewOutlinedIcon from '@mui/icons-material/AutorenewOutlined';
 import BoltIcon from '@mui/icons-material/Bolt';
 import ChevronRightIcon from '@mui/icons-material/ChevronRight';
 import { Link as RouterLink, useNavigate } from 'react-router-dom';
 
 import { LoadingSpinner } from '../components/common/LoadingSpinner';
+import { PracticeQueueSummary } from '../components/practice/PracticeQueueSummary';
 import { RecentSessions } from '../components/practice/RecentSessions';
 // The same `/settings/journey` page the civics state notice links to. Imported
 // rather than re-spelled: two literals for one destination is how one of them
@@ -104,6 +130,7 @@ import { SET_STATE_PATH as PLAN_PATH } from '../components/civics/StateRequiredN
 import { useCivicsCategories } from '../hooks/useCivicsCategories';
 import { useIsMounted } from '../hooks/useIsMounted';
 import { useLearnerProfile } from '../contexts/LearnerProfileContext';
+import { usePracticeQueue } from '../hooks/usePracticeQueue';
 import { usePracticeSessions } from '../hooks/usePracticeSessions';
 import { createPracticeSession } from '../services/api';
 import type { CreatePracticeSessionInput } from '../types';
@@ -130,6 +157,32 @@ export default function PracticePage() {
     error: sessionsError,
     refresh: refreshSessions,
   } = usePracticeSessions();
+
+  const {
+    queue,
+    isLoading: isQueueLoading,
+    error: queueError,
+    refresh: refreshQueue,
+  } = usePracticeQueue(testVersionCode);
+
+  // Same gate `study-coach.ts`'s `recommendStudyAction` fires its `review`
+  // rung on (`memory-model.md` §6) — reused here so the Quick 5 action reads
+  // as the same coach as Home's Next-up card, not a second opinion. There is
+  // no `kind: 'review'` this page can request (declared, unwired — see the
+  // header on `PracticeQueueSummary`); selector v2 already orders a `quick`
+  // session's questions due-first, so biasing the COPY toward what a Quick 5
+  // will actually surface is the honest thing to do without asking the API
+  // for a kind it would 400 on.
+  const reviewCount = queue ? queue.due + queue.weak : 0;
+
+  // `categoryId -> newCount`, so the "by section" list can show where
+  // coverage is thinnest without a second request — `queue.new.byCategory` is
+  // the exact same count `mastery/selector.ts` would draw a `category`
+  // session's new questions from.
+  const newCountByCategory = useMemo(
+    () => new Map(queue?.new.byCategory.map((c) => [c.categoryId, c.newCount]) ?? []),
+    [queue],
+  );
 
   /** Which start is in flight — `'quick'` or a category id. */
   const [starting, setStarting] = useState<string | null>(null);
@@ -213,7 +266,47 @@ export default function PracticePage() {
             )}
 
             {/* -----------------------------------------------------------
-                1. Quick 5 — the one prominent action on this page.
+                0. Your queue — the coach's read of the evidence, BEFORE any
+                   action is offered. What actually needs doing surfaces
+                   first; the Quick 5 button below is the one action that
+                   already answers it.
+                ----------------------------------------------------------- */}
+            <Box sx={{ mb: 4 }}>
+              {queueError ? (
+                <Alert
+                  severity="error"
+                  action={
+                    <Button color="inherit" size="small" onClick={() => void refreshQueue()}>
+                      Try again
+                    </Button>
+                  }
+                >
+                  {queueError}
+                </Alert>
+              ) : isQueueLoading ? (
+                <Box role="status" aria-live="polite" aria-label="Loading your queue">
+                  <LoadingSpinner />
+                </Box>
+              ) : queue && queue.total === 0 ? (
+                // Honest, not fabricated: the bank itself has nothing in it
+                // for this test version, which is different from "you
+                // haven't attempted anything yet" (that is the `new` bucket,
+                // rendered as a real, non-zero count below).
+                <Alert severity="info" role="status">
+                  There are no questions loaded for your test version yet.
+                </Alert>
+              ) : queue ? (
+                <PracticeQueueSummary queue={queue} headingId="practice-queue-heading" />
+              ) : null}
+            </Box>
+
+            {/* -----------------------------------------------------------
+                1. Quick 5 — the one prominent action on this page. Its copy
+                   and icon follow `reviewCount` (`queue.due + queue.weak`)
+                   because selector v2 already orders a `quick` session
+                   due-first — the button still POSTs `kind: 'quick'`
+                   unchanged, only what it SAYS adapts to what it will
+                   actually surface.
                 ----------------------------------------------------------- */}
             <Box component="section" aria-labelledby="practice-quick-heading">
               <Typography
@@ -226,13 +319,14 @@ export default function PracticePage() {
                 Start practising
               </Typography>
               <Typography color="text.secondary" sx={{ mt: 1, maxWidth: '60ch' }}>
-                Five questions from across your test, chosen for you &mdash;
-                ones you haven&rsquo;t seen yet come first.
+                {reviewCount > 0
+                  ? `Five questions, due and struggling ones first — you have ${reviewCount} of those waiting.`
+                  : "Five questions from across your test, chosen for you — ones you haven't seen yet come first."}
               </Typography>
               <Button
                 variant="contained"
                 size="large"
-                startIcon={<BoltIcon />}
+                startIcon={reviewCount > 0 ? <AutorenewOutlinedIcon /> : <BoltIcon />}
                 onClick={() => void start({ kind: 'quick' }, 'quick')}
                 disabled={starting !== null}
                 // Full width on a phone, where this IS the action of the
@@ -240,7 +334,11 @@ export default function PracticePage() {
                 // primary button reads as the only thing to do here.
                 sx={{ mt: 2, width: { xs: '100%', sm: 'auto' } }}
               >
-                {starting === 'quick' ? 'Starting…' : 'Start a Quick 5'}
+                {starting === 'quick'
+                  ? 'Starting…'
+                  : reviewCount > 0
+                    ? 'Review now'
+                    : 'Start a Quick 5'}
               </Button>
             </Box>
 
@@ -284,28 +382,40 @@ export default function PracticePage() {
                 // well-meant `localeCompare` here would quietly renumber the
                 // exam.
                 <List disablePadding sx={{ mt: 1 }}>
-                  {categories.map((category) => (
-                    <ListItem key={category.id} disablePadding>
-                      <ListItemButton
-                        onClick={() =>
-                          void start(
-                            { kind: 'category', categoryId: category.id },
-                            category.id,
-                          )
-                        }
-                        disabled={starting !== null}
-                        sx={{ borderRadius: 1 }}
-                      >
-                        <ListItemText
-                          primary={category.name}
-                          secondary={
-                            starting === category.id ? 'Starting…' : category.section
+                  {categories.map((category) => {
+                    // Where the queue data has a natural place to land: the
+                    // same `new.byCategory` breakdown `PracticeQueueSummary`
+                    // reads from, one count per section, so a learner can see
+                    // where coverage is thinnest without a second screen.
+                    // Omitted (not "0 new") once a section has nothing left
+                    // unattempted — a real, honest fact, not a discouraging
+                    // zero next to a section that is actually done.
+                    const newCount = newCountByCategory.get(category.id) ?? 0;
+                    const secondary =
+                      starting === category.id
+                        ? 'Starting…'
+                        : newCount > 0
+                          ? `${category.section} · ${newCount} new`
+                          : category.section;
+
+                    return (
+                      <ListItem key={category.id} disablePadding>
+                        <ListItemButton
+                          onClick={() =>
+                            void start(
+                              { kind: 'category', categoryId: category.id },
+                              category.id,
+                            )
                           }
-                        />
-                        <ChevronRightIcon color="action" />
-                      </ListItemButton>
-                    </ListItem>
-                  ))}
+                          disabled={starting !== null}
+                          sx={{ borderRadius: 1 }}
+                        >
+                          <ListItemText primary={category.name} secondary={secondary} />
+                          <ChevronRightIcon color="action" />
+                        </ListItemButton>
+                      </ListItem>
+                    );
+                  })}
                 </List>
               )}
             </Box>

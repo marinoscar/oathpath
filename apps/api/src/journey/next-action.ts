@@ -62,21 +62,27 @@
 // One more hardcoded, verified path in the same closed map. Nothing about the
 // mechanism changed — only how many real destinations there are to name.
 //
-// The next kinds are still E5's `review` and E8's `interview`, on the same
-// extend-the-union-when-the-destination-exists discipline. Neither route
-// exists yet; neither member does either.
+// E5 adds `review` (#82, epic #54), on the same extend-the-union-when-the-
+// destination-exists discipline this file's own header already promised: it
+// is produced by `study-coach.ts`'s `recommendStudyAction`, which wraps this
+// file's `recommendNextAction` rather than duplicating branches 1, 2, and 4 —
+// see that file for the ordering `orientation > interview_countdown > review
+// > practice > explore`. E8's `interview` is still unclaimed; neither route
+// exists yet, so neither member does either.
 // =============================================================================
 
 /**
- * The four recommendations this recommender can make.
+ * The five recommendations this recommender's closed union can carry.
  *
- * `practice` is E3's addition (#81). E5 and E8 each add exactly one more when
- * their route exists to receive it — `review` (E5), `interview` (E8) —
- * following the same discipline the stage and destination registries use.
+ * `practice` is E3's addition (#81); `review` is E5's (#82) — produced by
+ * `study-coach.ts`, never by this file's own `recommendNextAction`, which
+ * still only ever returns one of the other four. E8 adds one more,
+ * `interview`, when its route exists to receive it.
  */
 export const NEXT_ACTION_KINDS = [
   'orientation',
   'interview_countdown',
+  'review',
   'practice',
   'explore',
 ] as const;
@@ -96,11 +102,14 @@ export type NextActionKind = (typeof NEXT_ACTION_KINDS)[number];
  *     `practice.controller.ts` serves.
  *   - `/learn` — likewise a bar destination, carrying E2's civics content.
  *
- * `interview_countdown` and `practice` deliberately share `/practice`. That is
- * two kinds naming one destination, not a duplicated branch: they differ in
- * what they SAY (a countdown is about a date; `practice` is about today), and
- * collapsing them would lose the countdown, which is the single most
- * emotionally loaded card this product shows.
+ * `interview_countdown`, `review`, and `practice` deliberately share
+ * `/practice`. That is three kinds naming one destination, not a duplicated
+ * branch: they differ in what they SAY (a countdown is about a date; `review`
+ * is about specific due/lapsed evidence; `practice` is about today generally),
+ * and collapsing them would lose the countdown, which is the single most
+ * emotionally loaded card this product shows. The Practice page reads
+ * `nextAction.kind` to decide which session kind (`review` vs. the default) to
+ * default into.
  *
  * Frozen because this is process-lifetime state a serialiser or a careless
  * `Object.assign` must not be able to repoint.
@@ -109,6 +118,7 @@ export const NEXT_ACTION_PATHS: Readonly<Record<NextActionKind, string>> =
   Object.freeze({
     orientation: '/setup/journey',
     interview_countdown: '/practice',
+    review: '/practice',
     practice: '/practice',
     explore: '/learn',
   });
@@ -166,9 +176,17 @@ export interface NextActionInput {
 /**
  * The single recommendation to show, given a profile.
  *
- * ORDERING IS THE CONTRACT:
+ * ORDERING IS THE CONTRACT — for THIS function:
  *
  *   orientation  >  interview_countdown  >  practice  >  explore
+ *
+ * `study-coach.ts`'s `recommendStudyAction` (E5, #82) wraps this function
+ * with a fifth rung, `review`, ranked between `interview_countdown` and
+ * `practice` — reviewing due/lapsed evidence is a more specific, more urgent
+ * true thing to say than a generic five-question nudge, but never more
+ * urgent than an actual interview date on the calendar. This function itself
+ * is unchanged and still never returns `review`: it has no mastery data to
+ * decide that branch with, by design (see that file's header).
  *
  * A learner who has not finished setup has nothing useful to be told about a
  * date they entered halfway through it. A learner with a date on the calendar

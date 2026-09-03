@@ -17,8 +17,10 @@ import {
   type DynamicScope,
 } from '../civics/answer-resolution';
 import { Clock } from '../common/clock/clock';
+import { nextStageOnMasteryEvent } from '../journey/stage-transitions';
 import { PrismaService } from '../prisma/prisma.service';
 import { matchAnswer, type AnswerMatch } from './answer-matching';
+import { excludeUnanswerable } from './question-selection';
 import {
   buildGradingPrompt,
   gradingVerdictSchema,
@@ -28,11 +30,27 @@ import {
   type GradingVerdict,
   type PersistableFailureCause,
 } from './grading';
-import { selectQuestions } from './question-selection';
+import {
+  fromStoredMasteryOutcome,
+  toAttemptOutcome,
+  toStoredMasteryOutcome,
+} from './mastery/outcome-mapping';
+import {
+  classifyMasteryBucket,
+  selectQuestionsV2,
+  type QuestionMasterySnapshot,
+} from './mastery/selector';
+import {
+  initialMasteryRecord,
+  nextSchedule,
+  type AttemptOutcome,
+  type MasteryRecord,
+} from './mastery/scheduler';
 import type { CreatePracticeSessionInput } from './dto/create-practice-session.dto';
 import type { RecordAttemptInput } from './dto/record-attempt.dto';
 import type { PracticeSessionQuery } from './dto/practice-session-query.dto';
 import type { PracticeQuestion } from './dto/practice-question.dto';
+import type { PracticeQueueResponse } from './dto/practice-queue.dto';
 import type {
   PracticeAnswerSnapshot,
   PracticeAttemptResponse,
@@ -639,50 +657,90 @@ export class PracticeService {
       { status, outcome, responseText },
     );
 
-    const attempt = await this.prisma.practiceAttempt.create({
-      data: {
-        userId,
-        questionId: question.id,
-        sessionId: session.id,
-        source: 'practice',
-        inputMode: 'typed',
-        promptMode: 'read',
-        responseText,
-        // The model's verdict when one was reached, rung 1's otherwise. The two
-        // are read together with `gradingMethod` and never merged: "was it
-        // right" and "how do we know" stay independent facts (§9).
-        outcome: aiGrading?.outcome ?? outcome,
-        gradingMethod: aiGrading ? 'ai' : 'exact',
-        // THE THREE AI COLUMNS ARE OMITTED ENTIRELY WHEN NO GRADER RAN, rather
-        // than written as null. Both leave the same NULL in Postgres, but a
-        // nullable `Json` column takes `Prisma.DbNull` rather than `null`, and a
-        // conditional spread keeps this write free of a Prisma-specific null
-        // sentinel that a reader would have to decode. The absence IS the
-        // meaning here: null in all three says no grader ever looked at this
-        // response, which is a different fact from `failureCause: 'unknown'`
-        // (schema.prisma, `PracticeFailureCause`).
-        ...(aiGrading
-          ? {
-              failureCause: aiGrading.failureCause,
-              // THE PARSED VERDICT ONLY — never the prompt, never a raw
-              // completion. The prompt is reconstructable from `responseText`
-              // plus `answerSnapshot` at any time, and a raw completion is
-              // exactly the unbounded provider text this column's own comment
-              // excludes.
-              aiFeedback: aiGrading.aiFeedback as unknown as Prisma.InputJsonValue,
-              aiUsageEventId: aiGrading.aiUsageEventId,
-            }
-          : {}),
-        revealed: input.revealed,
-        hintUsed: input.hintUsed,
-        // Absent stays absent. `0` would be a claim that the learner answered
-        // instantly — see the DTO, and `ai_usage_events`' nullable token counts
-        // for the same argument applied to a different unknown.
-        durationMs: input.durationMs ?? null,
-        answeredAt,
-        answerSnapshot: snapshot as unknown as Prisma.InputJsonValue,
-      },
-      include: { question: { select: QUESTION_SELECT } },
+    // The model's verdict when one was reached, rung 1's otherwise. The two
+    // are read together with `gradingMethod` and never merged: "was it
+    // right" and "how do we know" stay independent facts (§9). Pulled out
+    // here (rather than inlined in the `create` below) because the mastery
+    // scheduling call a few lines down needs the exact same two facts to map
+    // to an `AttemptOutcome` — see `mastery/outcome-mapping.ts`.
+    const finalOutcome = aiGrading?.outcome ?? outcome;
+    const gradingMethod = aiGrading ? 'ai' : 'exact';
+
+    // SYNCHRONOUS MASTERY SCHEDULING (issue #78, epic #54 / E5), inside the
+    // SAME transaction as the attempt write — not a second transaction and
+    // not fire-and-forget. `question_mastery` is derived, live state; a
+    // learner whose next question depends on it (the very next
+    // `nextQuestionFor` call, a few lines below) must see this attempt's
+    // effect already applied, which only holds if both writes commit
+    // together.
+    //
+    // SKIPPED for a `state_required` attempt specifically: `grade()`'s own
+    // comment above already treats that case as "no honest grade available",
+    // recorded as `skipped` rather than `incorrect` so the evidence table is
+    // not entered with a wrong answer nobody actually gave. Feeding the
+    // identical `skipped` outcome into the scheduler would silently lapse a
+    // question's mastery for a system limitation (no state on the learner's
+    // profile) rather than anything the learner did — the same harm `grade()`
+    // already avoids for `practice_attempts.outcome`, applied here to
+    // `question_mastery` too. Question selection never SELECTS such a
+    // question in the first place (`mastery/selector.ts`'s own
+    // `excludeUnanswerable`), so this only matters for a question id a client
+    // posted rather than was handed.
+    const attempt = await this.prisma.$transaction(async (tx) => {
+      const created = await tx.practiceAttempt.create({
+        data: {
+          userId,
+          questionId: question.id,
+          sessionId: session.id,
+          source: 'practice',
+          inputMode: 'typed',
+          promptMode: 'read',
+          responseText,
+          outcome: finalOutcome,
+          gradingMethod,
+          // THE THREE AI COLUMNS ARE OMITTED ENTIRELY WHEN NO GRADER RAN, rather
+          // than written as null. Both leave the same NULL in Postgres, but a
+          // nullable `Json` column takes `Prisma.DbNull` rather than `null`, and a
+          // conditional spread keeps this write free of a Prisma-specific null
+          // sentinel that a reader would have to decode. The absence IS the
+          // meaning here: null in all three says no grader ever looked at this
+          // response, which is a different fact from `failureCause: 'unknown'`
+          // (schema.prisma, `PracticeFailureCause`).
+          ...(aiGrading
+            ? {
+                failureCause: aiGrading.failureCause,
+                // THE PARSED VERDICT ONLY — never the prompt, never a raw
+                // completion. The prompt is reconstructable from `responseText`
+                // plus `answerSnapshot` at any time, and a raw completion is
+                // exactly the unbounded provider text this column's own comment
+                // excludes.
+                aiFeedback: aiGrading.aiFeedback as unknown as Prisma.InputJsonValue,
+                aiUsageEventId: aiGrading.aiUsageEventId,
+              }
+            : {}),
+          revealed: input.revealed,
+          hintUsed: input.hintUsed,
+          // Absent stays absent. `0` would be a claim that the learner answered
+          // instantly — see the DTO, and `ai_usage_events`' nullable token counts
+          // for the same argument applied to a different unknown.
+          durationMs: input.durationMs ?? null,
+          answeredAt,
+          answerSnapshot: snapshot as unknown as Prisma.InputJsonValue,
+        },
+        include: { question: { select: QUESTION_SELECT } },
+      });
+
+      if (status !== 'state_required') {
+        await this.scheduleMastery(
+          tx,
+          userId,
+          question.id,
+          toAttemptOutcome(finalOutcome, gradingMethod),
+          answeredAt,
+        );
+      }
+
+      return created;
     });
 
     const answeredQuestionIds = new Set<string>(
@@ -785,10 +843,31 @@ export class PracticeService {
       );
     }
 
-    const updated = await this.prisma.practiceAttempt.update({
-      where: { id: attempt.id },
-      data: { outcome: 'correct', gradingMethod: 'self' },
-      include: { question: { select: QUESTION_SELECT } },
+    const scheduledAt = this.clock.now();
+
+    // SYNCHRONOUS MASTERY SCHEDULING, in the SAME transaction as the update —
+    // see `recordAttempt`'s identical comment. `toAttemptOutcome('correct',
+    // 'self')` resolves to `'correct_self_marked'`
+    // (`mastery/outcome-mapping.ts`), which is exactly the discounted-credit
+    // case `nextSchedule`'s own header names: half the ease bump and half the
+    // interval growth of a verified match, because a self-mark is a weaker
+    // signal than one (§9 of this file's header; scheduler.ts's own header).
+    const updated = await this.prisma.$transaction(async (tx) => {
+      const result = await tx.practiceAttempt.update({
+        where: { id: attempt.id },
+        data: { outcome: 'correct', gradingMethod: 'self' },
+        include: { question: { select: QUESTION_SELECT } },
+      });
+
+      await this.scheduleMastery(
+        tx,
+        userId,
+        attempt.questionId,
+        toAttemptOutcome('correct', 'self'),
+        scheduledAt,
+      );
+
+      return result;
     });
 
     this.logger.log(
@@ -871,9 +950,10 @@ export class PracticeService {
   }
 
   /**
-   * The learner's selectable questions, ordered unseen-first.
+   * The learner's selectable questions, mastery-ordered (v2, issue #78).
    *
-   * Three filters, and the third is the one worth naming:
+   * Three filters on the question bank itself, and the third is the one worth
+   * naming:
    *
    *  - the session's test version, so a learner is only ever asked questions
    *    from the bank they will actually sit;
@@ -883,22 +963,34 @@ export class PracticeService {
    *    is emphatic about the distinction, and it is the reason the flag lives
    *    on `civics_questions` rather than being applied to answer resolution.
    *
-   * Unanswerable questions are then dropped and the rest partitioned
-   * unseen-first by `question-selection.ts`; both rules live there, pure and
-   * directly testable, rather than inline in a query.
+   * Unanswerable questions are dropped and the rest ordered by
+   * `mastery/selector.ts`'s `selectQuestionsV2` — due, then weak/lapsed, then
+   * new (by category coverage), then steady, then mastered (sampled by
+   * recency). That file's own header has the full rule; this method's job is
+   * only to hand it the right rows.
    *
-   * **"Seen" is read from `practice_attempts` with a `groupBy`**, which is the
-   * query the shipped `[userId, questionId, answeredAt]` index exists to serve
-   * (§2.2). A `findMany` of every attempt row would return one row per
-   * repetition — a learner who has practised for a month would drag hundreds of
-   * rows across the wire to compute a set of at most 128 ids.
+   * **Mastery is read with one bounded `findMany`**, scoped to exactly the
+   * question ids just selected from the bank — never `where: { userId }`
+   * alone, which would drag in mastery rows for every OTHER test version and
+   * category the learner has ever touched. `question_mastery`'s own
+   * `[userId, dueAt]` index does not cover this shape, but the `id IN (...)`
+   * list this query filters by is bounded to the bank's own size (at most a
+   * few hundred rows), so a table scan over that bound is the same cost class
+   * v1's `practiceAttempt.groupBy` query was.
+   *
+   * A question with NO mastery row reads as `state: 'new'` structurally — see
+   * `mastery/selector.ts`'s `classifyMasteryBucket` — which is the same "never
+   * attempted" fact v1's `seenQuestionIds` used to carry, now derived from the
+   * live scheduling table instead of a second aggregation over
+   * `practice_attempts`. Issue #220's backfill is what makes that substitution
+   * correct for questions attempted before this epic shipped.
    *
    * The pool is re-read on every call rather than persisted with the session.
    * There is no column for a question list (§2.1's table has none), and adding
    * one would be a second place the session's contents are recorded — able to
    * disagree with the attempts that actually happened. Re-selecting, minus what
    * this session has already answered, is stateless, cannot drift, and costs
-   * one bounded query over a bank of at most a few hundred rows.
+   * two bounded queries over a bank of at most a few hundred rows.
    */
   private async candidateQuestions(
     scope: { testVersionCode: string; categoryId: string | null },
@@ -906,29 +998,301 @@ export class PracticeService {
     userId: string,
     excludeQuestionIds?: ReadonlySet<string>,
   ): Promise<QuestionRow[]> {
-    const [questions, seen] = await Promise.all([
-      this.prisma.civicsQuestion.findMany({
-        where: {
-          testVersionCode: scope.testVersionCode,
-          ...(scope.categoryId ? { categoryId: scope.categoryId } : {}),
-          ...(profile.seniorExemption ? { seniorEligible: true } : {}),
-        },
-        select: QUESTION_SELECT,
-        orderBy: [{ number: 'asc' }],
-      }),
-      this.prisma.practiceAttempt.groupBy({
-        by: ['questionId'],
-        where: { userId },
-      }),
-    ]);
+    const questions = await this.prisma.civicsQuestion.findMany({
+      where: {
+        testVersionCode: scope.testVersionCode,
+        ...(scope.categoryId ? { categoryId: scope.categoryId } : {}),
+        ...(profile.seniorExemption ? { seniorEligible: true } : {}),
+      },
+      select: QUESTION_SELECT,
+      orderBy: [{ number: 'asc' }],
+    });
 
-    return selectQuestions(questions as unknown as QuestionRow[], {
+    const masteryByQuestionId = await this.loadMasteryByQuestionId(
+      userId,
+      questions.map((question: { id: string }) => question.id),
+    );
+
+    return selectQuestionsV2(questions as unknown as QuestionRow[], {
       learnerStateCode: profile.stateCode,
-      seenQuestionIds: new Set<string>(
-        (seen as { questionId: string }[]).map((row) => row.questionId),
-      ),
+      masteryByQuestionId,
+      now: this.clock.now(),
       excludeQuestionIds,
     });
+  }
+
+  /**
+   * This user's `question_mastery` rows for exactly the given question ids,
+   * as the plain snapshot `mastery/selector.ts` (and `getQueue` below) read —
+   * never the whole Prisma row, so a caller cannot accidentally start reading
+   * a column the selection rule does not use.
+   */
+  private async loadMasteryByQuestionId(
+    userId: string,
+    questionIds: readonly string[],
+  ): Promise<ReadonlyMap<string, QuestionMasterySnapshot>> {
+    if (questionIds.length === 0) {
+      return new Map();
+    }
+
+    const rows = (await this.prisma.questionMastery.findMany({
+      where: { userId, questionId: { in: questionIds as string[] } },
+      select: {
+        questionId: true,
+        state: true,
+        dueAt: true,
+        lapses: true,
+        correctStreak: true,
+        lastAttemptAt: true,
+      },
+    })) as ({ questionId: string } & QuestionMasterySnapshot)[];
+
+    return new Map(rows.map((row) => [row.questionId, row] as const));
+  }
+
+  /**
+   * Advance one question's `question_mastery` row by one graded attempt,
+   * inside the CALLER's own transaction (issue #78, epic #54 / E5).
+   *
+   * Three steps, and every one of them delegates rather than re-derives:
+   *
+   *  1. Read the existing row (`tx.questionMastery.findUnique`, by the
+   *     `[userId, questionId]` compound unique key) and map it to a
+   *     `MasteryRecord` — or `initialMasteryRecord()` when this question has
+   *     never been attempted before, exactly as `scheduler.ts`'s own doc
+   *     comment on that function describes.
+   *  2. Call `nextSchedule` — the pure SM-2 variant (issue #75). NOTHING here
+   *     re-implements or approximates its state machine; this method's only
+   *     job is getting a `MasteryRecord` in and a `MasteryRecord` out.
+   *  3. `upsert` the result back, keyed by the same compound unique index —
+   *     `create` for a question with no prior row, `update` for one that
+   *     already had one. One upsert, not a read-then-branch write, so a
+   *     concurrent first attempt at the same question cannot race this method
+   *     into inserting the row twice (the `@@unique([userId, questionId])`
+   *     constraint would reject the loser anyway; `upsert` is what lets that
+   *     loser succeed as an update instead of erroring).
+   *
+   * `outcome` is already the caller's `AttemptOutcome` — `recordAttempt` and
+   * `selfMarkAttempt` both produce it via `mastery/outcome-mapping.ts` before
+   * calling this method, so this method itself needs no knowledge of
+   * `practice_attempts.outcome` or `.gradingMethod` at all.
+   *
+   * A FOURTH STEP, added by issue #82 (epic #54 / E5, memory-model.md §7):
+   * once the `question_mastery` row is upserted, check whether this exact
+   * mastery event — this learner's CURRENT journey stage, plus the state
+   * this row was in before and after this attempt — also advances
+   * `learner_profiles.stage` (`oriented -> learning`, `learning ->
+   * remembering`). `nextStageOnMasteryEvent` is `journey/stage-transitions.ts`'s
+   * own pure decision; this method's only job is handing it the right three
+   * values and, when it says to, writing the result — inside this SAME
+   * transaction, never a separate one (§4's synchronous-scheduling rationale
+   * applies identically to the stage write: an attempt recorded without its
+   * stage consequence would be a fact that silently never reached the
+   * learner's own journey state, and nothing sweeps up that gap later).
+   */
+  private async scheduleMastery(
+    tx: Prisma.TransactionClient,
+    userId: string,
+    questionId: string,
+    outcome: AttemptOutcome,
+    now: Date,
+  ): Promise<void> {
+    const existing = await tx.questionMastery.findUnique({
+      where: { userId_questionId: { userId, questionId } },
+    });
+
+    const current: MasteryRecord = existing
+      ? {
+          state: existing.state,
+          dueAt: existing.dueAt,
+          intervalDays: existing.intervalDays,
+          ease: existing.ease,
+          correctStreak: existing.correctStreak,
+          lapses: existing.lapses,
+          totalAttempts: existing.totalAttempts,
+          distinctCorrectDays: existing.distinctCorrectDays,
+          lastOutcome: fromStoredMasteryOutcome(existing.lastOutcome),
+          lastAttemptAt: existing.lastAttemptAt,
+        }
+      : initialMasteryRecord();
+
+    const next = nextSchedule(current, outcome, now);
+
+    await tx.questionMastery.upsert({
+      where: { userId_questionId: { userId, questionId } },
+      create: {
+        userId,
+        questionId,
+        state: next.state,
+        dueAt: next.dueAt,
+        intervalDays: next.intervalDays,
+        ease: next.ease,
+        correctStreak: next.correctStreak,
+        lapses: next.lapses,
+        totalAttempts: next.totalAttempts,
+        distinctCorrectDays: next.distinctCorrectDays,
+        lastOutcome: toStoredMasteryOutcome(outcome),
+        lastAttemptAt: next.lastAttemptAt,
+      },
+      update: {
+        state: next.state,
+        dueAt: next.dueAt,
+        intervalDays: next.intervalDays,
+        ease: next.ease,
+        correctStreak: next.correctStreak,
+        lapses: next.lapses,
+        totalAttempts: next.totalAttempts,
+        distinctCorrectDays: next.distinctCorrectDays,
+        lastOutcome: toStoredMasteryOutcome(outcome),
+        lastAttemptAt: next.lastAttemptAt,
+      },
+    });
+
+    // Guarded on the row existing at all rather than upserted: a practice
+    // attempt is unreachable without an oriented, existing `learner_profiles`
+    // row (`requireOrientedProfile`), so `findUnique` returning nothing here
+    // would itself be the surprise. The guard costs one null check and
+    // refuses to crash the whole attempt write over a stage nicety if that
+    // invariant is ever violated.
+    const learnerProfile = await tx.learnerProfile.findUnique({
+      where: { userId },
+      select: { stage: true },
+    });
+
+    if (learnerProfile) {
+      const nextStage = nextStageOnMasteryEvent(
+        learnerProfile.stage,
+        current.state,
+        next.state,
+      );
+
+      if (nextStage !== null) {
+        await tx.learnerProfile.update({
+          where: { userId },
+          data: { stage: nextStage },
+        });
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Queue (issue #78, epic #54 / E5)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Queue counts for the Practice page's picker (`GET /api/practice/queue`).
+   *
+   * Every count is produced by `mastery/selector.ts`'s `classifyMasteryBucket`
+   * — the SAME function `candidateQuestions` above uses to order a session's
+   * questions — so this endpoint can never disagree with what starting a
+   * session right now would actually select. `total` and the bank read are
+   * scoped identically to `candidateQuestions` too: the caller's own
+   * `testVersionCode`, and `seniorEligible` only, under the 65/20 exemption.
+   *
+   * Uses `requireOrientedProfile`, the same guard `createSession` uses: there
+   * is no honest queue to report for a learner whose test version has not
+   * been resolved yet.
+   */
+  async getQueue(userId: string): Promise<PracticeQueueResponse> {
+    const profile = await this.requireOrientedProfile(userId);
+    const testVersionCode = profile.testVersionCode as string;
+
+    const rawQuestions = await this.prisma.civicsQuestion.findMany({
+      where: {
+        testVersionCode,
+        ...(profile.seniorExemption ? { seniorEligible: true } : {}),
+      },
+      select: { id: true, categoryId: true, dynamicScope: true },
+    });
+
+    // BUG FIX (issue #78 follow-up, caught writing integration coverage): a
+    // `state`-scope question for a learner with no state on their profile was
+    // being counted here (as `new`, most likely) even though
+    // `candidateQuestions`'s `selectQuestionsV2` — via `excludeUnanswerable`
+    // — would never let a session select it. That contradicted both this
+    // file's own header ("can never disagree with what starting a session
+    // right now would actually select") and the DTO's own doc comment on
+    // `total` ("scoped ... exactly as session selection is"). Applying the
+    // SAME `excludeUnanswerable` filter session selection uses, over the
+    // SAME `profile.stateCode`, keeps the two in agreement.
+    const questions = excludeUnanswerable(
+      rawQuestions as { id: string; categoryId: string; dynamicScope: DynamicScope }[],
+      profile.stateCode,
+    );
+
+    const masteryByQuestionId = await this.loadMasteryByQuestionId(
+      userId,
+      questions.map((question: { id: string }) => question.id),
+    );
+
+    const now = this.clock.now();
+
+    let due = 0;
+    let weak = 0;
+    let learning = 0;
+    let mastered = 0;
+    const newCountByCategory = new Map<string, number>();
+
+    for (const question of questions as { id: string; categoryId: string }[]) {
+      const bucket = classifyMasteryBucket(masteryByQuestionId.get(question.id), now);
+
+      switch (bucket) {
+        case 'due':
+          due += 1;
+          break;
+        case 'weak':
+          weak += 1;
+          break;
+        case 'steady':
+          learning += 1;
+          break;
+        case 'mastered':
+          mastered += 1;
+          break;
+        case 'new':
+          newCountByCategory.set(
+            question.categoryId,
+            (newCountByCategory.get(question.categoryId) ?? 0) + 1,
+          );
+          break;
+      }
+    }
+
+    const categories =
+      newCountByCategory.size === 0
+        ? []
+        : await this.prisma.civicsCategory.findMany({
+            where: { id: { in: [...newCountByCategory.keys()] } },
+            select: { id: true, name: true },
+          });
+
+    const categoryNameById = new Map(
+      (categories as { id: string; name: string }[]).map((category) => [category.id, category.name]),
+    );
+
+    const newTotal = [...newCountByCategory.values()].reduce((sum, count) => sum + count, 0);
+
+    return {
+      testVersionCode,
+      total: questions.length,
+      due,
+      weak,
+      learning,
+      mastered,
+      new: {
+        total: newTotal,
+        byCategory: [...newCountByCategory.entries()]
+          .map(([categoryId, newCount]) => ({
+            categoryId,
+            categoryName: categoryNameById.get(categoryId) ?? categoryId,
+            newCount,
+          }))
+          // Most-uncovered category first — the same signal the selector's
+          // own category-coverage rule reacts to, surfaced here for a human
+          // to read instead of an algorithm to consume.
+          .sort((a, b) => b.newCount - a.newCount),
+      },
+    };
   }
 
   /**
