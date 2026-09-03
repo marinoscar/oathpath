@@ -1368,8 +1368,8 @@ one thing to do next.
     "nextAction": {
       "kind": "interview_countdown",
       "title": "12 days until your interview",
-      "reason": "Start with the material, then build up to full practice.",
-      "path": "/learn"
+      "reason": "Practice is the closest thing to the real interview. A few questions today, and the day itself will feel familiar.",
+      "path": "/practice"
     }
   }
 }
@@ -1382,10 +1382,34 @@ one thing to do next.
 | `dailyGoal.tracked` | Literally `false` for the whole of this release — nothing measures practice time yet, and there is deliberately no `minutesToday`: a displayed `0` would be indistinguishable from a learner who did nothing today |
 | `nextAction` | Produced by a pure function over the profile — no model call — so two consecutive loads return the same answer |
 
-`nextAction.kind` is one of exactly three values in this release —
-`orientation`, `interview_countdown`, `explore` — and each maps to one fixed,
-non-redirecting route. A later epic adding practice, review, or the
-interview stage widens this set; nothing else does.
+`nextAction.kind` is one of five values today — `orientation`,
+`interview_countdown`, `review`, `practice`, `explore` — each mapping to one
+fixed, non-redirecting route (`apps/api/src/journey/next-action.ts`'s
+`NEXT_ACTION_PATHS`). `practice` (issue #81, epic #52 / E3) and `review`
+(issue #82, epic #54 / E5) were both added after this release's original
+three; the interview stage (E8) still widens this set further.
+
+`review` is produced only by `apps/api/src/journey/study-coach.ts`'s
+`recommendStudyAction` — never by this route's own recommender directly —
+when the caller has `dueCount + lapsedCount > 0` question(s) waiting (the
+same `due`/`weak` counts `GET /practice/queue` below reports). Ranked between
+`interview_countdown` and `practice`:
+
+```json
+{
+  "kind": "review",
+  "title": "Review 4 questions.",
+  "reason": "You have 4 questions ready to review — reviewing what you've already learned keeps it from slipping.",
+  "path": "/practice"
+}
+```
+
+`path` is `/practice` for `interview_countdown`, `review`, and `practice`
+alike — three kinds naming one destination, not three routes — and the
+Practice page reads `nextAction.kind` itself to decide how to bias what it
+shows. See [`docs/specs/memory-model.md`](specs/memory-model.md) §6 for the
+full decision (including why the fire condition and the reason text's number
+are always the same sum, never `dueCount` alone).
 
 ---
 
@@ -2242,6 +2266,121 @@ finished stays the moment they finished.
 - 404 Not Found — no such session for this caller
 - 409 Conflict — the session is `abandoned` (it was closed by a later
   session start and has no completion to record)
+
+---
+
+#### GET /practice/queue
+Issue #78, epic #54 (E5 "Memory"). Counts for the Practice page's picker —
+how many questions are due, struggling, new (by category), still in
+progress, or mastered — for the caller's own resolved test version. A
+**read-only counts endpoint**; it does not create a session.
+
+Every count comes from `apps/api/src/practice/mastery/selector.ts`'s
+`classifyMasteryBucket` — the same function `POST /practice/sessions` uses
+to order a `quick` or `category` session's questions — so this endpoint can
+never disagree with what starting a session right now would actually
+select. Scoped identically to session creation: the caller's own test
+version, and `seniorEligible` only under the 65/20 accommodation. Full
+design: [`docs/specs/memory-model.md`](specs/memory-model.md) §5.
+
+**Request Body:** none.
+
+**Response:**
+```json
+{
+  "data": {
+    "testVersionCode": "v2025",
+    "total": 128,
+    "due": 4,
+    "weak": 2,
+    "new": {
+      "total": 92,
+      "byCategory": [
+        { "categoryId": "uuid", "categoryName": "American Government", "newCount": 40 }
+      ]
+    },
+    "learning": 26,
+    "mastered": 4
+  }
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `total` | The whole bank's size for this test version, under the same `seniorEligible` scoping session creation uses |
+| `due` | `state IN (review, lapsed)` with `dueAt` already passed |
+| `weak` | A `lapsed` question (any `dueAt`), or a `learning`/`review` question with repeated lapses or a broken correct streak |
+| `new.total` / `new.byCategory` | Never-attempted questions (or `state: 'new'`), broken down by category so the picker can show where coverage is thinnest |
+| `learning` | Ordinary in-progress questions — attempted, not due, not struggling, not yet mastered (`mastery/selector.ts`'s internal `steady` bucket, under this endpoint's own `learning` field name) |
+| `mastered` | Verified questions — the pool the selector samples from, least-recently-attempted first, once everything else is exhausted |
+
+There is deliberately **no `kind: 'review' | 'weak' | 'mixed'` session** this
+endpoint's counts feed into yet — those three `PracticeSessionKind` values
+stay declared in the database enum and unwired in `POST /practice/sessions`
+(see that route's own `kind` table above). A learner acts on these counts
+today by starting an ordinary `quick` or `category` session, which the
+mastery-aware ordering already serves due and weak content from first.
+
+**Error Cases:**
+- 400 Bad Request — the caller has not finished orientation, so no test
+  version is resolved
+
+---
+
+### Progress
+
+Issue #86, epic #54 (E5 "Memory"). Coverage and mastery, by category, for
+the Progress page. Design rationale lives in
+[`docs/specs/memory-model.md`](specs/memory-model.md) §8; this section
+covers only the wire contract.
+
+**`@Auth()` with no permissions**, caller-scoped exactly like every other
+per-user route in this product: the learner is resolved from
+`@CurrentUser('id')`, never from a path, query, or body parameter — every
+authenticated user owns their own mastery data, so gating this route would
+leave the default Viewer role unable to see their own progress.
+
+#### GET /progress/mastery
+The caller's own coverage and mastery, by `question_mastery.state`, for
+their resolved test version — a different question from `GET
+/practice/queue` above (that endpoint answers "what should a session started
+right now select"; this one answers "how much of the bank have I covered,
+and how well"). This is a read aggregate with no scheduling side effect of
+its own — it never calls the scheduler and never writes.
+
+**Request Body:** none.
+
+**Response:**
+```json
+{
+  "data": {
+    "testVersionCode": "v2025",
+    "totalQuestions": 128,
+    "attempted": 64,
+    "byState": { "new": 64, "learning": 20, "review": 30, "lapsed": 4, "mastered": 10 },
+    "categories": [
+      {
+        "categoryId": "uuid",
+        "categoryName": "American Government",
+        "totalQuestions": 57,
+        "byState": { "new": 20, "learning": 10, "review": 15, "lapsed": 2, "mastered": 10 },
+        "masteredCount": 10
+      }
+    ]
+  }
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `totalQuestions` | The whole bank's size for this test version — **not** scoped by `seniorEligible`, unlike `GET /practice/queue`'s `total`: this is coverage of the full official bank, not of a session's own candidate pool |
+| `attempted` | `totalQuestions - byState.new` |
+| `byState` | Every question in the bank, grouped by the caller's own `question_mastery.state`; a question with no row counts as `new` |
+| `categories[].masteredCount` | Convenience duplicate of that category's own `byState.mastered` — the number the Progress page's per-category ring reads directly |
+
+**Error Cases:**
+- 400 Bad Request — the caller has not finished orientation, so no test
+  version is resolved
 
 ---
 
