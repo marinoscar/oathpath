@@ -77,8 +77,8 @@ a v2.
 | — | AI configuration | Server model-role bindings (admin) plus mandatory per-user BYOK OpenAI keys; the one door (`AiDispatchService`) every later AI feature calls through | Foundation — required before E4, E8, E9, E10, E11 | done | [#25](https://github.com/marinoscar/oathpath/issues/25) |
 | E1 | Journey shell | Four-destination navigation (Home, Learn, Practice, Progress), the `Clock` provider, the learner profile (test version, senior exemption, interview date, state, goal), orientation, and home's `nextAction` contract | — | done | [#50](https://github.com/marinoscar/oathpath/issues/50) |
 | E2 | Civics content | The versioned, provenance-tracked USCIS question bank for both test versions, dynamic answers with effective dates, and the Learn page | E1 | done<sup>†</sup> | [#51](https://github.com/marinoscar/oathpath/issues/51) |
-| E3 | Practice sessions | Deterministic (exact-match + normalisation) practice loop and `practice_attempts`, the one evidence table every later epic reads | E1, E2 | in progress<sup>‡</sup> | [#52](https://github.com/marinoscar/oathpath/issues/52) |
-| E4 | AI Evaluator and Teacher | `AiDispatchService.run`, the `FakeAiProvider`, semantic grading with failure causes, streaming explanations — the first AI feature | #25, E2, E3 | in progress<sup>‡</sup> | [#53](https://github.com/marinoscar/oathpath/issues/53) |
+| E3 | Practice sessions | Deterministic (exact-match + normalisation) practice loop and `practice_attempts`, the one evidence table every later epic reads | E1, E2 | done<sup>‡</sup> | [#52](https://github.com/marinoscar/oathpath/issues/52) |
+| E4 | AI Evaluator and Teacher | `AiDispatchService.run`, the `FakeAiProvider`, semantic grading with failure causes, streaming explanations — the first AI feature | #25, E2, E3 | done<sup>‡</sup> | [#53](https://github.com/marinoscar/oathpath/issues/53) |
 | E5 | Memory | Spaced repetition (`question_mastery`), verified mastery (correct on ≥3 distinct days), the deterministic Study Coach recommender, Progress v1 | E1, E3 | not started | [#54](https://github.com/marinoscar/oathpath/issues/54) |
 | E6 | Readiness and Progress | The explainable, capped readiness score (`readiness_snapshots`), Progress v2, the readiness-vs-engagement separation | E3, E5 | not started | [#55](https://github.com/marinoscar/oathpath/issues/55) |
 | E7 | Habit | Daily goal, streaks with protection, session-end celebrations, three reminder notification events on an hourly cron | E1, E3, E5 | not started | [#56](https://github.com/marinoscar/oathpath/issues/56) |
@@ -129,14 +129,20 @@ verified against the official source — E4's grader and E8's interview engine
 ground their judgments in these rows, so that distinction matters to them
 specifically.
 
-<sup>‡</sup> **E3 and E4 have every child issue implemented and merged, and are
-`in progress` rather than `done` for one reason: nobody has run their
-Playwright specs.** `tests/e2e/specs/practice-session.spec.ts` (#84) and
-`ai-evaluation.spec.ts` (#131) were written against the real component
-sources, they typecheck, and all 17 specs register under `playwright test
---list` — but the environment they were authored in had no Docker daemon, so
-neither has ever walked the loop against the compose stack. That is the
-human check §6 requires, and it is the only thing outstanding.
+<sup>‡</sup> **E3 and E4 are closed and marked `done` by the repository owner,
+with one of this section's human checks knowingly outstanding** — the same
+deliberate call, on the same terms, that E2 records above. All nineteen child
+issues are merged and CI is green on `main`; what follows is not a defect list
+but a record of what a later reader should not assume was verified.
+
+1. **Neither epic's Playwright spec has ever been executed.**
+   `tests/e2e/specs/practice-session.spec.ts` (#84) and
+   `ai-evaluation.spec.ts` (#131) were written against the real component
+   sources, they typecheck, and all 17 specs across 6 files register under
+   `playwright test --list` — but the environment they were authored in had no
+   Docker daemon, so neither has walked the loop against the compose stack.
+   This is §6's human check, and it is the one thing `done` does not cover
+   here. #84 and #131 can be reopened if it is picked up.
 
 Two smaller facts a later reader should not have to discover:
 
@@ -155,6 +161,12 @@ not lift it for them: they ground every judgement and every explanation in
 `civics_answers` rows, so "grounded in the database" is exactly as true as the
 database is — a transcription no human has checked page by page is still a
 transcription no human has checked.
+
+Nothing downstream should read E3's or E4's `done` as meaning the practice loop
+or the grading ladder has been observed working end to end in a browser against
+a real database. E5 schedules on `practice_attempts`, E6 scores it and E8
+writes into it, so the first epic to actually run the compose stack is also the
+first to find out.
 
 ---
 
