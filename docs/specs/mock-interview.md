@@ -320,14 +320,17 @@ the right pool."
 ### 3.1 The seeded PRNG
 
 ```ts
-// ADDED BY THIS EPIC — apps/api/src/interviews/interview-engine.ts (pure —
-// no Nest, no Prisma, no Clock, no import statement at all: the identical
-// shape nextSchedule (memory-model.md §3), computeReadiness
-// (readiness-model.md §5), and recommendNextAction/recommendStudyAction
-// (journey-shell.md §4.2, memory-model.md §6) already establish for a rule
-// that must produce the same output for the same input forever, and must be
-// directly unit-testable, table of cases and all, with no database in the
-// loop).
+// ADDED BY THIS EPIC — apps/api/src/interviews/engine/ (pure — a four-file
+// directory, `phases.ts`, `seeded-random.ts`, `officer-lines.ts`,
+// `interview-engine.ts`, plus an `index.ts` barrel, so it imports its own
+// siblings freely. What makes it "pure" is not the absence of imports — it
+// is that it reaches no framework and no I/O: no Nest, no Prisma, no Clock,
+// no Date, exactly the identical shape nextSchedule (memory-model.md §3),
+// computeReadiness (readiness-model.md §5), and
+// recommendNextAction/recommendStudyAction (journey-shell.md §4.2,
+// memory-model.md §6) already establish for a rule that must produce the
+// same output for the same input forever, and must be directly
+// unit-testable, table of cases and all, with no database in the loop).
 
 /** FNV-1a, 32-bit — a fast, well-known, non-cryptographic string hash. Used
  *  only to turn the interview's own uuid into a numeric seed; nothing about
@@ -469,7 +472,7 @@ stop reasons, in this order:
 |---|---|---|
 | `threshold_reached` | `correct >= threshold` | `true` |
 | `threshold_unreachable` | `asked - correct > N - threshold` (the remaining questions can no longer close the gap) | `false` |
-| `all_asked` | `asked === N`, and neither of the above fired first | `correct >= threshold` |
+| `all_asked` | `civicsAsked >= civicsPlan.length`, and neither of the above fired first | `correct >= threshold` |
 
 `threshold_unreachable`'s condition is exactly "the number of questions
 already missed exceeds how many misses the ask-list can still afford" —
@@ -483,6 +486,30 @@ of the first two conditions is true, the engine stops there and never asks
 the remaining questions in the first place, so `all_asked` and
 `threshold_reached`/`threshold_unreachable` are mutually exclusive by
 construction, not merely by the table's ordering.
+
+**`all_asked` reads the length of the ask-list actually built, not `N`
+itself, and the difference matters whenever the eligible pool (§3.2) is
+smaller than `N`.** Stating the condition as `asked === N` is
+under-specified in exactly that case: `civicsPlan` (§3.3's `askList`) is
+`shuffled.slice(0, N)`, which is shorter than `N` the moment the pool itself
+holds fewer than `N` eligible questions — a narrow senior-eligible pool, a
+learner whose state exclusions (§3.2) trim the bank further — and `asked`
+can then never reach `N` at all. `asked === N` would simply never become
+true, and the phase would run off the end of the plan with no stop reason
+ever firing. The engine instead evaluates `civicsAsked >=
+civicsPlan.length`, which is identical to `asked === N` whenever the pool is
+full (`civicsPlan.length === N`) and terminates honestly on a short pool
+instead of hanging.
+
+**The threshold itself is never lowered to fit a short pool.** A short
+ask-list can still resolve as `threshold_reached` or
+`threshold_unreachable` before it runs out, exactly as a full one can; what
+changes is only that `all_asked` can arrive having asked fewer than `N`
+questions, and — because the threshold `T` is unchanged — a pool too small
+to ever reach `T` correct answers reports `passed_civics: false` at
+`all_asked` rather than the engine quietly reducing `T` to whatever the
+short pool could still deliver. An unreachable threshold is reported as
+unreachable, not made reachable by shrinking the bar to match the bank.
 
 **The early stop is a first-class outcome, not an optimisation to skip
 unnecessary work.** It is what the *real* USCIS civics test does — an
@@ -1066,6 +1093,17 @@ reasoning, not redesigned:
     only so a caller can tell "nothing was attempted" apart from "something
     was attempted and did not finish," the same distinction
     `ai-evaluation.md` §4/§9 already draw for the tutor's explain stream.
+
+  **All three terminal frames — `done`, `unavailable`, and `error` alike —
+  carry the turn's outcome** (the new officer turns, the phase, the turn
+  index, progress, and whether the interview now awaits completion), not
+  only `done`. This follows directly from §5.2: the interview advances in
+  every case — same next question, same grading, same stop evaluation —
+  whichever of the three terminal events fires, only the officer's wording
+  differs. A client therefore applies the turn outcome from whichever
+  terminal frame it actually receives; treating `unavailable`/`error` as
+  carrying no state to render would be dropping a turn that really
+  happened.
 - **Auth**: an ordinary `Authorization: Bearer …` header, never a `?token=`
   query parameter — the identical reasoning `explainQuestion`'s own
   comment gives (a token in a URL lands in access logs, browser history,

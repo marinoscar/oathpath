@@ -539,6 +539,20 @@ not inputs to the readiness engine — see
 and [`docs/specs/habit-streaks.md`](docs/specs/habit-streaks.md) §4.6 for
 the endpoint's full design.
 
+### Interviews (Per User)
+- `POST /api/interviews` - Start a mock interview; test version and senior accommodation resolved from `learner_profiles`, never the request; returns the officer's opening turn
+- `POST /api/interviews/{id}/turns` - Submit the applicant's reply and stream (SSE) the officer's response; the engine decides the question, grade and stop, the `tutor` role only supplies the acknowledgement wording
+- `POST /api/interviews/{id}/complete` - Finish the interview, compute the debrief, and trigger a readiness recompute; idempotent
+- `GET /api/interviews` - List the caller's own interviews, newest first, paginated
+- `GET /api/interviews/{id}` - Resume an in-progress interview or re-read a completed one's debrief
+
+All five are `@Auth()` with no permissions, and no route accepts a user
+id — every authenticated learner owns their own interview history exactly
+as they own their own practice attempts, their own learner profile, and
+their own readiness snapshots. Another learner's interview id is a **404,
+not a 403**. See [`docs/specs/mock-interview.md`](docs/specs/mock-interview.md)
+§12 and [`docs/API.md`](docs/API.md#interviews).
+
 ### Health
 - `GET /api/health/live` - Liveness check
 - `GET /api/health/ready` - Readiness check (includes DB)
@@ -639,6 +653,14 @@ data, exactly as they own their own readiness data and their own practice
 attempts, and no route accepts a user id. See
 [`docs/specs/habit-streaks.md`](docs/specs/habit-streaks.md) §4.6.
 
+**Mock interview adds no permission strings either, for the same reason.**
+All five `/api/interviews*` routes are `@Auth()` with no permissions: every
+authenticated learner owns their own interview history, exactly as they
+own their own practice attempts and their own readiness snapshots, and no
+route accepts a user id — `@CurrentUser('id')` is the only source of one,
+so there is no "read another learner's interview" permission to add in the
+first place. See [`docs/specs/mock-interview.md`](docs/specs/mock-interview.md) §12.
+
 ## Database Tables
 
 - `users` - User accounts with profile info
@@ -661,11 +683,13 @@ attempts, and no route accepts a user id. See
 - `civics_questions` - One version's questions: number, category, prompt, `senior_eligible`, `dynamic_scope` (`none`/`national`/`state`)
 - `civics_answers` - Accepted answers per question/state/slot; `effective_to IS NULL` means currently correct (no `is_current` flag — see `docs/specs/civics-content.md` §3)
 - `practice_sessions` - One row per practice run (Quick 5 or by-category): kind, status, planned count, cached completion `summary`
-- `practice_attempts` - One row per question ever answered, from a session or (from E8) a mock interview — the single evidence table E5/E6/E7 read and E8 writes into. Three columns record the AI grading rung (E4, epic #53), null together on every deterministically-graded attempt: `failure_cause` (why it missed, from a closed six-value enum — `null` means no grader ran, `unknown` means one ran and honestly couldn't tell), `ai_feedback` (the grader's structured verdict, verbatim), `ai_usage_event_id` (the `ai_usage_events` row that call wrote)
+- `practice_attempts` - One row per question ever answered, from a session or (from E8) a mock interview — the single evidence table E5/E6/E7 read and E8 writes into. `mock_interview_id` (nullable, E8, epic #57) is set only when `source: mock_interview`, and `response_text` is `null` for either a skip or a `mock_interview` attempt whose interview declined transcript retention — two distinct meanings for the same null, both documented on the column itself. Three columns record the AI grading rung (E4, epic #53), null together on every deterministically-graded attempt: `failure_cause` (why it missed, from a closed six-value enum — `null` means no grader ran, `unknown` means one ran and honestly couldn't tell), `ai_feedback` (the grader's structured verdict, verbatim; omitted entirely, not merely null, for a `mock_interview` attempt with retention off), `ai_usage_event_id` (the `ai_usage_events` row that call wrote)
 - `question_mastery` - One row per `(user, question)` pair once that question first produces a schedulable outcome (E5, epic #54): `state` (`new`/`learning`/`review`/`lapsed`/`mastered`), `due_at`, `interval_days`, `ease`, `correct_streak`, `lapses`, `total_attempts`, `distinct_correct_days` (the column that makes "correct on ≥3 distinct days" enforceable), `last_outcome`, `last_attempt_at`. No row means `new` — never a row that says so. Updated synchronously, inside the same transaction as the `practice_attempts` write that triggers it, by `nextSchedule` (`apps/api/src/practice/mastery/scheduler.ts`); see `docs/specs/memory-model.md` §2-§3
 - `readiness_snapshots` - One row per computed readiness score (E6, epic #55): `score` (0-100, structurally capped at 75 for a typed-only learner — `english`/`spoken`/`interview` sum to 0.25 weight and are 0 with no such evidence), the full `components`/`evidenceCounts` breakdown for all eight components, `cap_reason` (`'typed_only'`/`null`), `top_recommendation`, and the learner's `stage` at computation time, all frozen so a past snapshot stays self-explaining after the mastery rows it summarized move on. `narrative`/`narrative_generated_at` are nullable and filled in lazily, on the caller's own AI key, only from the request path (never the nightly cron). See `docs/specs/readiness-model.md` §4-§5
 - `daily_activity` - One row per `(user, local calendar day)` (E7, epic #56): `activity_date` (`@db.Date`, the learner's LOCAL day, not an instant), `tz_used` (the IANA zone that day was actually computed in, frozen at write time rather than re-derived from the learner's possibly-since-changed profile), `practice_seconds`/`attempts`/`correct`, `goal_met` (monotonic — once true, never flips back for the same row), `freeze_used` (true only when this row exists to record that a streak freeze covered a day with no practice at all). `@@unique([userId, activityDate])` is both the ordinary-accrual upsert key and the freeze-settlement idempotency key. Has no foreign key, relation, or column reachable from `readiness_snapshots` or the readiness engine — not an input to readiness, structurally, never merely by convention; see `docs/ARCHITECTURE.md` §5.6. See `docs/specs/habit-streaks.md` §2-§4
 - `learner_profiles.streak_freezes` / `learner_profiles.streak_freezes_granted_at` - The freeze budget (E7, epic #56): an integer ceiling of 2 (`STREAK_FREEZE_MAX`, `apps/api/src/engagement/streaks/freeze-settlement.ts`), replenished at most once per 7 days, and the timestamp of the last grant. Read and written only by `EngagementService`'s settlement pass (`GET /api/engagement/summary`'s own request path — engagement's sole recompute trigger, deliberately unlike readiness's two). See `docs/specs/habit-streaks.md` §4.3-§4.5
+- `mock_interviews` - One row per mock interview run (E8, epic #57): `mode` (`text`/`voice`, only `text` wired), `status` (`in_progress`/`completed`/`abandoned`), `test_version_code` and `senior_exemption` (frozen from `learner_profiles` at creation, never re-read), `civics_asked`/`civics_correct`/`passed_civics` (a derived running tally, not a second source of truth over the `practice_attempts` rows), `result` (the cached debrief JSON, written once at completion), and `transcript_retained` (`@default(false)` **at the database level** — the conservative retention default must survive a bug, not only a correctly-written call site). See `docs/specs/mock-interview.md` §8, §12
+- `mock_interview_turns` - One row per line of an interview's conversation, in order (E8, epic #57): `role` (`officer`/`applicant`), `phase`, `question_id` (set only on a civics officer turn), `attempt_id` (set only on a civics applicant turn — the `practice_attempts` row it produced), and `text`, which is written empty (not null) for an applicant turn when the interview's `transcript_retained` is `false` — the turn's structure survives; the learner's words do not. See `docs/specs/mock-interview.md` §8.2
 
 ## Access Control: Email Allowlist
 

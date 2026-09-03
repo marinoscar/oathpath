@@ -2018,6 +2018,101 @@ as "not configured".
 
 ---
 
+## 16. What OathPath Deliberately Does Not Collect: Mock Interview PII
+
+Issue #133/#154, epic #57 (E8 "Mock interview — text mode"). This section
+exists so the product's PII stance for the mock interview lives somewhere
+other than a closed issue — a stance that exists only there is not a
+stance, it is a memory. Full design rationale — the phase sequence, the
+engine/model boundary, the rejected alternatives — lives in
+[`docs/specs/mock-interview.md`](specs/mock-interview.md) §8; the table
+below is reproduced here (not merely linked) because a security document
+that says "see the spec" for its own core claim is not a security document.
+
+### No real N-400 answers are ever asked for
+
+The interview's `n400` phase asks the applicant to rehearse three
+application-review topics out loud, but **OathPath does not ask for,
+collect, or store a learner's real N-400 answers** — no travel dates, no
+addresses, no employment history, no family details, no arrest history.
+Every prompt names a *topic* the real interview covers ("The officer will
+ask about your travel history outside the United States. Practise how you
+would answer.") and never asks a question whose honest answer would be a
+real fact about the applicant.
+
+These prompts live in `apps/api/src/interviews/engine/officer-lines.ts`
+(`N400_PROMPTS`), and **they are code-owned and reviewable, never
+model-generated.** That is the structural reason this cannot drift: a
+model asked to improvise "ask the applicant something like a real N-400
+question" will, on some fraction of runs, produce a question specific
+enough that a genuine answer to it *is* PII — and no code review gate
+exists on that drift. A fixed, hand-written list changes only through a
+diff, in front of a reviewer, exactly like `civics_questions` content.
+
+### Transcript retention defaults to off, at the database level
+
+`mock_interviews.transcript_retained` is a **boolean column with
+`@default(false)`** — not only an application-code default a call site
+could omit or get wrong. A code path that forgets to pass this flag at all
+(a script, a backfill, a future entry point) still gets the private
+outcome, because the column itself refuses to retain the learner's words
+by default. It is chosen once, per interview, before that interview
+starts, and is never a `user_settings` field a learner sets once and
+forgets — a standing setting would apply to a future interview a learner
+starts without re-checking what their prior self configured.
+
+### What is retained in each case
+
+| What | retention off (default) | retention on |
+|---|---|---|
+| Officer turn text (greeting, prompts, question text) | stored | stored |
+| Applicant turn text (everything the learner typed) | **not stored** — the turn row is written with empty text | stored |
+| `practice_attempts.response_text` for civics answers | `null` | stored |
+| `practice_attempts.ai_feedback` (the grader's structured verdict) | omitted | stored |
+| `practice_attempts.outcome` / `grading_method` / `failure_cause` / `answer_snapshot` | stored | stored |
+
+**The evidence survives; the learner's own words do not.** Every row that
+records *what happened* — whether an answer was correct, how it was
+graded, what the accepted answers were at the time — is stored regardless
+of the retention setting, because mastery scheduling, readiness
+computation, and the debrief all depend on it, and none of it is the
+learner's own typed text. Officer turn text is never withheld either: it
+is code-owned copy or a `civics_questions` row already public, never
+anything the learner produced. `ai_feedback` is the one field that is
+*omitted entirely* rather than merely left `null` with retention off,
+specifically because a grader's `feedback` field is free text a model
+wrote *about* the response and routinely quotes it back — storing it would
+be a second, indirect way to retain the learner's words under a column
+that looks like it belongs to the product's own judgment.
+
+**Grading happens on the learner's real text, in memory, regardless of
+retention.** Retention governs only what is *persisted*, never what is
+graded: a retention-off learner is graded on exactly the words they typed,
+by the identical ladder a retention-on learner is graded by. A reader
+should not conclude from `response_text: null` that the learner was graded
+on an empty string — the applicant's real answer was read, matched (or
+escalated to the `grader` role), and scored before the write that discards
+it ever runs.
+
+### Where this is enforced
+
+All three retention writes happen in one place:
+`apps/api/src/interviews/interviews.service.ts`, inside
+`recordApplicantTurn`, in the single transaction that also writes the
+graded `practice_attempts` row and the interview's running tally:
+
+- The applicant turn's `mock_interview_turns.text` — written empty when
+  retention is off.
+- `practice_attempts.response_text` — written `null` when retention is
+  off.
+- `practice_attempts.ai_feedback` — omitted from the write entirely when
+  retention is off, even when the grader ran and produced one.
+
+There is no second call site that could disagree with these three — one
+method, one transaction, one flag read three times.
+
+---
+
 ## Conclusion
 
 This security architecture provides defense-in-depth through multiple layers:

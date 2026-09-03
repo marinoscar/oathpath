@@ -2327,6 +2327,347 @@ mastery-aware ordering already serves due and weak content from first.
 
 ---
 
+### Interviews
+
+Issue #133 (routes) / #145 (list), epic #57 (E8 "Mock interview — text
+mode"). A scripted, deterministic rehearsal of the civics portion of the
+naturalization interview: the engine decides the phase, the question, the
+grade and the stop; the `tutor` role only supplies the officer's wording.
+Design rationale — the phase sequence, the seeded question selection, the
+pass rule, the engine/model boundary and its failure mode, the PII
+stance — lives in
+[`docs/specs/mock-interview.md`](specs/mock-interview.md); this section
+covers only the wire contract.
+
+**Every route below is `@Auth()` with no permissions, and no new permission
+string is added**, for the identical reason the Journey, Practice,
+Progress, Readiness and Engagement sections above all give in turn: no
+route accepts a user id from anywhere but the authenticated session, so
+there is no "read another learner's interview" permission to add in the
+first place. Every authenticated learner owns their own interview history
+exactly as they own their own practice attempts, their own learner profile,
+and their own readiness snapshots.
+
+**An interview belonging to another learner is a 404, not a 403.**
+Confirming that an id names a real interview would itself be the leak —
+from the caller's position, another learner's interview genuinely does not
+exist.
+
+**Test version and the senior accommodation are resolved from the caller's
+own `learner_profiles` row, never from the request.** There is no
+`testVersionCode` and no `seniorExemption` field on `POST /interviews`; both
+are read from the profile and then frozen onto the interview row, so
+editing the profile mid-interview cannot change the rule the interview is
+graded against.
+
+**`transcriptRetained` defaults to `false`.** It is a per-interview choice
+made once, at creation, never a standing setting. With it off, the
+interview still records everything that *happened* — every turn, in order,
+in its phase, naming the question asked, plus every outcome, grading method
+and frozen answer snapshot — and does not record what the learner *said*:
+applicant turn text is stored empty, `responseText` is `null`, and the AI
+grader's written feedback is omitted entirely. The learner is still graded
+on their real words in memory; only the record of them is withheld. See
+`docs/specs/mock-interview.md` §8 for the full retention design, and
+[`docs/SECURITY-ARCHITECTURE.md`](SECURITY-ARCHITECTURE.md) for the
+retention table restated as a security posture.
+
+**No turn response, and no field on the resume payload, carries a verdict,
+a score, or a hint before the interview is completed.** The engine knows
+whether an answer was correct the instant it grades it and uses that to
+choose the next question and to run the early stop, entirely server-side;
+`POST /interviews/{id}/complete` is the first moment any of it is visible to
+the learner.
+
+**`POST /interviews/{id}/complete` is idempotent.** Completing an
+already-completed interview returns the identical stored debrief and
+recomputes nothing — a double-tap never writes a second readiness snapshot
+for one interview.
+
+#### POST /interviews
+Opens a new interview and returns it together with the officer's opening
+turn (the `smalltalk` phase's greeting and non-scored opener).
+
+**Request Body:**
+```json
+{ "transcriptRetained": false }
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `transcriptRetained` | boolean | No (default `false`) | Whether this interview keeps the learner's own words. See the retention note above. |
+
+**Response:**
+```json
+{
+  "data": {
+    "interview": {
+      "id": "uuid",
+      "mode": "text",
+      "status": "in_progress",
+      "testVersionCode": "v2025",
+      "seniorExemption": false,
+      "transcriptRetained": false,
+      "startedAt": "2026-09-02T14:00:00.000Z",
+      "completedAt": null,
+      "civicsAsked": 0,
+      "civicsCorrect": 0,
+      "passedCivics": false
+    },
+    "officerTurns": [
+      {
+        "id": "uuid",
+        "turnIndex": 0,
+        "role": "officer",
+        "phase": "smalltalk",
+        "questionId": null,
+        "text": "Good morning. Thank you for coming in today.\n\nHow are you doing today?",
+        "createdAt": "2026-09-02T14:00:00.000Z"
+      }
+    ],
+    "progress": { "civicsAsked": 0, "civicsPlanned": 10 },
+    "awaitingCompletion": false
+  }
+}
+```
+
+**Error Cases:**
+- 400 Bad Request — invalid body, or the caller has not finished
+  orientation so no test version is resolved
+
+---
+
+#### POST /interviews/:id/turns
+Submits the applicant's reply to the most recent officer turn and streams
+the officer's response. Modelled directly on `POST
+/civics/questions/{id}/explain` above — same hand-written SSE transport,
+same reasoning, extended with a turn outcome on every terminal frame.
+
+**The interview decides; the model only speaks.** Which question comes
+next, whether the answer was right, when the civics section stops and
+whether the learner passed are all computed server-side, and committed,
+before this stream opens. The model supplies one short acknowledgement
+sentence; the civics question itself, when the new turn is a civics
+question, is appended to that sentence **verbatim from the database** — it
+never passes through the model, so it cannot be paraphrased, translated,
+simplified, or invented.
+
+**Transport.** `200 text/event-stream`, hand-written rather than Nest's
+`@Sse()` (which hard-codes GET, and this route takes a body). The native
+`EventSource` cannot send an `Authorization` header and only ever issues a
+GET, so a client must use a fetch-based SSE reader, exactly as the explain
+endpoint requires. A `?token=` query parameter is deliberately unsupported —
+a bearer token in a URL lands in access logs, browser history and
+`Referer`. Disconnecting aborts the upstream call — inference runs on the
+learner's own key — but the turn is still persisted, so reconnecting shows
+a complete transcript rather than one missing the officer's last line.
+
+**Parameters:**
+- `id` (uuid) — interview id
+
+**Request Body:**
+```json
+{ "text": "I would say Congress." }
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `text` | string, max 2000 chars | Yes | What the applicant said, verbatim. May be empty after trimming — an applicant who says nothing has still taken their turn. |
+
+There is no `questionId`, no `phase`, no `skipped`, no `revealed`, and no
+`hintUsed`: which question this answers is the interview's own state, and
+none of the practice screen's affordances exists inside a rehearsal.
+
+**Response.** An open `text/event-stream`. An opening `: connected` comment
+flushes the headers immediately, then any number of `delta` frames, then
+**exactly one terminal frame, always last**.
+
+| Frame (`event:`) | `data` | Terminal? | Meaning |
+|---|---|---|---|
+| `delta` | `{"text": "…"}` | No | One chunk of the officer's acknowledgement. Never empty. |
+| `done` | `InterviewTurnOutcome` (below) | Yes | The officer's turn is whole. |
+| `unavailable` | `InterviewTurnOutcome & {"cause": "no_user_key" \| "ai_disabled" \| "role_unbound" \| "capability_unsupported"}` | Yes | No call was attempted — the caller has no stored key, or an administrator has not finished configuring AI. **The interview continues unchanged** — same phase, same next question, same grading — with the officer using a neutral, code-owned line. Render the turn; do not render an error. |
+| `error` | `InterviewTurnOutcome & {"errorCode": "…", "error": "…"}` | Yes | The call was attempted and did not produce a usable acknowledgement. The interview still advanced, identically to `unavailable`. |
+
+**`InterviewTurnOutcome` — carried by all three terminal frames alike, not
+only `done`.** The interview advances in every case, so a client applies
+this outcome from whichever terminal frame it actually receives:
+
+```json
+{
+  "officerTurns": [ { "...": "one or more interviewTurnRecord entries, in order" } ],
+  "phase": "civics",
+  "turnIndex": 5,
+  "progress": { "civicsAsked": 2, "civicsPlanned": 10 },
+  "awaitingCompletion": false
+}
+```
+
+`officerTurns` is an array because one exchange can produce several: the
+reading and writing phases each consume no applicant answer (one honest
+"we don't cover that yet" line and the phase is over), and neither does the
+closing statement, so the last civics answer of an interview is followed by
+three officer turns at once. `awaitingCompletion: true` means the only
+remaining action is `complete`.
+
+Example stream:
+```
+: connected
+
+event: delta
+data: {"text":"Thank you. "}
+
+event: delta
+data: {"text":"Let's continue."}
+
+event: done
+data: {"officerTurns":[{"id":"uuid","turnIndex":5,"role":"officer","phase":"civics","questionId":"uuid","text":"Thank you. Let's continue.\n\nName one branch of government.","createdAt":"2026-09-02T14:03:00.000Z"}],"phase":"civics","turnIndex":5,"progress":{"civicsAsked":2,"civicsPlanned":10},"awaitingCompletion":false}
+
+```
+
+**Cost.** Disconnecting aborts the upstream request, exactly as the explain
+endpoint's does. The turn is still recorded.
+
+**Error Cases:**
+- 404 Not Found — unknown interview id, or the interview belongs to another
+  learner (resolved, and thrown, before the stream opens — never a stream
+  that opens and immediately breaks)
+- 409 Conflict — the interview is completed or abandoned, or has no turn
+  left to take
+
+---
+
+#### POST /interviews/:id/complete
+Closes the interview, computes its debrief, and triggers a readiness
+recompute — the first moment any performance information exists where the
+learner can see it.
+
+**Parameters:**
+- `id` (uuid) — interview id
+
+**Request Body:** none.
+
+**Response:**
+```json
+{
+  "data": {
+    "civics": {
+      "planned": 10,
+      "asked": 6,
+      "correct": 6,
+      "threshold": 6,
+      "passed": true,
+      "stoppedEarly": true,
+      "stopReason": "threshold_reached"
+    },
+    "questions": [
+      {
+        "questionId": "uuid",
+        "number": 43,
+        "prompt": "Who is the Speaker of the House of Representatives now?",
+        "categoryName": "American Government",
+        "outcome": "correct",
+        "acceptedAnswers": ["Nancy Pelosi"]
+      }
+    ],
+    "phases": [
+      { "kind": "smalltalk", "status": "completed" },
+      { "kind": "n400", "status": "completed" },
+      { "kind": "civics", "status": "completed" },
+      { "kind": "reading", "status": "skipped" },
+      { "kind": "writing", "status": "skipped" },
+      { "kind": "closing", "status": "completed" }
+    ],
+    "focusAreas": [],
+    "readiness": {
+      "score": 68,
+      "previousScore": 61,
+      "delta": 7,
+      "capReason": null,
+      "capMessage": null,
+      "interviewComponent": { "value": 0.5, "evidenceCount": 1 }
+    }
+  }
+}
+```
+
+`planned` and `threshold` are echoed from the `civics_test_versions` row
+this interview was created against — never hardcoded on the client. `asked`
+is smaller than `planned` whenever the early stop fired; `stopReason` says
+which of `threshold_reached` / `threshold_unreachable` / `all_asked` ended
+the civics section. `reading`/`writing` are reported `skipped`, honestly,
+rather than omitted. `acceptedAnswers` comes from each attempt's frozen
+`answerSnapshot`, never a live re-query, and survives with retention off —
+what retention withholds is the learner's own words, not the evidence of
+what happened.
+
+**Error Cases:**
+- 404 Not Found — unknown interview id, or it belongs to another learner
+- 409 Conflict — the interview is abandoned and cannot be completed
+
+---
+
+#### GET /interviews
+The caller's own interviews, newest first, paginated. Added for issue #145
+so a learner can answer "did I do better on my second mock interview than
+my first" — a debrief that existed only as a one-time response to
+`complete` could not answer that.
+
+**Query Parameters:**
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `page` | number | 1 | Page number |
+| `pageSize` | number | 20 (max 100) | Items per page |
+
+There are deliberately no filters — `?status=`, `?passedCivics=`, `?userId=`
+included — a 400 naming the parameter.
+
+**Response:**
+```json
+{
+  "data": [
+    { "...": "the same interview shape POST /interviews returns" }
+  ],
+  "meta": { "total": 3, "page": 1, "pageSize": 20 }
+}
+```
+
+---
+
+#### GET /interviews/:id
+Resume an in-progress interview, or re-read a completed one — the same
+"one route serves both live and historical state" shape `GET
+/practice/sessions/{id}` above already takes.
+
+**Parameters:**
+- `id` (uuid) — interview id
+
+**Response:**
+```json
+{
+  "data": {
+    "interview": { "...": "same shape as POST /interviews" },
+    "turns": [ { "...": "the whole transcript so far, oldest first" } ],
+    "progress": { "civicsAsked": 6, "civicsPlanned": 10 },
+    "awaitingCompletion": true,
+    "debrief": null
+  }
+}
+```
+
+`debrief` is `null` while the interview is in progress and is populated
+with the exact shape `POST /interviews/{id}/complete` returned, once
+`status` is `completed` — read back from the stored row, never recomputed.
+An applicant turn with empty `text` on an interview whose
+`transcriptRetained` is `false` means the words were never kept, **not**
+that the learner said nothing; the interview's own `transcriptRetained`
+flag on the header is what tells the two apart.
+
+**Error Cases:**
+- 404 Not Found — unknown interview id, or it belongs to another learner
+
+---
+
 ### Progress
 
 Issue #86, epic #54 (E5 "Memory"). Coverage and mastery, by category, for
