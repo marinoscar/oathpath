@@ -15,6 +15,7 @@ import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { PracticeService } from './practice.service';
 import { CreatePracticeSessionDto } from './dto/create-practice-session.dto';
 import { PracticeSessionQueryDto } from './dto/practice-session-query.dto';
+import { PracticeQueueDto, type PracticeQueueResponse } from './dto/practice-queue.dto';
 import { RecordAttemptDto } from './dto/record-attempt.dto';
 import {
   PracticeAttemptDto,
@@ -42,6 +43,11 @@ import {
 //   POST /api/practice/sessions/:id/attempts                     @Auth(), none
 //   POST /api/practice/sessions/:id/attempts/:attemptId/self-mark @Auth(), none
 //   POST /api/practice/sessions/:id/complete                     @Auth(), none
+//   GET  /api/practice/queue                                     @Auth(), none
+//
+// The last route is issue #78 (epic #54 / E5 "Memory"): the Practice page's
+// picker counts, drawn from `mastery/selector.ts`'s own bucket rule so they
+// can never disagree with what starting a session right now would select.
 //
 // -----------------------------------------------------------------------------
 // NO ROUTE ACCEPTS A USER ID. THAT IS THE SECURITY BOUNDARY.
@@ -340,5 +346,37 @@ export class PracticeController {
     @Param('id', ParseUUIDPipe) id: string,
   ): Promise<PracticeSessionResponse> {
     return this.practiceService.completeSession(userId, id);
+  }
+
+  @Get('queue')
+  @Auth()
+  @ApiOperation({
+    summary: "The caller's practice queue counts",
+    description:
+      'Counts for the Practice page\'s picker — how many questions are **due**, **weak**, ' +
+      '**new** (broken down by category), **steady**/in-progress, and **mastered** — plus ' +
+      'the whole bank\'s `total` for the caller\'s own resolved test version.\n\n' +
+      'Every count comes from `mastery/selector.ts`\'s `classifyMasteryBucket`, the exact ' +
+      'same function `POST /api/practice/sessions` uses to order a session\'s questions, so ' +
+      'this endpoint can never disagree with what starting a session right now would ' +
+      'actually select.\n\n' +
+      '`due` is `state IN (review, lapsed)` with `dueAt` already passed. `weak` is a ' +
+      '`lapsed` question (any `dueAt`) or a `learning`/`review` question with repeated ' +
+      'lapses or a broken correct streak — the same struggling-content signal the review ' +
+      'queue reacts to. `new.total`/`new.byCategory` are never-attempted questions (or ' +
+      '`state: \'new\'`), so the picker can show where coverage is thinnest. `mastered` is ' +
+      'the pool the selector samples from once everything else is exhausted.\n\n' +
+      'Scoped exactly like session creation: the caller\'s own test version, and ' +
+      '`seniorEligible` only, under the 65/20 accommodation.',
+  })
+  @ApiDataResponse(PracticeQueueDto, {
+    description: 'Queue counts for the picker, by bucket and by category',
+  })
+  @ApiResponse({
+    status: 400,
+    description: 'The caller has not finished orientation so no test version is resolved',
+  })
+  getQueue(@CurrentUser('id') userId: string): Promise<PracticeQueueResponse> {
+    return this.practiceService.getQueue(userId);
   }
 }

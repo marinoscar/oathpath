@@ -319,6 +319,15 @@ function setupPracticeMocks(): void {
       return { ...row };
     },
   );
+
+  // `GET /api/practice/queue` (issue #78) reads category names for its
+  // `new.byCategory` breakdown.
+  (prismaMock.civicsCategory.findMany as jest.Mock).mockImplementation(async ({ where }: any) => {
+    const ids: string[] | undefined = where?.id?.in;
+    return ids === undefined || ids.includes(CATEGORY_ID)
+      ? [{ id: CATEGORY_ID, name: 'Category' }]
+      : [];
+  });
 }
 
 describe('Practice (Integration)', () => {

@@ -48,6 +48,7 @@ import type { CreatePracticeSessionInput } from './dto/create-practice-session.d
 import type { RecordAttemptInput } from './dto/record-attempt.dto';
 import type { PracticeSessionQuery } from './dto/practice-session-query.dto';
 import type { PracticeQuestion } from './dto/practice-question.dto';
+import type { PracticeQueueResponse } from './dto/practice-queue.dto';
 import type {
   PracticeAnswerSnapshot,
   PracticeAttemptResponse,
@@ -1131,6 +1132,111 @@ export class PracticeService {
         lastAttemptAt: next.lastAttemptAt,
       },
     });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Queue (issue #78, epic #54 / E5)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Queue counts for the Practice page's picker (`GET /api/practice/queue`).
+   *
+   * Every count is produced by `mastery/selector.ts`'s `classifyMasteryBucket`
+   * — the SAME function `candidateQuestions` above uses to order a session's
+   * questions — so this endpoint can never disagree with what starting a
+   * session right now would actually select. `total` and the bank read are
+   * scoped identically to `candidateQuestions` too: the caller's own
+   * `testVersionCode`, and `seniorEligible` only, under the 65/20 exemption.
+   *
+   * Uses `requireOrientedProfile`, the same guard `createSession` uses: there
+   * is no honest queue to report for a learner whose test version has not
+   * been resolved yet.
+   */
+  async getQueue(userId: string): Promise<PracticeQueueResponse> {
+    const profile = await this.requireOrientedProfile(userId);
+    const testVersionCode = profile.testVersionCode as string;
+
+    const questions = await this.prisma.civicsQuestion.findMany({
+      where: {
+        testVersionCode,
+        ...(profile.seniorExemption ? { seniorEligible: true } : {}),
+      },
+      select: { id: true, categoryId: true },
+    });
+
+    const masteryByQuestionId = await this.loadMasteryByQuestionId(
+      userId,
+      questions.map((question: { id: string }) => question.id),
+    );
+
+    const now = this.clock.now();
+
+    let due = 0;
+    let weak = 0;
+    let learning = 0;
+    let mastered = 0;
+    const newCountByCategory = new Map<string, number>();
+
+    for (const question of questions as { id: string; categoryId: string }[]) {
+      const bucket = classifyMasteryBucket(masteryByQuestionId.get(question.id), now);
+
+      switch (bucket) {
+        case 'due':
+          due += 1;
+          break;
+        case 'weak':
+          weak += 1;
+          break;
+        case 'steady':
+          learning += 1;
+          break;
+        case 'mastered':
+          mastered += 1;
+          break;
+        case 'new':
+          newCountByCategory.set(
+            question.categoryId,
+            (newCountByCategory.get(question.categoryId) ?? 0) + 1,
+          );
+          break;
+      }
+    }
+
+    const categories =
+      newCountByCategory.size === 0
+        ? []
+        : await this.prisma.civicsCategory.findMany({
+            where: { id: { in: [...newCountByCategory.keys()] } },
+            select: { id: true, name: true },
+          });
+
+    const categoryNameById = new Map(
+      (categories as { id: string; name: string }[]).map((category) => [category.id, category.name]),
+    );
+
+    const newTotal = [...newCountByCategory.values()].reduce((sum, count) => sum + count, 0);
+
+    return {
+      testVersionCode,
+      total: questions.length,
+      due,
+      weak,
+      learning,
+      mastered,
+      new: {
+        total: newTotal,
+        byCategory: [...newCountByCategory.entries()]
+          .map(([categoryId, newCount]) => ({
+            categoryId,
+            categoryName: categoryNameById.get(categoryId) ?? categoryId,
+            newCount,
+          }))
+          // Most-uncovered category first — the same signal the selector's
+          // own category-coverage rule reacts to, surfaced here for a human
+          // to read instead of an algorithm to consume.
+          .sort((a, b) => b.newCount - a.newCount),
+      },
+    };
   }
 
   /**
