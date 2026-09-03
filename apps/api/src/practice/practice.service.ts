@@ -19,6 +19,7 @@ import {
 import { Clock } from '../common/clock/clock';
 import { PrismaService } from '../prisma/prisma.service';
 import { matchAnswer, type AnswerMatch } from './answer-matching';
+import { excludeUnanswerable } from './question-selection';
 import {
   buildGradingPrompt,
   gradingVerdictSchema,
@@ -1156,13 +1157,28 @@ export class PracticeService {
     const profile = await this.requireOrientedProfile(userId);
     const testVersionCode = profile.testVersionCode as string;
 
-    const questions = await this.prisma.civicsQuestion.findMany({
+    const rawQuestions = await this.prisma.civicsQuestion.findMany({
       where: {
         testVersionCode,
         ...(profile.seniorExemption ? { seniorEligible: true } : {}),
       },
-      select: { id: true, categoryId: true },
+      select: { id: true, categoryId: true, dynamicScope: true },
     });
+
+    // BUG FIX (issue #78 follow-up, caught writing integration coverage): a
+    // `state`-scope question for a learner with no state on their profile was
+    // being counted here (as `new`, most likely) even though
+    // `candidateQuestions`'s `selectQuestionsV2` — via `excludeUnanswerable`
+    // — would never let a session select it. That contradicted both this
+    // file's own header ("can never disagree with what starting a session
+    // right now would actually select") and the DTO's own doc comment on
+    // `total` ("scoped ... exactly as session selection is"). Applying the
+    // SAME `excludeUnanswerable` filter session selection uses, over the
+    // SAME `profile.stateCode`, keeps the two in agreement.
+    const questions = excludeUnanswerable(
+      rawQuestions as { id: string; categoryId: string; dynamicScope: DynamicScope }[],
+      profile.stateCode,
+    );
 
     const masteryByQuestionId = await this.loadMasteryByQuestionId(
       userId,

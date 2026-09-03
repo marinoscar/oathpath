@@ -14,6 +14,8 @@ import {
   authHeader,
   TestUser,
 } from './helpers/auth-mock.helper';
+import { nextSchedule } from '../src/practice/mastery/scheduler';
+import { fromStoredMasteryOutcome } from '../src/practice/mastery/outcome-mapping';
 
 // =============================================================================
 // Practice API (integration) — issue #73, epic #52 / E3
@@ -51,6 +53,43 @@ const Q2 = 'a2222222-2222-4222-8222-222222222222'; // none-scope, 1 accepted ans
 const Q3 = 'a3333333-3333-4333-8333-333333333333'; // state-scope
 
 const CATEGORY_ID = 'c1111111-1111-4111-8111-111111111111';
+
+// -----------------------------------------------------------------------------
+// Fixtures for GET /api/practice/queue and mastery-scheduling coverage
+// (issue #78, epic #54 / E5 "Memory")
+// -----------------------------------------------------------------------------
+
+/** A second test version, so a `state_required` question can sit alongside an
+ * answerable one without disturbing the exactly-{Q1,Q2} `TV` pool every other
+ * test in this file assumes. */
+const TV2 = 'v2008';
+
+/** An answerable question in `TV2` — needed so a session can be STARTED for a
+ * stateless learner at all (a pool of only Q3 would 409 with no candidates,
+ * since Q3 is excluded outright by `excludeUnanswerable`). */
+const Q4 = 'a4444444-4444-4444-8444-444444444444';
+
+/** A dedicated test version for the queue-counts fixture, so it never shares
+ * a bank with the {Q1,Q2} pool the rest of this file's assertions depend on. */
+const QUEUE_TV = 'v2026queue';
+const QUEUE_CAT_A = 'cA111111-1111-4111-8111-111111111111';
+const QUEUE_CAT_B = 'cB111111-1111-4111-8111-111111111111';
+
+const Q_DUE = 'aD111111-1111-4111-8111-111111111111';
+const Q_WEAK = 'aE111111-1111-4111-8111-111111111111';
+const Q_NEW_A = 'aF111111-1111-4111-8111-111111111111';
+const Q_NEW_B = 'aG111111-1111-4111-8111-111111111111';
+const Q_STEADY = 'aH111111-1111-4111-8111-111111111111';
+const Q_MASTERED = 'aI111111-1111-4111-8111-111111111111';
+/** state-scope, in the QUEUE_TV pool too — proves `getQueue` excludes it for
+ * a stateless learner exactly as session selection would. */
+const Q_STATE_SCOPE = 'aJ111111-1111-4111-8111-111111111111';
+
+const CATEGORIES = [
+  { id: CATEGORY_ID, name: 'Category' },
+  { id: QUEUE_CAT_A, name: 'Category A' },
+  { id: QUEUE_CAT_B, name: 'Category B' },
+];
 
 /** The one accepted answer for Q2 — the "next question's" answer in the leak test. */
 const Q2_ANSWER_TEXT = 'The rule of law';
@@ -94,10 +133,84 @@ const QUESTIONS = [
     // {Q1, Q2} — state-scope exclusion itself is already covered at the unit
     // level (`practice.service.spec.ts`, `question-selection.spec.ts`).
     id: Q3,
-    testVersionCode: 'v2008',
+    testVersionCode: TV2,
     number: 3,
     categoryId: CATEGORY_ID,
     prompt: 'Who is the Governor of your state now?',
+    seniorEligible: false,
+    dynamicScope: 'state' as const,
+  },
+  {
+    // Answerable, in TV2 alongside Q3 — exists only so a session can be
+    // started for a stateless learner in TV2 at all.
+    id: Q4,
+    testVersionCode: TV2,
+    number: 1,
+    categoryId: CATEGORY_ID,
+    prompt: 'What do we call the first ten amendments to the Constitution?',
+    seniorEligible: false,
+    dynamicScope: 'none' as const,
+  },
+  {
+    id: Q_DUE,
+    testVersionCode: QUEUE_TV,
+    number: 1,
+    categoryId: QUEUE_CAT_A,
+    prompt: 'due-bucket fixture question',
+    seniorEligible: false,
+    dynamicScope: 'none' as const,
+  },
+  {
+    id: Q_WEAK,
+    testVersionCode: QUEUE_TV,
+    number: 2,
+    categoryId: QUEUE_CAT_A,
+    prompt: 'weak-bucket fixture question',
+    seniorEligible: false,
+    dynamicScope: 'none' as const,
+  },
+  {
+    id: Q_NEW_A,
+    testVersionCode: QUEUE_TV,
+    number: 3,
+    categoryId: QUEUE_CAT_A,
+    prompt: 'new-bucket fixture question (category A)',
+    seniorEligible: false,
+    dynamicScope: 'none' as const,
+  },
+  {
+    id: Q_NEW_B,
+    testVersionCode: QUEUE_TV,
+    number: 4,
+    categoryId: QUEUE_CAT_B,
+    prompt: 'new-bucket fixture question (category B)',
+    seniorEligible: false,
+    dynamicScope: 'none' as const,
+  },
+  {
+    id: Q_STEADY,
+    testVersionCode: QUEUE_TV,
+    number: 5,
+    categoryId: QUEUE_CAT_A,
+    prompt: 'steady-bucket fixture question',
+    seniorEligible: false,
+    dynamicScope: 'none' as const,
+  },
+  {
+    id: Q_MASTERED,
+    testVersionCode: QUEUE_TV,
+    number: 6,
+    categoryId: QUEUE_CAT_A,
+    prompt: 'mastered-bucket fixture question',
+    seniorEligible: false,
+    dynamicScope: 'none' as const,
+  },
+  {
+    id: Q_STATE_SCOPE,
+    testVersionCode: QUEUE_TV,
+    number: 7,
+    categoryId: QUEUE_CAT_A,
+    prompt: 'state-scope fixture question — excluded for a stateless learner',
     seniorEligible: false,
     dynamicScope: 'state' as const,
   },
@@ -324,9 +437,7 @@ function setupPracticeMocks(): void {
   // `new.byCategory` breakdown.
   (prismaMock.civicsCategory.findMany as jest.Mock).mockImplementation(async ({ where }: any) => {
     const ids: string[] | undefined = where?.id?.in;
-    return ids === undefined || ids.includes(CATEGORY_ID)
-      ? [{ id: CATEGORY_ID, name: 'Category' }]
-      : [];
+    return ids === undefined ? CATEGORIES : CATEGORIES.filter((c) => ids.includes(c.id));
   });
 }
 
@@ -691,6 +802,245 @@ describe('Practice (Integration)', () => {
         .post(`/api/practice/sessions/${created.session.id}/complete`)
         .set(authHeader(learnerA.accessToken))
         .expect(409);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // GET /api/practice/queue (issue #78, epic #54 / E5 "Memory")
+  // ---------------------------------------------------------------------------
+
+  describe('GET /api/practice/queue', () => {
+    /** Directly writes a `question_mastery` row into the in-memory store —
+     * bypassing the API, since these tests are about what `getQueue` reports
+     * GIVEN a mastery state, not about how that state was reached (the
+     * "mastery scheduling wiring" describe block below covers reaching it
+     * through the real attempt/self-mark endpoints). */
+    function seedMastery(userId: string, questionId: string, overrides: Record<string, any>) {
+      mastery.set(`${userId}:${questionId}`, {
+        id: randomUUID(),
+        userId,
+        questionId,
+        state: 'learning',
+        dueAt: null,
+        intervalDays: 1,
+        ease: 2.5,
+        correctStreak: 1,
+        lapses: 0,
+        totalAttempts: 1,
+        distinctCorrectDays: 1,
+        lastOutcome: 'correct',
+        lastAttemptAt: new Date('2026-07-01T00:00:00Z'),
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        ...overrides,
+      });
+    }
+
+    it('returns the documented shape and correct per-bucket counts for a mix of due/weak/new/steady/mastered rows, excluding an unanswerable state-scope question for a stateless learner', async () => {
+      const learnerQueue = await createMockViewerUser(context, 'learnerQueue@example.com');
+      profiles.set(learnerQueue.id, {
+        stateCode: null,
+        testVersionCode: QUEUE_TV,
+        seniorExemption: false,
+      });
+
+      const now = '2026-08-01T12:00:00.000Z';
+
+      seedMastery(learnerQueue.id, Q_DUE, {
+        state: 'review',
+        dueAt: new Date('2026-08-01T11:00:00.000Z'), // 1h in the past
+      });
+      seedMastery(learnerQueue.id, Q_WEAK, {
+        state: 'lapsed',
+        dueAt: new Date('2026-08-02T08:00:00.000Z'), // in the future — weak, not due
+        lapses: 1,
+      });
+      seedMastery(learnerQueue.id, Q_STEADY, {
+        state: 'learning',
+        dueAt: null,
+        correctStreak: 2,
+        lapses: 0,
+      });
+      seedMastery(learnerQueue.id, Q_MASTERED, {
+        state: 'mastered',
+        dueAt: null,
+      });
+      // Q_NEW_A and Q_NEW_B get no mastery row at all — never attempted.
+      // Q_STATE_SCOPE also gets no row — it must not appear in ANY count.
+
+      const response = await request(server())
+        .get('/api/practice/queue')
+        .set(authHeader(learnerQueue.accessToken))
+        .set('X-Test-Clock', now)
+        .expect(200);
+
+      const body = response.body.data;
+
+      expect(body.testVersionCode).toBe(QUEUE_TV);
+      // 6, not 7 — Q_STATE_SCOPE is excluded for this stateless learner,
+      // exactly as `candidateQuestions`' selector would exclude it too.
+      expect(body.total).toBe(6);
+      expect(body.due).toBe(1);
+      expect(body.weak).toBe(1);
+      expect(body.learning).toBe(1); // the STEADY bucket, under the `learning` key
+      expect(body.mastered).toBe(1);
+      expect(body.new.total).toBe(2);
+
+      const byCategory = [...body.new.byCategory].sort((a: any, b: any) =>
+        a.categoryId.localeCompare(b.categoryId),
+      );
+      expect(byCategory).toEqual([
+        { categoryId: QUEUE_CAT_A, categoryName: 'Category A', newCount: 1 },
+        { categoryId: QUEUE_CAT_B, categoryName: 'Category B', newCount: 1 },
+      ]);
+
+      // Every count is over exactly the FIVE buckets plus new — sums to total.
+      expect(body.due + body.weak + body.learning + body.mastered + body.new.total).toBe(
+        body.total,
+      );
+    });
+
+    it('400s a learner who has not finished orientation (no resolved test version)', async () => {
+      const unoriented = await createMockViewerUser(context, 'unoriented@example.com');
+      profiles.set(unoriented.id, { stateCode: null, testVersionCode: null, seniorExemption: false });
+
+      await request(server())
+        .get('/api/practice/queue')
+        .set(authHeader(unoriented.accessToken))
+        .expect(400);
+    });
+
+    it('401s an unauthenticated request', async () => {
+      await request(server()).get('/api/practice/queue').expect(401);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Synchronous mastery scheduling wiring (issue #78, epic #54 / E5 "Memory")
+  // ---------------------------------------------------------------------------
+
+  describe('mastery scheduling wiring', () => {
+    it('a correct attempt via POST .../attempts upserts and advances the question_mastery row: new -> learning, dueAt in the future', async () => {
+      const created = await startSession(learnerA, { kind: 'quick', plannedCount: 2 });
+      const questionId = created.nextQuestion.id;
+
+      expect(mastery.get(`${learnerA.id}:${questionId}`)).toBeUndefined();
+
+      const answeredAt = '2026-07-10T09:00:00.000Z';
+
+      await request(server())
+        .post(`/api/practice/sessions/${created.session.id}/attempts`)
+        .set(authHeader(learnerA.accessToken))
+        .set('X-Test-Clock', answeredAt)
+        .send({ questionId, responseText: correctAnswerFor(questionId) })
+        .expect(201);
+
+      const row = mastery.get(`${learnerA.id}:${questionId}`);
+      expect(row).toBeDefined();
+      expect(row!.state).toBe('learning');
+      expect(row!.totalAttempts).toBe(1);
+      expect(row!.correctStreak).toBe(1);
+      expect(row!.dueAt).toBeInstanceOf(Date);
+      expect(row!.dueAt.getTime()).toBeGreaterThan(new Date(answeredAt).getTime());
+      expect(row!.lastOutcome).toBe('correct');
+    });
+
+    it('self-marking an attempt advances mastery via the SELF-MARKED (discounted) path, not the plain-correct path, applying a strictly smaller ease bump', async () => {
+      const created = await startSession(learnerA, { kind: 'quick', plannedCount: 2 });
+      const questionId = created.nextQuestion.id;
+
+      const wrongAt = '2026-07-10T09:00:00.000Z';
+      const wrongResponse = await request(server())
+        .post(`/api/practice/sessions/${created.session.id}/attempts`)
+        .set(authHeader(learnerA.accessToken))
+        .set('X-Test-Clock', wrongAt)
+        .send({ questionId, responseText: 'definitely not it', revealed: true })
+        .expect(201);
+
+      const attemptId = wrongResponse.body.data.attempt.id;
+
+      // The mastery row exactly as the required precondition incorrect
+      // grading left it — the REAL starting point self-mark's own scheduling
+      // call reads inside `scheduleMastery`.
+      const beforeSelfMark = mastery.get(`${learnerA.id}:${questionId}`);
+      expect(beforeSelfMark).toBeDefined();
+
+      const startingRecord = {
+        state: beforeSelfMark!.state,
+        dueAt: beforeSelfMark!.dueAt,
+        intervalDays: beforeSelfMark!.intervalDays,
+        ease: beforeSelfMark!.ease,
+        correctStreak: beforeSelfMark!.correctStreak,
+        lapses: beforeSelfMark!.lapses,
+        totalAttempts: beforeSelfMark!.totalAttempts,
+        distinctCorrectDays: beforeSelfMark!.distinctCorrectDays,
+        lastOutcome: fromStoredMasteryOutcome(beforeSelfMark!.lastOutcome),
+        lastAttemptAt: beforeSelfMark!.lastAttemptAt,
+      };
+
+      const selfMarkAt = '2026-07-11T09:00:00.000Z';
+
+      // The pure scheduler, used as an ORACLE (never re-implemented, never
+      // guessed) for what each path would produce from this exact starting
+      // point — the same function `scheduleMastery` itself calls.
+      const viaPlainCorrect = nextSchedule(startingRecord, 'correct', new Date(selfMarkAt));
+      const viaSelfMarked = nextSchedule(startingRecord, 'correct_self_marked', new Date(selfMarkAt));
+
+      // Sanity on the oracle itself before trusting the comparison below.
+      expect(viaSelfMarked.ease).toBeLessThan(viaPlainCorrect.ease);
+
+      const selfMarked = await request(server())
+        .post(
+          `/api/practice/sessions/${created.session.id}/attempts/${attemptId}/self-mark`,
+        )
+        .set(authHeader(learnerA.accessToken))
+        .set('X-Test-Clock', selfMarkAt)
+        .expect(201);
+
+      expect(selfMarked.body.data.gradingMethod).toBe('self');
+
+      const afterSelfMark = mastery.get(`${learnerA.id}:${questionId}`);
+      expect(afterSelfMark).toBeDefined();
+
+      // The DISCOUNTED path was taken: ease matches the self-marked oracle
+      // exactly, and NOT the full-credit oracle.
+      expect(afterSelfMark!.ease).toBeCloseTo(viaSelfMarked.ease, 5);
+      expect(afterSelfMark!.ease).not.toBeCloseTo(viaPlainCorrect.ease, 5);
+      expect(afterSelfMark!.intervalDays).toBe(viaSelfMarked.intervalDays);
+      // `question_mastery.last_outcome` only has room for the collapsed
+      // 2-value form (mastery/outcome-mapping.ts) — never the 3-value
+      // AttemptOutcome the scheduler itself returned.
+      expect(afterSelfMark!.lastOutcome).toBe('correct');
+    });
+
+    it('a state_required attempt does NOT create or advance a question_mastery row', async () => {
+      const stateless = await createMockViewerUser(context, 'stateless@example.com');
+      profiles.set(stateless.id, { stateCode: null, testVersionCode: TV2, seniorExemption: false });
+
+      // TV2's pool is {Q3 (state-scope), Q4 (answerable)} — Q3 is excluded
+      // from SELECTION entirely (excludeUnanswerable), so the session's own
+      // `nextQuestion` can only ever be Q4. Q3 is reachable only because a
+      // client can name any question in the session's own test version
+      // directly, exactly as `resolveAcceptedAnswers`'s own doc comment
+      // describes ("this only fires for a question id a client posted rather
+      // than was handed").
+      const created = await startSession(stateless, { kind: 'quick', plannedCount: 1 });
+      expect(created.nextQuestion.id).toBe(Q4);
+
+      expect(mastery.get(`${stateless.id}:${Q3}`)).toBeUndefined();
+
+      const response = await request(server())
+        .post(`/api/practice/sessions/${created.session.id}/attempts`)
+        .set(authHeader(stateless.accessToken))
+        .send({ questionId: Q3, responseText: 'Gavin Newsom' })
+        .expect(201);
+
+      expect(response.body.data.attempt.outcome).toBe('skipped');
+
+      // No mastery row was created for Q3 — the attempt was recorded (it did
+      // happen), but there is no honest grade to schedule against.
+      expect(mastery.get(`${stateless.id}:${Q3}`)).toBeUndefined();
+      expect(mastery.size).toBe(0);
     });
   });
 });
