@@ -191,6 +191,10 @@ function renderInterview({ mode = 'light' as 'light' | 'dark' } = {}) {
           <AiStatusProvider>
             <Routes>
               <Route path="/practice/interviews/:id" element={<InterviewPage />} />
+              <Route
+                path="/practice/interviews/:id/debrief"
+                element={<div>the debrief</div>}
+              />
               <Route path="/practice" element={<div>Practice destination</div>} />
             </Routes>
           </AiStatusProvider>
@@ -436,10 +440,13 @@ describe('InterviewPage — ending the interview', () => {
 
     // COMPLETED, not abandoned — leaving still produces a real debrief.
     await waitFor(() => expect(completeCalls).toBe(1));
-    // #145 re-points this at `/practice/interviews/:id/debrief`. Until that
-    // route exists, sending a learner to it would land them on the catch-all
-    // redirect, so this goes somewhere real.
-    expect(await screen.findByText('Practice destination')).toBeInTheDocument();
+    // AND THE LEARNER IS TAKEN TO IT (#145). This used to land on `/practice`,
+    // because `/practice/interviews/:id/debrief` was not mounted yet and
+    // sending a learner to an unmounted route drops them on the catch-all
+    // redirect to `/`. The route exists now, so the debrief is where ending an
+    // interview goes — which is the whole point of ending it rather than
+    // abandoning it.
+    expect(await screen.findByText('the debrief')).toBeInTheDocument();
   });
 
   it('offers finishing in place of the answer box once nothing is left to answer', async () => {
@@ -469,7 +476,7 @@ describe('InterviewPage — ending the interview', () => {
     await user.click(screen.getByRole('button', { name: /end this interview/i }));
 
     expect(await screen.findByText(/that interview is abandoned/i)).toBeInTheDocument();
-    expect(screen.queryByText('Practice destination')).toBeNull();
+    expect(screen.queryByText('the debrief')).toBeNull();
   });
 
   it('says plainly that a finished interview is finished, rather than redirecting', async () => {
@@ -481,6 +488,13 @@ describe('InterviewPage — ending the interview', () => {
 
     expect(await screen.findByText(/This interview is finished/i)).toBeInTheDocument();
     expect(screen.queryByLabelText(/your answer/i)).toBeNull();
+    // And the one thing the learner opening this URL is actually looking for
+    // is one link away, at its own address (#145) rather than rendered here as
+    // a second copy of the same result.
+    expect(screen.getByRole('link', { name: /see how it went/i })).toHaveAttribute(
+      'href',
+      `/practice/interviews/${INTERVIEW_ID}/debrief`,
+    );
   });
 });
 

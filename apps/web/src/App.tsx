@@ -34,12 +34,12 @@ const ProgressPage = lazy(() => import("./pages/ProgressPage"));
 // new `DESTINATION_ROUTES` entry is needed or wanted.
 const PracticeSessionPage = lazy(() => import("./pages/PracticeSessionPage"));
 const PracticeSummaryPage = lazy(() => import("./pages/PracticeSummaryPage"));
-// Issue #140, epic #57 / E8 — the mock interview, two more screens UNDER the
-// same Practice destination and owned by the same `/practice` prefix. The
-// debrief route (`/practice/interviews/:id/debrief`) is issue #145's and is
-// deliberately not mounted here yet.
+// Issue #140 (the first two) and #145 (the debrief), epic #57 / E8 — the mock
+// interview, three more screens UNDER the same Practice destination and owned
+// by the same `/practice` prefix.
 const InterviewStartPage = lazy(() => import("./pages/InterviewStartPage"));
 const InterviewPage = lazy(() => import("./pages/InterviewPage"));
+const InterviewDebriefPage = lazy(() => import("./pages/InterviewDebriefPage"));
 const AiKeySetupPage = lazy(() => import("./pages/AiKeySetupPage"));
 // Issue #72, epic #50 — the orientation screen behind `RequireOrientation`.
 const OrientationPage = lazy(() => import("./pages/OrientationPage"));
@@ -270,11 +270,11 @@ function AppRoutes() {
                         `NEXT_ACTION_PATHS`' `interview` may point straight at
                         `/practice/interviews` without one.
 
-                        Two real routes rather than views in a query string, for
-                        the same reason the two above are: an interview NAMES A
-                        SERVER RESOURCE with an id, resumable from a reload in
-                        another tab and linkable from a history list weeks
-                        later. */}
+                        Three real routes rather than views in a query string,
+                        for the same reason the two above are: an interview
+                        NAMES A SERVER RESOURCE with an id, resumable from a
+                        reload in another tab and linkable from a history list
+                        weeks later. */}
                         <Route
                           path="/practice/interviews"
                           element={<InterviewStartPage />}
@@ -282,6 +282,20 @@ function AppRoutes() {
                         <Route
                           path="/practice/interviews/:id"
                           element={<InterviewPage />}
+                        />
+                        {/* The debrief (#145). The third of the three routes
+                        §14 names, and the one the other two point at: the
+                        interview screen navigates here on completion, and every
+                        finished row of the history list on
+                        `/practice/interviews` links here. §12 states why it has
+                        to be a route at all rather than a view the completion
+                        response renders once — "did I do better on my second
+                        mock interview than my first" is a real question, and a
+                        debrief that existed only as the response to the
+                        `complete` call that produced it could not answer it. */}
+                        <Route
+                          path="/practice/interviews/:id/debrief"
+                          element={<InterviewDebriefPage />}
                         />
                         <Route path="/progress" element={<ProgressPage />} />
                         {/* The per-user settings surface (#96, epic #90) — the same

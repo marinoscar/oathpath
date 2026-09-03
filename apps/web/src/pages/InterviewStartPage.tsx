@@ -52,8 +52,29 @@
  * §14 states the same reachability-versus-content distinction `CLAUDE.md` draws
  * for tabs versus destinations.
  *
- * The interview HISTORY list this route will also carry is issue #145's, not
- * this one's: `GET /api/interviews` exists and is deliberately not bound yet.
+ * =============================================================================
+ * THE HISTORY BAND (#145) — AND WHY IT IS ON THIS SCREEN
+ * =============================================================================
+ *
+ * This block used to say the history list "is issue #145's, not this one's:
+ * `GET /api/interviews` exists and is deliberately not bound yet". It is bound
+ * now, and it lives here rather than on `/practice` for the same reason
+ * `RecentSessions` lives on `/practice` rather than on `/`: the place a learner
+ * goes to start one of a thing is the place they expect to find the ones they
+ * already did.
+ *
+ * §12 gives the reason the endpoint exists at all: a completed debrief has to
+ * be reachable again later, because "did I do better on my second mock
+ * interview than my first" is a real question this product should be able to
+ * answer, and a debrief that existed only as the response to the `complete`
+ * call that produced it could not answer it.
+ *
+ * **An empty history is an EMPTY STATE, never a fabricated zero** — no "0
+ * interviews", no flat chart, no ring at zero. Loading, empty and failed stay
+ * three distinct things to say, all the way down from `useInterviews`, exactly
+ * as `/practice` keeps them for its own recent-sessions band: a fabricated zero
+ * is indistinguishable at a glance from a real measurement, and a learner
+ * cannot tell which one they are looking at.
  *
  * =============================================================================
  * WIDTH AND HEADINGS
@@ -78,18 +99,27 @@ import {
 import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import { Link as RouterLink, useNavigate } from 'react-router-dom';
 
+import { InterviewHistory } from '../components/interview/InterviewHistory';
+import { LoadingSpinner } from '../components/common/LoadingSpinner';
 import { RetentionChoice } from '../components/interview/RetentionChoice';
+import { interviewPath } from '../components/interview/paths';
+import { useInterviews } from '../hooks/useInterviews';
 import { useIsMounted } from '../hooks/useIsMounted';
 import { createInterview } from '../services/api';
-
-/** `/practice/interviews/:id` for one id, spelled once. */
-export function interviewPath(interviewId: string): string {
-  return `/practice/interviews/${interviewId}`;
-}
 
 export default function InterviewStartPage() {
   const navigate = useNavigate();
   const isMounted = useIsMounted();
+
+  // The history band's own read. It is never awaited before the start controls
+  // render: starting an interview is what this screen is for, and a slow or
+  // failed history read must not hold the button that does it off the screen.
+  const {
+    interviews,
+    isLoading: areInterviewsLoading,
+    error: interviewsError,
+    refresh: refreshInterviews,
+  } = useInterviews();
 
   // FALSE, and the initial value is the whole point — see the file header.
   const [transcriptRetained, setTranscriptRetained] = useState(false);
@@ -188,6 +218,53 @@ export default function InterviewStartPage() {
           >
             {starting ? 'Starting…' : 'Start the interview'}
           </Button>
+        </Box>
+
+        {/* -----------------------------------------------------------
+            The history band. Three distinct states, and only the middle
+            one is an empty state — see this file's header.
+            ----------------------------------------------------------- */}
+        <Box sx={{ mt: 4 }}>
+          {interviewsError ? (
+            <Alert
+              severity="error"
+              action={
+                <Button
+                  color="inherit"
+                  size="small"
+                  onClick={() => void refreshInterviews()}
+                >
+                  Try again
+                </Button>
+              }
+            >
+              {interviewsError}
+            </Alert>
+          ) : areInterviewsLoading ? (
+            <LoadingSpinner />
+          ) : interviews.length === 0 ? (
+            <Box component="section" aria-labelledby="interview-history-heading">
+              <Typography
+                id="interview-history-heading"
+                variant="overline"
+                component="h2"
+                color="text.secondary"
+                sx={{ display: 'block' }}
+              >
+                Your interviews
+              </Typography>
+              {/* The honest empty state. No count, no chart, no zero. */}
+              <Typography color="text.secondary" sx={{ mt: 1, maxWidth: '60ch' }}>
+                You haven&rsquo;t sat a mock interview yet. Once you do, each
+                one shows up here so you can read back how it went.
+              </Typography>
+            </Box>
+          ) : (
+            <InterviewHistory
+              interviews={interviews}
+              headingId="interview-history-heading"
+            />
+          )}
         </Box>
 
         <Button

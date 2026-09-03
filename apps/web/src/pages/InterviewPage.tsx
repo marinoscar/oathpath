@@ -73,20 +73,27 @@
  * own key and a conversation that is over should stop costing money.
  *
  * -----------------------------------------------------------------------------
- * WHERE IT GOES AFTERWARDS, AND WHAT #145 CHANGES
+ * WHERE IT GOES AFTERWARDS
  * -----------------------------------------------------------------------------
  *
- * It navigates to `/practice`. That is deliberate and temporary: the debrief
- * screen is issue #145, `/practice/interviews/:id/debrief` DOES NOT EXIST YET,
- * and sending a learner to a route that is not mounted would land them on the
- * catch-all redirect to `/` — the "a next action must never point at a route
- * that redirects" rule, met one layer down. **#145 re-points
- * {@link afterCompletionPath} at the debrief route once it exists**, and
- * nothing else on this page needs to change: the completion call, the abort and
- * the copy are all already right. This note is the same shape as the E1→E3
- * re-pointing note `apps/api/src/journey/next-action.ts` carries, for the same
- * reason — an instruction to the contributor who ships the next slice beats a
- * TODO nobody owns.
+ * It navigates to `/practice/interviews/:id/debrief`.
+ *
+ * This block used to say something else, and the difference is the whole
+ * content of issue #145. It read: "It navigates to `/practice`. That is
+ * deliberate and temporary: the debrief screen is issue #145,
+ * `/practice/interviews/:id/debrief` DOES NOT EXIST YET, and sending a learner
+ * to a route that is not mounted would land them on the catch-all redirect to
+ * `/` — the 'a next action must never point at a route that redirects' rule,
+ * met one layer down." **That condition has now been met**: the debrief route
+ * is mounted in `App.tsx`, so {@link afterCompletionPath} points at it and
+ * nothing else on this page changed — the completion call, the abort and the
+ * copy were all already right.
+ *
+ * The note that got us here was the same shape as the E1→E3 re-pointing note
+ * `apps/api/src/journey/next-action.ts` carries, and this replacement is the
+ * same shape as that file's own "E8 CLAIMS `interview`" paragraph, for the same
+ * reason: recording that the destination now exists is what stops the next
+ * contributor re-deriving whether it does.
  *
  * =============================================================================
  * QUIETER THAN THE REST OF THE APP, DELIBERATELY
@@ -143,20 +150,22 @@ import { EndInterviewControl } from '../components/interview/EndInterviewControl
 import { LoadingSpinner } from '../components/common/LoadingSpinner';
 import { OfficerCard } from '../components/interview/OfficerCard';
 import { PhaseProgress } from '../components/interview/PhaseProgress';
+import { interviewDebriefPath } from '../components/interview/paths';
 import { useMockInterview } from '../hooks/useMockInterview';
 
 /** What `AiNotReady` calls this feature in its first line. */
 const FEATURE_NAME = 'The officer’s own wording';
 
 /**
- * Where a finished interview sends the learner.
+ * Where a finished interview sends the learner: its own debrief (#145).
  *
- * `/practice` TODAY, and `/practice/interviews/:id/debrief` from issue #145 —
- * see this file's header for why it is not that already and why pointing at an
- * unmounted route would be worse than pointing at a real one.
+ * A thin alias over `interviewDebriefPath` rather than a second spelling of the
+ * URL — see `components/interview/paths.ts`. It is kept as a named export
+ * because this file's header explains what it points at and why, and a reader
+ * following that explanation should find something to look at.
  */
-export function afterCompletionPath(_interviewId: string): string {
-  return '/practice';
+export function afterCompletionPath(interviewId: string): string {
+  return interviewDebriefPath(interviewId);
 }
 
 export default function InterviewPage() {
@@ -252,9 +261,14 @@ export default function InterviewPage() {
    *
    * A redirect would take a learner who followed a link to their own interview
    * and drop them somewhere they did not ask for, with no explanation. It says
-   * plainly what state the interview is in instead — and #145 replaces this
-   * block with the stored debrief, which is exactly what the learner opening
-   * this URL is looking for.
+   * plainly what state the interview is in instead.
+   *
+   * #145 was going to replace this block with the stored debrief. It does not,
+   * and the reason is worth recording: the debrief got its OWN route
+   * (`/practice/interviews/:id/debrief`, §14's third), so rendering it here as
+   * well would put the same result at two URLs, only one of which a history row
+   * or a bookmark points at. This block links there instead — one debrief, one
+   * address, and this screen keeps its single job of conducting an interview.
    */
   if (interview.status !== 'in_progress') {
     return (
@@ -270,6 +284,14 @@ export default function InterviewPage() {
             <Typography color="text.secondary" sx={{ mt: 1 }}>
               There is nothing left to answer here.
             </Typography>
+            <Button
+              component={RouterLink}
+              to={interviewDebriefPath(interview.id)}
+              variant="contained"
+              sx={{ mt: 2 }}
+            >
+              See how it went
+            </Button>
           </Paper>
           <Button
             component={RouterLink}

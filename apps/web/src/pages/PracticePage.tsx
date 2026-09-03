@@ -20,7 +20,9 @@
  *     there is no `kind: 'review'` to request yet).
  *  2. **By category** — the sections of their own test version, each showing
  *     how many of its questions are still new (`queue.new.byCategory`).
- *  3. **Recent sessions** — what they were just doing, and the way back into it.
+ *  3. **Mock interview** — the way into `/practice/interviews` (issue #145,
+ *     epic #57 / E8). See the section on it below.
+ *  4. **Recent sessions** — what they were just doing, and the way back into it.
  *
  * =============================================================================
  * THERE IS NO `kind: 'review' | 'weak' | 'mixed'` REQUEST ON THIS PAGE
@@ -60,6 +62,37 @@
  * was left unfinished.
  *
  * =============================================================================
+ * THE MOCK INTERVIEW IS ITS OWN BAND, AND ITS COPY IS A WARNING LABEL
+ * =============================================================================
+ *
+ * Issue #145. It is a band alongside Quick 5 and By category rather than a
+ * third button inside "Start practising", because it is not the same kind of
+ * act: a Quick 5 is five questions with feedback after each one, and a mock
+ * interview is a twenty-minute rehearsal that says nothing at all until the
+ * end. Putting them side by side as peers would let a learner tap into the
+ * second expecting the first.
+ *
+ * So the copy states the two things that make it different — it is longer than
+ * five questions, and there is no feedback until it finishes — BEFORE the
+ * learner commits, so the choice is deliberate. That is
+ * `docs/specs/mock-interview.md` §10's rule reaching one screen further back:
+ * the real interview gives no per-question signal, a rehearsal that did would
+ * be coaching a learner to expect reassurance the actual event will never
+ * provide, and a learner who was not told that reads its absence as the product
+ * being broken.
+ *
+ * It links rather than POSTing. Unlike Quick 5, starting an interview needs a
+ * decision first — `transcriptRetained`, §8.1's per-interview choice — and
+ * `/practice/interviews` is the screen that asks for it. A one-click start here
+ * would either skip the question or answer it on the learner's behalf.
+ *
+ * It is shown to everyone with a resolved test version, and NOT gated on the
+ * journey stage. The stage gate belongs to Home's Next-up card, which is a
+ * recommendation and must offer the single most useful true thing; this is a
+ * menu, and a menu that hides an option a learner is entitled to choose is a
+ * product deciding for them (`VISION.md`'s Product Principle 9).
+ *
+ * =============================================================================
  * AN EMPTY HISTORY IS AN EMPTY STATE, NEVER A FABRICATED ZERO
  * =============================================================================
  *
@@ -96,8 +129,9 @@
  * WIDTH AND HEADINGS
  * =============================================================================
  *
- * One `h1` ("Practice") with an `h2` on each of the four bands (Your queue,
- * Start practising, Practise one section, Recent sessions). Mobile-first,
+ * One `h1` ("Practice") with an `h2` on each of the five bands (Your queue,
+ * Start practising, Practise one section, Mock interview, Recent sessions).
+ * Mobile-first,
  * every responsive value steps at `sm` (600px), and none of `CLAUDE.md`'s five
  * coupled gates is touched — this page only agrees with them.
  */
@@ -118,11 +152,13 @@ import {
 import AutorenewOutlinedIcon from '@mui/icons-material/AutorenewOutlined';
 import BoltIcon from '@mui/icons-material/Bolt';
 import ChevronRightIcon from '@mui/icons-material/ChevronRight';
+import HistoryEduOutlinedIcon from '@mui/icons-material/HistoryEduOutlined';
 import { Link as RouterLink, useNavigate } from 'react-router-dom';
 
 import { LoadingSpinner } from '../components/common/LoadingSpinner';
 import { PracticeQueueSummary } from '../components/practice/PracticeQueueSummary';
 import { RecentSessions } from '../components/practice/RecentSessions';
+import { INTERVIEWS_PATH } from '../components/interview/paths';
 // The same `/settings/journey` page the civics state notice links to. Imported
 // rather than re-spelled: two literals for one destination is how one of them
 // survives a route rename.
@@ -421,7 +457,49 @@ export default function PracticePage() {
             </Box>
 
             {/* -----------------------------------------------------------
-                3. Recent sessions.
+                3. Mock interview — a LINK, not a POST, and copy that says
+                   what it is before the learner commits to twenty minutes
+                   of it. See the header.
+                ----------------------------------------------------------- */}
+            <Box
+              component="section"
+              aria-labelledby="practice-interview-heading"
+              sx={{ mt: 4 }}
+            >
+              <Typography
+                id="practice-interview-heading"
+                variant="overline"
+                component="h2"
+                color="text.secondary"
+                sx={{ display: 'block' }}
+              >
+                Mock interview
+              </Typography>
+              <Typography color="text.secondary" sx={{ mt: 1, maxWidth: '60ch' }}>
+                A rehearsal of the interview itself, with an officer who asks
+                and moves on. It runs longer than five questions and tells you
+                nothing until it finishes &mdash; the real one doesn&rsquo;t
+                either. Worth choosing when you have a quiet stretch of time.
+              </Typography>
+              <Button
+                component={RouterLink}
+                to={INTERVIEWS_PATH}
+                variant="outlined"
+                size="large"
+                startIcon={<HistoryEduOutlinedIcon />}
+                // Its own width from `sm` up. Full width on a phone, where a
+                // half-width secondary action beside nothing reads as broken —
+                // but `outlined`, never `contained`: Quick 5 above is the
+                // action of this screen, and two filled buttons would be the
+                // page failing to say which.
+                sx={{ mt: 2, width: { xs: '100%', sm: 'auto' } }}
+              >
+                Start a mock interview
+              </Button>
+            </Box>
+
+            {/* -----------------------------------------------------------
+                4. Recent sessions.
                 ----------------------------------------------------------- */}
             <Box sx={{ mt: 4 }}>
               {sessionsError ? (

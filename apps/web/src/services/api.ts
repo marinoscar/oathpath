@@ -252,6 +252,7 @@ import type {
   CreateInterviewInput,
   InterviewDebrief,
   InterviewDetail,
+  InterviewPage,
   InterviewState,
   EngagementSummary,
 } from '../types';
@@ -1215,12 +1216,19 @@ export async function getEngagementSummary(): Promise<EngagementSummary> {
 // (issue #140, epic #57 / E8 "Mock interview")
 // =============================================================================
 //
-// Three calls. The fourth thing this feature does — taking a turn — is not
-// here, because it is not JSON: `POST /api/interviews/:id/turns` answers with
-// `text/event-stream` and lives in `services/interviewStream.ts`, beside the
-// frame decoder, exactly as the explain stream does. The fifth route the API
-// serves (`GET /api/interviews`, the history list) is issue #145's and is
-// deliberately not bound yet.
+// Four calls, one per JSON route the interviews controller serves. The fifth
+// thing this feature does — taking a turn — is not here, because it is not
+// JSON: `POST /api/interviews/:id/turns` answers with `text/event-stream` and
+// lives in `services/interviewStream.ts`, beside the frame decoder, exactly as
+// the explain stream does.
+//
+// `getInterviews` is issue #145's addition. This block used to say the history
+// list was "deliberately not bound yet"; it is bound now, because the debrief
+// screen it feeds exists. §12 states why the endpoint is there at all rather
+// than leaving it to be inferred: a debrief that existed only as a one-time
+// response to the `complete` call that produced it could not answer "did I do
+// better on my second mock interview than my first", which is a real question
+// this product should be able to answer.
 //
 // Every route is `@Auth()` with NO permission and resolves the learner from the
 // token, the same posture the practice, readiness and engagement blocks above
@@ -1299,4 +1307,28 @@ export async function getInterview(id: string): Promise<InterviewDetail> {
  */
 export async function completeInterview(id: string): Promise<InterviewDebrief> {
   return api.post<InterviewDebrief>(`/interviews/${id}/complete`, {});
+}
+
+/**
+ * The caller's own interviews, newest first — `GET /api/interviews` (#145).
+ *
+ * The same `page`/`pageSize` shape `getPracticeSessions` above sends, against
+ * the same convention on the server. There are deliberately NO FILTERS to pass:
+ * the query DTO is a `z.strictObject`, so an unknown parameter — `?userId=`
+ * included — is a 400 naming it rather than a filter that silently did nothing.
+ *
+ * Each row is a header: `status`, `startedAt`, `completedAt`, `civicsAsked`,
+ * `civicsCorrect` and `passedCivics`. Per-question detail lives behind
+ * `getInterview`, which is what the debrief screen reads.
+ */
+export async function getInterviews(params?: {
+  page?: number;
+  pageSize?: number;
+}): Promise<InterviewPage> {
+  const searchParams = new URLSearchParams();
+  if (params?.page) searchParams.set('page', String(params.page));
+  if (params?.pageSize) searchParams.set('pageSize', String(params.pageSize));
+
+  const query = searchParams.toString();
+  return api.get<InterviewPage>(`/interviews${query ? `?${query}` : ''}`);
 }

@@ -2273,3 +2273,30 @@ export interface CreateInterviewInput {
    */
   transcriptRetained?: boolean;
 }
+
+/**
+ * A row in the caller's interview history — `GET /api/interviews`.
+ *
+ * The header row and nothing else, exactly as the API's own
+ * `interviewListItemSchema` declares it (an alias of `interviewSchema`, not a
+ * narrower shape). §12 states what the endpoint is for and therefore what a row
+ * has to carry: "did I do better on my second mock interview than my first" is
+ * the question, and `civicsAsked` / `civicsCorrect` / `passedCivics` on the
+ * header already answer it. A learner who wants the per-question detail opens
+ * the interview's debrief.
+ *
+ * Declared as its own name rather than used as `Interview` at the call site so
+ * that the day the API narrows the list row — a real possibility, since a list
+ * has no need for `transcriptRetained` — this alias is the one place that
+ * changes.
+ */
+export type InterviewListItem = Interview;
+
+/** `GET /api/interviews` — the same flat pagination shape every list uses. */
+export interface InterviewPage {
+  items: InterviewListItem[];
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+}
