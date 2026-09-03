@@ -185,6 +185,15 @@ export const TAG_GROUPS: OpenApiTagGroup[] = [
           'not a 403. No permission gates any of it — every signed-in learner owns their own ' +
           'attempts.',
       },
+      {
+        name: 'Progress',
+        description:
+          "Coverage and mastery, by category, for the caller's own resolved test version — " +
+          "how much of the bank has been touched and how well each section is known, as " +
+          "opposed to Practice's queue counts, which say what a session started right now " +
+          'would select next. Read-only, and no permission gates it: every signed-in learner ' +
+          'owns their own mastery data.',
+      },
     ],
   },
   {
