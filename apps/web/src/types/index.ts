@@ -1764,3 +1764,43 @@ export interface PracticeQueue {
   learning: number;
   mastered: number;
 }
+
+// =============================================================================
+// Progress — `GET /api/progress/mastery` (issue #94, epic #54 / E5 "Memory")
+// =============================================================================
+
+/**
+ * The five buckets `question_mastery.state` and `mastery/scheduler.ts`'s own
+ * `MasteryState` union already use. A string, not a closed union, for the
+ * same open-set reason `PracticeOutcome`-adjacent types in this file take one:
+ * a browser holding this bundle must still render a sixth state a later
+ * migration adds, rather than fail to compile against rows it has never seen.
+ */
+export type MasteryState = 'new' | 'learning' | 'review' | 'lapsed' | 'mastered';
+
+/** Every question in some scope, bucketed by the caller's own mastery state. */
+export type MasteryStateCounts = Record<MasteryState, number>;
+
+/** One category's coverage and mastery — one row of `ProgressMastery.categories`. */
+export interface ProgressMasteryCategory {
+  categoryId: string;
+  categoryName: string;
+  /** How many of this category's questions exist in the caller's test version. */
+  totalQuestions: number;
+  byState: MasteryStateCounts;
+  /** Convenience duplicate of `byState.mastered`. */
+  masteredCount: number;
+}
+
+/** `GET /api/progress/mastery` — the caller's coverage and mastery, by category. */
+export interface ProgressMastery {
+  /** Which bank this is scoped to — the caller's own resolved test version. */
+  testVersionCode: string;
+  /** The whole bank's size for this test version. */
+  totalQuestions: number;
+  /** `totalQuestions - byState.new`. */
+  attempted: number;
+  byState: MasteryStateCounts;
+  /** In the same render order `GET /api/civics/versions/{code}/categories` uses. */
+  categories: ProgressMasteryCategory[];
+}
