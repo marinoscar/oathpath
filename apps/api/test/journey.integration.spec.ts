@@ -781,6 +781,131 @@ describe('Journey (Integration)', () => {
       });
     });
 
+    // -------------------------------------------------------------------------
+    // AC — the `review` next action (#82, epic #54 / E5 "Memory")
+    // -------------------------------------------------------------------------
+    //
+    // The rung E5 inserts between `interview_countdown` and `practice`.
+    // `PracticeService.getQueue` is real code here, not a double — it is the
+    // Prisma mocks (`civicsQuestion.findMany`, `questionMastery.findMany`)
+    // that are wired per test, in the same in-memory-store shape
+    // `practice.integration.spec.ts`'s own `GET /api/practice/queue` fixtures
+    // use (`classifyMasteryBucket`'s `review`+past-`dueAt` → due,
+    // `lapsed`+future-`dueAt` → weak).
+    describe('the review next action', () => {
+      const REVIEW_Q_DUE = 'b1111111-1111-4111-8111-111111111111';
+      const REVIEW_Q_LAPSED = 'b2222222-2222-4222-8222-222222222222';
+      const REVIEW_CAT = 'c9999999-9999-4999-8999-999999999999';
+
+      /** One `civics_questions` row, shaped exactly as `getQueue`'s own `select` reads it. */
+      function reviewQuestion(id: string) {
+        return { id, categoryId: REVIEW_CAT, dynamicScope: 'none' as const };
+      }
+
+      /** One `question_mastery` row, shaped as `loadMasteryByQuestionId`'s own `select` reads it. */
+      function masteryRow(
+        questionId: string,
+        overrides: Record<string, unknown>,
+      ) {
+        return {
+          questionId,
+          state: 'learning',
+          dueAt: null,
+          lapses: 0,
+          correctStreak: 1,
+          lastAttemptAt: new Date('2026-01-20T00:00:00Z'),
+          ...overrides,
+        };
+      }
+
+      it('sends an oriented learner with due evidence to review, ranked below the countdown but above practice', async () => {
+        await orient();
+        (prismaMock.civicsQuestion.findMany as jest.Mock).mockResolvedValueOnce([
+          reviewQuestion(REVIEW_Q_DUE),
+        ]);
+        (prismaMock.questionMastery.findMany as jest.Mock).mockResolvedValueOnce([
+          masteryRow(REVIEW_Q_DUE, {
+            state: 'review',
+            dueAt: new Date('2026-01-31T00:00:00Z'), // in the past relative to the clock below
+          }),
+        ]);
+
+        const response = await request(server())
+          .get('/api/journey/home')
+          .set(authHeader(learner.accessToken))
+          .set('X-Test-Clock', '2026-02-01T12:00:00Z')
+          .expect(200);
+
+        const { nextAction } = response.body.data;
+        expect(nextAction.kind).toBe('review');
+        expect(nextAction.path).toBe('/practice');
+        expect(nextAction.title).toBe('Review 1 question.');
+        expect(nextAction.reason).toContain('You have 1 question ready to review');
+      });
+
+      it('sends an oriented learner with ONLY lapsed evidence (dueCount 0) to review too', async () => {
+        // The shipped gate is `dueCount + lapsedCount > 0`, not `dueCount`
+        // alone (study-coach.ts's own flagged judgment call) — a row that is
+        // `weak`, not `due`, must still fire the card.
+        await orient();
+        (prismaMock.civicsQuestion.findMany as jest.Mock).mockResolvedValueOnce([
+          reviewQuestion(REVIEW_Q_LAPSED),
+        ]);
+        (prismaMock.questionMastery.findMany as jest.Mock).mockResolvedValueOnce([
+          masteryRow(REVIEW_Q_LAPSED, {
+            state: 'lapsed',
+            dueAt: new Date('2026-02-10T00:00:00Z'), // in the future — weak, not due
+            lapses: 1,
+          }),
+        ]);
+
+        const response = await request(server())
+          .get('/api/journey/home')
+          .set(authHeader(learner.accessToken))
+          .set('X-Test-Clock', '2026-02-01T12:00:00Z')
+          .expect(200);
+
+        const { nextAction } = response.body.data;
+        expect(nextAction.kind).toBe('review');
+        expect(nextAction.title).toBe('Review 1 question.');
+      });
+
+      it('does not fire review with no due/lapsed evidence, falling through to practice', async () => {
+        await orient();
+        // Default mocks (empty civics bank) apply — dueCount and lapsedCount
+        // both resolve to zero.
+
+        const response = await request(server())
+          .get('/api/journey/home')
+          .set(authHeader(learner.accessToken))
+          .set('X-Test-Clock', '2026-02-01T12:00:00Z')
+          .expect(200);
+
+        expect(response.body.data.nextAction.kind).toBe('practice');
+      });
+
+      it('lets the interview countdown outrank review even with due evidence sitting there', async () => {
+        await orient({ interviewDate: new Date('2026-03-15T00:00:00Z') });
+        (prismaMock.civicsQuestion.findMany as jest.Mock).mockResolvedValueOnce([
+          reviewQuestion(REVIEW_Q_DUE),
+        ]);
+        (prismaMock.questionMastery.findMany as jest.Mock).mockResolvedValueOnce([
+          masteryRow(REVIEW_Q_DUE, {
+            state: 'review',
+            dueAt: new Date('2026-01-31T00:00:00Z'),
+          }),
+        ]);
+
+        const response = await request(server())
+          .get('/api/journey/home')
+          .set(authHeader(learner.accessToken))
+          .set('X-Test-Clock', '2026-02-01T12:00:00Z')
+          .expect(200);
+
+        expect(response.body.data.nextAction.kind).toBe('interview_countdown');
+      });
+    });
+
     describe('the countdown respects X-Test-Clock', () => {
       it('counts whole calendar days to a pinned instant', async () => {
         await orient({
