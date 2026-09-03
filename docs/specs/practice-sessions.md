@@ -271,7 +271,7 @@ own justification for shipping two of these ahead of any reader existing.
 | `revealed` | `Boolean`, default `false` | no | E5 (evidence weighting) | True once the learner has seen the accepted answer for this question, whether or not they had already responded. §9.1 covers exactly how this interacts with self-mark. |
 | `hintUsed` | `Boolean`, default `false` | no | E5 (evidence weighting) | True if the learner requested a hint before submitting a response. Distinct from `revealed`: a hint narrows the field without giving away the accepted answer outright, so a correct outcome with `hintUsed: true` is real but *weaker* recall evidence than one with no assistance at all — the same "weaker evidence, not disqualified evidence" posture §9 gives self-mark. |
 | `durationMs` | `Int?` | yes | E6, E8 (pacing, debrief) | Wall-clock time from question shown to response submitted. Null, never `0`, when the client cannot report a duration (a resumed session's first attempt after the page was reloaded, for instance) — the identical "null means unknown, `0` is a false claim of speed" reasoning `ai_usage_events`'s token columns already state in `schema.prisma`, applied to timing instead of tokens. Declared now because — like `inputMode`/`promptMode` — a duration not captured at the moment of the attempt cannot be reconstructed afterward; there is nothing to backfill it from. |
-| `answeredAt` | `DateTime @db.Timestamptz` | no | E5 (distinct-day mastery), E7 (streaks) | The instant the attempt resolved to a terminal outcome — a submitted response, a skip, or a reveal with no response. Set from `Clock.now()`, never client-supplied and, unlike `practice_sessions.startedAt`, carries **no DB default at all**: the column is `NOT NULL` with nothing to fall back on, so application code must supply it explicitly on every insert. E5's "correct on 3 or more distinct days" rule (journey-shell.md §1) depends on this being the server's own clock, in the learner's own local day, not a timestamp a client device could misreport. |
+| `answeredAt` | `DateTime @db.Timestamptz` | no | E5 (distinct-day mastery), E7 (streaks) | The instant the attempt resolved to a terminal outcome — a submitted response, a skip, or a reveal with no response. Set from `Clock.now()`, never client-supplied and, unlike `practice_sessions.startedAt`, carries **no DB default at all**: the column is `NOT NULL` with nothing to fall back on, so application code must supply it explicitly on every insert. E5's "correct on 3 or more distinct days" rule (journey-shell.md §1) depends on this being the server's own clock, not a timestamp a client device could misreport. **Corrected from an earlier draft's "in the learner's own local day"**: as shipped, E5's distinct-day count reasons in **UTC** calendar days, not the learner's local one — `docs/specs/memory-model.md` §3.3/§3.5 record the correction against the real `nextSchedule`. |
 | `answerSnapshot` | `Json` | no | E5, E6, E8 (debrief and re-grade transparency) | §6 is the complete account of what this holds and why. No default — the shipped column requires a value on every insert, which is the concrete enforcement of locked decision #4: there is no code path that can write an attempt without also freezing what it was graded against. |
 | `createdAt` | `DateTime @db.Timestamptz` | no | — | House convention. **There is no `updatedAt` on this table at all** — the schema's own comment states it plainly: "An attempt is an immutable record of something that already happened — same reasoning as `AiUsageEvent`." §9 designs the self-mark mechanism around this fact rather than against it: self-marking is never a later mutation of a stored row. |
 
@@ -341,21 +341,23 @@ nothing.
 
 | `kind` | Ships in | Selector (design level) |
 |---|---|---|
-| `quick` | **E3** | Five questions, drawn from the learner's active test version, unseen-first (no `practice_attempts` row yet for that question), falling back to least-recently-attempted once every question has been seen at least once. |
-| `category` | **E3** | Every remaining unseen question in one `civics_categories` row for the learner's test version, `plannedCount` set to that count. |
-| `review` | Declared, wired by **E5** | E5's spaced-repetition scheduler (`question_mastery`) selects questions due for review. E3's selector has no scheduling data to draw on — `question_mastery` does not exist yet — so this kind is unreachable through E3's own API until E5 ships the table it reads from. |
-| `weak` | Declared, wired by **E5** | Questions E5's mastery computation has flagged as shaky (missed recently, or never verified). Same dependency as `review`: nothing in E3 can compute "weak" without E5's evidence aggregation existing first. |
-| `mixed` | Declared, wired by **E5** | A blend of due-for-review and weak questions — E5's own recommender surface, not a distinct selection algorithm E3 needs to anticipate beyond declaring the enum value it will eventually receive. |
+| `quick` | **E3**, ordering upgraded by **E5** | Five questions, drawn from the learner's active test version. Under E3's own selector: unseen-first, falling back to least-recently-attempted once every question has been seen at least once. **E5 (issue #78) replaces that ordering** — without changing the `kind` or its wire contract — with `mastery/selector.ts`'s `selectQuestionsV2`: due, then weak, then new by category coverage, then steady, then mastered by recency (`docs/specs/memory-model.md` §5). |
+| `category` | **E3**, ordering upgraded by **E5** | Every remaining unseen question in one `civics_categories` row for the learner's test version, `plannedCount` set to that count. Gains the identical `selectQuestionsV2` ordering upgrade `quick` does. |
+| `review` | Declared; **still unwired after E5's full merge** | `question_mastery` and its mastery-aware selector both exist now (issue #78), but `createPracticeSessionSchema`'s `kind` enum still rejects `"review"` as a 400 — **corrected here from an earlier draft of this table, which described E5 as wiring this value.** It does not: E5 instead applies the mastery-aware ordering above to the two kinds already wired, `quick` and `category`, rather than adding new session kinds. `apps/web/src/pages/PracticePage.tsx`'s own header states this precisely: "THERE IS NO `kind: 'review' \| 'weak' \| 'mixed'` REQUEST ON THIS PAGE." Widening the schema to offer a genuine review session remains a separate, later change. |
+| `weak` | Declared; **still unwired after E5's full merge** | Same correction as `review` — nothing in this codebase computes or requests `kind: 'weak'` today; `mastery/selector.ts`'s `weak` bucket biases the two wired kinds' ordering instead. |
+| `mixed` | Declared; **still unwired after E5's full merge** | Same correction as `review` — no distinct `mixed` selection algorithm has been written; a blend of due and weak content is exactly what the wired kinds' new ordering already surfaces first. |
 
 **E3's own module never produces `review`, `weak`, or `mixed`.** A session
-created with one of those three kinds before E5 ships is not a state E3's
-`POST /api/practice/sessions` (§10) can even construct — the DTO's kind
-field is validated against the two E3 wires, the same closed-set validation
-`aiSettingsSchema` gives its role map. The other three exist in the
-**database enum**, reachable only once E5's own service constructs a session
-with one of them, exactly the way `AI_MODEL_ROLES`' four unwired roles
-render inert on `/admin/settings/ai` today without being selectable for
-inference.
+created with one of those three kinds is not a state `POST
+/api/practice/sessions` (§10) can even construct — the DTO's `kind` field is
+validated against the two wired values, the same closed-set validation
+`aiSettingsSchema` gives its role map. **This is still true after E5's full
+merge, not just before it** (`docs/specs/memory-model.md` §5.3 corrects an
+earlier draft of this document that assumed otherwise): the other three
+exist only in the **database enum**, reachable once some later change
+constructs a session with one of them, exactly the way `AI_MODEL_ROLES`'
+four unwired roles render inert on `/admin/settings/ai` today without being
+selectable for inference.
 
 ---
 
