@@ -46,6 +46,7 @@ import {
 import type {
   CreatePracticeSessionInput,
   JourneyProfile,
+  PracticeQueue,
   PracticeSessionListItem,
   PracticeSessionState,
 } from '../../types';
@@ -124,14 +125,43 @@ function sessionStartResponse(
   };
 }
 
+/**
+ * A brand-new learner's queue: everything is `new`, nothing is due, weak, or
+ * mastered yet. The default so that a test exercising Quick 5, categories or
+ * recent sessions — none of which is ABOUT the queue band — is not also
+ * silently exercising its error state, the way `onUnhandledRequest: 'warn'`
+ * would otherwise make it: an un-mocked `GET /api/practice/queue` fails
+ * outright (there is no real server here), so every test that omits this
+ * handler would see a second, unrelated "Try again" button appear.
+ */
+const DEFAULT_QUEUE: PracticeQueue = {
+  testVersionCode: 'v2008',
+  total: CATEGORIES.length * 10,
+  due: 0,
+  weak: 0,
+  new: {
+    total: CATEGORIES.length * 10,
+    byCategory: CATEGORIES.map((category) => ({
+      categoryId: category.id,
+      categoryName: category.name,
+      newCount: 10,
+    })),
+  },
+  learning: 0,
+  mastered: 0,
+};
+
 interface PracticeHandlerOptions {
   sessions?: PracticeSessionListItem[];
   sessionsStatus?: number;
+  queue?: PracticeQueue;
+  queueStatus?: number;
   onCreateSession?: (input: CreatePracticeSessionInput) => void;
 }
 
 function practiceHandlers(options: PracticeHandlerOptions = {}) {
   const sessions = options.sessions ?? [];
+  const queue = options.queue ?? DEFAULT_QUEUE;
 
   return [
     http.get(`${API_BASE}/practice/sessions`, () => {
@@ -156,6 +186,16 @@ function practiceHandlers(options: PracticeHandlerOptions = {}) {
       const input = (await request.json()) as CreatePracticeSessionInput;
       options.onCreateSession?.(input);
       return HttpResponse.json({ data: sessionStartResponse(input) });
+    }),
+
+    http.get(`${API_BASE}/practice/queue`, () => {
+      if (options.queueStatus && options.queueStatus >= 400) {
+        return HttpResponse.json(
+          { message: 'Your practice queue could not be loaded.' },
+          { status: options.queueStatus },
+        );
+      }
+      return HttpResponse.json({ data: queue });
     }),
   ];
 }
