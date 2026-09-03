@@ -17,6 +17,7 @@ import {
   type DynamicScope,
 } from '../civics/answer-resolution';
 import { Clock } from '../common/clock/clock';
+import { nextStageOnMasteryEvent } from '../journey/stage-transitions';
 import { PrismaService } from '../prisma/prisma.service';
 import { matchAnswer, type AnswerMatch } from './answer-matching';
 import { excludeUnanswerable } from './question-selection';
@@ -1075,6 +1076,19 @@ export class PracticeService {
    * `selfMarkAttempt` both produce it via `mastery/outcome-mapping.ts` before
    * calling this method, so this method itself needs no knowledge of
    * `practice_attempts.outcome` or `.gradingMethod` at all.
+   *
+   * A FOURTH STEP, added by issue #82 (epic #54 / E5, memory-model.md §7):
+   * once the `question_mastery` row is upserted, check whether this exact
+   * mastery event — this learner's CURRENT journey stage, plus the state
+   * this row was in before and after this attempt — also advances
+   * `learner_profiles.stage` (`oriented -> learning`, `learning ->
+   * remembering`). `nextStageOnMasteryEvent` is `journey/stage-transitions.ts`'s
+   * own pure decision; this method's only job is handing it the right three
+   * values and, when it says to, writing the result — inside this SAME
+   * transaction, never a separate one (§4's synchronous-scheduling rationale
+   * applies identically to the stage write: an attempt recorded without its
+   * stage consequence would be a fact that silently never reached the
+   * learner's own journey state, and nothing sweeps up that gap later).
    */
   private async scheduleMastery(
     tx: Prisma.TransactionClient,
@@ -1133,6 +1147,32 @@ export class PracticeService {
         lastAttemptAt: next.lastAttemptAt,
       },
     });
+
+    // Guarded on the row existing at all rather than upserted: a practice
+    // attempt is unreachable without an oriented, existing `learner_profiles`
+    // row (`requireOrientedProfile`), so `findUnique` returning nothing here
+    // would itself be the surprise. The guard costs one null check and
+    // refuses to crash the whole attempt write over a stage nicety if that
+    // invariant is ever violated.
+    const learnerProfile = await tx.learnerProfile.findUnique({
+      where: { userId },
+      select: { stage: true },
+    });
+
+    if (learnerProfile) {
+      const nextStage = nextStageOnMasteryEvent(
+        learnerProfile.stage,
+        current.state,
+        next.state,
+      );
+
+      if (nextStage !== null) {
+        await tx.learnerProfile.update({
+          where: { userId },
+          data: { stage: nextStage },
+        });
+      }
+    }
   }
 
   // ---------------------------------------------------------------------------
