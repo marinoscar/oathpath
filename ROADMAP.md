@@ -77,8 +77,8 @@ a v2.
 | — | AI configuration | Server model-role bindings (admin) plus mandatory per-user BYOK OpenAI keys; the one door (`AiDispatchService`) every later AI feature calls through | Foundation — required before E4, E8, E9, E10, E11 | done | [#25](https://github.com/marinoscar/oathpath/issues/25) |
 | E1 | Journey shell | Four-destination navigation (Home, Learn, Practice, Progress), the `Clock` provider, the learner profile (test version, senior exemption, interview date, state, goal), orientation, and home's `nextAction` contract | — | done | [#50](https://github.com/marinoscar/oathpath/issues/50) |
 | E2 | Civics content | The versioned, provenance-tracked USCIS question bank for both test versions, dynamic answers with effective dates, and the Learn page | E1 | done<sup>†</sup> | [#51](https://github.com/marinoscar/oathpath/issues/51) |
-| E3 | Practice sessions | Deterministic (exact-match + normalisation) practice loop and `practice_attempts`, the one evidence table every later epic reads | E1, E2 | in progress<sup>‡</sup> | [#52](https://github.com/marinoscar/oathpath/issues/52) |
-| E4 | AI Evaluator and Teacher | `AiDispatchService.run`, the `FakeAiProvider`, semantic grading with failure causes, streaming explanations — the first AI feature | #25, E2, E3 | in progress<sup>‡</sup> | [#53](https://github.com/marinoscar/oathpath/issues/53) |
+| E3 | Practice sessions | Deterministic (exact-match + normalisation) practice loop and `practice_attempts`, the one evidence table every later epic reads | E1, E2 | done<sup>‡</sup> | [#52](https://github.com/marinoscar/oathpath/issues/52) |
+| E4 | AI Evaluator and Teacher | `AiDispatchService.run`, the `FakeAiProvider`, semantic grading with failure causes, streaming explanations — the first AI feature | #25, E2, E3 | done<sup>‡</sup> | [#53](https://github.com/marinoscar/oathpath/issues/53) |
 | E5 | Memory | Spaced repetition (`question_mastery`), verified mastery (correct on ≥3 distinct days), the deterministic Study Coach recommender, Progress v1 | E1, E3 | done<sup>§</sup> | [#54](https://github.com/marinoscar/oathpath/issues/54) |
 | E6 | Readiness and Progress | The explainable, capped readiness score (`readiness_snapshots`), Progress v2, the readiness-vs-engagement separation | E3, E5 | not started | [#55](https://github.com/marinoscar/oathpath/issues/55) |
 | E7 | Habit | Daily goal, streaks with protection, session-end celebrations, three reminder notification events on an hourly cron | E1, E3, E5 | not started | [#56](https://github.com/marinoscar/oathpath/issues/56) |
@@ -129,14 +129,20 @@ verified against the official source — E4's grader and E8's interview engine
 ground their judgments in these rows, so that distinction matters to them
 specifically.
 
-<sup>‡</sup> **E3 and E4 have every child issue implemented and merged, and are
-`in progress` rather than `done` for one reason: nobody has run their
-Playwright specs.** `tests/e2e/specs/practice-session.spec.ts` (#84) and
-`ai-evaluation.spec.ts` (#131) were written against the real component
-sources, they typecheck, and all 17 specs register under `playwright test
---list` — but the environment they were authored in had no Docker daemon, so
-neither has ever walked the loop against the compose stack. That is the
-human check §6 requires, and it is the only thing outstanding.
+<sup>‡</sup> **E3 and E4 are closed and marked `done` by the repository owner,
+with one of this section's human checks knowingly outstanding** — the same
+deliberate call, on the same terms, that E2 records above. All nineteen child
+issues are merged and CI is green on `main`; what follows is not a defect list
+but a record of what a later reader should not assume was verified.
+
+1. **Neither epic's Playwright spec has ever been executed.**
+   `tests/e2e/specs/practice-session.spec.ts` (#84) and
+   `ai-evaluation.spec.ts` (#131) were written against the real component
+   sources, they typecheck, and all 17 specs across 6 files register under
+   `playwright test --list` — but the environment they were authored in had no
+   Docker daemon, so neither has walked the loop against the compose stack.
+   This is §6's human check, and it is the one thing `done` does not cover
+   here. #84 and #131 can be reopened if it is picked up.
 
 Two smaller facts a later reader should not have to discover:
 
@@ -156,6 +162,12 @@ not lift it for them: they ground every judgement and every explanation in
 database is — a transcription no human has checked page by page is still a
 transcription no human has checked.
 
+Nothing downstream should read E3's or E4's `done` as meaning the practice loop
+or the grading ladder has been observed working end to end in a browser against
+a real database. E5 schedules on `practice_attempts`, E6 scores it and E8
+writes into it, so the first epic to actually run the compose stack is also the
+first to find out.
+
 <sup>§</sup> **E5 is marked `done` with all ten child issues merged to
 `main`** — #67, #71, #75, #78, #82, #86, #90, #94, #98
 (`tests/e2e/specs/memory.spec.ts`), and #102 (this docs reconciliation). The
@@ -166,20 +178,23 @@ transitions, and the progress endpoint) — so every number, field name, and
 endpoint shape in it is verified against the real, merged `apps/api/src/`
 tree, not aspirational.
 
-Two things a later reader should not assume this footnote settles:
+One thing a later reader should not assume this footnote settles: **whether a
+human has actually run `memory.spec.ts` against the compose stack** — the §6
+check this legend requires — is not something a docs reconciliation can
+confirm one way or the other; it can only confirm the spec file exists and is
+built against the real, shipped selector and scheduler (its own header cites
+both by name).
 
-1. **Whether a human has actually run `memory.spec.ts` against the compose
-   stack** — the §6 check this legend requires — is not something this docs
-   reconciliation can confirm one way or the other; it can only confirm the
-   spec file itself exists and is built directly against the real,
-   shipped selector and scheduler (its own header cites both by name). The
-   identical gap is footnoted `done`<sup>†</sup> for E2 and `in progress`<sup>‡</sup>
-   for E3/E4 elsewhere in this table — this repository has not been
-   consistent about which status an unconfirmed run gets, and this entry
-   does not resolve that inconsistency.
-2. **Epic issue #54 itself is still open on GitHub** as of this reconciliation,
-   despite all ten child issues being merged — closing it is a decision for
-   whoever merges #102, not something a docs change can do on its own.
+**The inconsistency that footnote originally named is now resolved, in one
+direction.** It observed that this repository had not been consistent about
+which status an unconfirmed Playwright run gets — `done`<sup>†</sup> for E2 but
+`in progress`<sup>‡</sup> for E3 and E4. The repository owner has since closed
+E3 and E4 on E2's terms, so all four now read `done` with the unrun spec
+recorded in a footnote rather than encoded in the status column. That is the
+convention this table follows from here: **an epic whose child issues are all
+merged and whose CI is green is `done`, and an unrun journey spec is a
+footnoted fact, not a status.** E5 is `done` on exactly that basis.
+
 
 ---
 
