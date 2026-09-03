@@ -24,7 +24,7 @@ import userEvent from '@testing-library/user-event';
 import { render, mockAdminUser, mockUser } from '../../utils/test-utils';
 import { setViewportWidth } from '../../setup';
 import { Layout } from '../../../components/common/Layout';
-import { DESTINATIONS } from '../../../config/destinations';
+import { CONSOLE_DESTINATION, DESTINATIONS } from '../../../config/destinations';
 
 vi.mock('../../../hooks/usePermissions', () => ({
   usePermissions: vi.fn(),
@@ -146,7 +146,7 @@ describe('The four-destination bar across the sm boundary', () => {
       // collapse toggle is a `button` rather than a link so it is not counted.
       // A viewer holds neither admin permission, so no pinned Console row.
       expect(rows).toHaveLength(DESTINATIONS.length);
-      for (const label of ['User Settings', 'Console']) {
+      for (const label of ['User Settings', CONSOLE_DESTINATION.label]) {
         expect(
           within(bar(width)).queryByRole(rowRole(width), { name: label }),
           `${label} should not be in the bar at ${width}px`,
@@ -194,22 +194,32 @@ describe('The four-destination bar across the sm boundary', () => {
     }
   });
 
-  it('gives an admin the pinned Console row on the rail and nowhere else', async () => {
-    // Spec §2.2's accepted cost, asserted rather than left as prose: the rail
-    // has Console, the phone has no path to it from the nav chrome, and
-    // reachability by URL is untouched either way.
+  it('gives an admin the pinned System Settings row on the rail, and the same row from the phone menu (#232)', async () => {
+    // Spec §2.2's ORIGINAL accepted cost was that the phone had no path to
+    // Console from the nav chrome at all. Issue #232 reverses exactly that
+    // half: the bottom bar still never draws it (it iterates `DESTINATIONS`
+    // only, never `RAIL_PINNED_DESTINATIONS`), but the user menu — mounted at
+    // every width — now offers the same destination the rail pins, so a phone
+    // admin is no longer locked out of the nav chrome entirely. Reachability
+    // by URL was always untouched either way.
     setPermissions(['system_settings:read', 'users:read'], true);
     const user = userEvent.setup();
 
     renderShell(DESKTOP, '/', mockAdminUser);
-    expect(screen.getByRole('link', { name: 'Console' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: CONSOLE_DESTINATION.label })).toBeInTheDocument();
 
     await act(async () => setViewportWidth(PHONE));
-    expect(screen.queryByRole('button', { name: 'Console' })).not.toBeInTheDocument();
+    // Still absent from the bottom bar itself — Console was never a bar
+    // destination and #232 does not change that.
+    expect(
+      screen.queryByRole('button', { name: CONSOLE_DESTINATION.label }),
+    ).not.toBeInTheDocument();
 
     await user.click(userMenuButton());
     expect(await screen.findByRole('menuitem', { name: 'User Settings' })).toBeInTheDocument();
-    expect(screen.queryByRole('menuitem', { name: 'Console' })).not.toBeInTheDocument();
+    expect(
+      screen.getByRole('menuitem', { name: CONSOLE_DESTINATION.label }),
+    ).toBeInTheDocument();
   });
 
   it('needs no permission for any of the four, at any width', () => {
