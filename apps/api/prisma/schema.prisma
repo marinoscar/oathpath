@@ -44,6 +44,7 @@ model User {
   learnerProfile         LearnerProfile?
   practiceSessions       PracticeSession[]      @relation("UserPracticeSessions")
   practiceAttempts       PracticeAttempt[]      @relation("UserPracticeAttempts")
+  questionMastery        QuestionMastery[]      @relation("UserQuestionMastery")
 
   @@map("users")
 }
@@ -972,6 +973,7 @@ model CivicsQuestion {
   category    CivicsCategory    @relation(fields: [categoryId], references: [id], onDelete: Restrict)
   answers     CivicsAnswer[]
   attempts    PracticeAttempt[]
+  mastery     QuestionMastery[]
 
   // The seed loader's stable upsert key: re-running a loader against the same
   // (version, official number) must resolve to the same row, never create a
@@ -1495,4 +1497,152 @@ model PracticeAttempt {
   // AiUsageEvent side of the relationship this column exists to answer.
   @@index([aiUsageEventId])
   @@map("practice_attempts")
+}
+
+// =============================================================================
+// Question Mastery (issue #71, epic #54 "Memory")
+// =============================================================================
+//
+// One row per (user, question) — the live spaced-repetition state the
+// scheduler (`nextSchedule`, issue #75) reads and writes on every attempt.
+// `PracticeAttempt` above is the immutable evidence ledger, one row per
+// answer, ever; this table is the DERIVED, MUTABLE summary of that ledger for
+// a single question — "where does this learner stand on this fact right
+// now?" — which is a different question than "what happened, when", and
+// answering it by re-aggregating `practice_attempts` on every read (the
+// review queue, PRD.md's readiness surfaces) does not scale the way one
+// row read by primary key does.
+//
+// A row exists here ONLY once a question has been attempted at least once —
+// see `state: new` below. There is no row for a question the learner has
+// never seen.
+//
+// -----------------------------------------------------------------------------
+// state — a real Postgres enum, matching this schema's convention for a
+// small, closed, code-owned state machine (`JourneyStage`,
+// `PracticeSessionStatus`, `DeviceCodeStatus`)
+// -----------------------------------------------------------------------------
+// The five SM-2-style buckets the scheduler moves a row through:
+//   - `new` — never attempted. Doubles as the schema-level default for a
+//     column with no committed answers yet; because this table is only ever
+//     inserted with a real attempt behind it (see above), no row is actually
+//     read back in this state today — the scheduler's insert already knows
+//     the true state from the first outcome. It exists as a value (not
+//     omitted) because a per-question mastery row is a natural future target
+//     for being created eagerly (e.g. when content loads) ahead of any
+//     attempt, and the enum should already have a name for that day one.
+//   - `learning` — attempted, not yet a stable, spaced-out interval.
+//   - `review` — graduated to spaced review; the ordinary steady state for a
+//     fact the learner knows.
+//   - `lapsed` — was known, then missed; the scheduler's signal to
+//     re-teach rather than merely re-review.
+//   - `mastered` — sustained correct recall over time (this migration's own
+//     backfill uses "correct on >= 3 distinct calendar days" as its proxy;
+//     `nextSchedule`, issue #75, owns the real, live promotion rule).
+//
+// -----------------------------------------------------------------------------
+// ease / interval_days / due_at — the SM-2-style scheduling triple
+// -----------------------------------------------------------------------------
+// `ease` starts at 2.5 (the canonical SM-2 default: every card starts at
+// "normal" difficulty, and each grade nudges it up or down) and
+// `interval_days` at 0 (an ungraduated card has no spacing yet — the very
+// next attempt is what sets one). `due_at` is nullable because a `new` row
+// (see above) has nothing scheduled; every other state carries a real
+// due date once `nextSchedule` (issue #75) has run at least once.
+//
+// `ease` is `@db.DoublePrecision`, not `Decimal`: SM-2's ease factor is a
+// heuristic multiplier fed back into arithmetic on every review (never
+// summed, never compared for exact equality, never shown to a user as
+// currency-like data) — the one case `Decimal`'s exactness earns its cost is
+// none of those, and a plain float keeps every scheduler calculation in
+// ordinary floating-point math with no cast at each read.
+//
+// -----------------------------------------------------------------------------
+// last_outcome — reuses `PracticeOutcome`, not a new enum
+// -----------------------------------------------------------------------------
+// The four values a `practice_attempts` row can already carry
+// (correct/partial/incorrect/skipped) are exactly what "the most recent
+// attempt's result" means here too — inventing a second, parallel enum for
+// the same four-value set would be the same duplication this schema's other
+// comments (`AiUsageEvent.roleKey`, the notification registry) argue against
+// elsewhere, just moved from a code registry to an enum. Nullable because a
+// row created ahead of any attempt (see `state: new` above) has no outcome
+// yet to report.
+//
+// -----------------------------------------------------------------------------
+// distinct_correct_days — why a COUNT OF DAYS, not a COUNT OF ATTEMPTS
+// -----------------------------------------------------------------------------
+// VISION.md's "never create artificial confidence after a few successful
+// answers" (already quoted at length on `PracticeAttempt` above) is exactly
+// what a plain correct-attempt counter would violate: five correct answers
+// inside one ten-minute drill session would count the same as five correct
+// answers spread across five separate days, and only the second is real
+// evidence of durable recall. Counting distinct calendar dates is the
+// cheapest column-level proxy for "spaced" recall available without
+// re-deriving it from `practice_attempts` on every read.
+//
+// -----------------------------------------------------------------------------
+// onDelete — Cascade on both FKs, matching `PracticeAttempt.userId` /
+// `.questionId`'s own reasoning ONE OF THE TWO WAYS, DELIBERATELY DIFFERENT
+// ON THE OTHER
+// -----------------------------------------------------------------------------
+// `userId`: Cascade, identical reasoning to every other per-user table in
+// this schema (`AiUsageEvent`, `Notification`, `PracticeAttempt` itself) —
+// this is derived state with no reader once the account is gone.
+//
+// `questionId`: Cascade here, UNLIKE `PracticeAttempt.questionId`'s
+// `Restrict`. That asymmetry is intentional, not an oversight: a
+// `PracticeAttempt` is immutable EVIDENCE that must survive content changes
+// (the comment on that column says so explicitly), so content the schema
+// cares about protecting cannot be deleted out from under it. A
+// `QuestionMastery` row is the opposite — purely DERIVED scheduling state
+// with no independent meaning once the question it tracks is gone. Requiring
+// `Restrict` here would additionally block the exact content deletion
+// `PracticeAttempt.questionId`'s own comment says must already be blocked by
+// that column — so this FK cannot be the thing standing in the way; it
+// should just quietly disappear alongside the row it was scheduling.
+model QuestionMastery {
+  id String @id @default(uuid()) @db.Uuid
+
+  userId     String @map("user_id") @db.Uuid
+  questionId String @map("question_id") @db.Uuid
+
+  state MasteryState @default(new)
+
+  dueAt        DateTime? @map("due_at") @db.Timestamptz
+  intervalDays Int       @default(0) @map("interval_days")
+  ease         Float     @default(2.5) @db.DoublePrecision
+
+  correctStreak Int @default(0) @map("correct_streak")
+  lapses        Int @default(0)
+  totalAttempts Int @default(0) @map("total_attempts")
+
+  distinctCorrectDays Int @default(0) @map("distinct_correct_days")
+
+  lastOutcome   PracticeOutcome? @map("last_outcome")
+  lastAttemptAt DateTime?        @map("last_attempt_at") @db.Timestamptz
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  // Relations
+  user     User           @relation("UserQuestionMastery", fields: [userId], references: [id], onDelete: Cascade)
+  question CivicsQuestion @relation(fields: [questionId], references: [id], onDelete: Cascade)
+
+  // One mastery row per (user, question) — the upsert key `nextSchedule`
+  // (issue #75) writes through on every graded attempt.
+  @@unique([userId, questionId])
+  // The review queue's core query: this user's due cards, oldest-due first.
+  @@index([userId, dueAt])
+  @@map("question_mastery")
+}
+
+// See `QuestionMastery.state` above for what each value means and why `new`
+// is declared but not read back by anything in this migration's own backfill.
+enum MasteryState {
+  new
+  learning
+  review
+  lapsed
+  mastered
 }
