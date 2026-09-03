@@ -1532,6 +1532,87 @@ model PracticeAttempt {
   // even after the officeholder it named has left office.
   answerSnapshot Json @map("answer_snapshot")
 
+  // ---------------------------------------------------------------------------
+  // Voice foundation (issue #91, epic #58 "Voice") — transcript, confidence,
+  // retry. NO COLUMN HERE CAN HOLD AUDIO, AND NONE BY PROXY.
+  // ---------------------------------------------------------------------------
+  //
+  // No `bytea`, no `Bytes`, no FK or path to `storage_objects`, no filename —
+  // not on this model, and not added to it later as a "just for review"
+  // exception. Audio is transcribed and discarded at the point of capture
+  // (`docs/specs/voice.md` §4); this schema is where that decision is
+  // ENFORCED, not merely intended, so a future contributor who reaches for
+  // "let's just keep the recording so we can review mishearings" finds the
+  // argument against it here rather than having to reconstruct it: a stored
+  // recording of a person speaking is a materially different privacy
+  // commitment than a stored transcript of what they confirmed they said,
+  // and this table is not the place that commitment gets made silently by
+  // adding a column.
+
+  // The text the learner CONFIRMED they said — NOT the raw recogniser
+  // output. Null for a typed attempt (`inputMode: typed`).
+  //
+  // This is the mechanism behind VISION.md line 228's promise that a learner
+  // is not "unfairly penalized for accent or speech-recognition errors": the
+  // learner sees the transcript the recogniser produced and can EDIT it
+  // before anything is graded (`docs/specs/voice.md` §3). Storing the raw,
+  // unconfirmed recogniser output here instead would record words the
+  // learner never agreed they said, making the one column that is supposed
+  // to prove the promise was kept into the column that breaks it.
+  //
+  // DISTINCT FROM `responseText` ABOVE, DELIBERATELY. For a spoken attempt
+  // the two hold the same string today, and they are still kept as two
+  // columns because they answer two different questions that happen to
+  // share an answer right now: `responseText` is "what was graded" (read by
+  // grading and by every existing reader of this column, unchanged);
+  // `transcript` is "what came back from the recogniser and was confirmed
+  // by the learner". A future epic that grades something other than the
+  // confirmed transcript — e.g. scoring the raw recognition separately from
+  // the edited answer — must not have to guess which of the two a
+  // historical row meant.
+  transcript String? @db.Text
+
+  // The recogniser's confidence for that transcription, 0..1.
+  //
+  // NULLABLE WITH NO DEFAULT, AND NULL MEANS UNKNOWN, NEVER 0 — the same
+  // design `AiUsageEvent`'s token counts already give above, applied here: a
+  // stored zero is a CLAIM, and a false one. The false claim a wrongly
+  // defaulted 0 would make here is "the recogniser was certain it heard
+  // nothing," which is not "unknown" — it is a specific, confident-sounding
+  // lie that downstream selects `failureCause: misheard` on an answer the
+  // learner may well have gotten right.
+  //
+  // The concrete consumer: `ASR_CONFIDENCE_THRESHOLD` (0.6) is what turns a
+  // LOW value into `misheard` rather than an ordinary wrong answer. A NULL
+  // value must never trigger that mapping, because "unknown" is not "low" —
+  // collapsing the two would grade every attempt whose confidence could not
+  // be read (a provider outage, a missing field in a response) as if the
+  // recogniser had actively struggled, when it may not have run at all.
+  asrConfidence Float? @map("asr_confidence")
+
+  // Self-referencing FK: set when this attempt is a spoken retry that
+  // supersedes an earlier attempt at the same question — the learner heard
+  // their transcript was misheard and answered again. Null for every
+  // attempt that is not itself a retry.
+  //
+  // onDelete: SetNull, NOT Cascade, and the reason runs in the specific,
+  // non-obvious direction: Cascade here would delete the RETRY whenever the
+  // ORIGINAL it points at is removed — destroying the BETTER of the two
+  // pieces of evidence (the corrected answer) while keeping the worse one
+  // (the mishearing). That is backwards. This is the identical "evidence
+  // must outlive its bookkeeping" shape `sessionId`, `mockInterviewId` and
+  // `aiUsageEventId` above already give this model, applied here to a link
+  // between two rows of the same table instead of a link to a different
+  // one.
+  //
+  // THE SUPERSESSION RULE THIS COLUMN EXISTS FOR: an attempt another attempt
+  // points at through `retryOfAttemptId` is SUPERSEDED. A superseded row is
+  // not deleted and not corrected in place — it stays in the table because
+  // it is real evidence that a mishearing happened — but it is excluded from
+  // a practice session's summary counts, so a mishearing and its correction
+  // read as one answered question, not two failures.
+  retryOfAttemptId String? @map("retry_of_attempt_id") @db.Uuid
+
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
 
   // NO `updatedAt`. An attempt is an immutable record of something that
@@ -1543,6 +1624,14 @@ model PracticeAttempt {
   session       PracticeSession? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
   mockInterview MockInterview?   @relation(fields: [mockInterviewId], references: [id], onDelete: SetNull)
   aiUsageEvent  AiUsageEvent?    @relation("AiUsageEventPracticeAttempts", fields: [aiUsageEventId], references: [id], onDelete: SetNull)
+
+  // The other half of `retryOfAttemptId` above: the attempt this one
+  // supersedes, and (on the reverse side) the retry attempt(s), if any, that
+  // supersede this one. Named because Prisma requires a name on any
+  // self-relation, matching this model's existing named-relation style
+  // (`UserPracticeAttempts`, `AiUsageEventPracticeAttempts`).
+  retryOf PracticeAttempt?  @relation("PracticeAttemptRetries", fields: [retryOfAttemptId], references: [id], onDelete: SetNull)
+  retries PracticeAttempt[] @relation("PracticeAttemptRetries")
 
   // Reverse lookup for `MockInterviewTurn.attemptId` (issue #115, epic
   // #57) — the applicant-turn "which graded attempt did this become"
@@ -1564,6 +1653,9 @@ model PracticeAttempt {
   // Reverse lookup from a usage row to the attempt(s) it graded — the
   // AiUsageEvent side of the relationship this column exists to answer.
   @@index([aiUsageEventId])
+  // Resolving a retry back to the attempt it supersedes, and finding
+  // whether a given attempt has itself been superseded by a later retry.
+  @@index([retryOfAttemptId])
   @@map("practice_attempts")
 }
 
