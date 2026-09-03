@@ -2384,6 +2384,147 @@ its own — it never calls the scheduler and never writes.
 
 ---
 
+### Readiness
+
+Issue #122/#127/#134, epic #55 (E6 "Readiness and Progress"). The
+eight-component weighted readiness score, snapshotted (not recomputed on
+every read) so the trend line means what it said on the day it was
+computed. Design rationale lives in
+[`docs/specs/readiness-model.md`](specs/readiness-model.md); this section
+covers only the wire contract.
+
+**`@Auth()` with no permissions**, caller-scoped exactly like every other
+per-user route in this product: the learner is resolved from
+`@CurrentUser('id')`, never from a path, query, or body parameter — every
+authenticated user owns their own readiness data.
+
+#### GET /readiness
+The caller's most recent `readiness_snapshots` row. Lazily computed and
+persisted if none exists yet, or if the latest one is **stale**: an
+existing snapshot older than the caller's most recent
+`practice_attempts.answeredAt`. A snapshot the nightly cron just produced is
+never stale by this rule — the cron already reflects every attempt that
+existed when it ran.
+
+`score` is 0-100, and structurally can't exceed 75 while `capReason` is
+`"typed_only"` — the three components that lift the cap
+(`english`/`spoken`/`interview`) sum to 0.25 of the total weight and are all
+`0` with no spoken-answer or mock-interview evidence. `capReason` becomes
+`null` the instant either kind of evidence exists at all, even once — a
+distinct, binary signal from `score` itself, which keeps climbing gradually
+as more evidence arrives.
+
+`topRecommendation` is always present: the fixed cap message while capped,
+otherwise the earnable component (`coverage`, `recall`, `retention`,
+`consistency`, or `remediation`) with the greatest weighted headroom.
+
+`narrative`/`narrativeGeneratedAt` are the Progress Guide's one
+AI-generated paragraph (issue #134), filled in lazily on the caller's own
+AI key. Both stay `null` — absent without complaint, never blocking this
+response — whenever AI is not configured for this deployment or this
+caller has no key of their own; a later request for the same (still
+current) snapshot fills them in once it can.
+
+**Request Body:** none.
+
+**Response:**
+```json
+{
+  "data": {
+    "id": "b3f1c2a0-9e4a-4f3b-8c2d-1a2b3c4d5e6f",
+    "computedAt": "2026-09-01T03:00:00.000Z",
+    "score": 53,
+    "stage": "practicing",
+    "components": {
+      "coverage": { "value": 0.72, "weight": 0.15, "contribution": 0.108 },
+      "recall": { "value": 0.75, "weight": 0.2, "contribution": 0.15 },
+      "retention": { "value": 0.65, "weight": 0.2, "contribution": 0.13 },
+      "consistency": { "value": 0.8571, "weight": 0.1, "contribution": 0.0857 },
+      "remediation": { "value": 0.6, "weight": 0.1, "contribution": 0.06 },
+      "english": { "value": 0, "weight": 0.05, "contribution": 0 },
+      "spoken": { "value": 0, "weight": 0.1, "contribution": 0 },
+      "interview": { "value": 0, "weight": 0.1, "contribution": 0 }
+    },
+    "evidenceCounts": {
+      "coverage": { "distinctQuestionsAttempted": 72, "totalQuestionsInVersion": 100 },
+      "recall": { "qualifyingAttempts": 20, "correctCount": 14, "partialCount": 2, "incorrectCount": 3, "skippedCount": 1 },
+      "retention": { "masteredCount": 36, "reviewCount": 18, "totalAttemptedQuestions": 72 },
+      "consistency": { "distinctPracticeDaysInLast14": 6 },
+      "remediation": { "everWeakCount": 5, "remediatedCount": 3 },
+      "english": { "distinctQuestionsCorrectSpokenInEnglish": 0 },
+      "spoken": { "attempts": 0 },
+      "interview": { "attempts": 0 }
+    },
+    "capReason": "typed_only",
+    "topRecommendation": {
+      "componentKey": null,
+      "title": "Limited interview practice",
+      "reason": "Your civics knowledge is strong, but you have limited interview practice. Completing two mock interviews is the best way to strengthen your readiness now.",
+      "path": "/practice"
+    },
+    "narrative": null,
+    "narrativeGeneratedAt": null
+  }
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `score` | `round(sum(components[*].contribution) * 100)` — the components above sum to `0.5337`, so `score` is `53` |
+| `capReason` | `"typed_only"` (no spoken or mock-interview evidence yet) or `null`. Not a synonym for "components incomplete" — a learner can have `capReason: null` (one passed mock interview) while `score` still sits well under 75 |
+| `components[*].value` | Normalized `[0, 1]` |
+| `components[*].contribution` | `value * weight` — what this component actually added to the score |
+| `topRecommendation.componentKey` | `null` only for the fixed cap message; otherwise the name of the earnable component being recommended |
+
+**Error Cases:** none beyond standard auth (401).
+
+---
+
+#### GET /readiness/history
+The caller's own past snapshots, **newest first**, paginated with the same
+`page`/`pageSize` shape every other list in this API uses.
+
+**Query Parameters:**
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `page` | number | 1 | Page number |
+| `pageSize` | number | 20 (max 100) | Items per page |
+
+There are deliberately no filters — `?userId=` included — a 400 naming the
+parameter.
+
+Every field on a history row is exactly what `GET /readiness` returns for
+the latest snapshot, frozen as it stood the day it was computed — a
+`question_mastery` row this snapshot summarized can be rescheduled or
+re-promoted since, and this row still means exactly what it meant on the
+day it was written.
+
+**Response:**
+```json
+{
+  "data": [
+    {
+      "id": "b3f1c2a0-9e4a-4f3b-8c2d-1a2b3c4d5e6f",
+      "computedAt": "2026-09-01T03:00:00.000Z",
+      "score": 53,
+      "stage": "practicing",
+      "components": { "...": "same shape as GET /readiness" },
+      "evidenceCounts": { "...": "same shape as GET /readiness" },
+      "capReason": "typed_only",
+      "topRecommendation": { "componentKey": null, "title": "Limited interview practice", "reason": "...", "path": "/practice" },
+      "narrative": null,
+      "narrativeGeneratedAt": null
+    }
+  ],
+  "meta": { "total": 9, "page": 1, "pageSize": 20 }
+}
+```
+
+**Error Cases:**
+- 400 Bad Request — an unknown query parameter was supplied
+
+---
+
 ### Storage Objects
 
 The storage system provides file upload and management capabilities with support for large files (GB scale) through resumable multipart uploads.

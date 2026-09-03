@@ -967,3 +967,40 @@ currently-earnable components' weighted headroom (`weight × (1 − value)`):
 them, only partially credited at `0.6`) are, at this point, the single
 largest lever left on her score: converting more of them to `mastered` adds
 more to the number than any other currently-earnable move available to her.
+
+---
+
+## 13. Divergences from this design, as shipped
+
+Issue #150 requires this document reconciled against
+`readiness-engine.ts`, `readiness.service.ts`,
+`readiness-recompute.task.ts`, `readiness-stage-transitions.ts`, and
+`readiness.controller.ts` as they actually shipped (epic #55, E6), with
+every place they disagree recorded here rather than silently edited over —
+mirroring `docs/specs/practice-sessions.md` §15's own pattern. Every row
+below was checked directly against the shipped source, not against the
+issue text.
+
+| This document said | What shipped | Why the shipped design is right |
+|---|---|---|
+| §2.7: `spoken`'s formula is declared now "exactly the unwired-role idiom one layer up" (§2.6), with "zero evidence until E9" — reading, by analogy with `english` (§2.6, a literal hardcoded `0`) and `interview` (§2.8, a literal hardcoded `0`), as a stub returning `0` unconditionally until E9 ships. | `ReadinessService.assembleEvidence` computes `distinctQuestionsCorrectSpoken` for real, today — a genuine Prisma query for distinct `questionId`s among `practice_attempts` rows with `inputMode: 'spoken', outcome: 'correct'`, not a hardcoded `0`. Its own comment states the reasoning: "`inputMode: 'spoken'` already exists on `practice_attempts`... nothing stops reading it honestly today." The *result* is `0` for every user today, because no code path writes `inputMode: 'spoken'` yet (E9 is what will), so this is not an observable behavior change from what §2.7 promised — a typed-only learner still scores `spoken: 0`. | This is a genuine, deliberate implementation judgment call, not an error: unlike `english` (no column exists to read at all — a real one would need to be invented) and `interview` (no grouping key exists to turn attempt rows into "interview sessions" — inventing one would be guessing at E8's design), `spoken`'s one input (`inputMode = 'spoken'`) already exists as a real column with a real, unambiguous meaning. Reading it for real costs nothing extra and needs no future migration or follow-up edit once E9 starts writing it — the component goes live the moment E9 ships, with no change to this file. Hardcoding `0` here would have been the *safer-looking* choice that was actually less honest: it would silently stay `0` even after E9 started writing real spoken attempts, until someone remembered to come back and wire it up. |
+
+No other divergence was found. §2's formulas and weights, §3's `capReason`
+rule, §4's `readiness_snapshots` schema, §5's `ReadinessEvidence`/
+`ReadinessResult` shapes, §6's two endpoints, §7's two recompute triggers
+(including the nightly cron's shape and its never-calls-AI rule), §8's
+three stage thresholds and the `ready` gate's `capReason === null`
+requirement, and §9's narrative generation (request-path only, never
+blocking) were all checked line-by-line against the shipped source and
+match exactly.
+
+**A note on §12's worked example, not itself a divergence:** the example's
+precise 33/50/59 scores are not reproduced by an automated test.
+`tests/e2e/specs/readiness.spec.ts` (issue #146) exercises the real shipped
+engine end to end, but over its own self-designed, hand-verifiable evidence
+table rather than Dana's exact numbers — that file's own header explains
+why in full (an AI-graded `partial` outcome and an exact `lapses`-threshold
+mix have no honest way to be dialed to through the real product surface in
+an E2E test with no AI configured). §12 itself remains an accurate,
+independently hand-checked worked example of the shipped formulas; it is
+simply not the literal fixture any test asserts against.

@@ -466,6 +466,111 @@ apps/api/src/storage/
         └── base-processor.interface.ts
 ```
 
+### 5.5 Readiness Engine
+
+Epic #55 (E6 "Readiness and Progress"). An eight-component weighted score
+(0-100) summarizing how ready a learner is for the interview, stored as a
+`readiness_snapshots` row rather than computed fresh on every read. Full
+design detail — every component's formula, the `capReason` rule, the stage
+thresholds, worked examples — lives in
+[`docs/specs/readiness-model.md`](specs/readiness-model.md); this section
+covers only the architectural shape.
+
+#### Why a snapshot, not a live computation
+
+The epic body gives three independently load-bearing reasons, and the
+shipped design follows them exactly:
+
+- **The trend line is the product.** `GET /api/readiness/history` — the
+  scored history a learner watches move over weeks — has nothing to show if
+  no result is ever stored.
+- **A rendered number must stay explicable after its inputs move.** A
+  `question_mastery` row a snapshot summarized can be rescheduled or
+  re-promoted by the time a learner revisits last week's score; a live
+  recompute would silently rewrite history under an old date.
+- **Recomputing a learner's entire evidence history on every read is
+  neither cheap nor honest** — not cheap, because it means re-aggregating
+  every mastery row and the last 20 qualifying attempts on every page load;
+  not honest, because "your readiness two weeks ago" rendered from today's
+  evidence isn't actually a fact about two weeks ago.
+
+#### Pure engine / service split
+
+`computeReadiness` (`apps/api/src/readiness/readiness-engine.ts`) is pure
+TypeScript — no Prisma, no `Clock`, no I/O — taking an already-assembled
+evidence object and returning a score, the per-component breakdown, and
+`capReason`. It mirrors the same pure-function shape
+`practice/mastery/scheduler.ts`'s `nextSchedule` already establishes:
+directly unit-testable, table-of-cases and all, with no database in the
+loop. `ReadinessService` owns every Prisma read that assembles the evidence,
+calls the engine, and persists the result — the engine itself never sees a
+`userId`.
+
+**The structural 75-point cap has no clamp.** `english` (0.05) + `spoken`
+(0.10) + `interview` (0.10) sum to 0.25 of the total weight and are
+mathematically `0` for a learner with no such evidence, so a typed-only
+score can never exceed 75 — a fact that falls directly out of the weights
+table, not a hand-maintained `min(score, 75)` ceiling that could drift out
+of sync with it. `capReason` (`'typed_only'` / `null`) is a separate,
+binary signal from `score` itself: it answers "is there a structural reason
+you can't move past a number," not "how close are you to that number."
+
+Stage transitions from a snapshot's score (`remembering → practicing` at
+50, `practicing → performing` at 65, `performing → ready` at 80 **and**
+`capReason === null`) live in a sibling file,
+`apps/api/src/journey/readiness-stage-transitions.ts` — deliberately not
+folded into `journey/stage-transitions.ts`, whose own header ties it to
+per-attempt mastery events specifically. Regression is never automatic: a
+score falling back below a cleared threshold never demotes a stage badge.
+
+#### Recompute triggers
+
+Exactly two, no job queue:
+
+1. **Synchronously**, at the end of `PracticeService.completeSession` —
+   inside the same request that produced the evidence.
+2. **A nightly cron**, `ReadinessRecomputeTask`
+   (`apps/api/src/readiness/tasks/readiness-recompute.task.ts`), following
+   `apps/api/src/auth/tasks/token-cleanup.task.ts`'s exact shape — a plain
+   `@Injectable()` with `@Cron(CronExpression.EVERY_DAY_AT_3AM)`, registered
+   directly in `ReadinessModule`'s own `providers` array rather than a
+   separate "tasks module." It recomputes every user who has ever engaged
+   with the journey, so `consistency`'s 14-day window (and any stage
+   transition it triggers) decays honestly while a learner is away, not
+   only on a day they happen to open the app.
+
+**The nightly cron never calls AI.** It writes `score`, `stage`,
+`components`, `evidenceCounts`, `capReason`, and `topRecommendation`, and
+leaves `narrative`/`narrativeGeneratedAt` untouched — a user's BYOK key is
+not available outside a request from that user, so narrative generation
+(issue #134's Progress Guide paragraph) happens only inside
+`GET /api/readiness`'s own request path, and never blocks that response if
+generation is unavailable or fails.
+
+#### Web
+
+`/progress` (`apps/web/src/pages/ProgressPage.tsx`) renders the full score,
+per-component breakdown, cap notice, trend, top recommendation, and
+narrative, alongside E5's existing mastery-by-category sections — two
+independent data sources with two independent loading states, not one
+combined flag. `ReadinessWidget`
+(`apps/web/src/components/readiness/ReadinessWidget.tsx`) is the compact
+equivalent on Home (`/`): the same score and recommendation, one glance,
+with the `topRecommendation` copy always rendered verbatim rather than
+re-templated locally.
+
+**A note on test coverage:** the E2E spec
+(`tests/e2e/specs/readiness.spec.ts`, issue #146) verifies the shipped
+engine end to end against a self-designed, hand-verifiable evidence table —
+it does **not** reproduce the exact 33/50/59 scores from
+`docs/specs/readiness-model.md` §12's Dana worked example, because that
+example's precise evidence shape (an AI-graded `partial` outcome, an exact
+`lapses`-threshold mix) has no honest way to be dialed to through the real
+product surface without either configuring `AI_PROVIDER_FAKE` and pinning
+this suite to its exact grading behavior, or writing directly to
+`practice_attempts` — neither of which is a true end-to-end exercise of the
+product. The spec's own header explains the substitution in full.
+
 ---
 
 ## 6. Data Architecture
@@ -817,6 +922,7 @@ Before OAuth authentication completes:
 | **System Settings** | `/api/system-settings/*` | Yes (Admin) | App configuration |
 | **Allowlist** | `/api/allowlist/*` | Yes (Admin) | Access control |
 | **Journey** | `/api/journey/*` | Yes | Learner profile, home screen, stage registry (epic #50) |
+| **Readiness** | `/api/readiness*` | Yes | Snapshotted readiness score, history, Progress Guide narrative (epic #55) |
 
 ### 8.2 Complete Endpoint Reference
 
@@ -885,6 +991,18 @@ No route takes a user id anywhere — path, query, or body — so there is no
 permission that could gate "read/write *any* learner's profile" to add;
 `docs/specs/journey-shell.md` §4.1 and §5 have the full argument, mirrored by
 CLAUDE.md's RBAC Model section.
+
+#### Readiness (Per User)
+
+| Method | Path | Auth | Purpose |
+|--------|------|------|---------|
+| `GET` | `/api/readiness` | `@Auth()`, no permissions | The caller's latest snapshot, lazily (re)computed if none exists or the latest is stale |
+| `GET` | `/api/readiness/history` | `@Auth()`, no permissions | The caller's past snapshots, paginated, newest first |
+
+Same posture as Journey/Practice/Progress above — no route takes a user id,
+so there is no permission to add. See
+[`docs/specs/readiness-model.md`](specs/readiness-model.md) §6 and §5.5
+above for the architectural shape.
 
 #### Health
 
