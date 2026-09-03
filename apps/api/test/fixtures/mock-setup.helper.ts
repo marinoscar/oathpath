@@ -579,6 +579,42 @@ export function setupMockUserSettings(userId: string, settings: any): void {
 }
 
 // ============================================================================
+// Readiness snapshot mocks (issue #122, epic #55 / E6)
+// ============================================================================
+
+/**
+ * Generic, spec-agnostic `readiness_snapshots` defaults.
+ *
+ * `PracticeService.completeSession` calls
+ * `ReadinessService.recomputeSnapshot` synchronously on every completion
+ * (readiness-model.md §7(a)) — which means EVERY existing integration spec
+ * that completes a practice session now exercises this table too, whether
+ * or not that spec's own concern is readiness. Without a default here,
+ * `readinessSnapshot.create` (an unconfigured `mockDeep` method) resolves
+ * to `undefined`, and `recomputeSnapshot` throws reading `.stage` off it.
+ *
+ * `readiness.integration.spec.ts` overrides `create`/`findFirst`/`findMany`/
+ * `count` with its own small in-memory store, the same "generic default
+ * here, a real store where the suite's own assertions need one" split
+ * `progress.integration.spec.ts`'s header already documents for
+ * `question_mastery`.
+ */
+export function setupReadinessSnapshotMocks(): void {
+  (prismaMock.readinessSnapshot.findFirst as jest.Mock).mockResolvedValue(null);
+  (prismaMock.readinessSnapshot.findMany as jest.Mock).mockResolvedValue([]);
+  (prismaMock.readinessSnapshot.count as jest.Mock).mockResolvedValue(0);
+  (prismaMock.readinessSnapshot.create as jest.Mock).mockImplementation(
+    async ({ data }: any) => ({
+      id: `readiness-snapshot-${Math.random().toString(36).slice(2)}`,
+      createdAt: new Date(),
+      narrative: null,
+      narrativeGeneratedAt: null,
+      ...data,
+    }),
+  );
+}
+
+// ============================================================================
 // Complete Mock Setup
 // ============================================================================
 
@@ -596,6 +632,7 @@ export function setupBaseMocks(): void {
   setupUserSettingsMocks();
   setupMockSystemSettings();
   setupMockAuditEvents();
+  setupReadinessSnapshotMocks();
 
   // Mock transactions
   mockPrismaTransaction();

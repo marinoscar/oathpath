@@ -19,6 +19,7 @@ import {
 import { Clock } from '../common/clock/clock';
 import { nextStageOnMasteryEvent } from '../journey/stage-transitions';
 import { PrismaService } from '../prisma/prisma.service';
+import { ReadinessService } from '../readiness/readiness.service';
 import { matchAnswer, type AnswerMatch } from './answer-matching';
 import { excludeUnanswerable } from './question-selection';
 import {
@@ -229,6 +230,10 @@ export class PracticeService {
     // THE ONE DOOR TO A MODEL. Injected as the dispatcher, never as a provider:
     // see the header, and `ai-evaluation.md` §3.
     private readonly dispatch: AiDispatchService,
+    // Readiness recompute trigger (a) — `docs/specs/readiness-model.md`
+    // §7(a). Called synchronously from `completeSession`, after its own
+    // write commits; see that method's own comment.
+    private readonly readiness: ReadinessService,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -527,6 +532,17 @@ export class PracticeService {
       },
       'Practice session completed',
     );
+
+    // READINESS RECOMPUTE TRIGGER (A) (issue #122, epic #55 / E6),
+    // synchronous, in-request, AFTER the completion write above has
+    // committed — never inside its transaction and never fire-and-forget.
+    // `docs/specs/readiness-model.md` §7(a) quotes `ROADMAP.md` §7 verbatim:
+    // "No job queue. Scheduling (E5) and readiness recompute (E6) run
+    // synchronously, inside the request... that produces the evidence."
+    // Awaited before the response returns, so a client reloading
+    // `GET /api/readiness` right after this response sees the session it
+    // just completed already reflected — not merely eventually.
+    await this.readiness.recomputeSnapshot(userId);
 
     return toSessionResponse(completed);
   }

@@ -8,6 +8,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { AiDispatchService } from '../ai/ai-dispatch.service';
 import { Clock } from '../common/clock/clock';
 import { PrismaService } from '../prisma/prisma.service';
+import { ReadinessService } from '../readiness/readiness.service';
 import { GRADING_SCHEMA_NAME } from './grading';
 import { computeSummary, PracticeService } from './practice.service';
 import type { CreatePracticeSessionInput } from './dto/create-practice-session.dto';
@@ -162,6 +163,15 @@ describe('PracticeService', () => {
    */
   let dispatch: { runStructured: jest.Mock };
 
+  /**
+   * Readiness recompute trigger (a) (issue #122, epic #55 / E6), as a
+   * double. `completeSession` awaits this and does nothing with its return
+   * value, so a resolved stub is all any test here needs — no test in this
+   * file is about the readiness engine's own behaviour (see
+   * `readiness.service.spec.ts`/`readiness-engine.spec.ts` for that).
+   */
+  let readiness: { recomputeSnapshot: jest.Mock };
+
   beforeEach(async () => {
     prisma = {
       civicsCategory: { findFirst: jest.fn().mockResolvedValue(null) },
@@ -222,6 +232,10 @@ describe('PracticeService', () => {
         .mockResolvedValue({ status: 'unavailable', cause: 'ai_disabled' }),
     };
 
+    readiness = {
+      recomputeSnapshot: jest.fn().mockResolvedValue(undefined),
+    };
+
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         PracticeService,
@@ -232,6 +246,7 @@ describe('PracticeService', () => {
         // module-level property `ai-evaluation.md` §3 asks for, checked by the
         // compiler on every test that stands the service up.
         { provide: AiDispatchService, useValue: dispatch },
+        { provide: ReadinessService, useValue: readiness },
       ],
     }).compile();
 
@@ -806,6 +821,10 @@ describe('PracticeService', () => {
           },
         },
       });
+
+      // Readiness recompute trigger (a), issue #122 — called synchronously,
+      // after the completion write above, for the caller who just completed.
+      expect(readiness.recomputeSnapshot).toHaveBeenCalledWith(USER_A);
     });
 
     it('is idempotent: completing an already-completed session returns the stored summary and does not re-stamp completedAt', async () => {
@@ -836,6 +855,9 @@ describe('PracticeService', () => {
       expect(result.summary).toEqual(storedSummary);
       expect(prisma.practiceSession.update).not.toHaveBeenCalled();
       expect(prisma.practiceAttempt.findMany).not.toHaveBeenCalled();
+      // Nothing changed, so no readiness recompute either — the idempotent
+      // early return happens before the trigger.
+      expect(readiness.recomputeSnapshot).not.toHaveBeenCalled();
     });
 
     it('409s an abandoned session — it was closed by a later session start and has no completion to record', async () => {
