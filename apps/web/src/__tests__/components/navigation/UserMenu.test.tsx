@@ -3,7 +3,7 @@ import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { render, mockUser, mockAdminUser } from '../../utils/test-utils';
 import { UserMenu } from '../../../components/navigation/UserMenu';
-import { SETTINGS_DESTINATION } from '../../../config/destinations';
+import { CONSOLE_DESTINATION, SETTINGS_DESTINATION } from '../../../config/destinations';
 
 // Mock usePermissions hook
 vi.mock('../../../hooks/usePermissions', () => ({
@@ -188,14 +188,19 @@ describe('UserMenu', () => {
       });
     });
 
-    it('shows NO Console entry, even to a full admin (#69)', async () => {
-      // A DELIBERATE BEHAVIOUR CHANGE, not a regression:
-      // `docs/specs/journey-shell.md` §2.2 moves Console into the rail's pinned
-      // foot and nowhere else, and names the cost plainly — an administrator
-      // below `sm` (where the rail is unmounted) has no one-tap path to it from
-      // the nav chrome. REACHABILITY is untouched: `/admin/settings` is still a
-      // route, still gated by `RequirePermission`, and still works from a
-      // bookmark or a typed URL. Only discoverability from this menu is gone.
+    it('shows a System Settings entry to a full admin (#232)', async () => {
+      // A DELIBERATE REVERSAL of the #69 behaviour, not a regression back to
+      // it: `docs/specs/journey-shell.md` §2.2 moved Console into the rail's
+      // pinned foot and nowhere else, and named the accepted cost plainly — an
+      // administrator below `sm` (where the rail is unmounted) had no one-tap
+      // path to it from the nav chrome. Issue #232 reverses that cost WITHOUT
+      // reversing the membership rule #69 established: Console still is not a
+      // fifth bar destination and still is not in `DESTINATIONS`. Instead this
+      // menu — the one settings surface that exists at every width — draws
+      // `CONSOLE_DESTINATION` as a SECOND row, gated through
+      // `isDestinationVisible` exactly like the rail's pinned row is. The
+      // destination model is still the single source of truth for both the
+      // label ("System Settings") and the gate; nothing here retypes either.
       const user = userEvent.setup();
 
       mockUsePermissions.mockReturnValue({
@@ -219,10 +224,16 @@ describe('UserMenu', () => {
       await waitFor(() => {
         expect(screen.getByRole('menu')).toBeInTheDocument();
       });
-      expect(screen.queryByRole('menuitem', { name: /console/i })).not.toBeInTheDocument();
+      expect(
+        screen.getByRole('menuitem', { name: CONSOLE_DESTINATION.label }),
+      ).toBeInTheDocument();
     });
 
-    it('should NOT show the Console entry for non-admin users', async () => {
+    it('should NOT show the System Settings entry for non-admin users', async () => {
+      // The default mock (set in `beforeEach`) holds only
+      // `user_settings:read`/`:write` — neither half of `console`'s
+      // `anyPermission` — so the row this menu now offers an admin must still
+      // be absent here.
       const user = userEvent.setup();
 
       render(<UserMenu />);
@@ -233,7 +244,9 @@ describe('UserMenu', () => {
         expect(screen.getByRole('menu')).toBeInTheDocument();
       });
 
-      expect(screen.queryByRole('menuitem', { name: /console/i })).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole('menuitem', { name: CONSOLE_DESTINATION.label }),
+      ).not.toBeInTheDocument();
     });
   });
 
@@ -276,6 +289,47 @@ describe('UserMenu', () => {
 
       expect(SETTINGS_DESTINATION.path).toBe('/settings');
       await user.click(screen.getByRole('menuitem', { name: 'User Settings' }));
+
+      await waitFor(() => {
+        expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+      });
+    });
+
+    it('sends System Settings to CONSOLE_DESTINATION.path, ordered after User Settings (#232)', async () => {
+      const user = userEvent.setup();
+
+      mockUsePermissions.mockReturnValue({
+        permissions: new Set(['system_settings:read', 'users:read']),
+        roles: new Set(['admin']),
+        hasPermission: (perm: string) =>
+          perm === 'system_settings:read' || perm === 'users:read',
+        hasAnyPermission: vi.fn(),
+        hasAllPermissions: vi.fn(),
+        hasRole: vi.fn(),
+        hasAnyRole: vi.fn(),
+        isAdmin: true,
+      });
+
+      render(<UserMenu />, { wrapperOptions: { user: mockAdminUser } });
+
+      await user.click(screen.getByRole('button'));
+
+      await waitFor(() => {
+        expect(screen.getByRole('menuitem', { name: CONSOLE_DESTINATION.label })).toBeInTheDocument();
+      });
+
+      // Row order: User Settings before System Settings — `UserMenu.tsx` builds
+      // `menuDestinations` as `[SETTINGS_DESTINATION, ...maybe CONSOLE_DESTINATION]`.
+      const navigationRows = screen
+        .getAllByRole('menuitem')
+        .filter((item) => item.textContent !== 'Logout');
+      expect(navigationRows.map((item) => item.textContent)).toEqual([
+        SETTINGS_DESTINATION.label,
+        CONSOLE_DESTINATION.label,
+      ]);
+
+      expect(CONSOLE_DESTINATION.path).toBe('/admin/settings');
+      await user.click(screen.getByRole('menuitem', { name: CONSOLE_DESTINATION.label }));
 
       await waitFor(() => {
         expect(screen.queryByRole('menu')).not.toBeInTheDocument();
@@ -427,13 +481,14 @@ describe('UserMenu', () => {
       });
     });
 
-    it('shows no Console entry on either admin permission (#69)', async () => {
-      // Both halves of `console`'s `anyPermission` — the gate #92 added — now
-      // resolve to the same answer HERE, because Console is not in this menu at
-      // all. It is drawn by the rail's pinned foot and nowhere else; see the
-      // Menu Items suite above for the accepted cost, and
-      // `NavigationRail.test.tsx` for where the permission gate is still
-      // asserted in both directions.
+    it('shows a System Settings entry on EITHER half of anyPermission alone (#232)', async () => {
+      // Both halves of `console`'s `anyPermission` — the gate #92 added — must
+      // independently produce the row here, exactly as they independently do
+      // on the rail's own pinned row (`NavigationRail.test.tsx`). Before #232
+      // this menu drew neither Console destination row at all, so this suite
+      // asserted the opposite: that both halves agreed on ABSENCE. Now that the
+      // menu draws `CONSOLE_DESTINATION` through the same `isDestinationVisible`
+      // gate, both halves must agree on PRESENCE instead.
       const user = userEvent.setup();
 
       for (const granted of [['system_settings:read'], ['users:read']]) {
@@ -447,14 +502,18 @@ describe('UserMenu', () => {
           expect(screen.getByRole('menu')).toBeInTheDocument();
         });
         expect(
-          screen.queryByRole('menuitem', { name: 'Console' }),
-          `${granted.join()} saw a Console entry`,
-        ).not.toBeInTheDocument();
+          screen.getByRole('menuitem', { name: CONSOLE_DESTINATION.label }),
+          `${granted.join()} did not show a System Settings entry`,
+        ).toBeInTheDocument();
         unmount();
       }
     });
 
     it('grants nothing on the admin role alone', async () => {
+      // The split-brain guard this file's header describes still matters: the
+      // `admin` ROLE with an empty permission set must not produce the row —
+      // only `console`'s `anyPermission` may, and a role check here would be
+      // exactly the bug `isDestinationVisible` exists to prevent.
       const user = userEvent.setup();
       setPermissions([], true);
 
@@ -464,7 +523,9 @@ describe('UserMenu', () => {
       await waitFor(() => {
         expect(screen.getByRole('menu')).toBeInTheDocument();
       });
-      expect(screen.queryByRole('menuitem', { name: 'Console' })).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole('menuitem', { name: CONSOLE_DESTINATION.label }),
+      ).not.toBeInTheDocument();
     });
 
     it('omits Home and the other three bar destinations — the chrome already draws them', async () => {
@@ -496,14 +557,19 @@ describe('UserMenu', () => {
         expect(screen.getByRole('menu')).toBeInTheDocument();
       });
 
-      // The menu's ONE navigation row, read from the destination model rather
-      // than typed here — the same guarantee this test made when it iterated
-      // `DESTINATIONS`, over the export that now owns the row (#69).
+      // The menu's TWO navigation rows for a fully-permitted admin, read from
+      // the destination model rather than typed here — the same guarantee this
+      // test made when it iterated `DESTINATIONS`, over the two exports
+      // (`SETTINGS_DESTINATION`, #69; `CONSOLE_DESTINATION`, #232) that now own
+      // the rows.
       expect(
         screen.getByRole('menuitem', { name: SETTINGS_DESTINATION.label }),
       ).toBeInTheDocument();
-      // That row plus Logout, and nothing invented locally.
-      expect(screen.getAllByRole('menuitem')).toHaveLength(2);
+      expect(
+        screen.getByRole('menuitem', { name: CONSOLE_DESTINATION.label }),
+      ).toBeInTheDocument();
+      // Those two rows plus Logout, and nothing invented locally.
+      expect(screen.getAllByRole('menuitem')).toHaveLength(3);
     });
   });
 });

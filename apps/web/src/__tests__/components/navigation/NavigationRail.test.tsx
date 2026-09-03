@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { render, mockAdminUser } from '../../utils/test-utils';
 import { setViewportWidth } from '../../setup';
 import { NavigationRail, RAIL_WIDTH_COLLAPSED } from '../../../components/navigation/NavigationRail';
+import { CONSOLE_DESTINATION } from '../../../config/destinations';
 
 /**
  * Coverage migrated from the deleted `Sidebar.test.tsx` — four items, admin
@@ -70,7 +71,7 @@ describe('NavigationRail', () => {
 
       const nav = screen.getByRole('navigation', { name: /main navigation/i });
       expect(within(nav).getAllByRole('link')).toHaveLength(5);
-      for (const name of ['Home', 'Learn', 'Practice', 'Progress', 'Console']) {
+      for (const name of ['Home', 'Learn', 'Practice', 'Progress', CONSOLE_DESTINATION.label]) {
         expect(screen.getByRole('link', { name })).toBeInTheDocument();
       }
     });
@@ -81,7 +82,7 @@ describe('NavigationRail', () => {
       for (const name of ['Home', 'Learn', 'Practice', 'Progress']) {
         expect(screen.getByRole('link', { name })).toBeInTheDocument();
       }
-      expect(screen.queryByRole('link', { name: 'Console' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('link', { name: CONSOLE_DESTINATION.label })).not.toBeInTheDocument();
     });
 
     it('draws no User Settings row — it moved to the user menu (#69)', () => {
@@ -103,7 +104,7 @@ describe('NavigationRail', () => {
 
       render(<NavigationRail />);
 
-      expect(screen.getByRole('link', { name: 'Console' })).toBeInTheDocument();
+      expect(screen.getByRole('link', { name: CONSOLE_DESTINATION.label })).toBeInTheDocument();
     });
 
     it('shows Console on users:read alone', () => {
@@ -114,7 +115,7 @@ describe('NavigationRail', () => {
 
       render(<NavigationRail />);
 
-      expect(screen.getByRole('link', { name: 'Console' })).toBeInTheDocument();
+      expect(screen.getByRole('link', { name: CONSOLE_DESTINATION.label })).toBeInTheDocument();
     });
   });
 
@@ -136,7 +137,7 @@ describe('NavigationRail', () => {
         'href',
         '/progress',
       );
-      expect(screen.getByRole('link', { name: 'Console' })).toHaveAttribute(
+      expect(screen.getByRole('link', { name: CONSOLE_DESTINATION.label })).toHaveAttribute(
         'href',
         '/admin/settings',
       );
@@ -401,7 +402,7 @@ describe('NavigationRail', () => {
           wrapperOptions: { route: '/admin/settings/users', user: mockAdminUser },
         });
 
-        expect(screen.queryByRole('link', { name: 'Console' })).not.toBeInTheDocument();
+        expect(screen.queryByRole('link', { name: CONSOLE_DESTINATION.label })).not.toBeInTheDocument();
       });
 
       it('names the nav landmark "Console navigation"', () => {
@@ -429,7 +430,7 @@ describe('NavigationRail', () => {
         await act(async () => setViewportWidth(800));
 
         expect(screen.getByRole('navigation', { name: 'Main navigation' })).toBeInTheDocument();
-        expect(screen.getByRole('link', { name: 'Console' })).toBeInTheDocument();
+        expect(screen.getByRole('link', { name: CONSOLE_DESTINATION.label })).toBeInTheDocument();
         expect(
           screen.queryByRole('link', { name: 'Users & Allowlist' }),
         ).not.toBeInTheDocument();
@@ -443,7 +444,7 @@ describe('NavigationRail', () => {
         });
 
         expect(screen.getByRole('navigation', { name: 'Main navigation' })).toBeInTheDocument();
-        expect(screen.getByRole('link', { name: 'Console' })).toBeInTheDocument();
+        expect(screen.getByRole('link', { name: CONSOLE_DESTINATION.label })).toBeInTheDocument();
         expect(
           screen.queryByRole('link', { name: 'Users & Allowlist' }),
         ).not.toBeInTheDocument();
@@ -458,7 +459,7 @@ describe('NavigationRail', () => {
           expect(
             screen.getByRole('navigation', { name: 'Main navigation' }),
           ).toBeInTheDocument();
-          expect(screen.getByRole('link', { name: 'Console' })).toBeInTheDocument();
+          expect(screen.getByRole('link', { name: CONSOLE_DESTINATION.label })).toBeInTheDocument();
         },
       );
     });
@@ -554,7 +555,7 @@ describe('NavigationRail', () => {
     // (a separate list, preceded by its own divider) rather than mere
     // presence, so it fails against that inline render.
     function pinnedList(nav: HTMLElement): HTMLElement {
-      const consoleLink = within(nav).getByRole('link', { name: 'Console' });
+      const consoleLink = within(nav).getByRole('link', { name: CONSOLE_DESTINATION.label });
       const list = consoleLink.closest('ul');
       if (!list) throw new Error('Console link is not inside a <ul>');
       return list as HTMLElement;
@@ -622,7 +623,7 @@ describe('NavigationRail', () => {
         wrapperOptions: { route: '/admin/settings/users', user: mockAdminUser },
       });
 
-      expect(screen.queryByRole('link', { name: 'Console' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('link', { name: CONSOLE_DESTINATION.label })).not.toBeInTheDocument();
       // The pinned row links to /admin/settings specifically; Console mode's
       // own cards link to their own card paths, never the bare hub path, so
       // this is the one href a resurrected pinned row would introduce.
@@ -639,7 +640,7 @@ describe('NavigationRail', () => {
       // section, so no divider hanging above an empty list. This is the edge
       // the `pinnedDestinations.length > 0` guard exists for.
       expect(within(nav).getAllByRole('separator')).toHaveLength(1);
-      expect(screen.queryByRole('link', { name: 'Console' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('link', { name: CONSOLE_DESTINATION.label })).not.toBeInTheDocument();
     });
 
     it('keeps aria-current="page" on the pinned row at the collapsed tier — a relocated destination, not a shortcut', async () => {
@@ -653,7 +654,7 @@ describe('NavigationRail', () => {
       // still carry the active-state landmark its inline predecessor did.
       await act(async () => setViewportWidth(800));
 
-      expect(screen.getByRole('link', { name: 'Console' })).toHaveAttribute(
+      expect(screen.getByRole('link', { name: CONSOLE_DESTINATION.label })).toHaveAttribute(
         'aria-current',
         'page',
       );
@@ -694,7 +695,7 @@ describe('NavigationRail', () => {
       // `destinations.test.ts` enforces) and so the one this chrome is measured
       // against; Console is the pinned row, drawn by the same `RailRow`.
       const practiceRow = screen.getByRole('link', { name: 'Practice' });
-      const consoleRow = screen.getByRole('link', { name: 'Console' });
+      const consoleRow = screen.getByRole('link', { name: CONSOLE_DESTINATION.label });
 
       expect(horizontalChrome(practiceRow)).toBeCloseTo(8, 5);
       expect(horizontalChrome(consoleRow)).toBeCloseTo(8, 5);
@@ -711,8 +712,17 @@ describe('NavigationRail', () => {
 
       // The caption is aria-hidden; query by literal text rather than by
       // accessible name, which stays the full label either way and would not
-      // distinguish a full caption from a shortened one.
-      for (const caption of ['Home', 'Learn', 'Practice', 'Progress', 'Console']) {
+      // distinguish a full caption from a shortened one. Console's caption is
+      // `compactLabel` ("Console"), deliberately unchanged by #232 even though
+      // `label` itself is now "System Settings" — see `CONSOLE_DESTINATION`'s
+      // own comment in `config/destinations.ts`.
+      for (const caption of [
+        'Home',
+        'Learn',
+        'Practice',
+        'Progress',
+        CONSOLE_DESTINATION.compactLabel,
+      ]) {
         expect(screen.getByText(caption), `${caption} caption`).toBeInTheDocument();
       }
     });
