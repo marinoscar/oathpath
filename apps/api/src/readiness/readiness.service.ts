@@ -1,10 +1,16 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Prisma, type JourneyStage, type ReadinessSnapshot } from '@prisma/client';
 
+import { AiDispatchService, type AiRunResult } from '../ai/ai-dispatch.service';
 import { Clock } from '../common/clock/clock';
 import { nextStageOnReadinessSnapshot } from '../journey/readiness-stage-transitions';
 import { PrismaService } from '../prisma/prisma.service';
-import { computeReadiness, type ReadinessEvidence } from './readiness-engine';
+import { buildProgressGuidePrompt } from './progress-guide-prompt';
+import {
+  computeReadiness,
+  type ReadinessEvidence,
+  type ReadinessResult,
+} from './readiness-engine';
 import { buildTopRecommendation, type ReadinessTopRecommendation } from './top-recommendation';
 import type { ReadinessSnapshotResponse } from './dto/readiness-snapshot.dto';
 
@@ -56,6 +62,30 @@ const MS_PER_DAY = 86_400_000;
 
 /** How many calendar days back `consistency`'s (§2.4) rolling window looks, inclusive of today. */
 const CONSISTENCY_WINDOW_DAYS = 14;
+
+/**
+ * The role the Progress Guide narrative (issue #134, §9) spends the
+ * learner's key on.
+ *
+ * `tutor`, matching `civics-explain.service.ts`'s own `TUTOR_ROLE` — a short,
+ * personal explanatory paragraph is exactly that role's job, and a
+ * REGISTRY KEY (`ai/ai-model-roles.ts`) persisted on every `ai_usage_events`
+ * row is what lets an admin tell narrative spend from explanation spend
+ * apart on that table.
+ */
+const PROGRESS_GUIDE_ROLE = 'tutor' as const;
+
+/**
+ * The generation cap for one Progress Guide paragraph.
+ *
+ * A COST CEILING, NOT THE SHAPE OF THE ANSWER — see
+ * `civics-explain.service.ts`'s own `EXPLAIN_MAX_TOKENS` for the identical
+ * reasoning. This paragraph is shorter by design (three to five sentences,
+ * §9's own prompt), so the cap is tighter too: generous enough that a
+ * well-behaved model never brushes against it, tight enough to bound the bill
+ * on one that does.
+ */
+const PROGRESS_GUIDE_MAX_TOKENS = 400;
 
 /** A generous buffer added to the 14-day query bound so a timezone offset near the edge can never clip a real day out of the window before the exact, timezone-aware filter runs in JS. */
 const CONSISTENCY_QUERY_BUFFER_DAYS = 3;
@@ -131,6 +161,23 @@ function toSnapshotResponse(snapshot: ReadinessSnapshot): ReadinessSnapshotRespo
   };
 }
 
+/**
+ * A `readiness_snapshots` Prisma row → the `ReadinessResult` shape
+ * `buildProgressGuidePrompt` (§9) reads. The identical cast
+ * `toSnapshotResponse` above already performs on the same three `Json`/
+ * nullable columns — this is a second, narrower reader of the same row for a
+ * different consumer, not a second derivation: the values themselves were
+ * produced once, by `computeReadiness`, before this row was ever written.
+ */
+function toReadinessResultForPrompt(snapshot: ReadinessSnapshot): ReadinessResult {
+  return {
+    score: snapshot.score,
+    components: snapshot.components as unknown as ReadinessResult['components'],
+    evidenceCounts: snapshot.evidenceCounts as unknown as ReadinessResult['evidenceCounts'],
+    capReason: snapshot.capReason as ReadinessResult['capReason'],
+  };
+}
+
 @Injectable()
 export class ReadinessService {
   private readonly logger = new Logger(ReadinessService.name);
@@ -138,6 +185,11 @@ export class ReadinessService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly clock: Clock,
+    // The Progress Guide narrative's one door (issue #134, §9). Reached ONLY
+    // from `ensureNarrative`, which is reached ONLY from the request-path
+    // `getLatestOrRecompute` — never from `recomputeAllActiveUsers`/the
+    // nightly cron. See that method's own header for why.
+    private readonly dispatch: AiDispatchService,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -159,7 +211,8 @@ export class ReadinessService {
     });
 
     if (!latest) {
-      return this.recomputeSnapshot(userId);
+      const snapshot = await this.computeAndPersistSnapshot(userId);
+      return toSnapshotResponse(await this.ensureNarrative(snapshot));
     }
 
     const mostRecentAttempt = await this.prisma.practiceAttempt.findFirst({
@@ -172,7 +225,16 @@ export class ReadinessService {
       mostRecentAttempt !== null &&
       mostRecentAttempt.answeredAt.getTime() > latest.computedAt.getTime();
 
-    return isStale ? this.recomputeSnapshot(userId) : toSnapshotResponse(latest);
+    const snapshot = isStale ? await this.computeAndPersistSnapshot(userId) : latest;
+
+    // §9: attempted on EVERY request-path read whose snapshot has no
+    // narrative yet — not only a freshly recomputed one. A snapshot an
+    // earlier request already found `unavailable` for (no key configured
+    // then) is exactly the "a client can re-request the same snapshot a
+    // moment later once it's populated" case the spec names; `ensureNarrative`
+    // itself is the only gate (`narrative === null`), so this is a no-op read
+    // the instant a narrative already exists.
+    return toSnapshotResponse(await this.ensureNarrative(snapshot));
   }
 
   /** Paginated snapshot history, newest first — the same `page`/`pageSize` shape `PracticeService.listSessions` already uses. */
@@ -217,6 +279,24 @@ export class ReadinessService {
    * here.
    */
   async recomputeSnapshot(userId: string): Promise<ReadinessSnapshotResponse> {
+    const snapshot = await this.computeAndPersistSnapshot(userId);
+    return toSnapshotResponse(snapshot);
+  }
+
+  /**
+   * The raw Prisma row half of {@link recomputeSnapshot} — everything that
+   * method does, minus the final conversion to the wire shape.
+   *
+   * SPLIT OUT SPECIFICALLY so `getLatestOrRecompute` can hand the row it just
+   * wrote (or the existing latest row it read) to {@link ensureNarrative}
+   * before ever converting to `ReadinessSnapshotResponse` — `narrative` and
+   * `narrativeGeneratedAt` are columns on the row, not fields
+   * `toSnapshotResponse` could patch in after the fact without a second
+   * Prisma shape to reconcile. `recomputeSnapshot` (this method's only other
+   * caller — the public API and the nightly cron) is otherwise unchanged: it
+   * still never touches AI.
+   */
+  private async computeAndPersistSnapshot(userId: string): Promise<ReadinessSnapshot> {
     const profile = await this.prisma.learnerProfile.findUnique({
       where: { userId },
       select: { stage: true },
@@ -266,7 +346,89 @@ export class ReadinessService {
       'Readiness snapshot computed',
     );
 
-    return toSnapshotResponse(snapshot);
+    return snapshot;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Progress Guide narrative (issue #134, §9)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Fill in a snapshot's `narrative`/`narrativeGeneratedAt` when it has none
+   * yet, on the calling user's own AI key. NEVER THROWS, and NEVER BLOCKS the
+   * `GET /api/readiness` response it is called from — every path out of this
+   * method returns a `ReadinessSnapshot`, whether or not a narrative was
+   * actually produced.
+   *
+   * REQUEST-PATH ONLY. Called from `getLatestOrRecompute` alone —
+   * `computeAndPersistSnapshot`/`recomputeAllActiveUsers` (the nightly cron's
+   * own entry point, §7(b)) never call this, because a user's BYOK key is not
+   * available outside a request from that user (`ROADMAP.md` §7, quoted in
+   * `readiness-recompute.task.ts`'s own header). Widening that boundary is a
+   * design change to make deliberately, not a refactor to fall into.
+   *
+   * A NO-OP THE INSTANT A NARRATIVE ALREADY EXISTS — the one gate this method
+   * itself enforces, so a caller never has to check `narrative === null`
+   * before reaching for it.
+   */
+  async ensureNarrative(snapshot: ReadinessSnapshot): Promise<ReadinessSnapshot> {
+    if (snapshot.narrative !== null) {
+      return snapshot;
+    }
+
+    let run: AiRunResult;
+    try {
+      const messages = buildProgressGuidePrompt(toReadinessResultForPrompt(snapshot));
+      run = await this.dispatch.run(snapshot.userId, PROGRESS_GUIDE_ROLE, {
+        messages,
+        maxTokens: PROGRESS_GUIDE_MAX_TOKENS,
+      });
+    } catch (error) {
+      // DEFENSIVE ONLY. `AiDispatchService.run` never throws for an AI
+      // reason (`CLAUDE.md`'s "Adding an AI feature", step 3) — this catch
+      // exists purely so a genuinely unexpected error in this file's own
+      // prompt-building or in the dispatcher's plumbing can never turn a
+      // narrative attempt into a 500 on `GET /api/readiness`. The snapshot
+      // itself is a complete, useful row with or without a narrative (§4),
+      // so the honest response here is the one the caller already had.
+      this.logger.warn(
+        {
+          userId: snapshot.userId,
+          snapshotId: snapshot.id,
+          error: error instanceof Error ? error.message : error,
+        },
+        'Progress Guide narrative generation threw unexpectedly; snapshot returned without one',
+      );
+      return snapshot;
+    }
+
+    switch (run.status) {
+      case 'ok':
+        return this.prisma.readinessSnapshot.update({
+          where: { id: snapshot.id },
+          data: { narrative: run.text, narrativeGeneratedAt: this.clock.now() },
+        });
+
+      case 'unavailable':
+        // NOT LOGGED. An administrator who has not finished configuring AI,
+        // or a learner with no personal key, is the common, expected state of
+        // most deployments and most learners today — logging it here would
+        // be noise on every `GET /api/readiness` a keyless learner ever
+        // makes. `narrative` stays `null`, absent without complaint, exactly
+        // as §4/§9 describe.
+        return snapshot;
+
+      case 'failed':
+        // LOGGED, deliberately — a real failure worth knowing about in ops,
+        // unlike `unavailable`. `warn`, matching `AiDispatchService`'s own
+        // level for a provider failure, not `error`: the request still
+        // succeeds and the learner is unaffected beyond a missing paragraph.
+        this.logger.warn(
+          { userId: snapshot.userId, snapshotId: snapshot.id, errorCode: run.errorCode },
+          'Progress Guide narrative generation failed',
+        );
+        return snapshot;
+    }
   }
 
   /**

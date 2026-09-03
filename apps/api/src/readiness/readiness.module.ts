@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 
+import { AiModule } from '../ai/ai.module';
 import { PrismaModule } from '../prisma/prisma.module';
 import { ReadinessController } from './readiness.controller';
 import { ReadinessService } from './readiness.service';
@@ -28,9 +29,17 @@ import { ReadinessRecomputeTask } from './tasks/readiness-recompute.task';
  * cycle for a dependency this module does not have.
  *
  * `ReadinessService` is exported for exactly that one consumer.
+ *
+ * `AiModule` IS imported (issue #134, §9) — the identical justification
+ * `CivicsModule`'s own header gives for the same import: what this module
+ * gains is `AiDispatchService`, which resolves the model from the admin's
+ * settings row and spends the CALLING USER's own key for the Progress Guide
+ * narrative, and nothing else. `ReadinessRecomputeTask` (the nightly cron)
+ * never touches it — only `ReadinessService.ensureNarrative`, called from the
+ * request path alone, does.
  */
 @Module({
-  imports: [PrismaModule],
+  imports: [PrismaModule, AiModule],
   controllers: [ReadinessController],
   providers: [ReadinessService, ReadinessRecomputeTask],
   exports: [ReadinessService],

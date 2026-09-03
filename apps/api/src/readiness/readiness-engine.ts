@@ -93,6 +93,17 @@ const READINESS_WEIGHTS: Record<ReadinessComponentKey, number> = {
 type QualifyingOutcome = 'correct' | 'partial' | 'incorrect' | 'skipped';
 
 /**
+ * §2.2's evidence floor: below this many qualifying attempts, `recall`'s
+ * value is `0` rather than a percentage finer than this floor's own
+ * `0.5`-weighted partial credit can honestly produce. Exported so a reader
+ * of `evidenceCounts.recall.qualifyingAttempts` elsewhere (the Progress
+ * Guide prompt, issue #134) can render the identical "not enough evidence
+ * yet" reading this engine already applies, rather than a second
+ * hand-copied `5`.
+ */
+export const RECALL_MIN_QUALIFYING_ATTEMPTS = 5;
+
+/**
  * Everything `computeReadiness` needs, already resolved from Prisma by the
  * caller. §5's exact shape.
  */
@@ -220,7 +231,9 @@ function computeRecall(evidence: ReadinessEvidence): {
 
   const qualifyingAttempts = evidence.recentQualifyingAttempts.length;
   const value =
-    qualifyingAttempts < 5 ? 0 : safeRatio(correctCount + 0.5 * partialCount, qualifyingAttempts);
+    qualifyingAttempts < RECALL_MIN_QUALIFYING_ATTEMPTS
+      ? 0
+      : safeRatio(correctCount + 0.5 * partialCount, qualifyingAttempts);
 
   return {
     result: toResult('recall', value),

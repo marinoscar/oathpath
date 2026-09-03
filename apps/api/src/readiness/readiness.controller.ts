@@ -47,8 +47,11 @@ export class ReadinessController {
       'signal from `score` itself, which keeps climbing gradually as more evidence arrives.\n\n' +
       '`topRecommendation` is always present: the fixed cap message while capped, otherwise the ' +
       'earnable component with the greatest weighted headroom.\n\n' +
-      '`narrative`/`narrativeGeneratedAt` are `null` until issue #134 wires narrative ' +
-      'generation — expected, and correct, until then.\n\n' +
+      '`narrative`/`narrativeGeneratedAt` are the Progress Guide\'s one AI-generated ' +
+      'paragraph (issue #134), filled in lazily on the caller\'s own AI key. Both stay ' +
+      '`null` — absent without complaint, never blocking this response — whenever AI is ' +
+      'not configured for this deployment or this caller has no key of their own; a later ' +
+      'request for the same (still-current) snapshot fills them in once it can.\n\n' +
       'Scoped to the caller. There is no parameter or query field that names a user.',
   })
   @ApiDataResponse(ReadinessSnapshotDto, {
