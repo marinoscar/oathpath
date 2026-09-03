@@ -19,6 +19,7 @@ import {
 import { Clock } from '../common/clock/clock';
 import { nextStageOnMasteryEvent } from '../journey/stage-transitions';
 import { PrismaService } from '../prisma/prisma.service';
+import { EngagementService } from '../engagement/engagement.service';
 import { ReadinessService } from '../readiness/readiness.service';
 import { matchAnswer, type AnswerMatch } from './answer-matching';
 import { excludeUnanswerable } from './question-selection';
@@ -234,6 +235,10 @@ export class PracticeService {
     // §7(a). Called synchronously from `completeSession`, after its own
     // write commits; see that method's own comment.
     private readonly readiness: ReadinessService,
+    // Accrual trigger — `docs/specs/habit-streaks.md` §2.1. Called from
+    // `recordAttempt` and `completeSession`, after each one's own write
+    // commits, and never allowed to fail either; see {@link accrueActivity}.
+    private readonly engagement: EngagementService,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -514,11 +519,16 @@ export class PracticeService {
 
     const summary = computeSummary(attempts, session.plannedCount);
 
+    // Hoisted so accrual can measure the SAME instant this row records as the
+    // completion, rather than a second, slightly later clock read
+    // (habit-streaks.md §2.3: `now` is "the completion timestamp").
+    const completedAt = this.clock.now();
+
     const completed = await this.prisma.practiceSession.update({
       where: { id: session.id },
       data: {
         status: 'completed',
-        completedAt: this.clock.now(),
+        completedAt,
         summary: summary as unknown as Prisma.InputJsonValue,
       },
     });
@@ -543,6 +553,21 @@ export class PracticeService {
     // `GET /api/readiness` right after this response sees the session it
     // just completed already reflected — not merely eventually.
     await this.readiness.recomputeSnapshot(userId);
+
+    // ACCRUAL EVENT (B) (issue #119, epic #56 / E7), after the completion
+    // write above has committed and outside any transaction — the same
+    // placement as the readiness call, for the same reason (habit-streaks.md
+    // §2.1). It closes the one gap no attempt event ever closes: the seconds
+    // between the last attempt (or, for a session completed with zero
+    // attempts, the session's own `startedAt`) and the moment the learner
+    // actually finished. `attempts`/`correct` are untouched by it — nothing
+    // was answered at completion itself.
+    await this.accrueActivity(userId, session.id, () =>
+      this.engagement.recordSessionCompletionActivity(userId, {
+        sessionId: session.id,
+        completedAt,
+      }),
+    );
 
     return toSessionResponse(completed);
   }
@@ -759,6 +784,24 @@ export class PracticeService {
       return created;
     });
 
+    // ACCRUAL EVENT (A) (issue #119, epic #56 / E7), after the transaction
+    // above has COMMITTED — never inside it. Accrual is not part of what makes
+    // this attempt valid, so it must not be able to roll it back
+    // (habit-streaks.md §2.1). It runs for every recorded attempt, INCLUDING a
+    // `skipped` one: a skip is not evidence of recall in either direction for
+    // mastery scheduling, but it is still a real interaction with the product,
+    // and excluding it would undercount genuine engagement. Placed after the
+    // commit specifically so `sliceSeconds`' "previous attempt in this
+    // session" lookup can see this row and correctly measure the NEXT slice
+    // from it.
+    await this.accrueActivity(userId, session.id, () =>
+      this.engagement.recordAttemptActivity(userId, {
+        sessionId: session.id,
+        answeredAt,
+        outcome: finalOutcome,
+      }),
+    );
+
     const answeredQuestionIds = new Set<string>(
       (
         await this.prisma.practiceAttempt.findMany({
@@ -926,6 +969,38 @@ export class PracticeService {
    * business having one — and the row it created would say nothing more than
    * the nulls below already do.
    */
+  /**
+   * Run one accrual call, and never let it fail the action that triggered it.
+   *
+   * THE SAME RULE `CLAUDE.md`'s "Adding a Notification" section states for
+   * `notify()` — a send failure "becomes a `notification_deliveries` row,
+   * never an exception" — enforced directly here, because accrual has no
+   * delivery row to fall back to (habit-streaks.md §2.4). A thrown error is
+   * logged with the userId and sessionId, and swallowed.
+   *
+   * An attempt that was graded correctly, or a session that genuinely
+   * completed, must never become a 500 because a rollup table had a transient
+   * write failure: the attempt and the session are the EVIDENCE; the day's
+   * tally is a derived convenience on top of it. A missed increment is also
+   * recoverable in a way a lost attempt never would be — the next accrual call
+   * for the same local day still lands, since the upsert simply adds to
+   * whatever `practiceSeconds` the row already holds.
+   */
+  private async accrueActivity(
+    userId: string,
+    sessionId: string,
+    accrue: () => Promise<void>,
+  ): Promise<void> {
+    try {
+      await accrue();
+    } catch (error) {
+      this.logger.error(
+        { userId, sessionId, err: error },
+        'Daily activity accrual failed; the attempt or completion it followed still stands',
+      );
+    }
+  }
+
   private async loadProfile(userId: string): Promise<PracticeProfile> {
     const profile = await this.prisma.learnerProfile.findUnique({
       where: { userId },

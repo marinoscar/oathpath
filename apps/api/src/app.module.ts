@@ -18,6 +18,7 @@ import { CivicsModule } from './civics/civics.module';
 import { PracticeModule } from './practice/practice.module';
 import { ProgressModule } from './progress/progress.module';
 import { ReadinessModule } from './readiness/readiness.module';
+import { EngagementModule } from './engagement/engagement.module';
 import { DeviceAuthModule } from './device-auth/device-auth.module';
 import { StorageModule } from './storage/storage.module';
 import { PatModule } from './pat/pat.module';
@@ -104,6 +105,21 @@ import configuration from './config/configuration';
     // .recomputeSnapshot` synchronously, per readiness-model.md §7(a).
     // `@Auth()` with no permissions, no route parameter carrying a user id.
     ReadinessModule,
+    // Daily activity, streaks and the freeze budget (#119, epic #56 / E7):
+    // `daily_activity`, the pure streak engine, and `GET
+    // /api/engagement/summary`. Registered next to ReadinessModule because it
+    // reads the same practice evidence — and because the boundary between the
+    // two is worth seeing in one place: engagement is deliberately NOT an
+    // input to readiness, and never will be (habit-streaks.md §1, agreeing
+    // word for word with readiness-model.md §2.4). `ReadinessEvidence` has no
+    // field a streak or a freeze balance could be assigned to, and this module
+    // does not import ReadinessModule at all — the separation `PRD.md`
+    // requires is kept by the missing wire, not by a filter at read time.
+    // `PracticeModule` imports THIS module (not the other way around) so
+    // `recordAttempt` and `completeSession` can accrue after their own writes
+    // commit, per habit-streaks.md §2.1. `@Auth()` with no permissions, no
+    // route parameter carrying a user id.
+    EngagementModule,
     DeviceAuthModule,
     StorageModule,
     PatModule,
