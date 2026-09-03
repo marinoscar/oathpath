@@ -186,6 +186,13 @@ describe('PracticeService', () => {
       },
       learnerProfile: { findUnique: jest.fn().mockResolvedValue(null) },
       civicsAnswer: { findMany: jest.fn().mockResolvedValue([]) },
+      // Empty by default: no mastery row for any question means every
+      // question reads as `state: 'new'` (`classifyMasteryBucket`) — the same
+      // "never attempted" default v1's `seenQuestionIds` used to express via
+      // an empty `practiceAttempt.groupBy` result.
+      questionMastery: {
+        findMany: jest.fn().mockResolvedValue([]),
+      },
     };
     prisma.$transaction = jest.fn(async (cb: any) => cb(prisma));
 
@@ -257,18 +264,37 @@ describe('PracticeService', () => {
       });
     });
 
-    it('is UNSEEN-FIRST: a learner with attempts on some questions gets an unattempted one', async () => {
-      // Two questions already attempted, one never touched. Whichever order
-      // the "seen" pair would shuffle into, the single unseen question MUST be
-      // first — that is the entire content of the rule.
+    it('is NEW-FIRST (v2): a learner with mastery rows on some questions gets a never-attempted one', async () => {
+      // Two questions already in ordinary progress (a real `question_mastery`
+      // row, not due, not weak — the STEADY bucket), one never touched at
+      // all (no row — the NEW bucket). Whichever order the STEADY pair would
+      // shuffle into, the single NEW question MUST be first: `mastery/
+      // selector.ts` orders NEW ahead of STEADY. This is the v2 selector's
+      // direct descendant of v1's "unseen-first" rule, now expressed through
+      // `question_mastery` instead of a `practiceAttempt` groupBy.
       prisma.civicsQuestion.findMany.mockResolvedValue([
         question({ id: Q_NONE, number: 1 }),
         question({ id: Q_NONE_2, number: 2 }),
         question({ id: Q_NATIONAL, number: 3, dynamicScope: 'national' }),
       ]);
-      prisma.practiceAttempt.groupBy.mockResolvedValue([
-        { questionId: Q_NONE },
-        { questionId: Q_NONE_2 },
+      prisma.questionMastery.findMany.mockResolvedValue([
+        {
+          questionId: Q_NONE,
+          state: 'learning',
+          dueAt: null,
+          lapses: 0,
+          correctStreak: 1,
+          lastAttemptAt: NOW,
+        },
+        {
+          questionId: Q_NONE_2,
+          state: 'learning',
+          dueAt: null,
+          lapses: 0,
+          correctStreak: 1,
+          lastAttemptAt: NOW,
+        },
+        // Q_NATIONAL has no row at all — it stays NEW.
       ]);
 
       const result = await service.createSession(USER_A, createInput({ plannedCount: 3 }));
@@ -921,7 +947,13 @@ describe('PracticeService', () => {
       const T3 = new Date('2026-03-03T00:00:00Z');
 
       // --- createSession -------------------------------------------------
-      clock.now.mockReturnValueOnce(T1);
+      //
+      // `mockReturnValue` (persistent for the phase), not `mockReturnValueOnce`:
+      // `createSession` now calls `clock.now()` twice — once inside
+      // `candidateQuestions` (v2 selection's `now` for due/weak bucketing,
+      // issue #78) and once for `startedAt` — and both must read the SAME
+      // pinned instant, exactly as two calls within one real request would.
+      clock.now.mockReturnValue(T1);
       prisma.learnerProfile.findUnique.mockResolvedValue({
         stateCode: 'CA',
         testVersionCode: TV,
@@ -936,7 +968,10 @@ describe('PracticeService', () => {
       );
 
       // --- recordAttempt ---------------------------------------------------
-      clock.now.mockReturnValueOnce(T2);
+      // Same reasoning as above: `recordAttempt` also calls `clock.now()`
+      // more than once now (`answeredAt`, and `nextQuestionFor`'s own
+      // `candidateQuestions` call for the FOLLOWING question) — all within T2.
+      clock.now.mockReturnValue(T2);
       mockOwnedSession(sessionRow());
       prisma.civicsQuestion.findUnique.mockResolvedValue(question());
       prisma.practiceAttempt.findFirst.mockResolvedValue(null);
@@ -952,7 +987,7 @@ describe('PracticeService', () => {
       expect(recorded.attempt.answerSnapshot.resolvedAt).toBe(T2.toISOString());
 
       // --- completeSession ---------------------------------------------------
-      clock.now.mockReturnValueOnce(T3);
+      clock.now.mockReturnValue(T3);
       mockOwnedSession(sessionRow());
       prisma.practiceAttempt.findMany.mockResolvedValue([]);
 

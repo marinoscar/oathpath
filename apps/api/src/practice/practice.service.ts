@@ -28,7 +28,11 @@ import {
   type GradingVerdict,
   type PersistableFailureCause,
 } from './grading';
-import { selectQuestions } from './question-selection';
+import {
+  classifyMasteryBucket,
+  selectQuestionsV2,
+  type QuestionMasterySnapshot,
+} from './mastery/selector';
 import type { CreatePracticeSessionInput } from './dto/create-practice-session.dto';
 import type { RecordAttemptInput } from './dto/record-attempt.dto';
 import type { PracticeSessionQuery } from './dto/practice-session-query.dto';
@@ -871,9 +875,10 @@ export class PracticeService {
   }
 
   /**
-   * The learner's selectable questions, ordered unseen-first.
+   * The learner's selectable questions, mastery-ordered (v2, issue #78).
    *
-   * Three filters, and the third is the one worth naming:
+   * Three filters on the question bank itself, and the third is the one worth
+   * naming:
    *
    *  - the session's test version, so a learner is only ever asked questions
    *    from the bank they will actually sit;
@@ -883,22 +888,34 @@ export class PracticeService {
    *    is emphatic about the distinction, and it is the reason the flag lives
    *    on `civics_questions` rather than being applied to answer resolution.
    *
-   * Unanswerable questions are then dropped and the rest partitioned
-   * unseen-first by `question-selection.ts`; both rules live there, pure and
-   * directly testable, rather than inline in a query.
+   * Unanswerable questions are dropped and the rest ordered by
+   * `mastery/selector.ts`'s `selectQuestionsV2` — due, then weak/lapsed, then
+   * new (by category coverage), then steady, then mastered (sampled by
+   * recency). That file's own header has the full rule; this method's job is
+   * only to hand it the right rows.
    *
-   * **"Seen" is read from `practice_attempts` with a `groupBy`**, which is the
-   * query the shipped `[userId, questionId, answeredAt]` index exists to serve
-   * (§2.2). A `findMany` of every attempt row would return one row per
-   * repetition — a learner who has practised for a month would drag hundreds of
-   * rows across the wire to compute a set of at most 128 ids.
+   * **Mastery is read with one bounded `findMany`**, scoped to exactly the
+   * question ids just selected from the bank — never `where: { userId }`
+   * alone, which would drag in mastery rows for every OTHER test version and
+   * category the learner has ever touched. `question_mastery`'s own
+   * `[userId, dueAt]` index does not cover this shape, but the `id IN (...)`
+   * list this query filters by is bounded to the bank's own size (at most a
+   * few hundred rows), so a table scan over that bound is the same cost class
+   * v1's `practiceAttempt.groupBy` query was.
+   *
+   * A question with NO mastery row reads as `state: 'new'` structurally — see
+   * `mastery/selector.ts`'s `classifyMasteryBucket` — which is the same "never
+   * attempted" fact v1's `seenQuestionIds` used to carry, now derived from the
+   * live scheduling table instead of a second aggregation over
+   * `practice_attempts`. Issue #220's backfill is what makes that substitution
+   * correct for questions attempted before this epic shipped.
    *
    * The pool is re-read on every call rather than persisted with the session.
    * There is no column for a question list (§2.1's table has none), and adding
    * one would be a second place the session's contents are recorded — able to
    * disagree with the attempts that actually happened. Re-selecting, minus what
    * this session has already answered, is stateless, cannot drift, and costs
-   * one bounded query over a bank of at most a few hundred rows.
+   * two bounded queries over a bank of at most a few hundred rows.
    */
   private async candidateQuestions(
     scope: { testVersionCode: string; categoryId: string | null },
@@ -906,29 +923,56 @@ export class PracticeService {
     userId: string,
     excludeQuestionIds?: ReadonlySet<string>,
   ): Promise<QuestionRow[]> {
-    const [questions, seen] = await Promise.all([
-      this.prisma.civicsQuestion.findMany({
-        where: {
-          testVersionCode: scope.testVersionCode,
-          ...(scope.categoryId ? { categoryId: scope.categoryId } : {}),
-          ...(profile.seniorExemption ? { seniorEligible: true } : {}),
-        },
-        select: QUESTION_SELECT,
-        orderBy: [{ number: 'asc' }],
-      }),
-      this.prisma.practiceAttempt.groupBy({
-        by: ['questionId'],
-        where: { userId },
-      }),
-    ]);
+    const questions = await this.prisma.civicsQuestion.findMany({
+      where: {
+        testVersionCode: scope.testVersionCode,
+        ...(scope.categoryId ? { categoryId: scope.categoryId } : {}),
+        ...(profile.seniorExemption ? { seniorEligible: true } : {}),
+      },
+      select: QUESTION_SELECT,
+      orderBy: [{ number: 'asc' }],
+    });
 
-    return selectQuestions(questions as unknown as QuestionRow[], {
+    const masteryByQuestionId = await this.loadMasteryByQuestionId(
+      userId,
+      questions.map((question: { id: string }) => question.id),
+    );
+
+    return selectQuestionsV2(questions as unknown as QuestionRow[], {
       learnerStateCode: profile.stateCode,
-      seenQuestionIds: new Set<string>(
-        (seen as { questionId: string }[]).map((row) => row.questionId),
-      ),
+      masteryByQuestionId,
+      now: this.clock.now(),
       excludeQuestionIds,
     });
+  }
+
+  /**
+   * This user's `question_mastery` rows for exactly the given question ids,
+   * as the plain snapshot `mastery/selector.ts` (and `getQueue` below) read —
+   * never the whole Prisma row, so a caller cannot accidentally start reading
+   * a column the selection rule does not use.
+   */
+  private async loadMasteryByQuestionId(
+    userId: string,
+    questionIds: readonly string[],
+  ): Promise<ReadonlyMap<string, QuestionMasterySnapshot>> {
+    if (questionIds.length === 0) {
+      return new Map();
+    }
+
+    const rows = (await this.prisma.questionMastery.findMany({
+      where: { userId, questionId: { in: questionIds as string[] } },
+      select: {
+        questionId: true,
+        state: true,
+        dueAt: true,
+        lapses: true,
+        correctStreak: true,
+        lastAttemptAt: true,
+      },
+    })) as ({ questionId: string } & QuestionMasterySnapshot)[];
+
+    return new Map(rows.map((row) => [row.questionId, row] as const));
   }
 
   /**

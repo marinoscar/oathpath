@@ -130,6 +130,8 @@ let profiles: Map<string, { stateCode: string | null; testVersionCode: string | 
 let sessions: Map<string, Record<string, any>>;
 /** The `practice_attempts` table, in-memory. */
 let attempts: Map<string, Record<string, any>>;
+/** The `question_mastery` table, in-memory — keyed by `${userId}:${questionId}`, mirroring its own `@@unique([userId, questionId])`. */
+let mastery: Map<string, Record<string, any>>;
 
 /**
  * Wire the practice tables into the shared Prisma mock as a tiny relational
@@ -142,6 +144,7 @@ function setupPracticeMocks(): void {
   profiles = new Map();
   sessions = new Map();
   attempts = new Map();
+  mastery = new Map();
 
   (prismaMock.learnerProfile.findUnique as jest.Mock).mockImplementation(
     async ({ where }: any) => profiles.get(where.userId) ?? null,
@@ -287,6 +290,16 @@ function setupPracticeMocks(): void {
     const updated = { ...existing, ...data };
     attempts.set(where.id, updated);
     return { ...updated, question: QUESTIONS.find((q) => q.id === updated.questionId) };
+  });
+
+  // `question_mastery` (issue #78, epic #54 / E5) — `candidateQuestions`
+  // (v2 selection) reads this for ordering. Empty by default: no row for a
+  // question means it reads as `state: 'new'`.
+  (prismaMock.questionMastery.findMany as jest.Mock).mockImplementation(async ({ where }: any) => {
+    const ids: string[] | undefined = where.questionId?.in;
+    return Array.from(mastery.values()).filter(
+      (row) => row.userId === where.userId && (ids === undefined || ids.includes(row.questionId)),
+    );
   });
 }
 
