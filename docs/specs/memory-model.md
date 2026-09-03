@@ -54,17 +54,26 @@ Source of truth for every claim below:
   rather than scheduling it as a weak signal.
 - `docs/specs/ai-evaluation.md` §6, §8 — the grading ladder's three rungs and
   the `verdict` values (`correct` / `partial` / `incorrect`) rung 2's grader
-  can produce, which is where §3.1's `partial` mastery outcome comes from.
+  can produce. **Corrected from an earlier draft**: the shipped
+  `AttemptOutcome` union (§3) has no `partial` case at all — only `correct`,
+  `incorrect`, and `correct_self_marked` — so a `partial` AI verdict does not
+  pass through to `nextSchedule` as its own outcome. How the not-yet-written
+  caller (issue #78) collapses a `partial` verdict into one of the three real
+  outcomes is that caller's decision; this document no longer asserts one.
 - `docs/specs/journey-shell.md` §1, §3.2, §6 — the eight-value `JourneyStage`
   enum, the `learner_profiles` columns this epic reads (`stage`, `timezone`)
   and writes (`stage` only — §7), and the "every stage has an owning epic"
   table this document fills in for `learning` and `remembering`.
 - `apps/api/src/common/clock/clock.ts` — `Clock.now()` and
-  `Clock.calendarDateIn(timeZone)`, the exact calendar-day derivation §3.3
-  uses for `due_at` and the distinct-day credit, quoted rather than
-  reinvented: "at 2026-01-15T23:30:00-08:00 the answer in `America/Los_Angeles`
-  is measured from January 15, while the same instant is already January 16
-  in UTC."
+  `Clock.calendarDateIn(timeZone)`, cited here for the general local-day
+  framing `ROADMAP.md` §7 requires elsewhere in this app, not because
+  `nextSchedule` itself calls either method. **Corrected from an earlier
+  draft**: the shipped scheduler takes only a plain `now: Date` and computes
+  both `due_at` and the distinct-day credit in UTC calendar days (§3.3,
+  §3.5) — `Clock.calendarDateIn`'s local-vs-UTC distinction ("at
+  2026-01-15T23:30:00-08:00 the answer in `America/Los_Angeles` is measured
+  from January 15, while the same instant is already January 16 in UTC")
+  does not apply inside the pure function documented here.
 - `apps/api/src/notifications/notifications.service.ts`'s file header — the
   complete "WHY NOT A QUEUE" rationale §4 below cites by name rather than
   restating, and the one place this epic's reasoning *diverges* from it
@@ -136,15 +145,15 @@ for "no grader ran" — journey-shell.md's honesty rule, one table over).
 | `userId` | `String @db.Uuid` | no | FK → `users.id`, `onDelete: Cascade` — the same posture `PracticeAttempt.userId` already takes: a learner's own derived mastery state has no meaning independent of the account it summarizes. |
 | `questionId` | `String @db.Uuid` | no | FK → `civics_questions.id`, `onDelete: Restrict` — mirrors `PracticeAttempt.questionId` exactly, for the identical reason: a question cannot be deleted while a learner's mastery of it is still on record. **No separate `testVersionCode` column** — `civics_questions` already belongs to exactly one test version, and a mastery row's version is implied by its question, the same reasoning `PracticeAttempt` itself uses (only `PracticeSession` carries `testVersionCode` directly). |
 | `state` | `QuestionMasteryState` (Postgres enum), default `new` | no | `new` \| `learning` \| `review` \| `lapsed` \| `mastered` — §3 is the complete state machine. **Practically unreachable as a stored value**: because a row is created the moment a question first becomes schedulable, and creation always computes at least one transition out of `new` in the same write (§3.2), no row is ever left sitting in the database with `state: 'new'` in steady state — the default exists so the column type is total, and so a future caller reading a row mid-transaction sees a defined value, not because a query is expected to find one. A question genuinely in the `new` state is a question with **no row at all**. |
-| `dueAt` | `DateTime @db.Timestamptz` | no | The instant this question re-enters the selector's "due" bucket (§5). **Not nullable, and always set on creation** — §3.3 gives the exact derivation (local-midnight arithmetic in the learner's own timezone, per `ROADMAP.md` §7's "local days are explicit" rule), which always produces a real value, even for a question's very first scheduled row. |
+| `dueAt` | `DateTime @db.Timestamptz` | no | The instant this question re-enters the selector's "due" bucket (§5). **Not nullable, and always set on creation** — §3.3 gives the exact derivation: `now` plus `intervalDays` whole UTC calendar days, computed entirely inside the pure scheduler with no per-learner timezone input (corrected here from an earlier draft that described local-midnight arithmetic in the learner's own timezone) — which always produces a real value, even for a question's very first scheduled row. |
 | `intervalDays` | `Int`, default `0` | no | The spacing this row's last schedule computed, in whole days. `0` only as the column's structural default for a row that (per the `state` note above) is never actually read in that shape — every real row's `intervalDays` is at least `LAPSE_INTERVAL_DAYS` (`1`, §3.1) the instant it is created. |
 | `ease` | `Float`, default `2.5` | no | The SM-2-style easiness factor. §3.1 gives the exact bounds (`[1.3, 3.0]`) and deltas; `2.5` is `STARTING_EASE`, the SM-2 convention this variant keeps rather than inventing a different starting point with no external referent. |
-| `correctStreak` | `Int`, default `0` | no | Consecutive correct answers since the last reset, incremented by **any** correct outcome — an objective `correct` and a self-marked `correct_self` credit it identically (§3.4; corrected here from an earlier draft of this design that gated this column to objective corrects only). Self-mark's discount is never expressed by holding this counter back; it is expressed entirely through smaller `ease` and `intervalDays` growth (§3.4). |
-| `lapses` | `Int`, default `0` | no | How many times this question has fallen out of `review`/`mastered` back into `lapsed`. Incremented **exactly once per transition into `lapsed`** — never once per subsequent miss while already there (§3.8's Row 10) — because it answers "how many times has this been forgotten after being verified," not "how many wrong answers has this question ever received." |
-| `totalAttempts` | `Int`, default `0` | no | Count of **schedulable** outcomes this row has been updated for — `correct`, `correct_self`, `partial`, `incorrect`. **Excludes `skipped`** attempts entirely (§3.2): a skip never touches this row, so it is not counted here either. This is deliberately not the same number as `practice_attempts`'s own per-question attempt count, which does include skips — the two answer different questions, the same way `practice_sessions.summary` and a live `practice_attempts` aggregate can legitimately differ (`practice-sessions.md` §10's "recent sessions" note). |
-| `distinctCorrectDays` | `Int`, default `0` | no | **The column that makes `VISION.md`'s rule enforceable.** Counts distinct calendar days (learner's own timezone) on which this question has received a **credit-eligible** outcome — `correct` or `correct_self`, never `partial`, never more than once per day regardless of how many credit-eligible attempts land on the same day (§3.5). This is *not* a running attempt count and *not* a percentage; it is a count of **days**, specifically so that answering the same question correctly ten times between 2pm and 2:15pm produces `distinctCorrectDays: 1`, not `10` — the exact failure `PRD.md` names by name ("A user who correctly answers ten questions immediately after studying them should not appear highly ready"). A count-of-attempts column could not distinguish "ten correct answers in one sitting" from "one correct answer on each of ten different days"; a count-of-days column cannot help but distinguish them, which is why this is the column the mastery promotion rule (§3.5) reads, not `totalAttempts` or `correctStreak`. |
-| `lastOutcome` | `QuestionMasteryOutcome` (Postgres enum) | no | `correct` \| `correct_self` \| `partial` \| `incorrect` — the outcome that produced this row's current shape. **Not nullable**: a row only exists once at least one schedulable outcome has been recorded, so there is no "row exists but nothing has happened yet" state to represent (the same reasoning that keeps `PracticeAttempt.gradingMethod` `NOT NULL`, `practice-sessions.md` §8.1). A distinct enum from `PracticeOutcome` on purpose — `skipped` is not a member, because it is never a value this column can hold (§3.2). |
-| `lastAttemptAt` | `DateTime @db.Timestamptz` | no | `Clock.now()` at the moment of the schedulable outcome that last updated this row. Read by the selector's "weak" bucket ordering (§5) and by the Study Coach's recency input (§6), never by `nextSchedule` itself to derive "already credited today" (§3.5 states explicitly why that derivation is unsafe from this column alone). |
+| `correctStreak` | `Int`, default `0` | no | Consecutive correct answers since the last reset, incremented by **any** correct outcome — an objective `correct` and a self-marked `correct_self_marked` credit it identically (§3.4; corrected here from an earlier draft of this design that gated this column to objective corrects only). Self-mark's discount is never expressed by holding this counter back; it is expressed entirely through smaller `ease` and `intervalDays` growth (§3.4). |
+| `lapses` | `Int`, default `0` | no | How many times this question has fallen out of `review`/`mastered` back into `lapsed`. Incremented **exactly once per transition into `lapsed`** — never once per subsequent miss while already there (§3.8's Row 9) — because it answers "how many times has this been forgotten after being verified," not "how many wrong answers has this question ever received." |
+| `totalAttempts` | `Int`, default `0` | no | Count of **schedulable** outcomes this row has been updated for — `correct`, `incorrect`, `correct_self_marked`. **Excludes `skipped`** attempts entirely (§3.2): a skip never touches this row, so it is not counted here either. This is deliberately not the same number as `practice_attempts`'s own per-question attempt count, which does include skips — the two answer different questions, the same way `practice_sessions.summary` and a live `practice_attempts` aggregate can legitimately differ (`practice-sessions.md` §10's "recent sessions" note). |
+| `distinctCorrectDays` | `Int`, default `0` | no | **The column that makes `VISION.md`'s rule enforceable.** Counts distinct UTC calendar days (corrected here from an earlier draft that said the learner's own timezone — `nextSchedule` has no timezone input at all, §3.3) on which this question has received a **credit-eligible** outcome — `correct` or `correct_self_marked` (`AttemptOutcome` has no `partial` case at all — §3), never more than once per day regardless of how many credit-eligible attempts land on the same day (§3.5). This is *not* a running attempt count and *not* a percentage; it is a count of **days**, specifically so that answering the same question correctly ten times between 2pm and 2:15pm produces `distinctCorrectDays: 1`, not `10` — the exact failure `PRD.md` names by name ("A user who correctly answers ten questions immediately after studying them should not appear highly ready"). A count-of-attempts column could not distinguish "ten correct answers in one sitting" from "one correct answer on each of ten different days"; a count-of-days column cannot help but distinguish them, which is why this is the column the mastery promotion rule (§3.5) reads, not `totalAttempts` or `correctStreak`. |
+| `lastOutcome` | `QuestionMasteryOutcome` (Postgres enum) | no | `correct` \| `incorrect` \| `correct_self_marked` — the outcome that produced this row's current shape. **Not nullable**: a row only exists once at least one schedulable outcome has been recorded, so there is no "row exists but nothing has happened yet" state to represent (the same reasoning that keeps `PracticeAttempt.gradingMethod` `NOT NULL`, `practice-sessions.md` §8.1). A distinct enum from `PracticeOutcome` on purpose — `skipped` is not a member, because it is never a value this column can hold (§3.2). |
+| `lastAttemptAt` | `DateTime @db.Timestamptz` | no | `Clock.now()` at the moment of the schedulable outcome that last updated this row. Read by the selector's "weak" bucket ordering (§5), by the Study Coach's recency input (§6), and — corrected here from an earlier draft that claimed the opposite — by `nextSchedule` itself, together with `lastOutcome`, as the one-attempt lookback that decides "already credited today" for `distinctCorrectDays` (§3.5). |
 | `createdAt` / `updatedAt` | `DateTime @db.Timestamptz` | no | House convention, present on every table in this schema; not named in the epic's own column list but added here for the same reason `practice_sessions.updatedAt` exists — `updatedAt` moves on every scheduling write, unlike `practice_attempts`, which is genuinely immutable end to end. |
 
 ```
@@ -175,55 +184,67 @@ no import statement at all — the identical shape `answer-matching.ts` and
 must be directly unit-testable, table of cases and all, per this document's
 own §11.
 
-```ts
-export type QuestionMasteryState = 'new' | 'learning' | 'review' | 'lapsed' | 'mastered';
-export type MasteryOutcome = 'correct' | 'correct_self' | 'partial' | 'incorrect';
+**The type and signature below are quoted verbatim from the shipped file**
+— an earlier draft of this document described a `MasterySnapshot`/
+`NextScheduleContext`/`MasterySchedule` split with a `timezone` and an
+`alreadyCreditedToday` parameter; none of that exists in the shipped code.
+`nextSchedule` takes and returns one flat record, positionally, with no
+context object of any kind:
 
-/** The row's shape immediately BEFORE this schedule runs. `state: 'new'`
- *  with every numeric field at its column default is what the caller passes
- *  when no row exists yet — see NEW_MASTERY_SNAPSHOT below. */
-export interface MasterySnapshot {
-  state: QuestionMasteryState;
+```ts
+export type MasteryState = 'new' | 'learning' | 'review' | 'lapsed' | 'mastered';
+export type AttemptOutcome = 'correct' | 'incorrect' | 'correct_self_marked';
+
+/** One question's spaced-repetition state for one learner — the row's shape
+ *  immediately BEFORE `nextSchedule` runs, and the shape it returns. There
+ *  is no separate "snapshot in / schedule out" pair of types. */
+export interface MasteryRecord {
+  state: MasteryState;
+  dueAt: Date | null;
   intervalDays: number;
   ease: number;
   correctStreak: number;
   lapses: number;
   totalAttempts: number;
   distinctCorrectDays: number;
+  lastOutcome: AttemptOutcome | null;
+  lastAttemptAt: Date | null;
 }
 
-export interface NextScheduleContext {
-  outcome: MasteryOutcome;
-  /** Clock.now() — nextSchedule takes "now" as data and reads no clock
-   *  itself, the same reason every pure function in this codebase does. */
-  now: Date;
-  /** learner_profiles.timezone — for calendar-day arithmetic (§3.3). */
-  timezone: string;
-  /** Computed by the CALLER from practice_attempts, never derived here from
-   *  the mastery row alone. §3.5 states exactly why and exactly how. */
-  alreadyCreditedToday: boolean;
-}
-
-export interface MasterySchedule extends MasterySnapshot {
-  dueAt: Date;
-  lastOutcome: MasteryOutcome;
-  lastAttemptAt: Date;
-}
-
-export const NEW_MASTERY_SNAPSHOT: MasterySnapshot = {
-  state: 'new',
-  intervalDays: 0,
-  ease: 2.5,
-  correctStreak: 0,
-  lapses: 0,
-  totalAttempts: 0,
-  distinctCorrectDays: 0,
-};
-
+/**
+ * Advance one question's mastery record by one graded attempt. PURE: same
+ * inputs, same output, forever, and `mastery` is never mutated — a new
+ * object is always returned.
+ *
+ * `now` is the only time input, and reads no clock itself — the same reason
+ * every pure function in this codebase takes "now" as data. There is no
+ * `timezone` parameter: every calendar-day decision inside the function
+ * (`dueAt`, and the distinct-day same-day check) reasons in UTC (§3.3,
+ * §3.5). There is no `alreadyCreditedToday` parameter either — the function
+ * derives same-day crediting itself, from `mastery.lastOutcome` and
+ * `mastery.lastAttemptAt` (§3.5).
+ */
 export function nextSchedule(
-  prior: MasterySnapshot,
-  ctx: NextScheduleContext,
-): MasterySchedule;
+  mastery: MasteryRecord,
+  outcome: AttemptOutcome,
+  now: Date,
+): MasteryRecord;
+
+/** A fresh mastery record for a question a learner has never attempted. */
+export function initialMasteryRecord(): MasteryRecord {
+  return {
+    state: 'new',
+    dueAt: null,
+    intervalDays: 0,
+    ease: STARTING_EASE, // 2.5 — §3.1
+    correctStreak: 0,
+    lapses: 0,
+    totalAttempts: 0,
+    distinctCorrectDays: 0,
+    lastOutcome: null,
+    lastAttemptAt: null,
+  };
+}
 ```
 
 ### 3.1 Constants
@@ -244,8 +265,8 @@ export function nextSchedule(
 **Interval progression for an objectively-graded `correct`:** 1st correct
 repetition → `LAPSE_INTERVAL_DAYS` (1 day); 2nd →
 `SECOND_REPETITION_INTERVAL_DAYS` (3 days); 3rd and every one after →
-`round(previousIntervalDays × ease)`, floored at `1`. `correct_self` reuses
-this exact same base — computed from the same `correctStreak`, the same
+`round(previousIntervalDays × ease)`, floored at `1`. `correct_self_marked`
+reuses this exact same base — computed from the same `correctStreak`, the same
 prior `ease`, the same prior `intervalDays` — and then applies
 `SELF_MARKED_INTERVAL_DISCOUNT` to that base, floored at `1` day. There is
 no second, independent interval progression for self-mark; the two variants
@@ -258,7 +279,7 @@ the earliest a question can be shown again is tomorrow.
 
 ### 3.2 What `nextSchedule` is never called for
 
-**`skipped` is not a member of `MasteryOutcome`, and a skipped attempt never
+**`skipped` is not a member of `AttemptOutcome`, and a skipped attempt never
 reaches this function at all.** `practice-sessions.md` §9.1 already states
 the reason in full for the attempt row itself — "seeing the answer without
 ever producing or claiming one is not evidence of recall in either
@@ -270,22 +291,36 @@ gap is intentional, not a bug to reconcile.
 
 ### 3.3 `dueAt` derivation
 
-`dueAt` is computed as **the UTC instant that begins the learner's local
-calendar day, N days from today**, where N is the newly computed
-`intervalDays` and "today" is `Clock.calendarDateIn(timezone)` at the moment
-of the write:
+`nextSchedule` computes `dueAt` as **`now` plus `N` whole UTC calendar
+days**, where `N` is the newly computed `intervalDays`:
 
 ```
-dueAt = startOfLocalDayInUTC(addDays(clock.calendarDateIn(timezone), intervalDays), timezone)
+dueAt = addDays(now, intervalDays)
+// addDays: result.setUTCDate(result.getUTCDate() + intervalDays)
 ```
 
-This is deliberately **not** `now + N * 24h`. A learner reviewing at 11pm and
-one reviewing at 7am on the same local day, both scheduled `intervalDays: 1`,
-become due at the identical instant — local midnight the next day — rather
-than at two different times exactly 24 hours after their own answer. "Due
-tomorrow" means *available all of tomorrow*, the same local-day framing
-`ROADMAP.md` §7 already requires for `daily_activity` and streaks, applied
-here to scheduling instead of engagement.
+This is plain UTC-calendar-day arithmetic on whatever `Date` the caller
+passes as `now` — there is no per-learner timezone parameter anywhere in
+`nextSchedule`'s signature (§3), and no `startOfLocalDayInUTC`/local-midnight
+step inside it. **This corrects an earlier draft of this design**, which
+described `dueAt` as always landing on the UTC instant that begins the
+learner's local calendar day, computed via `Clock.calendarDateIn(timezone)`
+and a `startOfLocalDayInUTC` helper, both invoked *inside* the scheduler.
+Neither exists in the shipped function: `addDays` only ever shifts `now`'s
+UTC date component, so `dueAt` keeps whatever time-of-day `now` had — a
+learner who answers at 11pm UTC and one who answers at 7am UTC, both
+scheduled `intervalDays: 1`, become due exactly 24 hours after their own
+answer, not at a shared local-midnight instant.
+
+`isSameUtcCalendarDay` (§3.5) uses the identical UTC-getter comparison
+(`getUTCFullYear`/`getUTCMonth`/`getUTCDate`) for its own same-day check, so
+both of `nextSchedule`'s day-boundary decisions — `dueAt` and same-day
+distinct-day crediting — agree with each other, just not necessarily with
+any individual learner's own local calendar day. Whether a caller normalizes
+`now` to a learner's local time before calling `nextSchedule` — so that
+"day" in the numbers above means something closer to the learner's own day —
+is a decision for that caller (not yet written; #78/#82), not a behavior of
+the pure function documented here.
 
 ### 3.4 State transitions, and the rule that gates every one of them
 
@@ -312,13 +347,13 @@ On an incorrect outcome:
 **The load-bearing rule, stated once, referenced everywhere below, and the
 single biggest correction this document makes relative to an earlier
 draft:** `correctStreak` is incremented **unconditionally by any correct
-outcome** — an objective `correct` and a self-marked `correct_self` credit
-it identically. There is no gate anywhere in the shipped scheduler that
-blocks `correct_self` from advancing this counter, and — because every
-state-*crossing* transition above is driven by the row's **current `state`
-alone**, never by `correctStreak`'s value or by which outcome variant
-produced it — there is no gate that blocks `correct_self` from crossing a
-state boundary either:
+outcome** — an objective `correct` and a self-marked `correct_self_marked`
+credit it identically. There is no gate anywhere in the shipped scheduler
+that blocks `correct_self_marked` from advancing this counter, and —
+because every state-*crossing* transition above is driven by the row's
+**current `state` alone**, never by `correctStreak`'s value or by which
+outcome variant produced it — there is no gate that blocks
+`correct_self_marked` from crossing a state boundary either:
 
 - **`learning` → `review` fires on the very next correct answer**, full
   stop — objective or self-marked, and regardless of `correctStreak`'s
@@ -345,11 +380,11 @@ is expressed entirely through two smaller numbers, applied identically no
 matter which state the row is in:
 
 - **Ease**: an objective `correct` adds `EASE_BUMP_CORRECT` (`0.1`); a
-  `correct_self` adds `EASE_BUMP_SELF_MARKED` (`0.05`, exactly half),
+  `correct_self_marked` adds `EASE_BUMP_SELF_MARKED` (`0.05`, exactly half),
   clamped to `[MIN_EASE, MAX_EASE]`.
 - **Interval**: both variants compute the *same* base interval from
   `correctStreak`, the prior `ease`, and the prior `intervalDays` (§3.1's
-  progression); `correct_self` then multiplies that base by
+  progression); `correct_self_marked` then multiplies that base by
   `SELF_MARKED_INTERVAL_DISCOUNT` (`0.5`), floored at `1` day. An objective
   `correct` uses the base unchanged.
 
@@ -365,40 +400,46 @@ but the two cases land in **different states**: a miss from `review` or
 earlier draft's claim that a repeated miss while already `lapsed` leaves the
 row sitting at `lapsed` — the shipped scheduler routes it to `learning`
 instead, the same destination as any other non-regression miss (§3.8's Row
-10). `distinctCorrectDays` is left completely unchanged by any miss, of
+9). `distinctCorrectDays` is left completely unchanged by any miss, of
 either kind — never reset, never decremented (§3.5, §3.6).
 
 ### 3.5 `distinctCorrectDays`: the axis self-mark is never discounted on
 
 `distinctCorrectDays` increments by **at most one per calendar day**, on
-outcome `correct` **or** `correct_self` — never `partial`, which is real but
-substantively incomplete evidence, not a correct answer. **It is left
-completely unchanged by an incorrect outcome** — a lapse does not reset it to
-`0`, or to any smaller value; it simply holds at whatever it already was
-(§3.6 explains why, and corrects an earlier draft of this design that
-claimed a full reset).
+outcome `correct` **or** `correct_self_marked` (`AttemptOutcome` has no
+`partial` case — §3). **It is left completely unchanged by an incorrect
+outcome** — a lapse does not reset it to `0`, or to any smaller value; it
+simply holds at whatever it already was (§3.6 explains why, and corrects an
+earlier draft of this design that claimed a full reset).
 
-**The `alreadyCreditedToday` boolean cannot be derived from `question_mastery`'s
-own columns, and that is stated here explicitly because a naive
-implementation gets it wrong.** The obvious-looking shortcut — "compare
-today's calendar date to `lastAttemptAt`'s calendar date; skip crediting if
-they match" — breaks on the single most common multi-attempt-per-day
-sequence this product has: an attempt graded `incorrect` this morning,
-revealed, and self-marked `correct_self` an hour later, same calendar day.
-Under the shortcut, the self-mark's own scheduling call would see
-`lastAttemptAt` already stamped *today* (from the morning's miss) and
-wrongly skip the credit the self-mark itself is supposed to earn.
+**The same-day check is computed inside `nextSchedule` itself, from the
+record's own `lastOutcome`/`lastAttemptAt` — corrected here from an earlier
+draft that described an externally-supplied `alreadyCreditedToday` boolean a
+caller would compute against `practice_attempts` and pass in.** No such
+parameter exists on the shipped function (§3). Instead: a correct outcome
+credits `distinctCorrectDays` *unless* `mastery.lastOutcome` was itself a
+correct outcome (`correct` or `correct_self_marked`) **and**
+`mastery.lastAttemptAt` falls on the same UTC calendar date as `now` — in
+which case the count is left unchanged. This one-attempt lookback correctly
+credits the product's most common multi-attempt-per-day sequence — an
+attempt graded `incorrect` this morning, revealed, and self-marked
+`correct_self_marked` an hour later, same calendar day — because
+`lastOutcome` is `'incorrect'` at the moment the self-mark runs, which is not
+a correct outcome, so the lookback finds nothing to suppress and the credit
+lands.
 
-So the caller — `apps/api/src/practice/mastery/mastery.service.ts` — computes
-`alreadyCreditedToday` from `practice_attempts` directly, not from the
-mastery row: a single query, using the same `[userId, questionId,
-answeredAt]` index `practice-sessions.md` §2.2 already ships, for whether any
-**other** row for this `(user, question)` already has `answeredAt` on
-today's calendar date (learner's timezone) and either `outcome: 'correct'`
-or `gradingMethod: 'self'`. `question_mastery` is deliberately a compact
-summary row with no per-day history; `practice_attempts` is the table that
-actually has one, and this is the one place the scheduler needs to consult it
-rather than its own cached summary.
+**What the one-attempt lookback genuinely cannot do** is detect a same-day
+repeat that is *not* the immediately preceding attempt: `correct`, then
+`incorrect`, then `correct` again, all on one calendar day, double-counts —
+the `incorrect` attempt in between clears `lastOutcome`'s correct-outcome
+flag, so the second `correct` sees no reason to suppress its own credit.
+`MasteryRecord` stores only the single most recent attempt, not a full
+history, so this is a deliberate, accepted approximation rather than an
+oversight — the shipped file's own header names it as "cheap to upgrade
+later if a full attempt history (`practice_attempts`, which E5's caller will
+have on hand) is threaded through instead," which is a decision for whichever
+caller eventually wires this in (#78), not a behavior of the pure function
+documented here.
 
 ### 3.6 Why a lapse leaves `distinctCorrectDays` untouched
 
@@ -435,16 +476,16 @@ An earlier draft of this design asserted an asymmetry — that self-mark could
 `review` → `mastered` promotion) but could never *start* one, because
 `correctStreak` supposedly never moved for a self-marked outcome. That
 premise does not hold: `correctStreak` moves identically for both variants
-(§3.4), so `correct_self` alone — with **no independently confirmed correct
-answer anywhere in the row's history** — can carry a question from `new`
+(§3.4), so `correct_self_marked` alone — with **no independently confirmed
+correct answer anywhere in the row's history** — can carry a question from `new`
 through `learning` and into `review` exactly as fast as an unbroken run of
 objective corrects would (§3.8's Rows 3–4 work this case end to end).
 
 The one place self-mark's weaker evidence genuinely does matter for
 *whether* a transition fires, not just for its size, is the `review` →
 `mastered` promotion's `distinctCorrectDays >= MASTERY_PROMOTION_THRESHOLD`
-gate — and even there, a `correct_self` counts toward that threshold on the
-same footing as an objective `correct` (§3.5); it is not blocked from
+gate — and even there, a `correct_self_marked` counts toward that threshold
+on the same footing as an objective `correct` (§3.5); it is not blocked from
 completing the promotion either. So there is, in the shipped design, no
 state transition anywhere that self-mark is excluded from. What self-mark
 genuinely never does is earn the *full-strength* ease bump or interval
@@ -457,21 +498,20 @@ gate-based discount that the shipped scheduler does not implement.
 ### 3.8 Worked transitions
 
 Every row below is a complete, self-contained input/output pair a unit test
-should be able to assert directly. "Day N" is a relative calendar day in the
-learner's own timezone, not a literal date.
+should be able to assert directly. "Day N" is a relative UTC calendar day
+(§3.3 — `nextSchedule` has no timezone input), not a literal date.
 
 | # | Scenario | Prior state | Prior fields (`interval`/`ease`/`streak`/`lapses`/`total`/`distinctDays`) | `outcome` | credited today? | New state | New fields | `dueAt` | Why |
 |---|---|---|---|---|---|---|---|---|---|
 | 1 | Brand-new question, first-ever attempt, exact match | *(no row)* | `0`/`2.5`/`0`/`0`/`0`/`0` | `correct` | no | `learning` | `1`/`2.6`/`1`/`0`/`1`/`1` | Day 2 | First schedulable outcome creates the row and immediately advances it past the implicit `new` state — §2's "no row ever persists `state: 'new'`" claim, in practice. |
 | 2 | Same question, Day 2, second consecutive objective correct | `learning` | `1`/`2.6`/`1`/`0`/`1`/`1` | `correct` | no | `review` | `3`/`2.7`/`2`/`0`/`2`/`2` | Day 5 | `learning` → `review` fires on the very next correct answer regardless of `correctStreak`'s value (§3.4) — reaching `correctStreak: 2` here is incidental, not a gate. Interval uses the scheduler's second-repetition step (`SECOND_REPETITION_INTERVAL_DAYS`, `3`), not a flat graduation constant — there isn't one in the shipped scheduler. |
-| 3 | A **different** brand-new question, first-ever attempt is **self-marked** correct | *(no row)* | `0`/`2.5`/`0`/`0`/`0`/`0` | `correct_self` | no | `learning` | `1`/`2.55`/`1`/`0`/`1`/`1` | Day 2 | Self-mark starts a row exactly like an objective correct does — the `new → learning` transition reads no outcome variant (§3.4). The only difference from Row 1 is the smaller ease bump (`EASE_BUMP_SELF_MARKED`, `0.05`, vs. `0.1`); the interval is identical (`LAPSE_INTERVAL_DAYS`, both variants) because the discount only bites once the base interval is above the 1-day floor. |
-| 4 | Row 3's question, Day 2, second consecutive **self-marked** correct | `learning` | `1`/`2.55`/`1`/`0`/`1`/`1` | `correct_self` | no | `review` | `2`/`2.6`/`2`/`0`/`2`/`2` | Day 4 | Self-mark alone — with **no objectively-graded correct answer anywhere in this row's history** — crosses `learning` → `review`, contradicting an earlier draft of this design that claimed self-mark could never start or complete this transition (§3.7). The discount is visible only in the smaller numbers: interval `2` days here vs. Row 2's `3` days for the objective equivalent (`round(3 × 0.5) = 2`), and ease `+0.05` vs. `+0.10`. |
+| 3 | A **different** brand-new question, first-ever attempt is **self-marked** correct | *(no row)* | `0`/`2.5`/`0`/`0`/`0`/`0` | `correct_self_marked` | no | `learning` | `1`/`2.55`/`1`/`0`/`1`/`1` | Day 2 | Self-mark starts a row exactly like an objective correct does — the `new → learning` transition reads no outcome variant (§3.4). The only difference from Row 1 is the smaller ease bump (`EASE_BUMP_SELF_MARKED`, `0.05`, vs. `0.1`); the interval is identical (`LAPSE_INTERVAL_DAYS`, both variants) because the discount only bites once the base interval is above the 1-day floor. |
+| 4 | Row 3's question, Day 2, second consecutive **self-marked** correct | `learning` | `1`/`2.55`/`1`/`0`/`1`/`1` | `correct_self_marked` | no | `review` | `2`/`2.6`/`2`/`0`/`2`/`2` | Day 4 | Self-mark alone — with **no objectively-graded correct answer anywhere in this row's history** — crosses `learning` → `review`, contradicting an earlier draft of this design that claimed self-mark could never start or complete this transition (§3.7). The discount is visible only in the smaller numbers: interval `2` days here vs. Row 2's `3` days for the objective equivalent (`round(3 × 0.5) = 2`), and ease `+0.05` vs. `+0.10`. |
 | 5 | A third brand-new question, first-ever attempt is a **miss** | *(no row)* | `0`/`2.5`/`0`/`0`/`0`/`0` | `incorrect` | — | `learning` | `1`/`2.3`/`0`/`0`/`1`/`0` | Day 2 | Never entered `review`/`mastered`, so this is not a lapse (`lapses` stays `0`) — just the ordinary start of learning, one miss in. |
 | 6 | Row 2's question, on its due date (Day 5), third distinct day, objective correct | `review` | `3`/`2.7`/`2`/`0`/`2`/`2` | `correct` | no | **`mastered`** | `8`/`2.8`/`3`/`0`/`3`/`3` | Day 13 | `distinctCorrectDays` reaches `MASTERY_PROMOTION_THRESHOLD` (3) while `state: 'review'` — promotion, exactly as an earlier draft described. What changes here is only the interval math: the third-and-later repetition uses `round(previousIntervalDays × ease) = round(3 × 2.7) = 8`, not a flat graduation constant. |
 | 7 | Row 6's question, much later, a miss while `mastered` | `mastered` | `8`/`2.8`/`3`/`0`/`3`/`3` | `incorrect` | — | `lapsed` | `1`/`2.6`/`0`/`1`/`4`/**`3`** | +1 day | A real lapse: `lapses` increments, interval collapses to `LAPSE_INTERVAL_DAYS`. **`distinctCorrectDays` is left at `3`, not reset to `0`** — an earlier draft of this design claimed a reset here; the shipped scheduler copies the field forward unchanged on every `incorrect` outcome (§3.6). |
-| 8 | Row 7's question, next day, **self-marked** correct | `lapsed` | `1`/`2.6`/`0`/`1`/`4`/`3` | `correct_self` | no | `learning` | `1`/`2.65`/`1`/`1`/`5`/**`4`** | +1 day | Self-mark rebuilds a lapsed row exactly like an objective correct would (§3.4) — `lapsed → learning`, not the unchanged `lapsed` an earlier draft claimed. `distinctCorrectDays` continues from its **persisted** value, `3 → 4`, rather than rebuilding from `0` — Rows 7–8 are the same correction, viewed from either side of the lapse. |
-| 9 | An established `review` question receives an **AI partial verdict** | `review` | `10`/`2.5`/`4`/`0`/`6`/`2` | `partial` | no | `review` (**unchanged**) | `13`/`2.5`/`4`/`0`/`7`/`2` | +13 days | `intervalDays = round(10 × 2.5 × 0.5) = 13` — real but half-strength growth (an objective correct here would have produced `round(10 × 2.5 × 1.0) = 25`). `distinctCorrectDays` does **not** credit — `partial` is not a correct answer. |
-| 10 | A **repeated** miss while already `lapsed` | `lapsed` | `1`/`1.35`/`0`/`2`/`9`/`0` | `incorrect` | — | **`learning`** | `1`/`1.3`/`0`/`2`/`10`/`0` | +1 day | `lapses` stays `2` — only a miss **from** `review`/`mastered` increments it, and a miss while already `lapsed` is not a further regression. Corrected here from an earlier draft: the state moves to `learning`, not staying at `lapsed` — every non-regression miss (from `new`, `learning`, or `lapsed`) lands at the same `learning` destination (§3.4). `ease` floors at `MIN_EASE` (`1.3`), not the uncapped `1.15`. |
+| 8 | Row 7's question, next day, **self-marked** correct | `lapsed` | `1`/`2.6`/`0`/`1`/`4`/`3` | `correct_self_marked` | no | `learning` | `1`/`2.65`/`1`/`1`/`5`/**`4`** | +1 day | Self-mark rebuilds a lapsed row exactly like an objective correct would (§3.4) — `lapsed → learning`, not the unchanged `lapsed` an earlier draft claimed. `distinctCorrectDays` continues from its **persisted** value, `3 → 4`, rather than rebuilding from `0` — Rows 7–8 are the same correction, viewed from either side of the lapse. |
+| 9 | A **repeated** miss while already `lapsed` | `lapsed` | `1`/`1.35`/`0`/`2`/`9`/`0` | `incorrect` | — | **`learning`** | `1`/`1.3`/`0`/`2`/`10`/`0` | +1 day | `lapses` stays `2` — only a miss **from** `review`/`mastered` increments it, and a miss while already `lapsed` is not a further regression. Corrected here from an earlier draft: the state moves to `learning`, not staying at `lapsed` — every non-regression miss (from `new`, `learning`, or `lapsed`) lands at the same `learning` destination (§3.4). `ease` floors at `MIN_EASE` (`1.3`), not the uncapped `1.15`. |
 
 ---
 
@@ -484,13 +524,13 @@ already-persisted attempt row, not folded into the first:
 
 1. `POST /api/practice/sessions/:id/attempts` (issue #78) — the `$transaction`
    that already writes the `practice_attempts` row is extended to also
-   upsert `question_mastery` (creating it from `NEW_MASTERY_SNAPSHOT` if this
-   is the question's first schedulable outcome) and, inside the same
+   upsert `question_mastery` (creating it from `initialMasteryRecord()` if
+   this is the question's first schedulable outcome) and, inside the same
    transaction, apply §7's stage-transition check.
 2. `POST /api/practice/sessions/:id/attempts/:attemptId/self-mark` — its own
    `UPDATE` of the attempt row gains the identical extension: a second
-   `nextSchedule` call, with `outcome: 'correct_self'`, against whatever the
-   mastery row's state already was.
+   `nextSchedule` call, with `outcome: 'correct_self_marked'`, against
+   whatever the mastery row's state already was.
 
 **This reuses, and then deliberately diverges from, the rationale
 `apps/api/src/notifications/notifications.service.ts`'s own header already
@@ -532,7 +572,7 @@ touched, until the requested count is reached:
 | # | Bucket | Definition | Order within bucket |
 |---|---|---|---|
 | 1 | **Due** | `state IN ('review', 'mastered')` AND `dueAt <= now` | `dueAt` ascending — most overdue first. |
-| 2 | **Lapsed and weak** | `state = 'lapsed'` **OR** `lastOutcome IN ('incorrect', 'partial')` (regardless of `state` or `dueAt` — a `lapsed` row is always eligible immediately; a `learning` row whose most recent evidence was a miss counts as "weak" the same way) | `lastAttemptAt` ascending — longest-neglected first. |
+| 2 | **Lapsed and weak** | `state = 'lapsed'` **OR** `lastOutcome = 'incorrect'` (regardless of `state` or `dueAt` — a `lapsed` row is always eligible immediately; a `learning` row whose most recent evidence was a miss counts as "weak" the same way; `AttemptOutcome` has no `partial` case to add to this list — §3) | `lastAttemptAt` ascending — longest-neglected first. |
 | 3 | **New, by category coverage** | Questions with **no** `question_mastery` row at all | Round-robin across `civics_categories` in their existing render `sort` order — one question from each category per pass — rather than exhausting one category before moving to the next, so early practice touches breadth before depth. |
 | 4 | **Sampled mastered** | `state = 'mastered'` AND `dueAt > now` (a due mastered row is already in bucket 1) AND not attempted (any outcome) within the last `MASTERED_SAMPLE_COOLDOWN_DAYS` | Uniform random sample, capped at `MASTERED_SAMPLE_RATE` of the queue's total requested slots |
 
@@ -738,7 +778,7 @@ does not mistake a silence in this document for an oversight:
 | **A job queue for scheduling** | `ROADMAP.md` §7's "No job queue" rule, restated by `notifications.service.ts`'s own header for a different feature and inherited here rather than re-derived (§4): no broker, no worker process, and no second failure mode anywhere in this app for a computation this cheap. Mastery scheduling additionally cannot tolerate the detached, best-effort posture a queue (or `notify()`'s own fire-and-forget shape) would imply — §4 states the divergence explicitly. |
 | **An AI-chosen next action** | `ROADMAP.md`'s 2026-09-02 decision log states the requirement outright: deterministic, identical across two consecutive loads, explainable in one sentence, and working with no AI key configured — none of which an inference call can guarantee. `next-action.ts`'s own header makes the identical argument one epic earlier: "a model call would make that a coin flip and would put a provider outage in front of the application's front page." §6. |
 | **Withholding distinct-day credit entirely from self-marked answers** | Would make the discount indistinguishable from disqualification on the one axis — verified mastery — the epic's decision 2 ("discounted, not ignored") most directly protects. The chosen design discounts self-mark through smaller ease and interval growth instead (§3.4), never through a blocked transition, so "weaker evidence" and "no evidence" stay genuinely different outcomes. |
-| **Deriving `alreadyCreditedToday` from `question_mastery`'s own `lastAttemptAt`/`lastOutcome`** | Breaks on the ordinary same-day incorrect-then-self-marked sequence self-mark itself produces (§3.5) — a summary row that remembers only the single most recent attempt cannot answer "was *any* attempt today already credited." The caller queries `practice_attempts` directly instead, over an index that already exists. |
+| **A caller-supplied `alreadyCreditedToday`, computed against `practice_attempts` instead of the mastery row's own fields** | An earlier draft of this design took this position — arguing that a summary row remembering only the single most recent attempt cannot answer "was *any* attempt today already credited," and that the ordinary same-day incorrect-then-self-marked sequence would break a naive same-day check. **This is not what shipped.** `nextSchedule` derives the same-day check itself, from `mastery.lastOutcome`/`mastery.lastAttemptAt` (§3.5) — no such parameter exists on the function at all (§3) — and that one-attempt lookback handles the incorrect-then-self-marked sequence correctly; its real, accepted limitation is a different, rarer sequence (`correct`, `incorrect`, `correct` again, same day — §3.5). |
 | **Resetting `distinctCorrectDays` on a lapse — fully to zero, or partially (e.g., halving)** | An earlier draft of this design chose a full reset to `0`, reasoning that re-earning `mastered` should require fresh multi-day evidence each time, and that a partial reset would concede too much of that standard. The shipped scheduler does neither: `distinctCorrectDays` is copied forward unchanged on every `incorrect` outcome (§3.6). This row is kept to record that both a full and a partial reset were considered and are **not** what shipped. |
 | **Blocking `correct_self` from advancing `correctStreak` (and thus from state transitions)** | This is the position an earlier draft of this design took, deliberately — it argued this would prevent a learner from self-marking through the entire ladder with no independently-confirmed answer. **It is not what shipped.** The real scheduler treats `correct_self` and an objective `correct` identically for `correctStreak` and every state transition (§3.4, §3.7); a row genuinely can reach `mastered` on self-marks alone. Recorded here, inverted, because the risk this earlier position named is real and worth a deliberate decision — accept it, or file a follow-up issue against `scheduler.ts` — rather than silently dropped. |
 
@@ -756,8 +796,8 @@ child-issue list to the issue numbers named throughout this document:
 |---|---|---|
 | **#67** (this document) | Design spec | `docs/specs/memory-model.md` |
 | **#71** | Migration — `question_mastery` (+ backfill) | `apps/api/prisma/schema.prisma` (`QuestionMastery` model, `QuestionMasteryState`, `QuestionMasteryOutcome` enums — §2), a new `apps/api/prisma/migrations/…_add_question_mastery/` |
-| **#75** | Pure scheduler + tests | `apps/api/src/practice/mastery/scheduler.ts` (`nextSchedule`, `NEW_MASTERY_SNAPSHOT` — §3), `apps/api/src/practice/mastery/scheduler.spec.ts` (§3.8's table, as literal test cases) |
-| **#78** | Selector v2 and `GET /api/practice/queue` | `apps/api/src/practice/mastery/mastery.service.ts` (the upsert wrapper, `alreadyCreditedToday` query — §3.5, called from inside both attempt-write transactions — §4), `apps/api/src/practice/mastery/queue-selector.ts` (`buildQueue` — §5), `apps/api/src/practice/practice.controller.ts` (the new route), `PracticeService.createSession`'s new `review`/`weak`/`mixed` branches |
+| **#75** | Pure scheduler + tests | `apps/api/src/practice/mastery/scheduler.ts` (`nextSchedule`, `initialMasteryRecord()` — §3), `apps/api/src/practice/mastery/scheduler.spec.ts` (§3.8's table, as literal test cases) |
+| **#78** | Selector v2 and `GET /api/practice/queue` | `apps/api/src/practice/mastery/mastery.service.ts` (the upsert wrapper, calling `nextSchedule` from inside both attempt-write transactions — §4; same-day crediting is computed inside `nextSchedule` itself, §3.5, not by this wrapper), `apps/api/src/practice/mastery/queue-selector.ts` (`buildQueue` — §5), `apps/api/src/practice/practice.controller.ts` (the new route), `PracticeService.createSession`'s new `review`/`weak`/`mixed` branches |
 | **#82** | Study-coach recommender and stage transitions | `apps/api/src/journey/study-coach.ts` (§6), `apps/api/src/journey/next-action.ts` (widened `NextActionKind`/`NEXT_ACTION_PATHS`), `apps/api/src/journey/stage-transitions.ts` (`nextStageOnMasteryEvent` — §7) |
 | **#86** | `GET /api/progress/mastery` | `apps/api/src/progress/progress.controller.ts`, `apps/api/src/progress/progress.service.ts` (§8) |
 | **#90** | Practice queue UI and real home Next-up | `apps/web/src/pages/PracticePage.tsx` (real queue counts and session kinds), the Home Next-up card reading `study-coach.ts`'s `review` kind |
