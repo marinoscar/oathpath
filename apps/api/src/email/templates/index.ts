@@ -3,7 +3,16 @@ import {
   type AllowlistInvitationEmailData,
   allowlistInvitationEmail,
 } from './allowlist-invitation.email';
+import {
+  type PracticeDailyReminderEmailData,
+  practiceDailyReminderEmail,
+} from './practice-daily-reminder.email';
+import {
+  type PracticeReviewDueEmailData,
+  practiceReviewDueEmail,
+} from './practice-review-due.email';
 import { type RoleChangedEmailData, roleChangedEmail } from './role-changed.email';
+import { type StreakAtRiskEmailData, streakAtRiskEmail } from './streak-at-risk.email';
 import { type TestEmailData, testEmail } from './test-email.email';
 import { type UserWelcomeEmailData, userWelcomeEmail } from './user-welcome.email';
 
@@ -66,6 +75,13 @@ export interface EmailTemplateDataMap {
   'user-welcome': UserWelcomeEmailData;
   'allowlist-invitation': AllowlistInvitationEmailData;
   'role-changed': RoleChangedEmailData;
+  // Epic #56 / E7's three practice reminders (`docs/specs/habit-streaks.md`
+  // §5). All three are raised by ONE trigger — the hourly
+  // `PracticeReminderTask` — and the ladder there sends exactly one of them to
+  // a given learner on a given local day.
+  'practice-daily-reminder': PracticeDailyReminderEmailData;
+  'practice-review-due': PracticeReviewDueEmailData;
+  'streak-at-risk': StreakAtRiskEmailData;
 }
 
 /**
@@ -97,6 +113,9 @@ export const EMAIL_TEMPLATES: {
   'user-welcome': userWelcomeEmail,
   'allowlist-invitation': allowlistInvitationEmail,
   'role-changed': roleChangedEmail,
+  'practice-daily-reminder': practiceDailyReminderEmail,
+  'practice-review-due': practiceReviewDueEmail,
+  'streak-at-risk': streakAtRiskEmail,
 };
 
 /**
@@ -201,6 +220,11 @@ export { userWelcomeEmail } from './user-welcome.email';
 export { allowlistInvitationEmail } from './allowlist-invitation.email';
 export { roleChangedEmail } from './role-changed.email';
 
+// Epic #56 / E7's three practice reminders.
+export { practiceDailyReminderEmail } from './practice-daily-reminder.email';
+export { practiceReviewDueEmail } from './practice-review-due.email';
+export { streakAtRiskEmail } from './streak-at-risk.email';
+
 export type { PlainTextOptions, RenderLayoutOptions } from './layout';
 export type { EmailTemplate, RenderedEmail } from './email-template.types';
 export type { TestEmailData } from './test-email.email';
@@ -213,3 +237,10 @@ export type { TestEmailData } from './test-email.email';
 export type { UserWelcomeEmailData } from './user-welcome.email';
 export type { AllowlistInvitationEmailData } from './allowlist-invitation.email';
 export type { RoleChangedEmailData } from './role-changed.email';
+
+// Epic #56 / E7's payloads. `PracticeReminderTask` annotates every payload it
+// builds with one of these — `notify` takes `data: unknown`, so the call site
+// is the only place the shape is checked at all.
+export type { PracticeDailyReminderEmailData } from './practice-daily-reminder.email';
+export type { PracticeReviewDueEmailData } from './practice-review-due.email';
+export type { StreakAtRiskEmailData } from './streak-at-risk.email';

@@ -67,6 +67,10 @@ export {
   userWelcomeEmail,
   allowlistInvitationEmail,
   roleChangedEmail,
+  // Epic #56 / E7's three practice reminders.
+  practiceDailyReminderEmail,
+  practiceReviewDueEmail,
+  streakAtRiskEmail,
 } from './templates';
 export {
   SmtpEmailProvider,
@@ -89,6 +93,11 @@ export type {
   UserWelcomeEmailData,
   AllowlistInvitationEmailData,
   RoleChangedEmailData,
+  // Epic #56 / E7's three reminder payloads, annotated at
+  // `PracticeReminderTask`'s own `notify()` call sites for the same reason.
+  PracticeDailyReminderEmailData,
+  PracticeReviewDueEmailData,
+  StreakAtRiskEmailData,
 } from './templates';
 export type { EmailProvider } from './providers/email-provider.interface';
 export type {

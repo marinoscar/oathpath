@@ -1,8 +1,10 @@
 import { Module } from '@nestjs/common';
 
+import { NotificationsModule } from '../notifications/notifications.module';
 import { PrismaModule } from '../prisma/prisma.module';
 import { EngagementController } from './engagement.controller';
 import { EngagementService } from './engagement.service';
+import { PracticeReminderTask } from './tasks/practice-reminder.task';
 
 /**
  * Daily activity, streaks and the engagement summary (issue #119, epic #56 /
@@ -31,6 +33,19 @@ import { EngagementService } from './engagement.service';
  * there is no wire between them. `PRD.md` requires the separation, and it is
  * kept by the missing import, not by a filter at read time.
  *
+ * `NotificationsModule` IS imported, for the hourly `PracticeReminderTask`
+ * (`docs/specs/habit-streaks.md` §6) — the one thing in this module that
+ * reaches outside it. That import runs one way too: `NotificationsModule`
+ * knows nothing about engagement, and the task raises events through
+ * `notify()` like every other trigger point in this application, rather than
+ * calling a channel directly.
+ *
+ * The task lives in THIS module's `providers` array rather than a separate
+ * "tasks module", exactly as `TokenCleanupTask` lives in `AuthModule` and
+ * `ReadinessRecomputeTask` in `ReadinessModule`. It is not exported: nothing
+ * calls it but the scheduler (and a test, which resolves it from the module
+ * it is declared in).
+ *
  * `EngagementService` is exported for exactly one consumer — `PracticeModule`.
  *
  * One controller, one route, no admin surface: nobody reads another learner's
@@ -38,9 +53,9 @@ import { EngagementService } from './engagement.service';
  * different gate.
  */
 @Module({
-  imports: [PrismaModule],
+  imports: [PrismaModule, NotificationsModule],
   controllers: [EngagementController],
-  providers: [EngagementService],
+  providers: [EngagementService, PracticeReminderTask],
   exports: [EngagementService],
 })
 export class EngagementModule {}

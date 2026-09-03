@@ -828,4 +828,223 @@ describe('User Settings Integration', () => {
       );
     });
   });
+  // ===========================================================================
+  // study namespace (epic #56 / E7 "Habit")
+  // ===========================================================================
+  //
+  // THE CHECK THAT CATCHES A MISSED FILE. Adding a namespace is a six-file
+  // change (`user-settings.service.ts`'s own comment says so by number, and
+  // habit-streaks.md §7 lists all six), and every way of getting it wrong
+  // produces the SAME silent symptom: the write returns 200, `userSettingsSchema
+  // .parse()` strips the unknown key, and the very next GET reports nothing
+  // changed — with no error in the response and nothing in the logs. Only a
+  // round trip catches that, which is why each of these writes is followed by
+  // a real GET rather than by an assertion on what was passed to Prisma.
+  //
+  // Same placement rule as the `dataTables`/`navigation` block above: outside
+  // `describe('PATCH ...')`, whose beforeEach replaces `findUnique` with a
+  // one-shot value and breaks the stateful registry a round trip needs.
+  describe('study namespace', () => {
+    it('persists study through PATCH and returns it on a subsequent GET', async () => {
+      const user = await createMockTestUser(context);
+      setupMockUserSettings(user.id, DEFAULT_USER_SETTINGS);
+
+      await request(context.app.getHttpServer())
+        .patch('/api/user-settings')
+        .set(authHeader(user.accessToken))
+        .send({ study: { reminderHour: 6, reminderEnabled: true } })
+        .expect(200);
+
+      const response = await request(context.app.getHttpServer())
+        .get('/api/user-settings')
+        .set(authHeader(user.accessToken))
+        .expect(200);
+
+      expect(response.body.data.study).toEqual({
+        reminderHour: 6,
+        reminderEnabled: true,
+      });
+    });
+
+    it('persists study through PUT and returns it on a subsequent GET', async () => {
+      const user = await createMockTestUser(context);
+      setupMockUserSettings(user.id, DEFAULT_USER_SETTINGS);
+
+      await request(context.app.getHttpServer())
+        .put('/api/user-settings')
+        .set(authHeader(user.accessToken))
+        .send({
+          theme: 'system',
+          profile: { useProviderImage: true },
+          study: { reminderHour: 21 },
+        })
+        .expect(200);
+
+      const response = await request(context.app.getHttpServer())
+        .get('/api/user-settings')
+        .set(authHeader(user.accessToken))
+        .expect(200);
+
+      expect(response.body.data.study).toEqual({ reminderHour: 21 });
+    });
+
+    it('patches one field without discarding the other', async () => {
+      // The reason `mergeStudy` is field-wise rather than replace-wholesale: a
+      // learner switching reminders off must keep the hour they chose, or
+      // switching them back on silently resets it to the built-in default.
+      const user = await createMockTestUser(context);
+      setupMockUserSettings(user.id, DEFAULT_USER_SETTINGS);
+
+      await request(context.app.getHttpServer())
+        .patch('/api/user-settings')
+        .set(authHeader(user.accessToken))
+        .send({ study: { reminderHour: 7 } })
+        .expect(200);
+
+      await request(context.app.getHttpServer())
+        .patch('/api/user-settings')
+        .set(authHeader(user.accessToken))
+        .send({ study: { reminderEnabled: false } })
+        .expect(200);
+
+      const response = await request(context.app.getHttpServer())
+        .get('/api/user-settings')
+        .set(authHeader(user.accessToken))
+        .expect(200);
+
+      expect(response.body.data.study).toEqual({
+        reminderHour: 7,
+        reminderEnabled: false,
+      });
+    });
+
+    it('patching a field to null restores the built-in default by deleting it', async () => {
+      const user = await createMockTestUser(context);
+      setupMockUserSettings(user.id, DEFAULT_USER_SETTINGS);
+
+      await request(context.app.getHttpServer())
+        .patch('/api/user-settings')
+        .set(authHeader(user.accessToken))
+        .send({ study: { reminderHour: 7, reminderEnabled: false } })
+        .expect(200);
+
+      await request(context.app.getHttpServer())
+        .patch('/api/user-settings')
+        .set(authHeader(user.accessToken))
+        .send({ study: { reminderHour: null } })
+        .expect(200);
+
+      const response = await request(context.app.getHttpServer())
+        .get('/api/user-settings')
+        .set(authHeader(user.accessToken))
+        .expect(200);
+
+      // The hour is GONE, not stored as today's default value — which is what
+      // lets a future change to DEFAULT_STUDY_REMINDER_HOUR reach this learner.
+      expect(response.body.data.study).toEqual({ reminderEnabled: false });
+    });
+
+    it('emptying the namespace collapses it back to absent', async () => {
+      const user = await createMockTestUser(context);
+      setupMockUserSettings(user.id, DEFAULT_USER_SETTINGS);
+
+      await request(context.app.getHttpServer())
+        .patch('/api/user-settings')
+        .set(authHeader(user.accessToken))
+        .send({ study: { reminderHour: 7 } })
+        .expect(200);
+
+      await request(context.app.getHttpServer())
+        .patch('/api/user-settings')
+        .set(authHeader(user.accessToken))
+        .send({ study: { reminderHour: null } })
+        .expect(200);
+
+      const response = await request(context.app.getHttpServer())
+        .get('/api/user-settings')
+        .set(authHeader(user.accessToken))
+        .expect(200);
+
+      // Absent, never `{}`: two spellings of "no opinion" is how the UI and
+      // the hourly task end up disagreeing about whether a learner has one.
+      expect(response.body.data.study).toBeUndefined();
+    });
+
+    it('an untouched account persists no study namespace at all', async () => {
+      // The sparse contract, end to end. `DEFAULT_USER_SETTINGS` carries no
+      // `study` key, and touching an unrelated preference must not materialise
+      // one — a stored `reminderHour: 9` would freeze this learner at today's
+      // default hour forever.
+      const user = await createMockTestUser(context);
+      setupMockUserSettings(user.id, DEFAULT_USER_SETTINGS);
+
+      await request(context.app.getHttpServer())
+        .patch('/api/user-settings')
+        .set(authHeader(user.accessToken))
+        .send({ theme: 'dark' })
+        .expect(200);
+
+      const response = await request(context.app.getHttpServer())
+        .get('/api/user-settings')
+        .set(authHeader(user.accessToken))
+        .expect(200);
+
+      expect(response.body.data.theme).toBe('dark');
+      expect(response.body.data).not.toHaveProperty('study');
+    });
+
+    describe('validation', () => {
+      it.each([
+        ['an hour past the end of the day', 24],
+        ['a negative hour', -1],
+        ['a fractional hour', 9.5],
+      ])('rejects %s with a 400', async (_label, reminderHour) => {
+        const user = await createMockTestUser(context);
+        setupMockUserSettings(user.id, DEFAULT_USER_SETTINGS);
+
+        await request(context.app.getHttpServer())
+          .patch('/api/user-settings')
+          .set(authHeader(user.accessToken))
+          .send({ study: { reminderHour } })
+          .expect(400);
+      });
+
+      it('rejects an out-of-range hour on PUT as well as PATCH', async () => {
+        const user = await createMockTestUser(context);
+        setupMockUserSettings(user.id, DEFAULT_USER_SETTINGS);
+
+        await request(context.app.getHttpServer())
+          .put('/api/user-settings')
+          .set(authHeader(user.accessToken))
+          .send({
+            theme: 'system',
+            profile: { useProviderImage: true },
+            study: { reminderHour: 24 },
+          })
+          .expect(400);
+      });
+
+      it('rejects a misspelled study key', async () => {
+        const user = await createMockTestUser(context);
+        setupMockUserSettings(user.id, DEFAULT_USER_SETTINGS);
+
+        await request(context.app.getHttpServer())
+          .patch('/api/user-settings')
+          .set(authHeader(user.accessToken))
+          .send({ study: { reminderHours: 9 } })
+          .expect(400);
+      });
+
+      it('rejects a non-boolean reminderEnabled', async () => {
+        const user = await createMockTestUser(context);
+        setupMockUserSettings(user.id, DEFAULT_USER_SETTINGS);
+
+        await request(context.app.getHttpServer())
+          .patch('/api/user-settings')
+          .set(authHeader(user.accessToken))
+          .send({ study: { reminderEnabled: 'yes' } })
+          .expect(400);
+      });
+    });
+  });
 });

@@ -3,7 +3,7 @@ import { NOTIFICATION_CHANNELS } from '../../notifications/notification-events';
 import type { NotificationPreferences } from '../../notifications/notification-preferences';
 
 // =============================================================================
-// User Settings Namespaces: `dataTables`, `navigation`, `notifications`
+// User Settings Namespaces: `dataTables`, `navigation`, `notifications`, `study`
 // =============================================================================
 //
 // WHY THIS FILE EXISTS
@@ -157,6 +157,90 @@ export const navigationPatchSchema = z
   .strict();
 
 // =============================================================================
+// User Settings Namespace: `study` (epic #56 / E7 "Habit")
+// =============================================================================
+//
+// `docs/specs/habit-streaks.md` §7. Two fields, both about ONE question: when
+// — and whether — the hourly `PracticeReminderTask` should check in on this
+// learner's study habit.
+//
+// THE BUILT-IN DEFAULTS ARE CONSTANTS BELOW, NOT `.default()` CALLS, and this
+// namespace is where that rule earns its keep most visibly. A `.default(9)`
+// would materialise `reminderHour: 9` into storage the first time a learner
+// touched any unrelated preference — a density menu, a rail toggle — freezing
+// them at today's default hour even after a future change decided the default
+// should move. That is the identical "frozen column set" failure this file's
+// own header spends a paragraph on for `dataTables.visibleColumns`; here it
+// would show up as a learner being reminded at 9am forever because they once
+// collapsed the navigation rail.
+//
+// TWO SEPARATE CONTROLS, NOT ONE (§7.1). `reminderEnabled` governs whether the
+// cron considers this learner AT ALL, for any of the three reminder events —
+// "stop checking in on my study habit". Muting `practice.daily_reminder` in the
+// `notifications` namespace above is narrower: the cron may still select that
+// event for this learner, but it is not delivered, while the other two stay
+// live. A settings page presenting either as the other is a bug in the copy,
+// not a detail: the two answer different questions and a learner who turns off
+// the wrong one keeps receiving exactly what they asked to stop.
+// =============================================================================
+
+/**
+ * The hour a reminder is sent when the learner has expressed no preference.
+ *
+ * READ AT REMINDER TIME BY `PracticeReminderTask`, never written into a
+ * `user_settings` row. That is what "absent means the built-in default" is:
+ * changing this constant moves the reminder for every learner who never chose
+ * an hour, which is the whole point of not persisting it.
+ *
+ * 9 (local, in `learner_profiles.timezone`) — morning, before a working day,
+ * and late enough that it is not the middle of anybody's night in their own
+ * zone. The learner picks a different one if it does not suit them.
+ */
+export const DEFAULT_STUDY_REMINDER_HOUR = 9;
+
+/**
+ * Whether the hourly task considers a learner who has expressed no preference.
+ *
+ * `true`, and each of the three reminder events then applies its OWN
+ * `defaultEnabled` on top — which is how `streak.at_risk` (`defaultEnabled:
+ * false`) stays opt-in even for a learner who never touched this namespace.
+ * Two gates, deliberately: this one is "may we check in at all", the registry's
+ * is "may we send you THIS".
+ */
+export const DEFAULT_STUDY_REMINDER_ENABLED = true;
+
+/**
+ * Full `study` namespace.
+ *
+ * Both fields optional, NEITHER with a `.default()` — see the block above.
+ * `reminderHour` is bounded to a real hour of a real day: 24 is not "midnight
+ * tomorrow", it is a value no learner's local clock ever reads, and accepting
+ * it would store a preference that silently never fires.
+ */
+export const studySchema = z
+  .object({
+    reminderHour: z.number().int().min(0).max(23).optional(),
+    reminderEnabled: z.boolean().optional(),
+  })
+  .strict();
+
+/**
+ * PATCH form of the `study` namespace: each field may additionally be `null`,
+ * meaning "delete this field and fall back to the built-in default".
+ *
+ * The delete is the operation that RESTORES the default rather than pinning
+ * one — a learner returning their reminder to 9am sends `reminderHour: null`,
+ * not `reminderHour: 9`, and keeps moving with the default if it ever changes.
+ * Same shape, same reason, as `navigationPatchSchema` above.
+ */
+export const studyPatchSchema = z
+  .object({
+    reminderHour: z.number().int().min(0).max(23).nullable().optional(),
+    reminderEnabled: z.boolean().nullable().optional(),
+  })
+  .strict();
+
+// =============================================================================
 // Inferred types — derived from the schemas above so they can never drift.
 // =============================================================================
 
@@ -167,6 +251,8 @@ export type DataTablesValue = z.infer<typeof dataTablesSchema>;
 export type DataTablesPatchValue = z.infer<typeof dataTablesPatchSchema>;
 export type NavigationValue = z.infer<typeof navigationSchema>;
 export type NavigationPatchValue = z.infer<typeof navigationPatchSchema>;
+export type StudyValue = z.infer<typeof studySchema>;
+export type StudyPatchValue = z.infer<typeof studyPatchSchema>;
 
 // =============================================================================
 // User Settings Namespace: `notifications` (issue #126, epic #109)

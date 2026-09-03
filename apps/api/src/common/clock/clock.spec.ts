@@ -154,6 +154,130 @@ describe('Clock', () => {
     });
   });
 
+  describe('localHourIn()', () => {
+    // The derivation the hourly practice reminder is built on
+    // (`docs/specs/habit-streaks.md` §6): "whose local hour, right now, equals
+    // the hour they chose". One instant, three answers.
+    it('reports a different hour per zone for the SAME instant', () => {
+      const instant = new Date('2026-01-15T00:00:00.000Z');
+
+      clockOverrideStorage.run({ now: instant }, () => {
+        expect(clock.localHourIn('Asia/Tokyo')).toBe(9);
+        expect(clock.localHourIn('UTC')).toBe(0);
+        expect(clock.localHourIn('America/Los_Angeles')).toBe(16);
+      });
+    });
+
+    it('reports midnight as 0 and never as 24', () => {
+      // `hourCycle: 'h23'`, and the reason it is pinned: a `24` here would
+      // mean a learner who chose hour 0 is never selected at all.
+      const instant = new Date('2026-01-15T00:00:00.000Z');
+
+      clockOverrideStorage.run({ now: instant }, () => {
+        expect(clock.localHourIn('UTC')).toBe(0);
+      });
+    });
+
+    it('reports 23 an hour before midnight', () => {
+      const instant = new Date('2026-01-15T23:30:00.000Z');
+
+      clockOverrideStorage.run({ now: instant }, () => {
+        expect(clock.localHourIn('UTC')).toBe(23);
+      });
+    });
+
+    it('accounts for daylight saving time in the named zone', () => {
+      // 2026-07-15T16:00:00Z is 09:00 PDT (UTC-7); the same wall-clock hour in
+      // January is 17:00Z (UTC-8).
+      clockOverrideStorage.run({ now: new Date('2026-07-15T16:00:00.000Z') }, () => {
+        expect(clock.localHourIn('America/Los_Angeles')).toBe(9);
+      });
+      clockOverrideStorage.run({ now: new Date('2026-01-15T17:00:00.000Z') }, () => {
+        expect(clock.localHourIn('America/Los_Angeles')).toBe(9);
+      });
+    });
+
+    it('rejects an unknown timezone rather than quietly falling back to UTC', () => {
+      expect(() => clock.localHourIn('Mars/Olympus_Mons')).toThrow(RangeError);
+    });
+  });
+
+  describe('localDayRangeIn()', () => {
+    it('brackets the current local day in UTC instants', () => {
+      // 09:00 Jan 15 in Tokyo. Tokyo's day started at 15:00Z on Jan 14 and
+      // ends at 15:00Z on Jan 15.
+      clockOverrideStorage.run({ now: new Date('2026-01-15T00:00:00.000Z') }, () => {
+        const { start, end } = clock.localDayRangeIn('Asia/Tokyo');
+
+        expect(start.toISOString()).toBe('2026-01-14T15:00:00.000Z');
+        expect(end.toISOString()).toBe('2026-01-15T15:00:00.000Z');
+      });
+    });
+
+    it('brackets a different window for a different zone at the same instant', () => {
+      clockOverrideStorage.run({ now: new Date('2026-01-15T00:00:00.000Z') }, () => {
+        const tokyo = clock.localDayRangeIn('Asia/Tokyo');
+        const la = clock.localDayRangeIn('America/Los_Angeles');
+
+        // Same instant, two different local days — the whole reason the
+        // "already reminded today" query cannot use a UTC day.
+        expect(la.start.toISOString()).toBe('2026-01-14T08:00:00.000Z');
+        expect(la.end.toISOString()).toBe('2026-01-15T08:00:00.000Z');
+        expect(tokyo.start.getTime()).not.toBe(la.start.getTime());
+      });
+    });
+
+    it('contains the current instant, and is exactly one day long outside a DST shift', () => {
+      const instant = new Date('2026-01-15T12:34:56.000Z');
+
+      clockOverrideStorage.run({ now: instant }, () => {
+        const { start, end } = clock.localDayRangeIn('Europe/Berlin');
+
+        expect(start.getTime()).toBeLessThanOrEqual(instant.getTime());
+        expect(end.getTime()).toBeGreaterThan(instant.getTime());
+        expect(end.getTime() - start.getTime()).toBe(86_400_000);
+      });
+    });
+
+    it('is 23 hours long on a spring-forward day, and 25 on a fall-back day', () => {
+      // The two-pass offset correction, asserted where a single pass would be
+      // wrong: the offset in effect NOW is not the offset in effect at this
+      // morning's midnight.
+      clockOverrideStorage.run({ now: new Date('2026-03-08T20:00:00.000Z') }, () => {
+        const { start, end } = clock.localDayRangeIn('America/Los_Angeles');
+        expect(end.getTime() - start.getTime()).toBe(23 * 3_600_000);
+      });
+
+      clockOverrideStorage.run({ now: new Date('2026-11-01T20:00:00.000Z') }, () => {
+        const { start, end } = clock.localDayRangeIn('America/Los_Angeles');
+        expect(end.getTime() - start.getTime()).toBe(25 * 3_600_000);
+      });
+    });
+
+    it('starts on the same local day calendarDateIn reports', () => {
+      // 23:30Z on Jan 15 is already Jan 16 in Tokyo. The range must bracket
+      // THAT day, not the UTC one — the two derivations answering differently
+      // is precisely how a learner gets reminded twice.
+      const instant = new Date('2026-01-15T23:30:00.000Z');
+
+      const today = clockOverrideStorage.run({ now: instant }, () =>
+        clock.calendarDateIn('Asia/Tokyo'),
+      );
+      const { start } = clockOverrideStorage.run({ now: instant }, () =>
+        clock.localDayRangeIn('Asia/Tokyo'),
+      );
+
+      expect(today).toBe('2026-01-16');
+      clockOverrideStorage.run({ now: start }, () => {
+        expect(clock.calendarDateIn('Asia/Tokyo')).toBe(today);
+      });
+    });
+
+    it('rejects an unknown timezone', () => {
+      expect(() => clock.localDayRangeIn('Mars/Olympus_Mons')).toThrow(RangeError);
+    });
+  });
+
   describe('calendarDateIn()', () => {
     it('returns the local calendar date on the earlier side of a day boundary', () => {
       // 19:30 on Jan 15 in Los Angeles (UTC-8) is already Jan 16 in UTC.

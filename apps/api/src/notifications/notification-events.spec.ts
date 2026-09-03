@@ -172,6 +172,48 @@ describe('seeded events', () => {
     expect(event?.channels).toHaveLength(2);
   });
 
+  it('the three practice reminders are registered (epic #56 / E7)', () => {
+    // The registry is the source of truth the hourly task, the preferences
+    // matrix and the delivery records all read. An event the task can raise
+    // that is NOT here is dispatched nowhere at all: `notify` logs a debug
+    // line for an unknown key and returns.
+    for (const key of [
+      'practice.daily_reminder',
+      'practice.review_due',
+      'streak.at_risk',
+    ]) {
+      const event = findEvent(key);
+      expect(event).toBeDefined();
+      expect(event?.channels).toEqual(expect.arrayContaining(['email', 'browser']));
+    }
+  });
+
+  it('none of the three practice reminders is mandatory', () => {
+    // THE PRODUCT RULE, not a detail of the data. `mandatory` is reserved for
+    // a fact a user must not be able to silence — a privilege or security
+    // change. A study reminder a learner cannot switch off is exactly the
+    // "pressure... to increase engagement metrics" VISION.md rules out by
+    // name, so a future edit adding `mandatory: true` to any of these three
+    // has to delete this test and explain itself.
+    for (const key of [
+      'practice.daily_reminder',
+      'practice.review_due',
+      'streak.at_risk',
+    ]) {
+      expect(isMandatory(key)).toBe(false);
+      expect(findEvent(key)?.mandatory).toBeUndefined();
+    }
+  });
+
+  it('streak.at_risk is the one reminder that defaults OFF', () => {
+    // habit-streaks.md §5.3: it is the only one of the three that references
+    // something the learner could lose, and an unrequested loss-framed
+    // message is the pressure VISION.md forbids. The other two default on.
+    expect(findEvent('streak.at_risk')?.defaultEnabled).toBe(false);
+    expect(findEvent('practice.daily_reminder')?.defaultEnabled).toBe(true);
+    expect(findEvent('practice.review_due')?.defaultEnabled).toBe(true);
+  });
+
   it('allowlist.invitation is email-only', () => {
     // Its recipient has no account and no open tab by definition — that is
     // what being newly allowlisted means — so a browser channel would be
