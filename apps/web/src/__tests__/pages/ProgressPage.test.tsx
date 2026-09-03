@@ -24,7 +24,7 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import { screen, waitFor, render } from '@testing-library/react';
+import { screen, waitFor, render, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse, delay } from 'msw';
 import { MemoryRouter, Route, Routes, useParams } from 'react-router-dom';
@@ -37,11 +37,18 @@ import { LearnerProfileProvider } from '../../contexts/LearnerProfileContext';
 import ProgressPage from '../../pages/ProgressPage';
 import { ORIENTED_PROFILE, UNORIENTED_PROFILE } from '../utils/journey-fixtures';
 import { journeyProfileHandler } from '../utils/civics-fixtures';
+import {
+  cappedReadinessSnapshot,
+  readinessHistoryResponse,
+  readinessSnapshot,
+} from '../utils/readiness-fixtures';
+import { TRUST_FOOTER_TEXT } from '../../components/journey/TrustFooter';
 import type {
   CreatePracticeSessionInput,
   JourneyProfile,
   ProgressMastery,
   PracticeSessionState,
+  ReadinessSnapshotResponse,
 } from '../../types';
 
 const API_BASE = '*/api';
@@ -143,6 +150,16 @@ function progressHandlers(options: MasteryHandlerOptions = {}) {
       return HttpResponse.json({ data: sessionStartResponse(input) });
     }),
   ];
+}
+
+/** Serve one readiness snapshot (and its one-item history) for the next render. */
+function serveReadiness(snapshot: ReadinessSnapshotResponse): void {
+  server.use(
+    http.get(`${API_BASE}/readiness`, () => HttpResponse.json({ data: snapshot })),
+    http.get(`${API_BASE}/readiness/history`, () =>
+      HttpResponse.json({ data: readinessHistoryResponse([snapshot]) }),
+    ),
+  );
 }
 
 /**
@@ -336,11 +353,25 @@ describe('the empty state', () => {
       screen.getByRole('link', { name: /go to practice/i }),
     ).toHaveAttribute('href', '/practice');
 
-    // Nothing that could be mistaken for a real measurement of zero.
-    expect(screen.queryByText(/0 of 100/)).not.toBeInTheDocument();
-    expect(screen.queryByText(/0%/)).not.toBeInTheDocument();
+    // Nothing that could be mistaken for a real measurement of zero. Scoped
+    // to the mastery empty-state region: the Readiness section above it (a
+    // separate, independently-loaded source, per this page's own header)
+    // legitimately renders its own real percentages — `50%`/`80%`/`100%`
+    // among them — and an unscoped `/0%/` substring match would collide
+    // with those rather than saying anything about the mastery empty state
+    // under test here.
+    const emptyStateHeading = screen.getByRole('heading', {
+      level: 2,
+      name: 'Nothing to show yet',
+    });
+    const emptyStateSection = emptyStateHeading.closest('section') as HTMLElement;
+    expect(within(emptyStateSection).queryByText(/0 of 100/)).not.toBeInTheDocument();
+    expect(within(emptyStateSection).queryByText(/0%/)).not.toBeInTheDocument();
     expect(screen.queryByRole('img', { name: /mastery breakdown/i })).not.toBeInTheDocument();
-    expect(screen.queryByRole('progressbar')).not.toBeInTheDocument();
+    // The dial in the Readiness section above legitimately renders a real
+    // `progressbar` — this asserts the MASTERY section contributes none,
+    // via the same scoped query.
+    expect(within(emptyStateSection).queryByRole('progressbar')).not.toBeInTheDocument();
   });
 
   it("treats an unfinished plan (no resolved test version) as its own distinct notice, not the attempted-0 empty state", async () => {
@@ -409,6 +440,170 @@ describe('the error state', () => {
       await screen.findByText('13 of 22 questions attempted'),
     ).toBeInTheDocument();
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+});
+
+// -----------------------------------------------------------------------------
+// Readiness — score, breakdown honesty rule, the cap, the recommendation
+// (issues #139/#142, epic #55 / E6)
+// -----------------------------------------------------------------------------
+
+describe('readiness', () => {
+  it("renders the score and stage from the server's own snapshot", async () => {
+    server.use(...progressHandlers());
+    serveReadiness(readinessSnapshot({ score: 59, stage: 'practicing' }));
+    renderProgress();
+
+    expect(
+      await screen.findByRole('progressbar', {
+        name: 'Readiness score: 59 out of 100',
+      }),
+    ).toHaveAttribute('aria-valuenow', '59');
+    expect(screen.getByText('Practicing')).toBeInTheDocument();
+  });
+
+  it('renders "No evidence yet" for english/spoken/interview when their evidence is zero, never a 0%', async () => {
+    server.use(...progressHandlers());
+    // The Day 1 fixture: no spoken and no interview evidence at all.
+    serveReadiness(cappedReadinessSnapshot());
+    renderProgress();
+
+    await screen.findByRole('progressbar', { name: /readiness score/i });
+
+    const evidenceRows = screen.getAllByText('No evidence yet');
+    expect(evidenceRows).toHaveLength(3);
+
+    // Never a fabricated 0% standing in for "unmeasured" on any of the
+    // three — the same honesty rule `ProgressMastery`'s own empty state
+    // already enforces one section up.
+    expect(screen.queryByText('0%')).not.toBeInTheDocument();
+  });
+
+  it('does not claim "No evidence yet" for a currently-earnable component, even at a low value', async () => {
+    server.use(...progressHandlers());
+    serveReadiness(cappedReadinessSnapshot());
+    renderProgress();
+
+    await screen.findByRole('progressbar', { name: /readiness score/i });
+
+    // `coverage` is 0.2 → 20% in the Day 1 fixture — a real, low, honest
+    // number, not "no evidence yet".
+    expect(screen.getByText('20%')).toBeInTheDocument();
+  });
+
+  it('renders the fixed cap sentence verbatim when capReason is typed_only', async () => {
+    server.use(...progressHandlers());
+    serveReadiness(cappedReadinessSnapshot());
+    renderProgress();
+
+    expect(
+      await screen.findByText(
+        'Your civics knowledge is strong, but you have limited interview practice. Completing two mock interviews is the best way to strengthen your readiness now.',
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it('does not render the fixed cap sentence when capReason is null', async () => {
+    server.use(...progressHandlers());
+    serveReadiness(readinessSnapshot({ capReason: null }));
+    renderProgress();
+
+    await screen.findByRole('progressbar', { name: /readiness score/i });
+
+    expect(
+      screen.queryByText(/completing two mock interviews/i),
+    ).not.toBeInTheDocument();
+  });
+
+  it("renders topRecommendation as a call to action, linking to the server's own path", async () => {
+    server.use(...progressHandlers());
+    serveReadiness(
+      readinessSnapshot({
+        topRecommendation: {
+          componentKey: 'retention',
+          title: 'A recommendation title from the server',
+          reason: 'A recommendation reason from the server.',
+          path: '/practice',
+        },
+      }),
+    );
+    renderProgress();
+
+    expect(
+      await screen.findByText('A recommendation title from the server'),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText('A recommendation reason from the server.'),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Go' })).toHaveAttribute(
+      'href',
+      '/practice',
+    );
+  });
+
+  it('renders the narrative when present, and renders nothing for it when null', async () => {
+    server.use(...progressHandlers());
+    serveReadiness(readinessSnapshot({ narrative: 'You are making steady, real progress.' }));
+    renderProgress();
+
+    expect(
+      await screen.findByText('You are making steady, real progress.'),
+    ).toBeInTheDocument();
+  });
+
+  it('renders no narrative section, and no error, when narrative is null', async () => {
+    server.use(...progressHandlers());
+    serveReadiness(readinessSnapshot({ narrative: null }));
+    renderProgress();
+
+    await screen.findByRole('progressbar', { name: /readiness score/i });
+
+    expect(screen.queryByText('Progress Guide')).not.toBeInTheDocument();
+  });
+
+  it('renders a trend sentence from two snapshots, and none from only one', async () => {
+    server.use(...progressHandlers());
+    const current = readinessSnapshot({ id: 'current', score: 65 });
+    const previous = readinessSnapshot({ id: 'previous', score: 59 });
+    server.use(
+      http.get(`${API_BASE}/readiness`, () => HttpResponse.json({ data: current })),
+      http.get(`${API_BASE}/readiness/history`, () =>
+        HttpResponse.json({ data: readinessHistoryResponse([current, previous]) }),
+      ),
+    );
+    renderProgress();
+
+    expect(
+      await screen.findByText('Up 6 points since your last check.'),
+    ).toBeInTheDocument();
+  });
+
+  it('renders the readiness section in an error state independently of a healthy mastery section', async () => {
+    server.use(...progressHandlers());
+    server.use(
+      http.get(`${API_BASE}/readiness`, () =>
+        HttpResponse.json({ message: 'Your readiness could not be loaded.' }, { status: 500 }),
+      ),
+    );
+    renderProgress();
+
+    // The mastery section still renders successfully — one call's failure
+    // does not block the other's success.
+    expect(
+      await screen.findByText('13 of 22 questions attempted'),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText('Your readiness could not be loaded.'),
+    ).toBeInTheDocument();
+  });
+
+  it("renders TrustFooter's exact standing disclaimer", async () => {
+    server.use(...progressHandlers());
+    renderProgress();
+
+    expect(
+      await screen.findByText(TRUST_FOOTER_TEXT),
+    ).toBeInTheDocument();
   });
 });
 

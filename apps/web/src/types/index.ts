@@ -1804,3 +1804,118 @@ export interface ProgressMastery {
   /** In the same render order `GET /api/civics/versions/{code}/categories` uses. */
   categories: ProgressMasteryCategory[];
 }
+
+// =============================================================================
+// Readiness — `GET /api/readiness`, `GET /api/readiness/history`
+// (issues #139/#142, epic #55 / E6 "Readiness and Progress")
+// =============================================================================
+//
+// Mirrors `apps/api/src/readiness/dto/readiness-snapshot.dto.ts` and
+// `dto/readiness-history-query.dto.ts` field for field —
+// `docs/specs/readiness-model.md` §2, §4, §5, §8 is the design these types
+// are a wire mapping of, not a re-derivation of it.
+//
+// `english`/`spoken`/`interview` are STRUCTURALLY ZERO until E11/E9/E8 ship
+// (§2.6-§2.8) — the frontend's own honesty rule (matching `ProgressMastery`'s
+// own empty-state convention) is to render "No evidence yet" for those three
+// rather than a `0%` presented as a failing score. See
+// `components/progress/readiness.ts`.
+
+/**
+ * The eight components, in the exact order `readiness-engine.ts`'s own
+ * `READINESS_COMPONENT_KEYS` declares them. The order is load-bearing beyond
+ * readability there (it is the tie-break order for `topRecommendation`); here
+ * it is reused only as the render order a client is expected to iterate in.
+ */
+export type ReadinessComponentKey =
+  | 'coverage'
+  | 'recall'
+  | 'retention'
+  | 'consistency'
+  | 'remediation'
+  | 'english'
+  | 'spoken'
+  | 'interview';
+
+/** One component's normalized value, its weight, and what it contributed. */
+export interface ReadinessComponentResult {
+  /** Normalized `[0, 1]`. */
+  value: number;
+  weight: number;
+  /** `value * weight`. */
+  contribution: number;
+}
+
+export type ReadinessComponents = Record<ReadinessComponentKey, ReadinessComponentResult>;
+
+/** §5's `evidenceCounts` table, one shape per component, verbatim. */
+export interface ReadinessEvidenceCounts {
+  coverage: { distinctQuestionsAttempted: number; totalQuestionsInVersion: number };
+  recall: {
+    qualifyingAttempts: number;
+    correctCount: number;
+    partialCount: number;
+    incorrectCount: number;
+    skippedCount: number;
+  };
+  retention: { masteredCount: number; reviewCount: number; totalAttemptedQuestions: number };
+  consistency: { distinctPracticeDaysInLast14: number };
+  remediation: { everWeakCount: number; remediatedCount: number };
+  english: { distinctQuestionsCorrectSpokenInEnglish: number };
+  spoken: { attempts: number };
+  interview: { attempts: number };
+}
+
+/**
+ * `'typed_only'` while there is no spoken-answer or mock-interview evidence
+ * at all (§3); `null` the instant either kind exists, even one attempt.
+ */
+export type ReadinessCapReason = 'typed_only' | null;
+
+/**
+ * §8.2 — the single next action a snapshot recommends. `componentKey: null`
+ * means the fixed cap message (§3), verbatim, not a component pick — title,
+ * reason and path are ALWAYS rendered as the server wrote them, the same
+ * "the server wrote the copy" discipline `NextUpCard` already follows for
+ * `nextAction`.
+ */
+export interface ReadinessTopRecommendation {
+  componentKey: ReadinessComponentKey | null;
+  title: string;
+  reason: string;
+  path: string;
+}
+
+/** `GET /api/readiness`, and one row of `GET /api/readiness/history`. */
+export interface ReadinessSnapshotResponse {
+  id: string;
+  /** When this snapshot was computed — `Clock.now()`, ISO 8601. */
+  computedAt: string;
+  /** 0-100. */
+  score: number;
+  /** The learner's `JourneyStage` at the moment this snapshot was computed. */
+  stage: JourneyStageKey;
+  components: ReadinessComponents;
+  evidenceCounts: ReadinessEvidenceCounts;
+  capReason: ReadinessCapReason;
+  topRecommendation: ReadinessTopRecommendation;
+  /**
+   * The Progress Guide's one AI-generated paragraph (issue #134). `null`
+   * whenever AI is unavailable or not yet generated — absence is silent,
+   * never rendered as an error (`docs/specs/readiness-model.md` §9).
+   */
+  narrative: string | null;
+  narrativeGeneratedAt: string | null;
+}
+
+/**
+ * `GET /api/readiness/history` — the same flat pagination shape
+ * `PracticeSessionPage` and `AllowlistResponse` already use, newest first.
+ */
+export interface ReadinessHistoryResponse {
+  items: ReadinessSnapshotResponse[];
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+}

@@ -247,6 +247,8 @@ import type {
   PracticeQueue,
   RecordPracticeAttemptInput,
   ProgressMastery,
+  ReadinessSnapshotResponse,
+  ReadinessHistoryResponse,
 } from '../types';
 
 // Allowlist API
@@ -1138,4 +1140,45 @@ export async function getPracticeQueue(): Promise<PracticeQueue> {
  */
 export async function getProgressMastery(): Promise<ProgressMastery> {
   return api.get<ProgressMastery>('/progress/mastery');
+}
+
+// =============================================================================
+// Readiness — `GET /api/readiness`, `GET /api/readiness/history`
+// (issues #139/#142, epic #55 / E6 "Readiness and Progress")
+// =============================================================================
+
+/**
+ * The caller's latest readiness snapshot — `GET /api/readiness`.
+ *
+ * `@Auth()` with no permissions, no parameters: the same posture
+ * `getProgressMastery`/`getJourneyHome` already take, for the same reason —
+ * every learner owns their own readiness data, resolved from the JWT. Lazily
+ * computed and persisted server-side if none exists yet or the latest is
+ * stale (`docs/specs/readiness-model.md` §6) — this call never triggers that
+ * computation itself, it only reads the result.
+ */
+export async function getReadiness(): Promise<ReadinessSnapshotResponse> {
+  return api.get<ReadinessSnapshotResponse>('/readiness');
+}
+
+/**
+ * The caller's own snapshot history, newest first — `GET /api/readiness/history`.
+ *
+ * `page`/`pageSize` passed exactly as `getPracticeSessions` passes its own —
+ * the one query-parameter shape this API already standardized on for a
+ * newest-first list. An unknown parameter is a 400 server-side, so nothing
+ * beyond these two is ever sent.
+ */
+export async function getReadinessHistory(params?: {
+  page?: number;
+  pageSize?: number;
+}): Promise<ReadinessHistoryResponse> {
+  const searchParams = new URLSearchParams();
+  if (params?.page) searchParams.set('page', String(params.page));
+  if (params?.pageSize) searchParams.set('pageSize', String(params.pageSize));
+
+  const query = searchParams.toString();
+  return api.get<ReadinessHistoryResponse>(
+    `/readiness/history${query ? `?${query}` : ''}`,
+  );
 }
