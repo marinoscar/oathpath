@@ -17,6 +17,7 @@ import { JourneyModule } from './journey/journey.module';
 import { CivicsModule } from './civics/civics.module';
 import { PracticeModule } from './practice/practice.module';
 import { ProgressModule } from './progress/progress.module';
+import { ReadinessModule } from './readiness/readiness.module';
 import { DeviceAuthModule } from './device-auth/device-auth.module';
 import { StorageModule } from './storage/storage.module';
 import { PatModule } from './pat/pat.module';
@@ -94,6 +95,15 @@ import configuration from './config/configuration';
     // shared provider. `@Auth()` with no permissions, no route parameter
     // carrying a user id.
     ProgressModule,
+    // The eight-component readiness score (#122/#127, epic #55 / E6): the
+    // pure engine, its two read endpoints, and the nightly recompute cron.
+    // Registered next to ProgressModule for the same reason ProgressModule
+    // sits next to PracticeModule — related evidence, no shared provider of
+    // its own. `PracticeModule` imports THIS module (not the other way
+    // around) so `completeSession` can call `ReadinessService
+    // .recomputeSnapshot` synchronously, per readiness-model.md §7(a).
+    // `@Auth()` with no permissions, no route parameter carrying a user id.
+    ReadinessModule,
     DeviceAuthModule,
     StorageModule,
     PatModule,

@@ -513,6 +513,16 @@ endpoint).
 learner owns their own mastery data. See
 [`docs/specs/memory-model.md`](docs/specs/memory-model.md) §8.
 
+### Readiness (Per User)
+- `GET /api/readiness` - The caller's latest readiness snapshot; lazily computed (and persisted) if none exists yet, or if the latest is stale — an existing snapshot older than the caller's most recent `practice_attempts.answeredAt`
+- `GET /api/readiness/history` - The caller's past snapshots, paginated, newest first — the trend line's data source
+
+`@Auth()` with no permissions, and no route accepts a user id — every
+authenticated learner owns their own readiness data, exactly as they own
+their own learner profile, their own practice attempts, and their own
+mastery rows. See
+[`docs/specs/readiness-model.md`](docs/specs/readiness-model.md) §6.
+
 ### Health
 - `GET /api/health/live` - Liveness check
 - `GET /api/health/ready` - Readiness check (includes DB)
@@ -600,6 +610,12 @@ permissions: every authenticated learner owns their own mastery data,
 exactly as they own their own practice attempts, and no route accepts a user
 id. See [`docs/specs/memory-model.md`](docs/specs/memory-model.md) §8.
 
+**Readiness adds no permission strings either, for the same reason.** Both
+`/api/readiness*` routes are `@Auth()` with no permissions: every
+authenticated learner owns their own readiness data, exactly as they own
+their own mastery rows and their own practice attempts, and no route accepts
+a user id. See [`docs/specs/readiness-model.md`](docs/specs/readiness-model.md) §6.
+
 ## Database Tables
 
 - `users` - User accounts with profile info
@@ -624,6 +640,7 @@ id. See [`docs/specs/memory-model.md`](docs/specs/memory-model.md) §8.
 - `practice_sessions` - One row per practice run (Quick 5 or by-category): kind, status, planned count, cached completion `summary`
 - `practice_attempts` - One row per question ever answered, from a session or (from E8) a mock interview — the single evidence table E5/E6/E7 read and E8 writes into. Three columns record the AI grading rung (E4, epic #53), null together on every deterministically-graded attempt: `failure_cause` (why it missed, from a closed six-value enum — `null` means no grader ran, `unknown` means one ran and honestly couldn't tell), `ai_feedback` (the grader's structured verdict, verbatim), `ai_usage_event_id` (the `ai_usage_events` row that call wrote)
 - `question_mastery` - One row per `(user, question)` pair once that question first produces a schedulable outcome (E5, epic #54): `state` (`new`/`learning`/`review`/`lapsed`/`mastered`), `due_at`, `interval_days`, `ease`, `correct_streak`, `lapses`, `total_attempts`, `distinct_correct_days` (the column that makes "correct on ≥3 distinct days" enforceable), `last_outcome`, `last_attempt_at`. No row means `new` — never a row that says so. Updated synchronously, inside the same transaction as the `practice_attempts` write that triggers it, by `nextSchedule` (`apps/api/src/practice/mastery/scheduler.ts`); see `docs/specs/memory-model.md` §2-§3
+- `readiness_snapshots` - One row per computed readiness score (E6, epic #55): `score` (0-100, structurally capped at 75 for a typed-only learner — `english`/`spoken`/`interview` sum to 0.25 weight and are 0 with no such evidence), the full `components`/`evidenceCounts` breakdown for all eight components, `cap_reason` (`'typed_only'`/`null`), `top_recommendation`, and the learner's `stage` at computation time, all frozen so a past snapshot stays self-explaining after the mastery rows it summarized move on. `narrative`/`narrative_generated_at` are nullable and filled in lazily, on the caller's own AI key, only from the request path (never the nightly cron). See `docs/specs/readiness-model.md` §4-§5
 
 ## Access Control: Email Allowlist
 

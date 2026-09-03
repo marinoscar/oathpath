@@ -45,6 +45,7 @@ model User {
   practiceSessions       PracticeSession[]      @relation("UserPracticeSessions")
   practiceAttempts       PracticeAttempt[]      @relation("UserPracticeAttempts")
   questionMastery        QuestionMastery[]      @relation("UserQuestionMastery")
+  readinessSnapshots     ReadinessSnapshot[]    @relation("UserReadinessSnapshots")
 
   @@map("users")
 }
@@ -1645,4 +1646,109 @@ enum MasteryState {
   review
   lapsed
   mastered
+}
+
+// =============================================================================
+// Readiness Snapshots (issue #113, epic #55 "Readiness and Progress")
+// =============================================================================
+//
+// One row per computation of `computeReadiness` (`readiness-model.md` §5,
+// issue #122) — a SNAPSHOT, not a live-computed view. `PracticeAttempt` is
+// the immutable evidence ledger and `QuestionMastery` is the live, mutable
+// per-question summary of it; this table is a third, different thing again:
+// a point-in-time, self-contained record of what the readiness engine said
+// on the day it ran, frozen so that a learner (or a future admin report)
+// looking back at last Tuesday's number sees exactly what last Tuesday's
+// number meant, even after the `question_mastery` rows it summarized have
+// since been re-scheduled, lapsed, or re-promoted underneath it. Re-deriving
+// the score on every read would silently re-describe today's evidence under
+// yesterday's date — see `readiness-model.md` §4/§12 for the full rejected
+// alternative.
+//
+// `userId`: Cascade, the identical posture every other per-learner table in
+// this schema already takes (`PracticeAttempt.userId`, `QuestionMastery.userId`)
+// — a snapshot has no meaning independent of the account it summarizes.
+model ReadinessSnapshot {
+  id String @id @default(uuid()) @db.Uuid
+
+  userId String @map("user_id") @db.Uuid
+
+  computedAt DateTime @map("computed_at") @db.Timestamptz
+
+  // `round(weightedSum * 100)` — an integer 0-100 chosen specifically for
+  // display: a UI renders "72," never "0.7182," and storing the
+  // already-rounded integer means every reader of this table (the home
+  // widget, the trend line, a future admin report) renders the identical
+  // number with no re-rounding step of its own to keep in sync with the
+  // engine's.
+  score Int
+
+  // The learner's `JourneyStage` at the moment this snapshot was computed —
+  // reuses the same enum `LearnerProfile.stage` carries, not a duplicate,
+  // so a snapshot can be read back later as "this was their stage when this
+  // score was true" without joining out to a `learner_profiles` row whose
+  // `stage` may have since moved on.
+  stage JourneyStage
+
+  // The FULL per-component breakdown — `ReadinessComponentResult` (`{
+  // value, weight, contribution }`, readiness-model.md §5) for every one of
+  // the eight `ReadinessComponentKey`s. Stored as `Json` (application-typed,
+  // not schema-typed) because the shape is a fixed TypeScript interface the
+  // pure engine already owns and validates — see `PracticeAttempt.aiFeedback`
+  // above for the same posture on the same reasoning. Kept alongside
+  // `evidenceCounts` below so a rendered snapshot stays self-explaining
+  // forever, even after the underlying evidence changes later.
+  components Json
+
+  // The raw per-component evidence counts §5's `evidenceCounts` shape
+  // defines (e.g. `{ distinctQuestionsAttempted, totalQuestionsInVersion }`
+  // for `coverage`) — the numbers `components` above were computed FROM, not
+  // a duplicate of the result. Frozen for the identical reason `components`
+  // is: so this snapshot's numbers stay meaningful after `question_mastery`
+  // and `practice_attempts` move on underneath it.
+  evidenceCounts Json @map("evidence_counts")
+
+  // Nullable `String`, not a Prisma enum — deliberately UNLIKE `MasteryState`
+  // /`JourneyStage`. Its one live value, `'typed_only'` (readiness-model.md
+  // §3), is not expected to grow into a genuinely open-ended set the way
+  // those two are; the closed TypeScript union `CapReason` is the real
+  // contract, enforced at the application layer, the same posture
+  // `PracticeAttempt.aiFeedback`'s `Json?` column takes relative to its own
+  // application-level shape. `null` means the cap has lifted — real evidence
+  // of spoken practice or a mock interview exists — NOT that every component
+  // is complete; see §3 for why those are deliberately different questions.
+  capReason String? @map("cap_reason")
+
+  // `ReadinessTopRecommendation` (`{ componentKey, title, reason, path }`,
+  // §8.2) — the single next action this snapshot recommends. `Json`, not
+  // nullable: `computeReadiness` always produces exactly one recommendation
+  // (the cap message itself, when capped; otherwise the component with the
+  // greatest weighted headroom), so there is no "no recommendation" state
+  // for this column to represent.
+  topRecommendation Json @map("top_recommendation")
+
+  // The Progress Guide's one AI-generated paragraph (issue #134, §9).
+  // Nullable and filled in LAZILY, after the snapshot row already exists —
+  // its absence must never block snapshot creation, exactly as `AiFeedback`
+  // above is populated by a call that happens after (and independently of)
+  // the row it augments. Absent without complaint when AI is unavailable.
+  narrative String? @db.Text
+
+  // When `narrative` was generated, so a caller can tell "never generated"
+  // (both null) apart from "generated once, on this date" without inferring
+  // it from `narrative`'s mere presence — and so a future re-generation
+  // policy (e.g. "regenerate if stale") has a timestamp to compare against.
+  narrativeGeneratedAt DateTime? @map("narrative_generated_at") @db.Timestamptz
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  // Relations
+  user User @relation("UserReadinessSnapshots", fields: [userId], references: [id], onDelete: Cascade)
+
+  // The home widget's and trend line's core query: this user's snapshots,
+  // most-recent-first (or a range over `computedAt`) — the same
+  // `[userId, <ordering column>]` shape `PracticeSession`/`QuestionMastery`
+  // already index for their own "this user's rows, in time order" reads.
+  @@index([userId, computedAt])
+  @@map("readiness_snapshots")
 }

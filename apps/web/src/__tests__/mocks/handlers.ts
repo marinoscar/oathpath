@@ -2,6 +2,7 @@ import { http, HttpResponse } from 'msw';
 
 import { JOURNEY_STAGES, homeResponse } from '../utils/journey-fixtures';
 import { civicsHandlers } from '../utils/civics-fixtures';
+import { readinessHistoryResponse, readinessSnapshot } from '../utils/readiness-fixtures';
 
 // Use wildcard pattern to match relative URLs
 const API_BASE = '*/api';
@@ -265,6 +266,25 @@ export const handlers = [
 
   http.get(`${API_BASE}/journey/stages`, () => {
     return HttpResponse.json({ data: JOURNEY_STAGES });
+  }),
+
+  // ---------------------------------------------------------------------------
+  // Readiness (issues #139/#142, epic #55 / E6 "Readiness and Progress")
+  //
+  // `HomePage` (the widget) and `ProgressPage` (the full dial/breakdown) both
+  // call `useReadiness`/`useReadinessHistory` unconditionally, exactly like
+  // the two journey reads above — without defaults every OTHER suite that
+  // renders either page falls through to a real fetch and shows readiness's
+  // error state for reasons that have nothing to do with what that suite is
+  // testing. The suites that actually test readiness override these with
+  // `server.use`.
+  // ---------------------------------------------------------------------------
+  http.get(`${API_BASE}/readiness`, () => {
+    return HttpResponse.json({ data: readinessSnapshot() });
+  }),
+
+  http.get(`${API_BASE}/readiness/history`, () => {
+    return HttpResponse.json({ data: readinessHistoryResponse([readinessSnapshot()]) });
   }),
 
   // ---------------------------------------------------------------------------

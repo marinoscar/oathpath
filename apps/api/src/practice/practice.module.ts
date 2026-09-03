@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 
 import { AiModule } from '../ai/ai.module';
 import { PrismaModule } from '../prisma/prisma.module';
+import { ReadinessModule } from '../readiness/readiness.module';
 import { PracticeController } from './practice.controller';
 import { PracticeService } from './practice.service';
 
@@ -49,9 +50,17 @@ import { PracticeService } from './practice.service';
  * (practice-sessions.md §10). `PracticeService` is exported because E4 (#53)
  * extends the grading path and E5 reads this module's evidence — both of which
  * are a service injection, not a new copy of the loop.
+ *
+ * `ReadinessModule` IS imported (issue #122, epic #55 / E6), for
+ * `ReadinessService.recomputeSnapshot` — `completeSession` calls it
+ * synchronously, in-request, after its own write commits
+ * (`docs/specs/readiness-model.md` §7(a): "No job queue... readiness
+ * recompute run[s] synchronously, inside the request... that produces the
+ * evidence"). The dependency runs one way only: `ReadinessModule` does not
+ * import this module back — see its own header.
  */
 @Module({
-  imports: [PrismaModule, AiModule],
+  imports: [PrismaModule, AiModule, ReadinessModule],
   controllers: [PracticeController],
   providers: [PracticeService],
   exports: [PracticeService],

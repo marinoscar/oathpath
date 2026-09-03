@@ -72,6 +72,26 @@
  * differ only in how the prose wraps. Every responsive value here steps at `sm`
  * (600px), never `md`, agreeing with the five coupled gates named in
  * `CLAUDE.md` without touching or duplicating any of them.
+ *
+ * =============================================================================
+ * THE READINESS WIDGET (#142, epic #55 / E6) HAS ITS OWN, INDEPENDENT
+ * LOADING/ERROR STATE — A DELIBERATE DEPARTURE FROM THE RULE ABOVE
+ * =============================================================================
+ *
+ * `useJourneyHome`'s ONE combined flag exists because `home` and `stages`
+ * describe one indivisible thing (§10, this file's own header above): a
+ * stage path with no recommendation behind it, or vice versa, is a screen
+ * that LOOKS finished but is lying. Readiness is not that — it is a third,
+ * independently complete answer to a different question ("am I becoming
+ * more ready?"), and folding it into the same combined flag would mean a
+ * slow or unavailable readiness call blocks the stage path, the Next-up
+ * card and the countdown from ever appearing, none of which readiness has
+ * anything to do with. So `useReadiness`/`useReadinessHistory` are read
+ * separately, and the widget renders its own compact loading/error state —
+ * still gated behind the main journey load (it has no reason to appear
+ * before the stage it sits beside does), but never the reverse. This is the
+ * identical reasoning `ProgressPage.tsx`'s own header gives for the same
+ * choice on `/progress`.
  */
 
 import { Alert, Box, Button, Container, Typography } from '@mui/material';
@@ -82,12 +102,23 @@ import { JourneyPath } from '../components/journey/JourneyPath';
 import { NextUpCard } from '../components/journey/NextUpCard';
 import { TrustFooter } from '../components/journey/TrustFooter';
 import { LoadingSpinner } from '../components/common/LoadingSpinner';
+import { ReadinessWidget } from '../components/readiness/ReadinessWidget';
+import { findPreviousReadinessScore } from '../components/progress/readiness';
 import { useAuth } from '../contexts/AuthContext';
 import { useJourneyHome } from '../hooks/useJourneyHome';
+import { useReadiness } from '../hooks/useReadiness';
+import { useReadinessHistory } from '../hooks/useReadinessHistory';
 
 export default function HomePage() {
   const { user } = useAuth();
   const { home, stages, isLoading, error, refresh } = useJourneyHome();
+  const {
+    readiness,
+    isLoading: isReadinessLoading,
+    error: readinessError,
+    refresh: refreshReadiness,
+  } = useReadiness();
+  const { history: readinessHistory } = useReadinessHistory();
 
   // A greeting, not a status. It is the only thing on this page that does not
   // come from the journey API, and it is safe to render immediately because it
@@ -149,6 +180,41 @@ export default function HomePage() {
               currentStageKey={home.stage}
               headingId="journey-path-heading"
             />
+
+            {/* Its own micro loading/error state — see this file's own
+                header on why it is not folded into the flag above. */}
+            {isReadinessLoading ? (
+              <Box
+                role="status"
+                aria-live="polite"
+                aria-label="Loading readiness"
+                sx={{ mb: { xs: 3, sm: 4 } }}
+              >
+                <LoadingSpinner size={28} />
+              </Box>
+            ) : readinessError ? (
+              <Alert
+                severity="error"
+                sx={{ mb: { xs: 3, sm: 4 } }}
+                action={
+                  <Button
+                    color="inherit"
+                    size="small"
+                    onClick={() => void refreshReadiness()}
+                  >
+                    Try again
+                  </Button>
+                }
+              >
+                {readinessError}
+              </Alert>
+            ) : readiness ? (
+              <ReadinessWidget
+                readiness={readiness}
+                previousScore={findPreviousReadinessScore(readiness, readinessHistory)}
+                headingId="readiness-widget-heading"
+              />
+            ) : null}
 
             <NextUpCard
               nextAction={home.nextAction}

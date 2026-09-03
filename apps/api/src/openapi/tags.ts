@@ -194,6 +194,17 @@ export const TAG_GROUPS: OpenApiTagGroup[] = [
           'would select next. Read-only, and no permission gates it: every signed-in learner ' +
           'owns their own mastery data.',
       },
+      {
+        name: 'Readiness',
+        description:
+          'The eight-component readiness score: how ready the caller actually is for the ' +
+          'interview, one number 0-100, a plain-English reason it may be structurally capped ' +
+          "(no spoken-answer or mock-interview evidence yet), and the single next action " +
+          'worth taking. Snapshots are computed lazily and persisted, never re-derived from ' +
+          "underlying evidence that has since moved on, so a caller's history stays exactly " +
+          'what it meant on the day it was written. Read-only, and no permission gates it: ' +
+          'every signed-in learner owns their own readiness data.',
+      },
     ],
   },
   {

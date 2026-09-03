@@ -50,6 +50,11 @@ import {
   NEXT_ACTIONS,
   homeResponse,
 } from '../utils/journey-fixtures';
+import {
+  cappedReadinessSnapshot,
+  readinessHistoryResponse,
+  readinessSnapshot,
+} from '../utils/readiness-fixtures';
 import HomePage from '../../pages/HomePage';
 import { UserMenu } from '../../components/navigation/UserMenu';
 import {
@@ -57,7 +62,12 @@ import {
   RAIL_PINNED_DESTINATIONS,
   SETTINGS_DESTINATION,
 } from '../../config/destinations';
-import type { JourneyHome, JourneyStage, NextAction } from '../../types';
+import type {
+  JourneyHome,
+  JourneyStage,
+  NextAction,
+  ReadinessSnapshotResponse,
+} from '../../types';
 
 const API_BASE = '*/api';
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -79,6 +89,24 @@ function serveJourney(
     ),
     http.get(`${API_BASE}/journey/stages`, () =>
       HttpResponse.json({ data: stages }),
+    ),
+  );
+}
+
+/**
+ * Serve one readiness snapshot and its history for the next render.
+ * `history` defaults to just the snapshot itself — no prior score, so the
+ * widget renders no trend, exactly the honest default a first-day learner
+ * would see.
+ */
+function serveReadiness(
+  snapshot: ReadinessSnapshotResponse,
+  history: ReadinessSnapshotResponse[] = [snapshot],
+): void {
+  server.use(
+    http.get(`${API_BASE}/readiness`, () => HttpResponse.json({ data: snapshot })),
+    http.get(`${API_BASE}/readiness/history`, () =>
+      HttpResponse.json({ data: readinessHistoryResponse(history) }),
     ),
   );
 }
@@ -370,6 +398,91 @@ describe('HomePage — the Next-up card', () => {
 });
 
 // =============================================================================
+// 3.5. The readiness widget (#142, epic #55 / E6)
+// =============================================================================
+
+describe('HomePage — the readiness widget', () => {
+  it("renders the server's score and links to /progress", async () => {
+    serveReadiness(readinessSnapshot({ score: 59 }));
+    await renderHome();
+
+    expect(screen.getByText('59')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /see your progress/i })).toHaveAttribute(
+      'href',
+      '/progress',
+    );
+  });
+
+  it('renders no trend with only one history point — never a fabricated direction', async () => {
+    const snapshot = readinessSnapshot({ id: 'only-one', score: 59 });
+    // Explicit empty history: no prior snapshot exists at all.
+    serveReadiness(snapshot, []);
+    await renderHome();
+
+    expect(screen.getByText('59')).toBeInTheDocument();
+    expect(screen.queryByText(/since your last check/i)).not.toBeInTheDocument();
+  });
+
+  it('renders a trend once a prior snapshot exists', async () => {
+    const current = readinessSnapshot({ id: 'current', score: 65 });
+    const previous = readinessSnapshot({ id: 'previous', score: 59 });
+    serveReadiness(current, [current, previous]);
+    await renderHome();
+
+    expect(screen.getByText('Up 6 points since your last check.')).toBeInTheDocument();
+  });
+
+  it('shows a short, non-contradictory cap hint when capReason is typed_only, linking to Progress', async () => {
+    serveReadiness(cappedReadinessSnapshot());
+    await renderHome();
+
+    // Short, compact — NOT the full §3 sentence (that renders in full on
+    // `/progress`), but it must not soften or contradict what that sentence
+    // says: still "limited interview practice", still pointing at Progress.
+    expect(screen.getByText(/limited interview practice/i)).toBeInTheDocument();
+    expect(
+      screen.queryByText(/completing two mock interviews is the best way/i),
+    ).not.toBeInTheDocument();
+  });
+
+  it('does not show the cap hint once capReason is null', async () => {
+    serveReadiness(readinessSnapshot({ capReason: null }));
+    await renderHome();
+
+    expect(screen.queryByText(/limited interview practice/i)).not.toBeInTheDocument();
+  });
+
+  it('fails independently of the journey — the stage path still renders when readiness errors', async () => {
+    server.use(
+      http.get(`${API_BASE}/readiness`, () => new HttpResponse(null, { status: 500 })),
+    );
+    await renderHome();
+
+    // The journey itself is unaffected by readiness's own failure.
+    expect(screen.getAllByRole('listitem')).toHaveLength(JOURNEY_STAGES.length);
+    expect(await screen.findByRole('alert')).toBeInTheDocument();
+  });
+
+  it('offers a retry for its own failure that does not touch the rest of the page', async () => {
+    let attempt = 0;
+    server.use(
+      http.get(`${API_BASE}/readiness`, () => {
+        attempt += 1;
+        return attempt === 1
+          ? new HttpResponse(null, { status: 500 })
+          : HttpResponse.json({ data: readinessSnapshot({ score: 59 }) });
+      }),
+    );
+    await renderHome();
+
+    await userEvent.click(await screen.findByRole('button', { name: /try again/i }));
+
+    expect(await screen.findByText('59')).toBeInTheDocument();
+    expect(screen.getAllByRole('listitem')).toHaveLength(JOURNEY_STAGES.length);
+  });
+});
+
+// =============================================================================
 // 4. The interview countdown
 // =============================================================================
 
@@ -601,9 +714,16 @@ describe('HomePage — structure, width and theme', () => {
     expect(h1s[0]).toHaveTextContent(/welcome back/i);
 
     // Each region names itself, and every name is an h2 — no level is skipped
-    // and no region is left anonymous.
+    // and no region is left anonymous. `Readiness` (#142) sits between the
+    // stage path and the Next-up card.
     const h2s = screen.getAllByRole('heading', { level: 2 }).map((h) => h.textContent);
-    expect(h2s).toEqual(['Where you are', 'Next up', 'Your interview', 'Daily goal']);
+    expect(h2s).toEqual([
+      'Where you are',
+      'Readiness',
+      'Next up',
+      'Your interview',
+      'Daily goal',
+    ]);
     expect(screen.queryAllByRole('heading', { level: 3 })).toHaveLength(0);
   });
 
@@ -614,7 +734,8 @@ describe('HomePage — structure, width and theme', () => {
       .getAllByRole('region')
       .map((region) => region.getAttribute('aria-labelledby'));
     expect(named.every(Boolean)).toBe(true);
-    expect(named.length).toBe(4);
+    // Five now: the four original regions plus the Readiness widget (#142).
+    expect(named.length).toBe(5);
   });
 
   it('renders the whole page at 360px and unchanged across the sm boundary', async () => {
