@@ -40,7 +40,11 @@ earlier design draft said they would):
   `validateEnglishContent` — the mechanized, word-by-word checker.
 - `apps/api/prisma/content/load-english-content.ts` — the idempotent loader,
   called from `apps/api/prisma/seed.ts` as a sibling step to the civics
-  loader.
+  loader, and (since issue #261) the enforcer of the verification statuses
+  §3 and §6.1 describe.
+- `infra/compose/.env.example` — where `ENGLISH_ALLOW_UNVERIFIED_CONTENT`
+  and its civics twin are documented. This runbook references that file
+  rather than restating it.
 - `apps/api/prisma/schema.prisma` — the `EnglishSentence` model (`source_url`,
   `retrieved_at`, `content_sha256`, `vocab_tags`), grepped directly for this
   runbook rather than copied from another document.
@@ -51,8 +55,8 @@ earlier design draft said they would):
   idempotency against a mocked Prisma client (`docs/TESTING.md`'s "API tests
   never touch a database" rule — no live database is needed to run it).
 - `apps/api/package.json` — the `content:validate`/`content:load` scripts
-  §5 below explains you should **not** reach for here, and `prisma:seed`,
-  which you should.
+  §5 below explains do not check English content, and `prisma:seed`, which
+  is what applies an English change to a database.
 
 ---
 
@@ -82,6 +86,32 @@ already composed against the old list, since a word that was allowed
 yesterday may not be today. Treat it as its own PR, reviewed by a second
 human against the freshly re-downloaded PDF, before touching any sentence.
 The rest of this runbook assumes the two lists themselves are not changing.
+
+**Neither hash above has been re-derived since the session that first
+recorded it, and if you can reach `uscis.gov` you are the first person who
+can change that.** No official USCIS source was reachable from the
+environment this content was written in, or from the one it was approved in:
+`uscis.gov` returns HTTP 403 and `web.archive.org` is unreachable, while npm
+and GitHub resolve normally — a per-host network policy, not an offline
+machine. Every `sourceUrl`, `retrievedAt` and `sha256` in the three English
+files was therefore carried forward verbatim from that first session, and
+each file's own note says so rather than letting the values imply a check
+that did not happen. From a network-capable environment:
+
+1. Download both PDFs from the `sourceUrl` values in the table above.
+2. Re-derive each sha256 (`shasum -a 256 <file>`) and compare it to the
+   value the file records. A mismatch means USCIS has republished — the list
+   needs re-transcribing and every sentence re-validating (§5), not a hash
+   edited in place.
+3. Diff the extracted text against the checked-in `categories[].words`
+   arrays, in both directions. A **missing** word is the failure mode no
+   check in this repository can see: it never surfaces as an error, only as
+   a legitimate sentence that mysteriously fails validation.
+4. **Rewrite that file's `provenance.transcription.warning` to say what you
+   actually did** — do not inherit the current note. It is written as a
+   record of one specific session's limits; leaving it in place after a real
+   source check would understate your work exactly as badly as inheriting a
+   stronger claim would overstate it.
 
 ---
 
@@ -165,6 +195,30 @@ Update `reviewedBy`/`reviewedAt`/`note` every time you touch the file — this
 block, plus the PR itself, is the human-review record §4 requires. There is
 no separate sign-off table; the file and the PR **are** the record.
 
+**`status` is read by the loader, so pick the one that is true** (§6.1).
+Two values are trusted, they mean different things, and the difference is
+the whole point of recording it:
+
+| Value | What it claims |
+|---|---|
+| `HUMAN_COMPOSED_AND_REVIEWED` | A human wrote these sentences and a human reviewed them. This is what §2 and §4 require of every sentence you add. Use it for your own work. |
+| `HUMAN_VERIFIED` | A human read and approved these sentences, over content produced some other way. Weaker on composition, and honest about it. |
+
+Anything else — a model draft, an unreviewed import, a field left blank — is
+refused at load time (§6.1).
+
+**The file ships `HUMAN_VERIFIED` today, and the reason is worth knowing
+before you add to it.** The 36 sentences currently in the file were not
+composed by hand: they were produced by an unattended agent session (issue
+#130, PR #250), whose `composition.note` claimed they were "composed by
+hand … then reviewed word by word" — a human process this repository has no
+evidence of. Issue #261 withdrew that claim rather than leaving it standing
+and recorded what is actually true: the repository owner read and approved
+the 36 sentences on 2026-09-04. That approval is not a licence to add more
+the same way. §4's rule is unchanged and applies to every sentence added
+from here on, which is exactly why the file keeps a status that does **not**
+say a human composed them.
+
 ---
 
 ## 4. The never-model-generated rule, and why it exists
@@ -194,6 +248,10 @@ This is also why §5's mechanized check exists at all, and why it is
 **exhaustive and mechanical rather than a matter of a reviewer's attention**:
 review-by-reading cannot catch this specific failure, by construction, no
 matter how careful the reviewer is.
+
+This rule governs what you add. It is not a description of the 36 sentences
+already in the file, which were model-composed and then owner-approved — §3
+records that, and the file's `HUMAN_VERIFIED` status is what says so.
 
 ### What the tooling checks for you, and what it cannot
 
@@ -238,18 +296,24 @@ A human must still catch, because no tool checks these:
 
 ## 5. Validating your change
 
-**Do not run `npm run content:validate --workspace=api` to check an English
-content change.** That script globs every `.json` file in
-`apps/api/prisma/content/`, including the three English files, and runs them
-all through the **civics-shaped** structural validator
+**`npm run content:validate --workspace=api` will not check your change —
+and, since issue #258, will no longer fail because of it either.** That
+script runs the **civics-shaped** structural validator
 (`validate-content.ts`), which expects a `categories[].code` field the
-English files do not have. Verified directly, running that command against
-this repository's current, correct English content reports 14 false
-`category.duplicateCode` errors and fails outright — a pre-existing gap in
-that script (it was written before English content existed), not a sign
-anything about your English change is wrong. Report this as a separate
-issue if you hit it; do not chase these errors trying to "fix" your content
-file.
+English files do not have; it used to glob every `.json` file in
+`apps/api/prisma/content/` and failed on an untouched checkout with a batch
+of fabricated `category.duplicateCode` errors. It is now scoped by filename
+to `civics-*.json` and prints every file it skipped, by name, so a skip
+nobody asked for is still visible. Verified by running it against this
+repository as-is (long line wrapped for this page):
+
+```
+Checking 2 file(s) in …/prisma/content: civics-2008.json, civics-2025.json
+Not checked (not civics-*.json — another content domain, with its own validator): english-sentences.json, english-vocabulary-reading.json, english-vocabulary-writing.json
+```
+
+If your English file appears on that second line, the tool is working. It is
+not validating your change, and it is not claiming to.
 
 The correct check for English content is the Jest suite that actually
 understands its shape:
@@ -298,6 +362,33 @@ change writes only the sentence(s) you actually changed;
 the console as `[english-loader] sentences: N written / M unchanged`, is how
 you confirm that from the output.
 
+### 6.1 The loader refuses untrusted content
+
+Since issue #261 the loader reads the status fields §3 describes, instead of
+merely carrying them: `composition.status` on the sentences file, and
+`provenance.transcription.status` on each vocabulary file. All three are
+checked on every seed run.
+
+- A sentences file is trusted at `HUMAN_COMPOSED_AND_REVIEWED` or
+  `HUMAN_VERIFIED` (§3's table). A **vocabulary** file is trusted at
+  `HUMAN_VERIFIED` only — it is a transcription of an official list, so it
+  answers the same question civics content does and takes the same single
+  token.
+- Anything else is refused unless `ENGLISH_ALLOW_UNVERIFIED_CONTENT=true`,
+  which exists for dev and CI and is documented, alongside its civics twin,
+  in `infra/compose/.env.example`.
+- Under `NODE_ENV=production` an untrusted file is refused **regardless of
+  that flag**, so an inherited or copied `.env` cannot put unreviewed
+  sentences in front of a learner.
+
+A refusal is not a partial load. The three files are one bundle — your
+sentences are validated against those exact two vocabulary lists — so the
+loader throws before it opens its transaction and the database is left
+byte-for-byte unchanged, exactly as it does for a validation error (§5).
+The error names the file and the status it found. Fix the status, or the
+content the status is about; do not set the environment flag to get a seed
+to finish.
+
 ---
 
 ## 7. Putting it together — the full procedure
@@ -308,8 +399,10 @@ you confirm that from the output.
    steps. **Never ask a model to draft or "help phrase" it** (§4).
 3. Add or edit the entry in `english-sentences.json`, with the exact
    `provenance` fields from §3, copied from the matching vocabulary file.
-4. Update the file's top-level `composition` block (§3) — who composed,
-   who is about to review, and against which two files.
+4. Update the file's top-level `composition` block (§3) — who composed, who
+   is about to review, against which two files, and the `status` that is
+   actually true of the work you just did (§3's table; the loader reads it,
+   §6.1).
 5. Run `cd apps/api && npm test -- --testPathPatterns=english-content` (§5)
    and fix anything it reports before opening a PR.
 6. Open the PR. A second human reviews the actual sentence text against the

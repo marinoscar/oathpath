@@ -50,6 +50,110 @@ const SENTENCES_FILE = 'english-sentences.json';
 export interface LoadEnglishContentOptions {
   /** Directory to read the three content files from. Defaults to this file's own directory. */
   contentDir?: string;
+  /**
+   * Environment the unverified-content gate reads (`ENGLISH_ALLOW_UNVERIFIED_CONTENT`,
+   * `NODE_ENV`). Defaults to `process.env`; injectable for the same reason
+   * `LoadCivicsContentOptions.env` is — so a test can prove the gate's decision
+   * without mutating the real process environment.
+   */
+  env?: NodeJS.ProcessEnv;
+}
+
+// -----------------------------------------------------------------------------
+// The unverified-content gate (issue #261).
+//
+// The civics twin of this is `assertTrustedForLoad` in load-content.ts, and
+// this is deliberately the same mechanism with the same env-var convention:
+// a content file's verification status is a claim a human signed off on, and
+// a claim nothing reads is not enforcement. Before #261 the English status
+// fields were exactly that — strings the loader never looked at.
+//
+// Refuses to load when a file's status is not one this repository trusts,
+// UNLESS ENGLISH_ALLOW_UNVERIFIED_CONTENT=true — and refuses unconditionally
+// when NODE_ENV=production, regardless of that flag, so an inherited or
+// copied .env cannot put unreviewed sentences in front of a learner.
+//
+// TWO DIFFERENCES FROM THE CIVICS GATE, BOTH DELIBERATE:
+//
+// 1. A refusal here is NOT turned into a per-file skip. `loadAllCivicsContent`
+//    can skip one refused version file and load another because civics
+//    versions are independent bank files; the three English files are ONE
+//    bundle — the sentences are validated against those exact two vocabulary
+//    lists — so "load the rest" is not a state that exists. A refusal
+//    therefore throws before the transaction opens and the database is left
+//    byte-for-byte unchanged, which is already this loader's own posture for
+//    a validation error (see `loadEnglishContent` below).
+//
+// 2. The sentence file has TWO trusted statuses, and the vocabulary files
+//    one. A vocabulary file is a TRANSCRIPTION of an official list, so it
+//    answers the identical question civics content does and takes the
+//    identical single token. A sentence file records a COMPOSITION decision
+//    (docs/specs/english-test.md §1.1: USCIS publishes no sentence list to
+//    transcribe), and this repository has shipped two honest answers to it:
+//    HUMAN_COMPOSED_AND_REVIEWED for sentences a human actually wrote — what
+//    §1.2 requires of any sentence added from here on — and HUMAN_VERIFIED
+//    for sentences produced some other way and then verified by a human, which
+//    is what english-sentences.json's own note now records. Both name a human
+//    sign-off; they differ in who composed. Anything else — a model draft, an
+//    unreviewed import, a status field somebody forgot to fill in — is refused.
+// -----------------------------------------------------------------------------
+
+export class UnverifiedEnglishContentError extends Error {
+  constructor(
+    message: string,
+    public readonly fileLabel: string,
+    public readonly status: string,
+  ) {
+    super(message);
+    this.name = 'UnverifiedEnglishContentError';
+  }
+}
+
+/** A transcription of an official USCIS vocabulary list — the civics token, for the civics reason. */
+export const TRUSTED_VOCABULARY_STATUSES: readonly string[] = ['HUMAN_VERIFIED'];
+
+/** A composition decision — see difference 2 in the header comment above. */
+export const TRUSTED_SENTENCES_STATUSES: readonly string[] = [
+  'HUMAN_VERIFIED',
+  'HUMAN_COMPOSED_AND_REVIEWED',
+];
+
+export function assertEnglishTrustedForLoad(
+  fileLabel: string,
+  status: string,
+  trustedStatuses: readonly string[],
+  env: NodeJS.ProcessEnv,
+): void {
+  if (trustedStatuses.includes(status)) {
+    return;
+  }
+
+  const expected = trustedStatuses.join(' or ');
+
+  if (env.NODE_ENV === 'production') {
+    throw new UnverifiedEnglishContentError(
+      `Refusing to load ${fileLabel}: verification status is "${status}", not ${expected}. ` +
+        `NODE_ENV=production never loads unverified English content, regardless of ` +
+        `ENGLISH_ALLOW_UNVERIFIED_CONTENT.`,
+      fileLabel,
+      status,
+    );
+  }
+
+  if (env.ENGLISH_ALLOW_UNVERIFIED_CONTENT !== 'true') {
+    throw new UnverifiedEnglishContentError(
+      `Refusing to load ${fileLabel}: verification status is "${status}", not ${expected}. ` +
+        `Set ENGLISH_ALLOW_UNVERIFIED_CONTENT=true to load unverified content in dev/CI (never ` +
+        `set this in production).`,
+      fileLabel,
+      status,
+    );
+  }
+
+  console.warn(
+    `[english-loader] WARNING: ${fileLabel} is not verified (status=${status}); loading anyway ` +
+      `because ENGLISH_ALLOW_UNVERIFIED_CONTENT=true.`,
+  );
 }
 
 export interface LoadEnglishContentSummary {
@@ -146,12 +250,18 @@ async function upsertSentence(
  * `load-content.ts`'s own `loadVersion` takes, so a structurally invalid
  * file aborts before any transaction opens and the database is left
  * byte-for-byte unchanged.
+ *
+ * Then runs the unverified-content gate (issue #261) over all three files,
+ * which throws `UnverifiedEnglishContentError` — also before the transaction,
+ * also leaving the database untouched — for content this repository has not
+ * marked as human-signed-off. See the gate's own header comment above.
  */
 export async function loadEnglishContent(
   prisma: PrismaClient,
   options: LoadEnglishContentOptions = {},
 ): Promise<LoadEnglishContentSummary> {
   const contentDir = options.contentDir ?? CONTENT_DIR;
+  const env = options.env ?? process.env;
 
   const readingVocabulary = loadJsonFile<VocabularyFile>(join(contentDir, READING_VOCAB_FILE));
   const writingVocabulary = loadJsonFile<VocabularyFile>(join(contentDir, WRITING_VOCAB_FILE));
@@ -165,6 +275,31 @@ export async function loadEnglishContent(
       `English content validation FAILED; the database has been left unchanged:\n${details}`,
     );
   }
+
+  // The trust gate (issue #261), after validation and before anything is
+  // written — the same order load-content.ts's `loadVersion` uses, so a file
+  // that is both structurally broken AND unverified reports the structural
+  // problem, which is the more actionable of the two. All three files are
+  // checked: a verified sentence list composed against an unverified word
+  // list is not verified content.
+  assertEnglishTrustedForLoad(
+    READING_VOCAB_FILE,
+    readingVocabulary.provenance.transcription.status,
+    TRUSTED_VOCABULARY_STATUSES,
+    env,
+  );
+  assertEnglishTrustedForLoad(
+    WRITING_VOCAB_FILE,
+    writingVocabulary.provenance.transcription.status,
+    TRUSTED_VOCABULARY_STATUSES,
+    env,
+  );
+  assertEnglishTrustedForLoad(
+    SENTENCES_FILE,
+    sentencesFile.composition.status,
+    TRUSTED_SENTENCES_STATUSES,
+    env,
+  );
 
   const readingAllowed = expandVocabulary(readingVocabulary);
   const writingAllowed = expandVocabulary(writingVocabulary);

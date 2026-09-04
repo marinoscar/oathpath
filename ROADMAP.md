@@ -103,23 +103,27 @@ record of what a later reader should not assume was verified:
    the real component sources and it typechecks and registers, but the
    environment it was authored in had no Docker daemon, so nobody has run the
    walk against the compose stack.
-2. **The civics content is not human-verified.** `uscis.gov` was unreachable
-   when the content files were originally written, so `civics-2008.json`
-   ships as an `UNVERIFIED_MODEL_DRAFT` — every officeholder answer is a
-   `[DRAFT PLACEHOLDER]` string rather than a name, and it was never
-   transcribed from the official PDF at all. Issue #212 (2026-09-02) later
-   closed the gap on `civics-2025.json` specifically: it now holds all 128
-   questions, transcribed from the downloaded, hashed official USCIS source
-   (M-1778 (09/25)) rather than shipping empty, but its status is still
-   `UNVERIFIED_MODEL_DRAFT` — a real source document was read, but no human
-   has yet checked the transcription page by page. The loader refuses to
-   load either file without `CIVICS_ALLOW_UNVERIFIED_CONTENT=true`, and
-   refuses outright under `NODE_ENV=production`, so this cannot reach a
-   learner by accident. Closing 2008 needs a human with the official USCIS
-   PDF from scratch; closing 2025 needs a human verification pass against the
-   PDF already on file; see
+2. **`civics-2008.json` is not human-verified, and `civics-2025.json` is
+   verified only in the sense its own note records.** `uscis.gov` was
+   unreachable when the content files were originally written, so
+   `civics-2008.json` ships as an `UNVERIFIED_MODEL_DRAFT` — eight questions
+   carry a literal `[DRAFT PLACEHOLDER]` string rather than an answer, and it
+   was never transcribed from the official PDF at all. Issue #212
+   (2026-09-02) closed the gap on `civics-2025.json` specifically: it holds
+   all 128 questions, transcribed from the downloaded, hashed official USCIS
+   source (M-1778 (09/25)) rather than shipping empty, and the repository
+   owner signed it off as `HUMAN_VERIFIED` on the recorded basis of an
+   automated re-parse and diff of that same source reporting zero
+   mismatches — **not** a page-by-page human re-read of the PDF, which its
+   own `provenance.transcription.warning` states outright rather than
+   letting the status imply. The loader refuses `civics-2008.json` without
+   `CIVICS_ALLOW_UNVERIFIED_CONTENT=true`, and refuses it outright under
+   `NODE_ENV=production`, so it cannot reach a learner by accident. Closing
+   2008 needs a human with the official USCIS PDF from scratch; the stronger
+   page-by-page pass on 2025 remains available and unrun; see
    [`docs/runbooks/updating-civics-content.md`](docs/runbooks/updating-civics-content.md)
-   §5.
+   §5, and [§7](#7-cross-cutting-rules)'s content-provenance rule for what
+   each status does and does not certify.
 
 Both were closed as a deliberate call rather than an oversight, and #101 and
 #132 can be reopened if either is picked up (#212 has since narrowed #132 to
@@ -559,10 +563,54 @@ only, forever, by design, not as an interim state.
 
 **Content provenance.** Civics content (E2) and English vocabulary-sourced
 sentences (E10) are versioned JSON under `apps/api/prisma/content/`, each
-carrying a source URL, a retrieval date, and a sha256, transcribed from
-official USCIS PDFs and human-verified. Neither is ever generated from model
-memory — the same "OathPath owns the truth" rule applied to the content
-pipeline itself, not just the runtime grading path.
+carrying a source URL, a retrieval date, a sha256, and a verification status
+that the loaders **read** — an untrusted file is refused outright under
+`NODE_ENV=production` and elsewhere without an explicit dev/CI override
+(`CIVICS_ALLOW_UNVERIFIED_CONTENT` / `ENGLISH_ALLOW_UNVERIFIED_CONTENT`, both
+documented in `infra/compose/.env.example`). No fact in this content is ever
+taken from model memory — every civics answer and every vocabulary word comes
+from an official document, not from what a model recalls — which is the same
+"OathPath owns the truth" rule applied to the content pipeline itself, not
+just the runtime grading path.
+
+"Verified" is not one fact, and the five shipped files are in three different
+states. Using one word for all three is the failure this rule exists to
+prevent, so each is named:
+
+- **`civics-2025.json` — `HUMAN_VERIFIED`.** Transcribed from the downloaded,
+  hashed official source (M-1778 (09/25)) and signed off by the repository
+  owner on 2026-09-02 (#212), on the recorded basis of an automated re-parse
+  and diff of that same source, which reported zero mismatches. Its own note
+  states plainly that this was **not** an independent page-by-page human
+  re-read of the PDF.
+- **The three English files — `HUMAN_VERIFIED`, in the recorded sense.** The
+  two vocabulary lists are transcriptions of the official USCIS lists; the 36
+  sentences are **composed**, because USCIS publishes vocabulary lists and no
+  sentence list at all. Those 36 were produced by an agent session rather than
+  by hand — a claim to the contrary in the file was withdrawn under #261
+  rather than left standing — which is why the rule above holds here only in
+  its precise form: no *word* in them came from model memory (every one is
+  mechanically checked against the checked-in vocabulary list, on every load),
+  but the sentences themselves are model-composed, and
+  `docs/specs/english-test.md` §1.2 requires human composition for every
+  sentence added from here on. What the owner's 2026-09-04 sign-off records is
+  a human reading and approving what shipped. What no English attestation
+  claims is a check against the official PDFs: `uscis.gov` returns HTTP 403
+  and `web.archive.org` is unreachable from the environment this work was done
+  in, so every hash was carried forward, not re-derived. Each file says so
+  itself.
+- **`civics-2008.json` — `UNVERIFIED_MODEL_DRAFT`, deliberately, and it must
+  stay that way until a human transcribes it from the official PDF.** It was
+  drafted by a model with no access to the source. Eight of its 100 questions
+  carry literal `[DRAFT PLACEHOLDER] … not sourced, needs verification` text
+  in place of an answer, and **three of those eight — Q29 (Vice President),
+  Q40 (Chief Justice), Q46 (President's political party) — are
+  `dynamicScope: 'none'`**, which `PUT /api/civics/dynamic-answers` rejects by
+  design (`civics-admin.service.ts` administers `national` and `state` only).
+  Certifying this file would mark placeholder text as verified and
+  learner-visible with no operational repair path — the five dynamic-scoped
+  ones an operator could at least correct through the admin surface; these
+  three they could not.
 
 **Engagement never moves readiness.** `PRD.md` requires the separation
 explicitly. E7's `daily_activity`, streaks, and points are kept structurally
@@ -648,7 +696,9 @@ block implying it was sourced, each content file now carries
 unconditionally under `NODE_ENV=production` regardless of that flag; the
 validator's `--strict` mode is the matching release gate. This turns the
 human-verification rule from a sentence in a spec into something the system
-enforces. The 2025 bank shipped empty rather than fabricated: a bank of
+enforces. (Issue #261 later extended the identical mechanism to the three
+English content files, with `ENGLISH_ALLOW_UNVERIFIED_CONTENT` as its
+override — see [§7](#7-cross-cutting-rules).) The 2025 bank shipped empty rather than fabricated: a bank of
 plausible-but-wrong questions would look complete and send a learner into a
 real citizenship interview having studied the wrong material. (The
 transcription gap this paragraph describes was later closed — see the
@@ -670,10 +720,14 @@ not the 3-category "Integrated Civics" scaffold carried over from the 2008
 test's structure — transcribed from the downloaded, hashed official source
 (M-1778 (09/25), "128 Civics Questions and Answers (2025 version)",
 sha256 `f280608c0fb6dc1eba344b4746a7ba52d02fe411fba30cedd4371819f0abe11c`).
-Status is `UNVERIFIED_MODEL_DRAFT`, deliberately not `HUMAN_VERIFIED` — a real
-source document was read this time, not model recall, but no human has yet
-checked the transcription page by page, which the loader still requires
-before production will serve it. Two content facts worth naming because they
+Status at the time of this entry was `UNVERIFIED_MODEL_DRAFT`, deliberately
+not `HUMAN_VERIFIED` — a real source document was read this time, not model
+recall, but no human had yet checked the transcription page by page, which
+the loader requires before production will serve it. (The owner has since
+signed the file off as `HUMAN_VERIFIED`, on the recorded basis of an
+automated re-parse and diff of that same source rather than the page-by-page
+re-read, which remains unrun — see [§7](#7-cross-cutting-rules)'s
+content-provenance rule.) Two content facts worth naming because they
 are easy to mistake for errors on review: (1) Q39 (Vice President) and Q57
 (Chief Justice) are modelled `dynamicScope: 'national'` here, a deliberate
 divergence from `civics-2008.json`'s narrower `'none'` scoping for both,

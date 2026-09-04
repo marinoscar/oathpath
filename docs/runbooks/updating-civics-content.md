@@ -15,6 +15,9 @@ Source of truth for every claim below:
 - `apps/api/prisma/content/civics-2008.json`, `civics-2025.json` — the content
   files a content PR edits.
 - `apps/api/prisma/content/validate-content.ts` — the structural validator.
+  Civics-only: it checks `civics-*.json` and prints every other content file
+  it skipped, by name (issue #258). English content has its own validator —
+  see [`docs/runbooks/updating-english-content.md`](updating-english-content.md) §5.
 - `apps/api/prisma/content/load-content.ts` — the idempotent loader.
 - `apps/api/src/civics/civics-admin.controller.ts`,
   `civics-admin.service.ts` — the admin dynamic-answer surface.
@@ -227,35 +230,50 @@ alone.
 
 ## 5. Current state — read this before touching either file
 
-As of this writing, **neither content file is safe to serve to a real
-learner**, and the loader enforces that rather than merely documenting it —
-but the two files are no longer at the same starting point, and the
-remaining work on each is different:
+The two files are in different states, and the remaining work on each is
+different. The loader enforces the difference rather than merely documenting
+it:
 
-- **`civics-2008.json`** is `UNVERIFIED_MODEL_DRAFT`, with `sha256: null`.
-  It was drafted to give the rest of this epic realistic-shaped data to build
-  against — it was **not** transcribed from the official USCIS PDF. Every
-  dynamic (officeholder) answer in it is a literal
-  `"[DRAFT PLACEHOLDER] …"` string, not a real name. **A human must
-  transcribe and verify this file against the official USCIS PDF, per §1–§2
-  above, before any production use.**
-- **`civics-2025.json`** is also `UNVERIFIED_MODEL_DRAFT`, but issue #212
-  closed the transcription gap: it now holds all 128 questions across the
-  8 real USCIS categories, transcribed from the downloaded, hashed official
-  source — `provenance.sha256` records the real hash of M-1778 (09/25), not
-  `null`. What's left is **verification, not transcription**: no human has
-  yet checked the transcription page by page against the PDF, which is what
-  `HUMAN_VERIFIED` certifies. §5.1 below is that remaining step.
+- **`civics-2008.json`** is `UNVERIFIED_MODEL_DRAFT`, with `sha256: null`,
+  and **is not safe to serve to a real learner**. It was drafted to give the
+  rest of this epic realistic-shaped data to build against — it was **not**
+  transcribed from the official USCIS PDF. Eight of its questions carry a
+  literal `"[DRAFT PLACEHOLDER] … not sourced, needs verification"` string in
+  place of an answer, and three of those eight — Q29 (Vice President), Q40
+  (Chief Justice), Q46 (President's political party) — are
+  `dynamicScope: 'none'`, so they are **not reachable through
+  `PUT /api/civics/dynamic-answers`** either (§3: that surface administers
+  `national` and `state` scopes only). An operator cannot repair them from
+  the running application; only a content PR can. **A human must transcribe
+  and verify this file against the official USCIS PDF, per §1–§2 above,
+  before any production use** — and until then its status must stay
+  `UNVERIFIED_MODEL_DRAFT`, because flipping it would mark placeholder text
+  as verified and learner-visible with no operational repair path.
+- **`civics-2025.json`** is `HUMAN_VERIFIED`. Issue #212 closed the
+  transcription gap — all 128 questions across the 8 real USCIS categories,
+  transcribed from the downloaded, hashed official source, with
+  `provenance.sha256` recording the real hash of M-1778 (09/25) rather than
+  `null` — and the repository owner signed the file off on 2026-09-02.
+  **Read that status for what its own note says it is**: an owner sign-off
+  over a machine transcription plus an automated re-parse and diff of the
+  same source reporting zero mismatches, explicitly **not** an independent
+  page-by-page human re-read of the PDF, and explicitly not certifying the
+  8 dynamic questions, whose officeholder answers are operational data (§3).
+  §5.1 below is that stronger pass, still available and still unrun.
 
-Until a file reaches `HUMAN_VERIFIED`,
-`npm run content:validate:strict --workspace=api` will keep failing on it,
-exactly as intended.
+`npm run content:validate:strict --workspace=api` will keep failing on any
+file short of `HUMAN_VERIFIED` — today, on `civics-2008.json` — exactly as
+intended.
 
-### 5.1 Verifying `civics-2025.json` (the remaining gate)
+### 5.1 The page-by-page re-read of `civics-2025.json` (available, not yet run)
 
 This is a **verification-only** pass, not a transcription — the content is
-already there and already draws from the correct hashed source. The job is
-to confirm it, page by page, and then flip the status.
+already there, already draws from the correct hashed source, and already
+carries an owner sign-off on a weaker basis. The job is to confirm it page
+by page, which nothing has done yet, and then to rewrite the file's
+`provenance.transcription.warning` so it records the stronger check instead
+of the current one. The status is already `HUMAN_VERIFIED`; what this pass
+changes is what that status is standing on.
 
 1. Fetch the source named in `provenance.sourceUrl` (M-1778 (09/25), "128
    Civics Questions and Answers (2025 version)") and re-derive its sha256.
@@ -273,10 +291,14 @@ to confirm it, page by page, and then flip the status.
      12, 20, 30, 36, 38, 39, 44, 52, 61, 66, 74, 78, 86, 94, 113, 115, 121,
      126) — confirm the count and the specific numbers against the source's
      own asterisks, not just the total.
-   - The 8 dynamic questions (`dynamicScope: national` or `state`) carry
-     `"[DRAFT PLACEHOLDER]"` text rather than an invented officeholder name —
-     confirm none of them were silently given a real-sounding name that isn't
-     actually in the source. This includes confirming that Q39 (Vice
+   - The 8 dynamic questions (`dynamicScope: national` or `state`) carry the
+     source's own answer rather than an invented officeholder name — the
+     "Visit uscis.gov/citizenship/testupdates…" instruction for the four
+     national officeholders, and "Answers will vary…" scoped to the learner's
+     state for the state-scoped ones. (Verified directly: unlike
+     `civics-2008.json`, this file contains no `[DRAFT PLACEHOLDER]` string
+     at all.) Confirm none of them were silently given a real-sounding name
+     that isn't actually in the source. This includes confirming that Q39 (Vice
      President) and Q57 (Chief Justice) are deliberately `national`-scope
      here — a real divergence from `civics-2008.json`, which models both as
      `none` — because the 2025 source defers both to
@@ -288,11 +310,14 @@ to confirm it, page by page, and then flip the status.
      from the PDF. Verify the capitals themselves (they are ordinary public
      record, not USCIS-sourced) and confirm every one of those 56 rows'
      `sourceNote` still says plainly that it isn't from the source document.
-4. Once every row checks out, set `provenance.transcription.status:
-   "HUMAN_VERIFIED"` (and update `provenance.transcription.warning` to
-   reflect that the check is done, or remove it). Do not touch
-   `provenance.sha256` unless step 1 required re-fetching — it should
+4. Once every row checks out, **rewrite
+   `provenance.transcription.warning`** to record what you actually did —
+   who read the PDF, on what date, page by page — replacing the current
+   note's narrower basis rather than appending to it. Do not weaken it into
+   a bare "verified": the note is the only place a later reader can judge
+   how much the status is worth. The status stays `HUMAN_VERIFIED`. Do not
+   touch `provenance.sha256` unless step 1 required re-fetching — it should
    continue to record the exact document the transcription and this
    verification were checked against.
 5. Run `npm run content:validate:strict --workspace=api` to confirm the file
-   now passes the release gate, then open the PR per §1 step 4.
+   still passes the release gate, then open the PR per §1 step 4.

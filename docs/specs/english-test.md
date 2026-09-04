@@ -120,10 +120,14 @@ Source of truth for every claim below:
   same idempotency contract applied to a fourth content file.
 - `apps/api/prisma/content/validate-content.ts` — read directly: the
   `TranscriptionStatus` union (`UNVERIFIED_MODEL_DRAFT` \| `HUMAN_VERIFIED`
-  \| `AWAITING_SOURCE`, lines 46–52) and the `IssueSeverity` union (`error`
-  \| `known_gap` \| `warning`, line 106) — §1.4 below's "every word on the
-  vocabulary list" check is a new rule in this same file's structural
-  category (`error`, always enforced), not a content-completeness rule that
+  \| `AWAITING_SOURCE`) and the `IssueSeverity` union (`error` \|
+  `known_gap` \| `warning`) — the severity taxonomy §1.4 below borrows, not
+  the file that runs English's own check. This validator is **civics-only**,
+  scoped by filename to `civics-*.json` and printing every file it skips by
+  name (issue #258); English content is checked by `validateEnglishContent`
+  in `english-vocabulary.ts`, which the loader calls directly. §1.4's "every
+  word on the vocabulary list" rule sits in that same structural category
+  (`error`, always enforced), not in the content-completeness category that
   can be downgraded to a `known_gap`.
 - `apps/api/prisma/seed.ts` — read directly, line 3 and line 274:
   `loadAllCivicsContent(prisma)` is called as one `await` inside the seed
@@ -215,49 +219,58 @@ reading sentence against the reading list and a writing sentence against
 the writing list, and never checks either against their union.
 
 Two files, siblings of the civics content already under
-`apps/api/prisma/content/`, each carrying the **identical** top-level
-provenance shape `civics-2025.json` uses — field-for-field, because it
+`apps/api/prisma/content/`, each carrying the **identical**
+`provenance` shape `civics-2025.json` uses — field-for-field, because it
 answers the identical question ("where did this content come from, and how
-sure are we it's right") for a different content domain — populated with
-the real, verified values below rather than a placeholder:
+sure are we it's right") for a different content domain. The two blocks
+below are the shipped files, transcribed from them rather than sketched,
+with only their `words` arrays elided:
 
-**`apps/api/prisma/content/english-vocabulary-reading.json`**
+**`apps/api/prisma/content/english-vocabulary-reading.json`** — 64 entries
+across 8 categories
 
 ```json
 {
+  "kind": "reading",
+  "version": "rev-08-08",
+  "label": "Reading Vocabulary for the Naturalization Test (rev. 08/08)",
   "provenance": {
     "sourceUrl": "https://www.uscis.gov/sites/default/files/document/guides/reading_vocab.pdf",
-    "label": "Reading Vocabulary for the Naturalization Test (rev. 08/08)",
     "retrievedAt": "2026-09-04",
-    "sha256": "56be9761b36d44afdbf6efeb825330232bd089d55eb1cf2865d00999a98db04",
-    "byteSize": 189179,
+    "sha256": "56be9761b36d44afdbf6efeb825330232bd089d55eb1cf2865d00999a98db04a",
     "transcription": {
-      "status": "HUMAN_VERIFIED | UNVERIFIED_MODEL_DRAFT | AWAITING_SOURCE",
+      "status": "HUMAN_VERIFIED",
       "warning": "<full prose: exactly what was verified, exactly what was not, by whom, and how>"
     }
   },
-  "categories": ["PEOPLE", "CIVICS", "PLACES", "HOLIDAYS", "QUESTION WORDS", "VERBS", "OTHER (FUNCTION)", "OTHER (CONTENT)"],
-  "entryCount": 64
+  "categories": [
+    { "tag": "PEOPLE", "words": ["Abraham Lincoln", "George Washington"] },
+    { "tag": "CIVICS", "words": ["American flag", "Bill of Rights", "…"] }
+  ]
 }
 ```
 
-**`apps/api/prisma/content/english-vocabulary-writing.json`**
+**`apps/api/prisma/content/english-vocabulary-writing.json`** — 75 entries
+across 8 categories
 
 ```json
 {
+  "kind": "writing",
+  "version": "rev-08-08",
+  "label": "Writing Vocabulary for the Naturalization Test (rev. 08/08)",
   "provenance": {
     "sourceUrl": "https://www.uscis.gov/sites/default/files/document/guides/writing_vocab.pdf",
-    "label": "Writing Vocabulary for the Naturalization Test (rev. 08/08)",
     "retrievedAt": "2026-09-04",
-    "sha256": "217244ecfb9ed6c5d79f9c281f9c1f6e4290ea358ced85192522b6218431bc0",
-    "byteSize": 185852,
+    "sha256": "217244ecfb9ed6c5d79f9c281f9c1f6e4290ea358ced85192522b6218431bc08",
     "transcription": {
-      "status": "HUMAN_VERIFIED | UNVERIFIED_MODEL_DRAFT | AWAITING_SOURCE",
+      "status": "HUMAN_VERIFIED",
       "warning": "<full prose: exactly what was verified, exactly what was not, by whom, and how>"
     }
   },
-  "categories": ["PEOPLE", "CIVICS", "PLACES", "MONTHS", "HOLIDAYS", "VERBS", "OTHER (FUNCTION)", "OTHER (CONTENT)"],
-  "entryCount": 75
+  "categories": [
+    { "tag": "PEOPLE", "words": ["Adams", "Lincoln", "Washington"] },
+    { "tag": "CIVICS", "words": ["American Indians", "capital", "…"] }
+  ]
 }
 ```
 
@@ -265,38 +278,76 @@ the real, verified values below rather than a placeholder:
 `civics-content.md` §6's stated reason: it is a receipt that proves which
 exact revision of the official material was on hand at transcription time,
 distinct from any hash computed later over the loaded JSON's own content.
+Both values above are the full 64 hex characters the shipped files carry;
+an earlier draft of this document printed them truncated to 63, which is
+worth naming because a truncated receipt is not a weaker receipt, it is an
+unusable one — nothing hashes to it. There is **no `byteSize` field**: the
+byte count each file's earlier transcription session recorded (189,179 and
+185,852) lives inside the `transcription.warning` prose, where a reviewer
+reads it alongside the rest of what was and was not checked, rather than
+standing alone as a field that looks machine-enforced and is not.
 `retrievedAt` is a calendar date, `YYYY-MM-DD`, matching the civics
-content's own format; `byteSize` is recorded alongside the hash purely as a
-second, cheap sanity check a reviewer can eyeball before re-deriving the
-full hash. The `transcription.warning` field is **required**, not optional,
-and must be full prose stating precisely what was checked and by what
-method — `civics-2025.json`'s own warning (quoted in the source list above)
-is the model to follow: it names the exact verification method used,
+content's own format. The `transcription.warning` field is **required**,
+not optional, and must be full prose stating precisely what was checked and
+by what method — `civics-2025.json`'s own warning (quoted in the source list
+above) is the model to follow: it names the exact verification method used,
 states plainly what that method does *not* establish, and does so without
-inflating the confidence of the claim. The reading list's 8 categories
-(`PEOPLE`, `CIVICS`, `PLACES`, `HOLIDAYS`, `QUESTION WORDS`, `VERBS`,
-`OTHER (FUNCTION)`, `OTHER (CONTENT)`) and the writing list's 8 categories
-(the same set with `HOLIDAYS`... `QUESTION WORDS` swapped for `MONTHS`) are
-USCIS's own category headings, transcribed verbatim — not invented for this
-design — and are what §1.4's `vocabTags` derivation below reads from.
+inflating the confidence of the claim. `transcription.status` is not
+decoration either: §1.5 below is the load-time gate that reads it.
+
+The reading list's 8 category tags (`PEOPLE`, `CIVICS`, `PLACES`,
+`HOLIDAYS`, `QUESTION_WORDS`, `VERBS`, `OTHER_FUNCTION`, `OTHER_CONTENT`)
+and the writing list's 8 (the same set with `QUESTION_WORDS` swapped for
+`MONTHS`) are USCIS's own category headings, normalised to
+underscore-separated identifiers — not invented for this design, and not
+verbatim either: an earlier draft of this document wrote them as
+`"QUESTION WORDS"` and `"OTHER (FUNCTION)"`, which is the heading as
+printed, not the tag as shipped. The shipped spelling is what §1.4's
+`vocabTags` derivation below reads from and what `english_sentences.vocab_tags`
+stores.
 
 ### 1.2 Sentences are composed by a human, not sourced — and interrogative for reading, declarative for writing
 
 Sentences live in a third file: `apps/api/prisma/content/english-sentences.json`.
-Unlike the two vocabulary files, this file has no `sourceUrl` in the usual
-sense — there is no official sentence list to transcribe from, per §1.1's
-own quoted source — but it still carries the same provenance shape, with
-`sourceUrl` naming the two vocabulary files it was composed against (by
-path, not URL) and `transcription.warning` stating who composed the
-sentences and who reviewed them, by name, in the same PR that added or
-changed them. "Content is data, not code" (`civics-content.md` §7) applies
-here exactly as it does to civics questions: a sentence is not a constant a
-developer edits inline in TypeScript, it is versioned, provenance-tracked
-JSON, reviewed the same way a civics content PR is reviewed
-(`civics-content.md` §6.1) — a human states the source (here: which two
-vocabulary lists were drawn from), a second human reviews the actual
-content before merge, and the PR itself is the record of who composed and
-who approved.
+Unlike the two vocabulary files, this file has no sentence source to
+transcribe from — there is no official sentence list, per §1.1's own quoted
+source — so its provenance is split in two, and the shipped shape says so
+directly rather than reusing a field name that would imply otherwise:
+
+- **Per sentence**, the same three-field `provenance` triple the vocabulary
+  files carry — `sourceUrl`, `retrievedAt`, `sha256` — copied from
+  whichever vocabulary file that sentence's `kind` was composed and
+  validated against. It points at that **list's** official PDF, not at a
+  document the sentence appears in, and not at a repository path.
+- **Per file**, one top-level `composition` block —
+  `{ status, reviewedBy, reviewedAt, note }`, not `transcription` — because
+  what is being attested here is a composition and review decision, not a
+  transcription of anything. `status` is read at load time by §1.5's gate;
+  `note` is the same full-prose standard §1.1 sets for a vocabulary file's
+  `transcription.warning`.
+
+"Content is data, not code" (`civics-content.md` §7) applies here exactly as
+it does to civics questions: a sentence is not a constant a developer edits
+inline in TypeScript, it is versioned, provenance-tracked JSON, reviewed the
+same way a civics content PR is reviewed (`civics-content.md` §6.1) — a
+human states the source (here: which of the two vocabulary lists was drawn
+from), a second human reviews the actual content before merge, and the PR
+itself is the record of who composed and who approved.
+
+**The 36 sentences shipped today do not meet this section's composition
+rule, and the file says so.** They were produced by an unattended agent
+session (issue #130, PR #250), whose own `composition.note` claimed they
+were "composed by hand … then reviewed word by word" — a human process this
+repository has no evidence of. Issue #261 withdrew that claim rather than
+leaving it standing, and replaced it: the file's status is now
+`HUMAN_VERIFIED`, recording that the repository owner read and approved the
+36 sentences on 2026-09-04, over content a model produced. That is a
+different fact from `HUMAN_COMPOSED_AND_REVIEWED`, which remains the honest
+label for a file whose sentences a human actually wrote, and remains what
+this section requires of every sentence added from here on. Both are trusted
+by the loader (§1.5) and they are not interchangeable: they differ in who
+composed, and a later reader deciding how much weight to put on the file
+needs the difference, not a single word covering both.
 
 **Reading sentences are phrased as questions; writing sentences are
 declarative statements.** This is not a style choice this document is
@@ -371,9 +422,9 @@ A sentence is **valid** when every one of its own tokens — the sentence's
 text run through the identical `normalizeAnswer` pipeline and split on
 whitespace, per §2.1 — appears in the matching list's allowed-token set (the
 reading list for a `kind: 'reading'` sentence, the writing list for
-`kind: 'writing'`, per §1.1's separate-lists rule). **A test enforces
-this, in the same structural-rule category `validate-content.ts`'s `error`
-severity already occupies** (never a `known_gap`, never a `warning` — a
+`kind: 'writing'`, per §1.1's separate-lists rule). **The loader enforces
+this on every run, in the same structural-rule category `validate-content.ts`'s
+`error` severity already occupies** (never a `known_gap`, never a `warning` — a
 sentence containing an off-list token is a bug in the file regardless of
 how "finished" the file otherwise claims to be). Composition is by a
 human, review is by a second human, and both are recorded in the PR — the
@@ -409,6 +460,68 @@ off-vocabulary word in its output undetectable by inspection. The
 enforced test in this section exists because "review it and it'll look
 fine" is not sufficient — the check has to be exhaustive and mechanical,
 not a matter of a reviewer's attention holding up across every sentence.
+
+This is a rule about what may be added, and the 36 sentences already in the
+file are the exception it was written after rather than an example of it
+being kept: they were model-composed, mechanically validated word by word
+against the two lists on every load, and then read and approved by the
+repository owner. §1.2 records that in full. Do not read this paragraph as
+evidence that what shipped satisfies it.
+
+### 1.5 The verification status is a load-time gate, not a label (issue #261)
+
+Each of the three files carries a status — `composition.status` on the
+sentences, `provenance.transcription.status` on each vocabulary list — and
+`load-english-content.ts` refuses to load a file whose status it does not
+trust. Until #261 those fields were strings nothing read, which is the
+failure the civics loader had already closed on its own side: a claim
+nothing reads is not enforcement.
+
+The mechanism is deliberately the civics one
+(`load-content.ts`'s `assertTrustedForLoad`), with the same environment
+convention — `ENGLISH_ALLOW_UNVERIFIED_CONTENT=true` permits untrusted
+content in dev/CI, and `NODE_ENV=production` refuses regardless of that
+flag, so an inherited or copied `.env` cannot put unreviewed sentences in
+front of a learner. Both flags are documented in
+`infra/compose/.env.example`; this document does not restate them.
+
+Two differences from the civics gate, both stated in the loader's own header
+and both load-bearing:
+
+1. **A refusal is not a per-file skip.** `loadAllCivicsContent` can refuse
+   one version file and load another, because civics versions are
+   independent banks. The three English files are one bundle — the sentences
+   are validated against those exact two vocabulary lists — so "load the
+   rest" is not a state that exists. A refusal throws before the transaction
+   opens and the database is left byte-for-byte unchanged, the same posture
+   this loader already takes for a validation error (§1.4).
+2. **The sentence file trusts two statuses; a vocabulary file trusts one.**
+   A vocabulary file is a transcription of an official list, so it answers
+   the identical question civics content does and takes the identical single
+   token, `HUMAN_VERIFIED`. The sentence file records a composition decision
+   (§1.2), and this repository has shipped two honest answers to it —
+   `HUMAN_COMPOSED_AND_REVIEWED` and `HUMAN_VERIFIED`. Both name a human
+   sign-off. Anything else — a model draft, an unreviewed import, a status
+   field somebody forgot to fill in — is refused.
+
+The gate runs **after** structural validation and before anything is
+written, matching `load-content.ts`'s ordering, so a file that is both
+structurally broken and untrusted reports the structural problem: it is the
+more actionable of the two.
+
+**What no status on any of these three files certifies is that the
+vocabulary lists match the official PDFs today.** No official USCIS source
+was reachable from the environment this content was written or approved in —
+`uscis.gov` returns HTTP 403 and `web.archive.org` is unreachable, while npm
+and GitHub resolve normally, so this is a per-host network policy rather than
+an offline machine. Every `sha256` and `retrievedAt` in the three files was
+carried forward verbatim from the session that first recorded it, not
+re-derived; each file's own note says so. A maintainer working from a
+network-capable environment should re-download each source, re-hash it, diff
+the extracted text against the checked-in list, and **rewrite that file's
+note to say what they actually did** rather than inheriting the current one —
+see [`docs/runbooks/updating-english-content.md`](../runbooks/updating-english-content.md)
+§1.
 
 ---
 
