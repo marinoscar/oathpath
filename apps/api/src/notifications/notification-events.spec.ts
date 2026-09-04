@@ -214,6 +214,22 @@ describe('seeded events', () => {
     expect(findEvent('practice.review_due')?.defaultEnabled).toBe(true);
   });
 
+  it('account.data_reset (issue #270) is mandatory, defaults on, and is email-only', () => {
+    // The registry's own stated invariant ("mandatory implies defaultEnabled:
+    // true", asserted generically above) holds for this entry too — this test
+    // pins the SPECIFIC values rather than only the invariant, the same way
+    // the seeded `security.role_changed` check above does. `channels` is
+    // exactly `['email']`, not merely a superset containing it: a browser
+    // notification would render in the same tab that just watched the reset
+    // succeed, which is the one reader who does not need to be told again —
+    // see this event's own comment in notification-events.ts.
+    const event = findEvent('account.data_reset');
+    expect(event).toBeDefined();
+    expect(event?.mandatory).toBe(true);
+    expect(event?.defaultEnabled).toBe(true);
+    expect(event?.channels).toEqual(['email']);
+  });
+
   it('allowlist.invitation is email-only', () => {
     // Its recipient has no account and no open tab by definition — that is
     // what being newly allowlisted means — so a browser channel would be
