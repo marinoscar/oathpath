@@ -21,6 +21,8 @@ import type {
   AiModelDescriptor,
   AiReachabilityRequest,
   AiReachabilityResult,
+  AiRealtimeSessionRequest,
+  AiRealtimeSessionResult,
   AiStructuredCompletionRequest,
   AiSynthesisRequest,
   AiSynthesisResult,
@@ -164,6 +166,34 @@ const SPEECH_CONTENT_TYPES: Readonly<Record<string, string>> = {
  * truth here, and `0` would claim the call consumed nothing — see `AiUsage`.
  */
 const EMPTY_SPEECH_USAGE: AiUsage = {
+  promptTokens: null,
+  completionTokens: null,
+  totalTokens: null,
+};
+
+/**
+ * The voice a realtime session uses when a caller names none.
+ *
+ * SEPARATE FROM {@link DEFAULT_SPEECH_VOICE} even though both are `alloy`
+ * today, because they answer different questions: one is the voice this
+ * application READS TEXT ALOUD in, the other is the voice an interviewing
+ * officer SPEAKS in. Collapsing them onto one constant would mean a product
+ * decision to give the officer a distinct voice — an obvious thing to want —
+ * silently changed every question-playback button in the app as well.
+ */
+const DEFAULT_REALTIME_VOICE = 'alloy';
+
+/**
+ * Usage for a realtime mint.
+ *
+ * ALL NULL, and not because anything failed or because we were not told:
+ * minting a client secret runs no inference. Every token the session goes on
+ * to spend is consumed by a conversation between the learner's browser and the
+ * provider, which this process never sees. `0` would claim we know the session
+ * cost nothing — see `AiUsage`, and `AiRealtimeSessionResult.usage`, where the
+ * gap in per-user accounting is stated rather than papered over.
+ */
+const EMPTY_REALTIME_USAGE: AiUsage = {
   promptTokens: null,
   completionTokens: null,
   totalTokens: null,
@@ -754,6 +784,115 @@ export class OpenAiProvider extends BaseAiProvider {
     };
   }
 
+  /**
+   * Mint one ephemeral realtime client secret on the caller's key (#156,
+   * epic #60).
+   *
+   * `POST /v1/realtime/client_secrets`, through the SDK's own
+   * `realtime.clientSecrets.create` — the endpoint whose entire purpose is to
+   * produce a credential that CAN be given to a browser, so that the
+   * long-lived key never is. The session configuration travels with the mint
+   * request rather than being negotiated by the client, which is what makes
+   * the officer's instructions and the tool list ours rather than the
+   * browser's to choose.
+   *
+   * NO RAW `fetch` AND NO NEW DEPENDENCY: the installed SDK exposes this
+   * surface directly (`openai@7`), so hand-rolling the request would mean
+   * hand-rolling its error shapes too — and `classifyThrow` in the base class
+   * reads the SDK's messages.
+   *
+   * THE EXPIRY IS READ BACK, NEVER COMPUTED. The provider anchors it to its
+   * own clock at the moment of minting; a `now + expiresInSeconds` computed
+   * here would disagree with the truth by the round trip plus clock skew, in
+   * the direction that tells a browser it still has time it does not have. A
+   * response we cannot read an expiry off is therefore a REFUSAL rather than a
+   * session with an unknown deadline — see {@link realtimeExpiry}.
+   *
+   * NO TOKEN USAGE IS REPORTED, and all-null is the honest answer: minting
+   * runs no inference. See {@link EMPTY_REALTIME_USAGE}.
+   *
+   * THROWS FREELY; `BaseAiProvider.createRealtimeSession` records the failure
+   * — and registers the secret below with the redactor the moment this returns
+   * it, which is why nothing here has to.
+   */
+  protected async runRealtimeSession(
+    apiKey: string,
+    request: AiRealtimeSessionRequest,
+    redact: SecretRedactor,
+  ): Promise<AiRealtimeSessionResult> {
+    redact.protect(apiKey);
+
+    const client = new OpenAI({ apiKey });
+
+    const minted = await client.realtime.clientSecrets.create({
+      // Sent only when the caller asked for one, so an omitted lifetime means
+      // the provider's own (short) default rather than a number this file
+      // invented on its behalf.
+      ...(request.expiresInSeconds === undefined
+        ? {}
+        : {
+            expires_after: {
+              anchor: 'created_at' as const,
+              seconds: request.expiresInSeconds,
+            },
+          }),
+      session: {
+        type: 'realtime',
+        model: request.modelId,
+        instructions: request.instructions,
+        audio: {
+          // The default is a product decision made once, here, rather than at
+          // each call site — see `AiRealtimeSessionRequest.voice`.
+          output: { voice: request.voice ?? DEFAULT_REALTIME_VOICE },
+        },
+        // Always sent, including as `[]`: a session minted with the tools
+        // field omitted inherits nothing, which is the same outcome, but
+        // sending what the caller declared keeps "this session deliberately
+        // has no tools" visible in the request rather than implied by its
+        // absence.
+        tools: request.tools.map((tool) => ({
+          type: 'function' as const,
+          name: tool.name,
+          description: tool.description,
+          parameters: tool.parameters,
+        })),
+      },
+    });
+
+    const expiresAt = realtimeExpiry(minted.expires_at);
+
+    if (expiresAt === null) {
+      // A secret with no readable deadline is worse than no secret: the
+      // browser would be handed a credential nothing can decide is stale, and
+      // every "is it still good?" check downstream would have to invent an
+      // answer. Refusing costs one retry; guessing costs a session that dies
+      // mid-interview with no explanation.
+      return {
+        success: false,
+        clientSecret: null,
+        expiresAt: null,
+        modelId: null,
+        usage: EMPTY_REALTIME_USAGE,
+        errorCode: 'malformed_result',
+        error: 'The realtime session was minted without a usable expiry.',
+      };
+    }
+
+    return {
+      success: true,
+      clientSecret: minted.value,
+      expiresAt,
+      // The session the provider actually created, falling back to what we
+      // asked for. A transcription-shaped session response carries no model at
+      // all, and the request's own id is the honest answer then — never a
+      // guess, because it is what this call named.
+      modelId: readSessionModel(minted.session) ?? request.modelId,
+      usage: EMPTY_REALTIME_USAGE,
+      errorCode: null,
+      error: null,
+    };
+  }
+
   // ---------------------------------------------------------------------------
   // Internals
   // ---------------------------------------------------------------------------
@@ -789,8 +928,11 @@ export class OpenAiProvider extends BaseAiProvider {
         // Retrieving the model is a weaker check — it proves the account can
         // SEE the model rather than use it — and saying so is better than
         // either skipping the role silently or claiming a strength we do not
-        // have. These roles are unwired today (#27), so nothing depends on the
-        // stronger guarantee yet.
+        // have. All three roles are wired now (#88 for the speech pair, #156
+        // for `realtime`), so this weaker answer is a real one an admin reads
+        // rather than a placeholder: a `realtime` binding that passes here can
+        // still fail at mint time on an organisation without realtime access,
+        // and the connection test says only what it actually checked.
         await client.models.retrieve(probe.modelId);
       }
 
@@ -1308,4 +1450,42 @@ function transcriptionResult(
 /** The MIME type for a synthesised container. See {@link SPEECH_CONTENT_TYPES}. */
 function speechContentType(format: string): string {
   return SPEECH_CONTENT_TYPES[format] ?? 'application/octet-stream';
+}
+
+/**
+ * The model a minted realtime session reports, or `null` when it reports none.
+ *
+ * DEFENSIVE ON PURPOSE, like {@link readTranscriptText}: the response's
+ * `session` is a union — a realtime session or a transcription session — and
+ * only one arm of it carries a model at all. Reading it through a narrowing
+ * cast would compile and then be `undefined` at runtime on the other arm,
+ * which is exactly the class of failure this file's other readers exist to
+ * avoid.
+ */
+export function readSessionModel(session: unknown): string | null {
+  const model = (session as { model?: unknown })?.model;
+
+  return typeof model === 'string' && model.length > 0 ? model : null;
+}
+
+/**
+ * The provider's expiry timestamp as a `Date`, or `null` when it is unusable.
+ *
+ * SECONDS IN, MILLISECONDS OUT. The realtime API reports unix SECONDS, and
+ * `new Date(seconds)` is a date in January 1970 that every comparison
+ * downstream would read as "already expired" — a bug that presents as a
+ * feature that never works rather than as an error.
+ *
+ * `null` for anything that is not a finite, positive number, including the
+ * `0`/`undefined` a mock or a proxy may produce. The caller turns that into a
+ * refusal rather than a session with an unknown deadline; see
+ * {@link OpenAiProvider.runRealtimeSession} for why guessing is the worse
+ * option.
+ */
+export function realtimeExpiry(secondsSinceEpoch: unknown): Date | null {
+  return typeof secondsSinceEpoch === 'number' &&
+    Number.isFinite(secondsSinceEpoch) &&
+    secondsSinceEpoch > 0
+    ? new Date(secondsSinceEpoch * 1000)
+    : null;
 }

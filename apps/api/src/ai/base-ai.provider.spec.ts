@@ -1,4 +1,5 @@
 import { Logger } from '@nestjs/common';
+import { trace } from '@opentelemetry/api';
 import { z } from 'zod';
 
 import type { SecretRedactor } from '../common/crypto/secret-redactor';
@@ -13,6 +14,8 @@ import type {
   AiConnectionTestResult,
   AiModelCatalogResult,
   AiReachabilityRequest,
+  AiRealtimeSessionRequest,
+  AiRealtimeSessionResult,
   AiStreamEvent,
   AiStructuredCompletionRequest,
   AiSynthesisRequest,
@@ -22,6 +25,10 @@ import type {
   AiUsage,
 } from './ai.types';
 import type { AiUsageService } from './ai-usage.service';
+// Imported for its VALUE, not its type: the constant is `true` only while the
+// compile-time proof in ai.types.ts resolves, so naming it here is what turns
+// that proof into a test this suite runs. See the realtime section below.
+import { AI_REALTIME_CARRIES_NO_LONG_LIVED_KEY } from './ai.types';
 
 // =============================================================================
 // BaseAiProvider (issue #28, epic #25)
@@ -80,6 +87,13 @@ interface InferenceHooks {
     request: AiSynthesisRequest,
     redact: SecretRedactor,
   ) => Promise<AiSynthesisResult>;
+
+  /** The realtime mint hook (#156, epic #60). */
+  onRealtime?: (
+    apiKey: string,
+    request: AiRealtimeSessionRequest,
+    redact: SecretRedactor,
+  ) => Promise<AiRealtimeSessionResult>;
 }
 
 /** A stub whose subclass hooks are supplied per test. */
@@ -163,7 +177,7 @@ class StubProvider extends BaseAiProvider {
    * its own cannot tell "refused before calling out" from "called out and
    * failed", and those are the two things that gate has to distinguish.
    */
-  readonly speechHookCalls = { transcribe: 0, synthesize: 0 };
+  readonly speechHookCalls = { transcribe: 0, synthesize: 0, realtime: 0 };
 
   protected runTranscription(
     apiKey: string,
@@ -189,6 +203,19 @@ class StubProvider extends BaseAiProvider {
       throw new Error('this test did not supply a synthesis hook');
     }
     return this.hooks.onSynthesize(apiKey, request, redact);
+  }
+
+  protected runRealtimeSession(
+    apiKey: string,
+    request: AiRealtimeSessionRequest,
+    redact: SecretRedactor,
+  ): Promise<AiRealtimeSessionResult> {
+    this.speechHookCalls.realtime += 1;
+
+    if (!this.hooks.onRealtime) {
+      throw new Error('this test did not supply a realtime hook');
+    }
+    return this.hooks.onRealtime(apiKey, request, redact);
   }
 }
 
@@ -248,6 +275,16 @@ function synthesizeProvider(
 ) {
   return provider(async () => OK_CATALOG, undefined, capabilities, {
     onSynthesize,
+  });
+}
+
+/** A provider whose only interesting hook is the realtime one (#156). */
+function realtimeProvider(
+  onRealtime: InferenceHooks['onRealtime'],
+  capabilities: AiCapabilitySet = ALL,
+) {
+  return provider(async () => OK_CATALOG, undefined, capabilities, {
+    onRealtime,
   });
 }
 
@@ -1426,5 +1463,380 @@ describe('BaseAiProvider.synthesize — the capability gate', () => {
     expect(hook).not.toHaveBeenCalled();
     expect(p.speechHookCalls.synthesize).toBe(0);
     expect(p.record).not.toHaveBeenCalled();
+  });
+});
+
+// =============================================================================
+// createRealtimeSession (issue #156, epic #60 — E11 "Realtime voice interview")
+// =============================================================================
+//
+// A fourth public inference method with the same never-throw guarantee, so the
+// first three tests here are the same three subclass failures the rest of this
+// file covers — a hook that throws, one that returns nothing, one that returns
+// a hand-built failure — plus the capability gate, which on this surface reads
+// `'realtime'`.
+//
+// WHAT IS GENUINELY NEW IS THE SECOND SECRET. Everywhere else on this class the
+// only credential in play arrives before the call; here one comes back FROM it,
+// and for the minutes it is valid it is a bearer token that can open a session
+// and spend a learner's quota. A log aggregator and a trace backend both retain
+// far longer than that window, so the tests below assert the negative directly:
+// the minted secret reaches the caller and reaches nothing else.
+// =============================================================================
+
+const REALTIME_REQUEST: AiRealtimeSessionRequest = {
+  roleKey: 'realtime',
+  modelId: 'gpt-4o-realtime-preview',
+  instructions: 'You are a USCIS officer conducting a naturalization interview.',
+  tools: [
+    {
+      name: 'record_civics_answer',
+      description: 'Record the applicant’s answer to the civics question asked.',
+      parameters: { type: 'object', properties: {} },
+    },
+  ],
+};
+
+/** A minted secret, distinctive enough to find anywhere it should not be. */
+const MINTED_SECRET = 'ek_test_secret_that_must_not_leak';
+
+const MINTED: AiRealtimeSessionResult = {
+  success: true,
+  clientSecret: MINTED_SECRET,
+  expiresAt: new Date('2099-01-01T00:10:00.000Z'),
+  modelId: 'gpt-4o-realtime-preview',
+  usage: { promptTokens: null, completionTokens: null, totalTokens: null },
+  errorCode: null,
+  error: null,
+};
+
+/** Every family EXCEPT realtime, i.e. a provider with no session API. */
+const NO_REALTIME: AiCapabilitySet = new Set<AiCapabilityFamily>([
+  'text',
+  'transcribe',
+  'tts',
+  'embedding',
+]);
+
+describe('BaseAiProvider.createRealtimeSession — never-throw', () => {
+  it('turns a thrown hook into a well-formed failure result', async () => {
+    const p = realtimeProvider(async () => {
+      throw new Error('the organisation has no realtime access');
+    });
+
+    const result = await p.createRealtimeSession(
+      ALICE,
+      USER_KEY,
+      REALTIME_REQUEST,
+    );
+
+    expect(result).toEqual({
+      success: false,
+      clientSecret: null,
+      expiresAt: null,
+      modelId: null,
+      usage: { promptTokens: null, completionTokens: null, totalTokens: null },
+      errorCode: 'error',
+      error: 'Stub: the organisation has no realtime access',
+    });
+  });
+
+  it('turns a hook that returns undefined into a failure rather than a TypeError', async () => {
+    // A subclass that falls off the end of a branch yields `undefined`, and a
+    // caller reading `.usage` off it throws one frame outside the try.
+    const p = realtimeProvider(
+      async () => undefined as unknown as AiRealtimeSessionResult,
+    );
+
+    await expect(
+      p.createRealtimeSession(ALICE, USER_KEY, REALTIME_REQUEST),
+    ).resolves.toMatchObject({
+      success: false,
+      clientSecret: null,
+      expiresAt: null,
+      modelId: null,
+      errorCode: 'malformed_result',
+      error: 'Stub returned no result.',
+    });
+  });
+
+  it('routes a hook-authored failure through redaction, and drops its payload', async () => {
+    // A failed mint has no session, whatever fields the subclass populated: a
+    // secret returned beside `success: false` is a credential a caller has no
+    // basis to use and every reason to log by accident.
+    const p = realtimeProvider(async () => ({
+      success: false,
+      clientSecret: MINTED_SECRET,
+      expiresAt: new Date('2099-01-01T00:10:00.000Z'),
+      modelId: 'gpt-4o-realtime-preview',
+      usage: { promptTokens: null, completionTokens: null, totalTokens: null },
+      errorCode: 'rate_limit',
+      error: `slow down, ${USER_KEY}`,
+    }));
+
+    const result = await p.createRealtimeSession(
+      ALICE,
+      USER_KEY,
+      REALTIME_REQUEST,
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.clientSecret).toBeNull();
+    expect(result.expiresAt).toBeNull();
+    expect(result.modelId).toBeNull();
+    expect(result.error).not.toContain(USER_KEY);
+    expect(result.error).toContain('Stub:');
+  });
+
+  it('never lets the API key reach the error string', async () => {
+    const p = realtimeProvider(async () => {
+      throw new Error(`401 Incorrect API key provided: ${USER_KEY}`);
+    });
+
+    const result = await p.createRealtimeSession(
+      ALICE,
+      USER_KEY,
+      REALTIME_REQUEST,
+    );
+
+    expect(result.error).not.toContain(USER_KEY);
+    expect(result.errorCode).toBe('invalid_key');
+  });
+
+  it('returns the minted session and records a row against the realtime role', async () => {
+    const p = realtimeProvider(async () => MINTED);
+
+    const result = await p.createRealtimeSession(
+      ALICE,
+      USER_KEY,
+      REALTIME_REQUEST,
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.clientSecret).toBe(MINTED_SECRET);
+    expect(result.expiresAt).toEqual(new Date('2099-01-01T00:10:00.000Z'));
+    expect(result.modelId).toBe('gpt-4o-realtime-preview');
+    // ALL-NULL USAGE IS THE ORDINARY CASE: minting runs no inference. A zero
+    // would claim we know the session cost nothing.
+    expect(result.usage).toEqual({
+      promptTokens: null,
+      completionTokens: null,
+      totalTokens: null,
+    });
+    expect(p.record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        roleKey: 'realtime',
+        model: 'gpt-4o-realtime-preview',
+        success: true,
+      }),
+    );
+  });
+});
+
+describe('BaseAiProvider.createRealtimeSession — the capability gate', () => {
+  it('refuses without calling the hook when the provider has no realtime API', async () => {
+    // The concrete case: a chat-only provider an admin swapped to, with a
+    // `realtime` binding still in the settings row. A refusal an admin can
+    // read, never a TypeError from inside an SDK that has no such method.
+    const hook = jest.fn();
+    const p = realtimeProvider(hook, NO_REALTIME);
+
+    const result = await p.createRealtimeSession(
+      ALICE,
+      USER_KEY,
+      REALTIME_REQUEST,
+    );
+
+    expect(result).toMatchObject({
+      success: false,
+      clientSecret: null,
+      expiresAt: null,
+      modelId: null,
+      errorCode: 'capability_unsupported',
+    });
+    expect(result.error).toBe('Stub does not support realtime sessions.');
+
+    expect(hook).not.toHaveBeenCalled();
+    expect(p.speechHookCalls.realtime).toBe(0);
+  });
+
+  it('writes no usage row for a call that never happened', async () => {
+    // `ai_usage_events` records calls that were made. Nothing left the process
+    // here, so a row would be a phantom entry in a learner's usage table.
+    const p = realtimeProvider(jest.fn(), NO_REALTIME);
+
+    await p.createRealtimeSession(ALICE, USER_KEY, REALTIME_REQUEST);
+
+    expect(p.record).not.toHaveBeenCalled();
+  });
+});
+
+describe('BaseAiProvider.createRealtimeSession — the minted secret goes nowhere else', () => {
+  /**
+   * Every span attribute set during one test, so the assertions below can be
+   * about what was RECORDED rather than about what the code appears to record.
+   *
+   * The API's `trace.getTracer` hands back a proxy that resolves its delegate
+   * lazily, so registering this provider after the class under test has
+   * already captured its tracer still works.
+   */
+  const attributes: Array<[string, unknown]> = [];
+
+  const recordingSpan = {
+    setAttribute(key: string, value: unknown) {
+      attributes.push([key, value]);
+      return this;
+    },
+    setAttributes() {
+      return this;
+    },
+    setStatus() {
+      return this;
+    },
+    addEvent() {
+      return this;
+    },
+    recordException() {
+      return this;
+    },
+    updateName() {
+      return this;
+    },
+    isRecording() {
+      return true;
+    },
+    end() {},
+    spanContext() {
+      return { traceId: '0'.repeat(32), spanId: '0'.repeat(16), traceFlags: 1 };
+    },
+  };
+
+  beforeAll(() => {
+    trace.setGlobalTracerProvider({
+      getTracer: () =>
+        ({ startSpan: () => recordingSpan }) as unknown as ReturnType<
+          typeof trace.getTracer
+        >,
+    });
+  });
+
+  afterAll(() => {
+    trace.disable();
+  });
+
+  beforeEach(() => {
+    attributes.length = 0;
+  });
+
+  it('puts the model and the role on the span, and nothing else', async () => {
+    const p = realtimeProvider(async () => MINTED);
+
+    await p.createRealtimeSession(ALICE, USER_KEY, REALTIME_REQUEST);
+
+    expect(attributes).toEqual([
+      ['ai.model', 'gpt-4o-realtime-preview'],
+      ['ai.role', 'realtime'],
+    ]);
+    // Stated separately from the equality above so a future attribute added
+    // for a good reason fails on the list, not on this: a span carrying the
+    // secret is a credential in a trace backend that outlives it.
+    for (const [, value] of attributes) {
+      expect(String(value)).not.toContain(MINTED_SECRET);
+    }
+    // Nor the instructions or the tool list, which are content rather than
+    // shape — the same rule the speech spans follow.
+    for (const [, value] of attributes) {
+      expect(String(value)).not.toContain('USCIS officer');
+      expect(String(value)).not.toContain('record_civics_answer');
+    }
+  });
+
+  it('registers the minted secret with the redactor the moment it exists', async () => {
+    // The line this method has that `synthesize` does not. The hook is handed
+    // the same redactor the public method will format every error string
+    // through; after the hook returns a secret, that redactor must already
+    // know about it — so an error raised later, by a usage write or by the
+    // next edit to this method, cannot quote a live credential into a log.
+    let captured: SecretRedactor | null = null;
+
+    const p = realtimeProvider(async (_key, _request, redact) => {
+      captured = redact;
+      return MINTED;
+    });
+
+    const result = await p.createRealtimeSession(
+      ALICE,
+      USER_KEY,
+      REALTIME_REQUEST,
+    );
+
+    expect(result.clientSecret).toBe(MINTED_SECRET);
+
+    const scrubbed = (captured as unknown as SecretRedactor).apply(
+      `boom while holding ${MINTED_SECRET}`,
+    );
+    expect(scrubbed).not.toContain(MINTED_SECRET);
+    expect(scrubbed).toContain('[redacted]');
+  });
+
+  it('scrubs a secret a FAILING hook quoted in its own error text', async () => {
+    // The other half of registering on both branches: a hook that minted a
+    // secret and then decided the call had failed may name what it was holding
+    // in its own message, and `formatError` is the last thing that reads that
+    // message.
+    const p = realtimeProvider(async () => ({
+      ...MINTED,
+      success: false,
+      errorCode: 'rate_limit',
+      error: `minted ${MINTED_SECRET} then hit the rate limit`,
+    }));
+
+    const failure = await p.createRealtimeSession(
+      ALICE,
+      USER_KEY,
+      REALTIME_REQUEST,
+    );
+
+    expect(failure.clientSecret).toBeNull();
+    expect(failure.error).not.toContain(MINTED_SECRET);
+    expect(failure.error).toContain('[redacted]');
+  });
+
+  it('logs nothing containing the secret, on success or on failure', async () => {
+    const warn = jest.spyOn(Logger.prototype, 'warn');
+    const error = jest.spyOn(Logger.prototype, 'error');
+    warn.mockClear();
+    error.mockClear();
+
+    await realtimeProvider(async () => MINTED).createRealtimeSession(
+      ALICE,
+      USER_KEY,
+      REALTIME_REQUEST,
+    );
+    await realtimeProvider(async () => ({
+      ...MINTED,
+      success: false,
+      errorCode: 'rate_limit',
+      error: `refused while holding ${MINTED_SECRET}`,
+    })).createRealtimeSession(ALICE, USER_KEY, REALTIME_REQUEST);
+
+    const logged = [...warn.mock.calls, ...error.mock.calls]
+      .flat()
+      .map((arg) => String(arg))
+      .join('\n');
+
+    expect(logged).not.toContain(MINTED_SECRET);
+  });
+});
+
+describe('the realtime types carry no long-lived credential', () => {
+  it('holds the compile-time proof', () => {
+    // THE ASSERTION IS THE IMPORT. `AI_REALTIME_CARRIES_NO_LONG_LIVED_KEY` is
+    // typed `true` only while neither realtime type has a field named like a
+    // long-lived key (`apiKey`, `key`, `token`, …); adding one makes the type
+    // resolve to `never`, and ai.types.ts stops compiling — which fails this
+    // suite too, since it imports the value. The `expect` below is what makes
+    // the failure legible; the protection is the type.
+    expect(AI_REALTIME_CARRIES_NO_LONG_LIVED_KEY).toBe(true);
   });
 });
