@@ -25,11 +25,13 @@ export { hashSeed, mulberry32, shuffleWithSeed } from './seeded-random';
 
 export {
   N400_PROMPTS,
+  ENGLISH_SEGMENT_LINES,
   FALLBACK_OFFICER_LINES,
   fallbackOfficerLine,
 } from './officer-lines';
 
 export {
+  civicsStopReason,
   selectPassRule,
   planCivicsQuestions,
   startState,
