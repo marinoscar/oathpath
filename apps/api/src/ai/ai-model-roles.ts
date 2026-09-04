@@ -128,7 +128,8 @@ export interface AiModelRoleDef {
    * all six now means voice work does not need a settings-schema change and a
    * migration over live admin configuration later. E9 (#88) is that promise
    * being cashed: `transcribe` and `speak` became wired by flipping this
-   * boolean, with no migration and no settings-schema change.
+   * boolean, with no migration and no settings-schema change. E11 (#156)
+   * cashed it a second time for `realtime`, the same way.
    *
    * `unboundRoles` (#36) is computed over EXACTLY the wired roles: an unwired
    * role with no binding is the normal state and must never be reported as
@@ -146,8 +147,8 @@ export interface AiModelRoleDef {
  * The roles this application can bind a model to, in the order the admin page
  * renders them.
  *
- * Order is meaningful: the four wired roles come first so an admin's live
- * decisions are not below two inert ones.
+ * Order is meaningful: the wired roles come first so an admin's live decisions
+ * are not below the inert ones. `embed` is the only one left inert.
  */
 export const AI_MODEL_ROLES: AiModelRoleDef[] = [
   {
@@ -190,10 +191,17 @@ export const AI_MODEL_ROLES: AiModelRoleDef[] = [
     description:
       'Runs a spoken mock interview that can interrupt and be interrupted naturally. Needs a speech-to-speech realtime model.',
     capability: 'realtime',
-    // Declared, not consumed. See `wired` above. Epic #60 (E11) is what wires
-    // it; until something dispatches to it, wiring it here would only make
-    // every deployment report itself unready for a feature that does not exist.
-    wired: false,
+    // Wired by E11 (#156, epic #60): `AiProvider.createRealtimeSession`
+    // dispatches to it — the mint call that hands a browser a short-lived
+    // credential scoped to an interview session.
+    //
+    // WIRING IT DOES NOT MOVE `systemReady`, and that is the whole reason the
+    // narrowing below exists: `realtime` is not a TEXT capability, so it joins
+    // `unboundRoles` (an admin is told the interview simulator has no model)
+    // without joining the hard-blocking gate (a learner with no realtime
+    // binding practises by text, which is a smaller product, not a broken
+    // one). See {@link textModelRoles}.
+    wired: true,
   },
   {
     key: 'embed',
@@ -308,6 +316,13 @@ export function wiredModelRoles(): AiModelRoleDef[] {
  * role's binding — `unboundRoles` names the role, which is precisely why that
  * field kept its wider meaning (#109's web surfaces need to say WHICH role is
  * missing, not merely that something is).
+ *
+ * E11 (#156) wiring `realtime` is the same shape a second time, and it landed
+ * with no edit here at all: a `realtime` capability is not a text one, so the
+ * role joined `unboundRoles` and left `systemReady` alone by construction.
+ * That is the property this function was written to have — the next wired
+ * non-text role costs nothing, and a wired TEXT role joins the gate in the
+ * same edit that declares it.
  *
  * Derived from {@link TEXT_CAPABILITY_FAMILIES} rather than hard-coding
  * `['tutor', 'grader']`, so a third text role added to the registry joins the

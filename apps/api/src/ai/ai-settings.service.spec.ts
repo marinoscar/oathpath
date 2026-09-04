@@ -149,6 +149,7 @@ describe('AiSettingsService', () => {
             grader: 'gpt-5.4-mini',
             transcribe: 'whisper-1',
             speak: 'tts-1-hd',
+            realtime: 'gpt-4o-realtime-preview',
           },
         }),
       } as never);
@@ -177,21 +178,19 @@ describe('AiSettingsService', () => {
 
       await expect(service.describeReadiness()).resolves.toMatchObject({
         systemReady: false,
-        unboundRoles: ['grader', 'transcribe', 'speak'],
+        unboundRoles: ['grader', 'transcribe', 'speak', 'realtime'],
       });
     });
 
     it('IGNORES the unwired roles', async () => {
-      // `realtime` and `embed` are declared and inert. Requiring them would
-      // mean a fresh install could never become ready no matter what an admin
-      // did.
+      // `embed` is declared and inert. Requiring it would mean a fresh install
+      // could never become ready no matter what an admin did.
       prisma.systemSettings.findUnique.mockResolvedValue({
         value: storedSettings(),
       } as never);
 
       const result = await service.describeReadiness();
 
-      expect(result.unboundRoles).not.toContain('realtime');
       expect(result.unboundRoles).not.toContain('embed');
     });
 
@@ -227,6 +226,50 @@ describe('AiSettingsService', () => {
 
       const result = await service.describeReadiness();
 
+      expect(result.unboundRoles).toEqual(['transcribe', 'speak', 'realtime']);
+    });
+
+    // -------------------------------------------------------------------------
+    // The E11 repeat (#156): wiring `realtime` must move `unboundRoles` alone
+    // -------------------------------------------------------------------------
+
+    it('is STILL ready with only tutor and grader bound, after realtime was wired', async () => {
+      // THE SAME REGRESSION E9 CREATED, ONE EPIC LATER. Every installation
+      // deployed before E11 has no `realtime` binding, because there was
+      // nothing to bind it for. Had `systemReady` been computed over every
+      // wired role, wiring the interview simulator would have flipped all of
+      // them to not-ready on deploy — learners hitting `AiNotReady` on
+      // practice and tutoring because nobody had chosen a model for a spoken
+      // interview they had never been offered.
+      prisma.systemSettings.findUnique.mockResolvedValue({
+        value: storedSettings(),
+      } as never);
+
+      const result = await service.describeReadiness();
+
+      expect(result.systemReady).toBe(true);
+      // And the admin is still told, by name, which model they have not chosen
+      // — the field that keeps its wider meaning precisely so a point-of-use
+      // message can say WHICH role is missing (#109).
+      expect(result.unboundRoles).toContain('realtime');
+    });
+
+    it('is ready with realtime bound and the speech roles left unbound', async () => {
+      // The converse, so neither direction is accidental: binding a non-text
+      // role neither creates readiness nor is required for it.
+      prisma.systemSettings.findUnique.mockResolvedValue({
+        value: storedSettings({
+          models: {
+            tutor: 'gpt-5.4',
+            grader: 'gpt-5.4-mini',
+            realtime: 'gpt-4o-realtime-preview',
+          },
+        }),
+      } as never);
+
+      const result = await service.describeReadiness();
+
+      expect(result.systemReady).toBe(true);
       expect(result.unboundRoles).toEqual(['transcribe', 'speak']);
     });
 
@@ -247,7 +290,7 @@ describe('AiSettingsService', () => {
       const result = await service.describeReadiness();
 
       expect(result.systemReady).toBe(false);
-      expect(result.unboundRoles).toEqual(['tutor']);
+      expect(result.unboundRoles).toEqual(['tutor', 'realtime']);
     });
 
     it('reports every wired role unbound on a corrupt row, speech included', async () => {
@@ -266,6 +309,7 @@ describe('AiSettingsService', () => {
         'grader',
         'transcribe',
         'speak',
+        'realtime',
       ]);
     });
 
