@@ -335,6 +335,9 @@ import type {
   InterviewDetail,
   InterviewPage,
   InterviewState,
+  RealtimeSessionResponse,
+  RealtimeToolCallInput,
+  RealtimeToolCallResponse,
   EngagementSummary,
   EnglishAttemptResult,
   EnglishNextResponse,
@@ -1518,6 +1521,85 @@ export async function getInterviews(params?: {
 
   const query = searchParams.toString();
   return api.get<InterviewPage>(`/interviews${query ? `?${query}` : ''}`);
+}
+
+// =============================================================================
+// The realtime voice interview — mint and relay (issue #159, epic #60 / E11)
+// =============================================================================
+//
+// Two calls, and between them the browser's ENTIRE authority over a spoken
+// interview. Everything else on this transport — which question is next, what
+// the officer says, whether an answer was right, whether a phase is over — is
+// decided server-side and reaches the browser only as a string to hand onward.
+//
+// -----------------------------------------------------------------------------
+// THE LEARNER'S API KEY IS NOT IN THIS FILE, AND CANNOT BE
+// -----------------------------------------------------------------------------
+//
+// `docs/specs/realtime-interview.md` §12's second locked decision. The mint
+// returns an ephemeral secret the browser uses to open its own connection to
+// the provider; the learner's own key never leaves the API process on any code
+// path. There is no request here that could ask for one and no response shape
+// that could carry one — see the `Realtime*` types in `types/index.ts`.
+// =============================================================================
+
+/**
+ * Mint one ephemeral realtime session for this interview —
+ * `POST /api/interviews/:id/realtime-session`.
+ *
+ * NO REQUEST BODY, deliberately: the officer's instructions, the tools the
+ * model may call and the session's lifetime are all the server's, built from
+ * this interview's own state. A body would be the first field through which a
+ * caller could ask for a session that is not this interview's.
+ *
+ * ALL THREE OUTCOMES ARE HTTP 200 — read `status`. A non-2xx would be
+ * flattened into generic failure handling and the `cause`, the one fact an
+ * `unavailable` response exists to carry, would never reach the screen. On
+ * `unavailable` or `failed` the caller conducts the interview in text, with
+ * the same interview id and no loss of progress (§7).
+ *
+ * SAFE TO CALL AGAIN while the interview is `in_progress`: the secret is short
+ * -lived by design, and a re-mint resolves the interview's CURRENT engine state
+ * — so a dropped connection resumes at whatever question the engine says comes
+ * next, never at the first one.
+ */
+export async function createRealtimeSession(
+  id: string,
+): Promise<RealtimeSessionResponse> {
+  return api.post<RealtimeSessionResponse>(
+    `/interviews/${id}/realtime-session`,
+    // An empty object rather than nothing, so the request carries the JSON
+    // content type every other POST in this file does. The route accepts no
+    // fields; sending `{}` is how "there is nothing to configure" travels.
+    {},
+  );
+}
+
+/**
+ * Relay one tool call from the realtime session to the engine —
+ * `POST /api/interviews/:id/realtime/tool-calls`.
+ *
+ * THE BROWSER IS A RELAY AND NOTHING MORE. It forwards the call the model
+ * emitted and hands the result back over the same data channel. It does not
+ * interpret the result, does not grade, does not choose a question, and does
+ * not decide whether a phase is over — the whole reason this route exists is
+ * that those decisions are the engine's (§4).
+ *
+ * A REFUSAL IS A 200 WITH AN `instruction`, NOT AN ERROR. `status: 'rejected'`
+ * means the interview's own state did not permit the call; the `instruction`
+ * field says what the model should do instead, and relaying it verbatim is
+ * what gets the interview moving again. Treating it as a failure would leave
+ * the officer waiting on a tool result that never arrives — a live
+ * conversation that has silently stopped, with nothing on screen to say so.
+ */
+export async function sendRealtimeToolCall(
+  id: string,
+  call: RealtimeToolCallInput,
+): Promise<RealtimeToolCallResponse> {
+  return api.post<RealtimeToolCallResponse>(
+    `/interviews/${id}/realtime/tool-calls`,
+    call,
+  );
 }
 
 // =============================================================================
