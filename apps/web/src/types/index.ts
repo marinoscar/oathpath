@@ -983,6 +983,40 @@ export interface AiUsage {
 }
 
 // =============================================================================
+// Speech — transcription and synthesis (epic #58 / E9)
+// =============================================================================
+
+/**
+ * `POST /api/ai/speech/transcribe` — TWO FIELDS AND NOTHING ELSE.
+ *
+ * `docs/specs/voice.md` §9 fixes this shape: no usage event id, no model id, no
+ * provider metadata, and — §4 — no audio, in either direction. The response is
+ * narrow on purpose, so a later change to the endpoint has one compatibility
+ * surface instead of six.
+ */
+export interface SpeechTranscription {
+  /** What the recognizer heard. Shown to the learner to confirm BEFORE grading. */
+  text: string;
+
+  /**
+   * How sure the recognizer was, 0..1 — or `null`.
+   *
+   * `null` MEANS UNKNOWN. IT DOES NOT MEAN ZERO, and the difference decides
+   * whether a learner is treated fairly: a consumer that reads `null` as `0`
+   * compares it against the low-confidence threshold, wins that comparison
+   * every time, and marks a perfectly clear answer `misheard` — on every
+   * provider that simply does not report a score. That is the exact
+   * knowledge-vs-recognition conflation `VISION.md` line 228 forbids, arriving
+   * through a falsy check rather than through a policy decision.
+   *
+   * So: branch on `confidence === null` FIRST, and only then on its value.
+   * `AiUsage`'s own nullable fields carry the identical rule for the identical
+   * reason ("null means unknown, never zero").
+   */
+  confidence: number | null;
+}
+
+// =============================================================================
 // Journey — the learner profile and its two reference lists (epic #50)
 // =============================================================================
 //
