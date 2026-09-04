@@ -14,6 +14,7 @@ import {
   authHeader,
   TestUser,
 } from './helpers/auth-mock.helper';
+import { ASR_CONFIDENCE_THRESHOLD } from '../src/ai/ai.types';
 import { nextSchedule } from '../src/practice/mastery/scheduler';
 import { fromStoredMasteryOutcome } from '../src/practice/mastery/outcome-mapping';
 
@@ -408,7 +409,13 @@ function setupPracticeMocks(): void {
         (where.id === undefined || a.id === where.id) &&
         (where.sessionId === undefined || a.sessionId === where.sessionId) &&
         (where.userId === undefined || a.userId === where.userId) &&
-        (where.questionId === undefined || a.questionId === where.questionId),
+        (where.questionId === undefined || a.questionId === where.questionId) &&
+        // The retry guard's "does anything already supersede this row?" probe
+        // (issue #104, epic #58 / E9). Filtered for real, like every other key
+        // here — a mock that ignored it would report "nothing supersedes it"
+        // for every row and quietly pass a service that had lost the check.
+        (where.retryOfAttemptId === undefined ||
+          (a.retryOfAttemptId ?? null) === where.retryOfAttemptId),
     );
     if (!row) return null;
     return { ...row, question: QUESTIONS.find((q) => q.id === row.questionId) };
@@ -836,6 +843,421 @@ describe('Practice (Integration)', () => {
         .post(`/api/practice/sessions/${created.session.id}/complete`)
         .set(authHeader(learnerA.accessToken))
         .expect(409);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Voice: spoken attempts, the misheard mapping, and the one retry
+  // (issue #104, epic #58 / E9)
+  // ---------------------------------------------------------------------------
+
+  describe('voice', () => {
+    /** Posts one attempt and returns the response body's `data`. */
+    async function postAttempt(
+      user: TestUser,
+      sessionId: string,
+      body: Record<string, unknown>,
+      status = 201,
+    ) {
+      const response = await request(server())
+        .post(`/api/practice/sessions/${sessionId}/attempts`)
+        .set(authHeader(user.accessToken))
+        .send(body)
+        .expect(status);
+      return response.body.data;
+    }
+
+    describe('inputMode and promptMode reach the row and come back on the wire', () => {
+      it.each([
+        ['typed', 'read'],
+        ['typed', 'heard'],
+        ['spoken', 'read'],
+        ['spoken', 'heard'],
+      ] as const)('records %s / %s', async (inputMode, promptMode) => {
+        const created = await startSession(learnerA, { kind: 'quick', plannedCount: 2 });
+        const questionId = created.nextQuestion.id;
+        const text = correctAnswerFor(questionId);
+
+        const data = await postAttempt(learnerA, created.session.id, {
+          questionId,
+          responseText: text,
+          inputMode,
+          promptMode,
+          ...(inputMode === 'spoken' ? { transcript: text } : {}),
+        });
+
+        expect(data.attempt.inputMode).toBe(inputMode);
+        expect(data.attempt.promptMode).toBe(promptMode);
+        expect(attempts.get(data.attempt.id)).toMatchObject({ inputMode, promptMode });
+      });
+    });
+
+    it('defaults an unchanged pre-voice body to typed/read, with all three voice columns null', async () => {
+      // The compatibility property, over the wire and through the global Zod
+      // pipe: a client that has never heard of E9 writes exactly the row it
+      // always wrote.
+      const created = await startSession(learnerA, { kind: 'quick', plannedCount: 2 });
+      const questionId = created.nextQuestion.id;
+
+      const data = await postAttempt(learnerA, created.session.id, {
+        questionId,
+        responseText: correctAnswerFor(questionId),
+      });
+
+      expect(data.attempt).toMatchObject({
+        inputMode: 'typed',
+        promptMode: 'read',
+        transcript: null,
+        asrConfidence: null,
+        retryOfAttemptId: null,
+      });
+    });
+
+    it('stores the confirmed transcript and the confidence on a spoken attempt', async () => {
+      const created = await startSession(learnerA, { kind: 'quick', plannedCount: 2 });
+      const questionId = created.nextQuestion.id;
+      const text = correctAnswerFor(questionId);
+
+      const data = await postAttempt(learnerA, created.session.id, {
+        questionId,
+        responseText: text,
+        inputMode: 'spoken',
+        promptMode: 'heard',
+        transcript: text,
+        asrConfidence: 0.88,
+      });
+
+      expect(data.attempt.transcript).toBe(text);
+      expect(data.attempt.asrConfidence).toBe(0.88);
+      expect(attempts.get(data.attempt.id)).toMatchObject({
+        transcript: text,
+        asrConfidence: 0.88,
+      });
+    });
+
+    describe('the misheard mapping', () => {
+      it('records failureCause: "misheard" for a low-confidence miss', async () => {
+        // voice.md §3.1's worked example, end to end: the recogniser was
+        // unsure, the learner confirmed what it produced, and the text does
+        // not match — so the row blames the recognition, not the learner.
+        const created = await startSession(learnerA, { kind: 'quick', plannedCount: 2 });
+
+        const data = await postAttempt(learnerA, created.session.id, {
+          questionId: created.nextQuestion.id,
+          responseText: 'the head of the executive ranch',
+          inputMode: 'spoken',
+          promptMode: 'heard',
+          transcript: 'the head of the executive ranch',
+          asrConfidence: 0.41,
+        });
+
+        expect(data.attempt.outcome).toBe('incorrect');
+        expect(data.attempt.failureCause).toBe('misheard');
+        // Non-null cause, null everything else the grading rung writes — no
+        // model was involved in reaching it, and `gradingMethod` says so.
+        expect(data.attempt.gradingMethod).toBe('exact');
+        expect(data.attempt.aiFeedback).toBeNull();
+        expect(data.attempt.aiUsageEventId).toBeNull();
+      });
+
+      it('does not fire on a correct answer, however poorly it was heard', async () => {
+        const created = await startSession(learnerA, { kind: 'quick', plannedCount: 2 });
+        const questionId = created.nextQuestion.id;
+        const text = correctAnswerFor(questionId);
+
+        const data = await postAttempt(learnerA, created.session.id, {
+          questionId,
+          responseText: text,
+          inputMode: 'spoken',
+          transcript: text,
+          asrConfidence: 0.41,
+        });
+
+        expect(data.attempt.outcome).toBe('correct');
+        expect(data.attempt.failureCause).toBeNull();
+      });
+
+      it('does not fire when no confidence was reported — unknown is not low', async () => {
+        const created = await startSession(learnerA, { kind: 'quick', plannedCount: 2 });
+
+        const data = await postAttempt(learnerA, created.session.id, {
+          questionId: created.nextQuestion.id,
+          responseText: 'the head of the executive ranch',
+          inputMode: 'spoken',
+          transcript: 'the head of the executive ranch',
+        });
+
+        expect(data.attempt.outcome).toBe('incorrect');
+        expect(data.attempt.failureCause).toBeNull();
+      });
+
+      it('does not fire at or above the threshold', async () => {
+        const created = await startSession(learnerA, { kind: 'quick', plannedCount: 2 });
+
+        const data = await postAttempt(learnerA, created.session.id, {
+          questionId: created.nextQuestion.id,
+          responseText: 'the head of the executive ranch',
+          inputMode: 'spoken',
+          transcript: 'the head of the executive ranch',
+          asrConfidence: ASR_CONFIDENCE_THRESHOLD,
+        });
+
+        expect(data.attempt.failureCause).toBeNull();
+      });
+    });
+
+    describe('the retry', () => {
+      /** A session whose first question has one misheard attempt on it. */
+      async function sessionWithMisheardAttempt(user: TestUser) {
+        const created = await startSession(user, { kind: 'quick', plannedCount: 2 });
+        const questionId = created.nextQuestion.id;
+
+        const first = await postAttempt(user, created.session.id, {
+          questionId,
+          responseText: 'the head of the executive ranch',
+          inputMode: 'spoken',
+          promptMode: 'heard',
+          transcript: 'the head of the executive ranch',
+          asrConfidence: 0.41,
+        });
+
+        return {
+          sessionId: created.session.id,
+          questionId,
+          originalId: first.attempt.id as string,
+        };
+      }
+
+      it('admits the corrected answer and links it back to the attempt it supersedes', async () => {
+        const { sessionId, questionId, originalId } =
+          await sessionWithMisheardAttempt(learnerA);
+
+        const retry = await postAttempt(learnerA, sessionId, {
+          questionId,
+          responseText: correctAnswerFor(questionId),
+          inputMode: 'spoken',
+          promptMode: 'heard',
+          transcript: correctAnswerFor(questionId),
+          asrConfidence: 0.97,
+          retryOfAttemptId: originalId,
+        });
+
+        expect(retry.attempt.outcome).toBe('correct');
+        expect(retry.attempt.retryOfAttemptId).toBe(originalId);
+
+        // THE SUPERSEDED ROW IS STILL THERE. Evidence that a mishearing
+        // happened is not deleted to make a number look better.
+        expect(attempts.get(originalId)).toMatchObject({
+          outcome: 'incorrect',
+          failureCause: 'misheard',
+        });
+      });
+
+      it('409s a second attempt at the same question that names no retry target', async () => {
+        const { sessionId, questionId } = await sessionWithMisheardAttempt(learnerA);
+
+        await postAttempt(
+          learnerA,
+          sessionId,
+          { questionId, responseText: correctAnswerFor(questionId) },
+          409,
+        );
+      });
+
+      it('409s a SECOND retry of the same original', async () => {
+        const { sessionId, questionId, originalId } =
+          await sessionWithMisheardAttempt(learnerA);
+
+        await postAttempt(learnerA, sessionId, {
+          questionId,
+          responseText: 'still not it',
+          retryOfAttemptId: originalId,
+        });
+
+        await postAttempt(
+          learnerA,
+          sessionId,
+          {
+            questionId,
+            responseText: correctAnswerFor(questionId),
+            retryOfAttemptId: originalId,
+          },
+          409,
+        );
+      });
+
+      it('409s retrying an attempt that is itself a retry — the chain stops at two', async () => {
+        const { sessionId, questionId, originalId } =
+          await sessionWithMisheardAttempt(learnerA);
+
+        const retry = await postAttempt(learnerA, sessionId, {
+          questionId,
+          responseText: 'still not it',
+          retryOfAttemptId: originalId,
+        });
+
+        await postAttempt(
+          learnerA,
+          sessionId,
+          {
+            questionId,
+            responseText: correctAnswerFor(questionId),
+            retryOfAttemptId: retry.attempt.id,
+          },
+          409,
+        );
+      });
+
+      it('404s — never 403s — a retry naming ANOTHER learner’s attempt', async () => {
+        // The rule this whole module follows: a 403 would confirm the id names
+        // a real attempt, which is itself the leak.
+        const mine = await sessionWithMisheardAttempt(learnerA);
+        const theirs = await sessionWithMisheardAttempt(learnerB);
+
+        await postAttempt(
+          learnerA,
+          mine.sessionId,
+          {
+            questionId: mine.questionId,
+            responseText: correctAnswerFor(mine.questionId),
+            retryOfAttemptId: theirs.originalId,
+          },
+          404,
+        );
+      });
+
+      it('404s a retry naming an attempt at a different question', async () => {
+        const { sessionId, questionId, originalId } =
+          await sessionWithMisheardAttempt(learnerA);
+        const otherQuestionId = questionId === Q1 ? Q2 : Q1;
+
+        await postAttempt(
+          learnerA,
+          sessionId,
+          {
+            questionId: otherQuestionId,
+            responseText: correctAnswerFor(otherQuestionId),
+            retryOfAttemptId: originalId,
+          },
+          404,
+        );
+      });
+
+      it('404s a retry naming an attempt from a different session', async () => {
+        const first = await sessionWithMisheardAttempt(learnerA);
+        // Starting a second session abandons the first, so this one is where a
+        // new attempt can be posted at all.
+        const second = await startSession(learnerA, { kind: 'quick', plannedCount: 2 });
+
+        await postAttempt(
+          learnerA,
+          second.session.id,
+          {
+            questionId: second.nextQuestion.id,
+            responseText: correctAnswerFor(second.nextQuestion.id),
+            retryOfAttemptId: first.originalId,
+          },
+          404,
+        );
+      });
+
+      it('excludes the superseded attempt from progress.answered AND from the summary, and the two agree', async () => {
+        // The property §3.2 exists for: a mishearing and its correction read
+        // as ONE answered question, in the live progress counter and in the
+        // summary that is written once and read forever.
+        const { sessionId, questionId, originalId } =
+          await sessionWithMisheardAttempt(learnerA);
+
+        const retry = await postAttempt(learnerA, sessionId, {
+          questionId,
+          responseText: correctAnswerFor(questionId),
+          retryOfAttemptId: originalId,
+        });
+
+        // Two rows in the table, one answered question in the count.
+        expect(retry.progress.answered).toBe(1);
+        expect(
+          Array.from(attempts.values()).filter((a) => a.sessionId === sessionId),
+        ).toHaveLength(2);
+
+        const resumed = await request(server())
+          .get(`/api/practice/sessions/${sessionId}`)
+          .set(authHeader(learnerA.accessToken))
+          .expect(200);
+
+        // Both rows are RETURNED — a review screen renders the pair — while
+        // only one is COUNTED.
+        expect(resumed.body.data.attempts).toHaveLength(2);
+        expect(resumed.body.data.progress.answered).toBe(1);
+
+        // And the session is NOT finished: `nextQuestionFor` compares against
+        // `plannedCount` using this same count, so a mishearing plus its
+        // correction must not end a two-question session after one.
+        expect(resumed.body.data.nextQuestion).not.toBeNull();
+        expect(retry.nextQuestion).not.toBeNull();
+
+        const completed = await request(server())
+          .post(`/api/practice/sessions/${sessionId}/complete`)
+          .set(authHeader(learnerA.accessToken))
+          .expect(201);
+
+        expect(completed.body.data.summary).toMatchObject({
+          answered: 1,
+          correct: 1,
+          // NOT 1. The misheard attempt is not counted as a failure — that is
+          // the whole point of superseding it rather than leaving it in.
+          incorrect: 0,
+        });
+        expect(completed.body.data.summary.answered).toBe(
+          resumed.body.data.progress.answered,
+        );
+      });
+    });
+
+    describe('the body has to be self-consistent — 400 through the global Zod pipe', () => {
+      it('rejects a transcript or a confidence on a typed attempt', async () => {
+        const created = await startSession(learnerA, { kind: 'quick', plannedCount: 2 });
+        const questionId = created.nextQuestion.id;
+
+        await postAttempt(
+          learnerA,
+          created.session.id,
+          { questionId, responseText: 'x', transcript: 'x' },
+          400,
+        );
+
+        await postAttempt(
+          learnerA,
+          created.session.id,
+          { questionId, responseText: 'x', asrConfidence: 0.41 },
+          400,
+        );
+      });
+
+      it('rejects a spoken attempt that was answered but carries no transcript', async () => {
+        const created = await startSession(learnerA, { kind: 'quick', plannedCount: 2 });
+
+        await postAttempt(
+          learnerA,
+          created.session.id,
+          { questionId: created.nextQuestion.id, responseText: 'x', inputMode: 'spoken' },
+          400,
+        );
+      });
+
+      it('still refuses to let the client state a verdict, by any of its new names', async () => {
+        const created = await startSession(learnerA, { kind: 'quick', plannedCount: 2 });
+        const questionId = created.nextQuestion.id;
+
+        for (const key of ['failureCause', 'misheard', 'transcriptConfidence']) {
+          await postAttempt(
+            learnerA,
+            created.session.id,
+            { questionId, responseText: 'x', [key]: 'misheard' },
+            400,
+          );
+        }
+      });
     });
   });
 

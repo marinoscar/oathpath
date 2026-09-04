@@ -1664,6 +1664,41 @@ export interface PracticeAttempt {
    */
   aiUsageEventId: string | null;
 
+  // ---------------------------------------------------------------------------
+  // Voice (issue #104, epic #58 / E9)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * For a spoken attempt: the text the learner CONFIRMED they said.
+   *
+   * Null for a typed attempt and for a skip — there was no recognition step to
+   * record. The CONFIRMED text, not the recogniser's raw output: the learner
+   * saw it and could edit it before anything was graded, which is the whole
+   * anti-penalty mechanism behind `docs/specs/voice.md` §3.
+   */
+  transcript: string | null;
+
+  /**
+   * How sure the recogniser was about that transcription, 0..1 — or null.
+   *
+   * NULL MEANS UNKNOWN, NEVER ZERO, exactly as on {@link SpeechTranscription}.
+   * On the wire so a client can explain its own behaviour to itself, NEVER so
+   * it can be shown to a learner as a number: "41% confident" is a diagnostic
+   * detail somebody studying for a naturalization interview has no way to act
+   * on. What they see is the transcript, editable.
+   */
+  asrConfidence: number | null;
+
+  /**
+   * The earlier attempt this one supersedes, or null.
+   *
+   * Set only on a retry. The superseded attempt stays in the table — it is
+   * evidence that a mishearing happened — but the server excludes it from
+   * `progress.answered` and from the stored summary, so a mishearing and its
+   * correction read as ONE answered question.
+   */
+  retryOfAttemptId: string | null;
+
   answeredAt: string;
   answerSnapshot: PracticeAnswerSnapshot;
 }
@@ -1814,6 +1849,59 @@ export interface RecordPracticeAttemptInput {
   skipped?: boolean;
   revealed?: boolean;
   hintUsed?: boolean;
+
+  // ---------------------------------------------------------------------------
+  // Voice (issue #104, epic #58 / E9)
+  // ---------------------------------------------------------------------------
+  //
+  // Five client-reported facts, and NOT ONE OF THEM IS A VERDICT — the rule
+  // above still holds. The server cannot observe any of them for itself for
+  // one concrete reason: the recording never reaches it (`voice.md` §4, and
+  // `useAudioCapture`'s header), so there is no artefact anywhere from which
+  // "was this spoken", "was the prompt heard", or "how well was it heard"
+  // could be reconstructed later. Not sending them now means they are gone.
+  //
+  // All five are OPTIONAL, and the server defaults `inputMode`/`promptMode` to
+  // the pre-E9 values, so a caller that knows nothing about voice keeps writing
+  // exactly the row it always wrote.
+  //
+  // THE SERVER REJECTS COMBINATIONS THAT CONTRADICT EACH OTHER (a 400), and a
+  // caller should mirror the rules rather than discover them: `transcript` and
+  // `asrConfidence` only with `inputMode: 'spoken'`; a non-skipped spoken
+  // attempt MUST carry a `transcript`; a skip carries neither.
+
+  /** How the answer was produced. Defaults to `typed` server-side. */
+  inputMode?: 'typed' | 'spoken';
+
+  /** How the QUESTION reached the learner. Defaults to `read` server-side. */
+  promptMode?: 'read' | 'heard';
+
+  /**
+   * The transcript the learner CONFIRMED, after seeing and being able to edit
+   * it. Never the recogniser's raw output as it arrived.
+   */
+  transcript?: string;
+
+  /**
+   * The recogniser's confidence, 0..1.
+   *
+   * OMITTED — never `0` — when the recogniser did not report one. A defaulted
+   * `0` is not inert: it is below the threshold the server reads as a probable
+   * mishearing, so it would route a perfectly good answer to
+   * `failureCause: 'misheard'`. See {@link SpeechTranscription.confidence}.
+   */
+  asrConfidence?: number;
+
+  /**
+   * This attempt supersedes an earlier attempt at the same question in the
+   * same session.
+   *
+   * The one legitimate second attempt at a question inside one session. The
+   * server admits it only when it names THIS caller's attempt, in THIS session,
+   * at THIS question, which is not itself a retry and has not already been
+   * superseded — a 409 otherwise, and a 404 for anybody else's id.
+   */
+  retryOfAttemptId?: string;
 }
 
 // =============================================================================

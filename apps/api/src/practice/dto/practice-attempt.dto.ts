@@ -129,10 +129,15 @@ export const practiceAttemptSchema = z.object({
    */
   source: z.enum(['practice', 'mock_interview']),
 
-  /** `typed` for everything this epic writes; `spoken` waits for E9. */
+  /**
+   * How the learner produced this answer.
+   *
+   * Written from the request since E9 (issue #104, epic #58); every row from
+   * before it reads `typed`, which is what those attempts were.
+   */
   inputMode: z.enum(['typed', 'spoken']),
 
-  /** `read` for everything this epic writes; `heard` waits for E9. */
+  /** How the question reached them — read on screen, or heard aloud (E9). */
   promptMode: z.enum(['read', 'heard']),
 
   /** The learner's raw input, or null for a skip. Never normalised in place. */
@@ -176,6 +181,13 @@ export const practiceAttemptSchema = z.object({
   // or a miss whose grading call was unavailable or failed) and
   // `gradingMethod: 'self'` never produce any of these values.
   //
+  // ONE EXCEPTION, ADDED BY E9 (issue #104, epic #58), and it is a real one
+  // rather than a caveat: `failureCause: 'misheard'` is written by the SERVER
+  // from `asrConfidence`, with `aiFeedback` and `aiUsageEventId` null, because
+  // no model was involved in reaching it. A client must therefore not treat a
+  // non-null `failureCause` as proof that a grader ran — `gradingMethod` is
+  // the field that answers that, and it still does.
+  //
   // Nullable rather than optional, for the reason the whole ladder exists: a
   // client that received an ABSENT field could reasonably render a placeholder
   // cause or a "why did I miss this?" panel with nothing behind it, and the one
@@ -218,6 +230,46 @@ export const practiceAttemptSchema = z.object({
    * held back for the accounting.
    */
   aiUsageEventId: z.uuid().nullable(),
+
+  // ---------------------------------------------------------------------------
+  // Voice (issue #104, epic #58 / E9)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * For a spoken attempt: the text the learner confirmed they said.
+   *
+   * Null for a typed attempt and for a skip — there was no recognition step to
+   * record. Distinct from `responseText` on purpose; see the column's own
+   * comment in `schema.prisma` and the request DTO's.
+   */
+  transcript: z.string().nullable(),
+
+  /**
+   * The recogniser's confidence for that transcription, in `[0, 1]`.
+   *
+   * NULL MEANS UNKNOWN AND IS NEVER 0. Not every transcription model reports
+   * one, so null is ordinary rather than an error — and a client must not fill
+   * it in, because below `ASR_CONFIDENCE_THRESHOLD` is what the server reads
+   * as a probable mishearing.
+   *
+   * On the wire so a client can explain ITS OWN behaviour to itself, never so
+   * it can be shown to a learner as a number: "41% confident" is a diagnostic
+   * detail a naturalization-interview learner has no way to act on
+   * (`docs/specs/voice.md` §3.1). What they see is the transcript, editable.
+   */
+  asrConfidence: z.number().min(0).max(1).nullable(),
+
+  /**
+   * The earlier attempt this one supersedes, or null.
+   *
+   * Set only on a retry (`voice.md` §3.2). The attempt it names stays in the
+   * table and is still returned by `GET /api/practice/sessions/:id` — it is
+   * evidence that a mishearing happened — but it is excluded from that
+   * response's `progress.answered` and from the session's stored summary, so
+   * a mishearing and its correction read as one answered question. A review
+   * screen renders the pair from this link.
+   */
+  retryOfAttemptId: z.uuid().nullable(),
 
   /** When the attempt resolved, from the server's own `Clock`. */
   answeredAt: z.iso.datetime(),

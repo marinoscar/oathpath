@@ -249,7 +249,25 @@ export class PracticeController {
       '`progress.answered` is counted from the persisted rows on every response, so two ' +
       'tabs and a resumed session all agree.\n\n' +
       'One attempt per question per session: a repeat is a 409. Answering a question ' +
-      'again is a new session.',
+      'again is a new session.\n\n' +
+      '**Voice (E9).** `inputMode` (`typed`/`spoken`) and `promptMode` (`read`/`heard`) ' +
+      'default to the pre-voice values, so an existing client keeps working unchanged. ' +
+      'A spoken attempt that was actually answered must also send `transcript` — the ' +
+      'text the learner **confirmed** after seeing what the recogniser returned, which ' +
+      'is the step that keeps an accent from costing them the answer — and may send ' +
+      '`asrConfidence`. Omit `asrConfidence` when there is none: absent means unknown, ' +
+      'and a sent `0` would claim the recogniser was certain it heard nothing. Neither ' +
+      'field is accepted on a typed attempt or on a skip.\n\n' +
+      'The server, never the client, decides what a low confidence means: below the ' +
+      'confidence threshold, an outcome that is not `correct` is recorded with ' +
+      '`failureCause: "misheard"`, overriding any cause the AI grader supplied.\n\n' +
+      '**One retry, and only one.** `retryOfAttemptId` is the single exception to the ' +
+      'one-attempt-per-question rule: it must name an attempt of yours, in this ' +
+      'session, at this question, that is not itself a retry and has not already been ' +
+      'retried — anything else is a 404 (unknown attempt) or a 409. The superseded ' +
+      'attempt is kept and still returned, but stops counting toward `progress.answered` ' +
+      'and the session summary, so a mishearing and its correction read as one answered ' +
+      'question rather than two failures.',
   })
   @ApiParam({ name: 'id', type: String, format: 'uuid' })
   @ApiDataResponse(PracticeAttemptResultDto, {
@@ -260,10 +278,16 @@ export class PracticeController {
     status: 400,
     description: 'Invalid body, or a question outside this session’s test version or category',
   })
-  @ApiResponse({ status: 404, description: 'No such session for this caller, or no such question' })
+  @ApiResponse({
+    status: 404,
+    description:
+      'No such session for this caller, no such question, or no such attempt to retry',
+  })
   @ApiResponse({
     status: 409,
-    description: 'The session is not in progress, or this question was already answered in it',
+    description:
+      'The session is not in progress; this question was already answered in it and no valid ' +
+      'retryOfAttemptId was sent; or the named attempt is itself a retry or has already been retried',
   })
   recordAttempt(
     @CurrentUser('id') userId: string,

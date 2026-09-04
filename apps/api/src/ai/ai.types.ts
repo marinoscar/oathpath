@@ -573,6 +573,39 @@ export interface AiTranscriptionResult {
 }
 
 /**
+ * Below this, a transcription is treated as a likely MISHEARING rather than as
+ * a wrong answer (`docs/specs/voice.md` §3).
+ *
+ * -----------------------------------------------------------------------------
+ * ONE NUMBER, IN ONE PLACE, BECAUSE IT IS A PRODUCT DECISION
+ * -----------------------------------------------------------------------------
+ *
+ * It answers "how much doubt is too much doubt to trust a transcript
+ * unexamined?", which is a judgement about fairness to a learner with an
+ * accent — not a tuning constant. Named for the same reason
+ * `STREAK_FREEZE_MAX` and `SYSTEM_STATUS_TTL_MS` are named rather than typed
+ * inline: a second call site repeating the literal `0.6` is a second call site
+ * that can drift from this one silently on the next edit, and the two would
+ * then disagree about whether the same recording was heard well enough — with
+ * nothing failing to say so.
+ *
+ * The one consumer today is `PracticeService.recordAttempt`, which maps a
+ * confidence strictly below this onto `practice_attempts.failure_cause =
+ * 'misheard'` for any outcome that is not `correct`. It lives here, beside
+ * {@link AiTranscriptionResult.confidence}, because this is the type that
+ * produces the value being compared — a reader who has just been told that
+ * `null` means unknown finds, in the same file, what a KNOWN low value means.
+ *
+ * STRICTLY BELOW, never at-or-below: `0.6` exactly is trusted. The boundary
+ * has to fall on one side, and trusting the transcript is the side that cannot
+ * invent a mishearing that did not happen.
+ *
+ * A `null` confidence NEVER reaches this comparison — see the same field's
+ * doc above. Unknown is not low.
+ */
+export const ASR_CONFIDENCE_THRESHOLD = 0.6;
+
+/**
  * A request to read one piece of text aloud, on one caller's key.
  *
  * The text is ours, not a learner's: a civics question, an explanation, an
