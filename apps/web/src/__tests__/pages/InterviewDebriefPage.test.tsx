@@ -904,6 +904,25 @@ describe('InterviewDebriefPage — the score is explainable and paired (§8, PRD
     ).toHaveAttribute('href', '/practice/interviews');
   });
 
+  it('holds the §11.1 copy rules over the spoken bands too', async () => {
+    // The vocabulary check above runs against the TEXT debrief, which does not
+    // render a word of the spoken, segment, cap-lifted or recommendation copy.
+    // Being misheard, missing a dictated sentence and reading a ceiling lift
+    // are three more places a kinder-sounding characterisation is tempting, so
+    // the same list is applied to the render that actually contains them.
+    const { container } = await mounted({
+      detail: detail({ debrief: spokenDebrief() }),
+    });
+
+    const text = (container.textContent ?? '').toLowerCase();
+    for (const word of FORBIDDEN_JUDGMENT_VOCABULARY) {
+      expect(text, `the debrief uses the judgment word "${word}"`).not.toContain(
+        word.toLowerCase(),
+      );
+    }
+    expect(container.textContent).not.toContain('!');
+  });
+
   it('carries the standing "not USCIS" disclaimer, verbatim', async () => {
     // `VISION.md`: "Trust is not legal copy buried in settings. It is part of
     // the user experience." This page hands a learner a pass/fail verdict AND a
