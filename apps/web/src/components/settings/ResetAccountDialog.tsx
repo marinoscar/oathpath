@@ -236,7 +236,11 @@ export function ResetAccountDialog({
           Cancel
         </Button>
         <Button color="error" disabled={!canConfirm} onClick={handleConfirm}>
-          {isResetting ? 'Resetting…' : 'Erase my data'}
+          {isResetting
+            ? 'Resetting…'
+            : scope === 'data'
+              ? 'Erase my data'
+              : 'Erase everything'}
         </Button>
       </DialogActions>
     </Dialog>

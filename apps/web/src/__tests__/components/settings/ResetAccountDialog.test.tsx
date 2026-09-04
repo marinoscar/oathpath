@@ -105,6 +105,7 @@ describe.each([['data'], ['data_and_key']] as const)(
     });
 
     const phrase = SUMMARY.phrases[scope];
+    const confirmLabel = scope === 'data' ? 'Erase my data' : 'Erase everything';
 
     it('renders the non-zero counts and omits the zero ones', () => {
       renderDialog({ scope });
@@ -137,7 +138,7 @@ describe.each([['data'], ['data_and_key']] as const)(
 
     it('disables the confirm button initially', () => {
       renderDialog({ scope });
-      expect(screen.getByRole('button', { name: 'Erase my data' })).toBeDisabled();
+      expect(screen.getByRole('button', { name: confirmLabel })).toBeDisabled();
     });
 
     it('keeps the confirm button disabled for a wrong phrase, and never calls reset', async () => {
@@ -146,7 +147,7 @@ describe.each([['data'], ['data_and_key']] as const)(
 
       await user.type(screen.getByLabelText(new RegExp(`Type ${phrase} to confirm`)), 'nope');
 
-      expect(screen.getByRole('button', { name: 'Erase my data' })).toBeDisabled();
+      expect(screen.getByRole('button', { name: confirmLabel })).toBeDisabled();
       expect(mockReset).not.toHaveBeenCalled();
     });
 
@@ -156,7 +157,7 @@ describe.each([['data'], ['data_and_key']] as const)(
 
       await user.type(screen.getByLabelText(new RegExp(`Type ${phrase} to confirm`)), phrase);
 
-      expect(screen.getByRole('button', { name: 'Erase my data' })).toBeEnabled();
+      expect(screen.getByRole('button', { name: confirmLabel })).toBeEnabled();
     });
 
     it('calls reset(scope, phrase) on confirm, then onReset and onClose on success', async () => {
@@ -164,7 +165,7 @@ describe.each([['data'], ['data_and_key']] as const)(
       const { onClose, onReset } = renderDialog({ scope });
 
       await user.type(screen.getByLabelText(new RegExp(`Type ${phrase} to confirm`)), phrase);
-      await user.click(screen.getByRole('button', { name: 'Erase my data' }));
+      await user.click(screen.getByRole('button', { name: confirmLabel }));
 
       await waitFor(() => expect(mockReset).toHaveBeenCalledWith(scope, phrase));
       await waitFor(() => expect(onReset).toHaveBeenCalledTimes(1));
@@ -183,7 +184,7 @@ describe.each([['data'], ['data_and_key']] as const)(
       const { onClose, onReset } = renderDialog({ scope });
 
       await user.type(screen.getByLabelText(new RegExp(`Type ${phrase} to confirm`)), phrase);
-      await user.click(screen.getByRole('button', { name: 'Erase my data' }));
+      await user.click(screen.getByRole('button', { name: confirmLabel }));
 
       await waitFor(() => expect(mockReset).toHaveBeenCalledWith(scope, phrase));
       expect(screen.getByRole('alert')).toHaveTextContent('Wrong confirmation phrase.');
@@ -255,7 +256,7 @@ describe('ResetAccountDialog — reopening / changing scope', () => {
 
     const keyField = await screen.findByLabelText(/Type DELETE EVERYTHING to confirm/);
     expect(keyField).toHaveValue('');
-    expect(screen.getByRole('button', { name: 'Erase my data' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Erase everything' })).toBeDisabled();
   });
 
   it('clears a stale resetError via clearResetError when the dialog reopens', () => {
