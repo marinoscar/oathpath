@@ -369,8 +369,15 @@ export default function RealtimeInterviewPage() {
 
         {/* THE CONVERSATION. Mounted from the moment the session is live and
             only ever added to — a live region inserted at the same moment as
-            its content is commonly missed entirely by assistive technology. */}
-        {(connected || stage === 'ended') && (
+            its content is commonly missed entirely by assistive technology.
+
+            IT SURVIVES A RECONNECT, which is why the condition includes a
+            transcript that already has something in it rather than only
+            `stage === 'live'`. A re-mint puts the stage back to `connecting`
+            for a second or two, and a screen that blanked the conversation
+            there would tell a learner, at the exact moment their officer went
+            quiet, that everything they had said was gone. */}
+        {(connected || stage === 'ended' || transcript.length > 0) && (
           <LiveTranscript
             entries={transcript}
             isOfficerSpeaking={isOfficerSpeaking}
@@ -384,11 +391,7 @@ export default function RealtimeInterviewPage() {
             <Typography variant="h6" component="h2" sx={{ fontWeight: 600 }}>
               Write what the officer read
             </Typography>
-            <Typography
-              color="text.secondary"
-              sx={{ mt: 1, maxWidth: '60ch' }}
-              id="realtime-writing-help"
-            >
+            <Typography color="text.secondary" sx={{ mt: 1, maxWidth: '60ch' }}>
               Ask the officer to repeat it if you need to hear it again &mdash;
               that is allowed, and it is not held against you.
             </Typography>

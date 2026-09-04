@@ -996,6 +996,12 @@ describe('every failure ends at the text interview', () => {
     renderVoice();
     await startSession(user);
 
+    await emit({
+      type: 'response.output_audio_transcript.done',
+      item_id: 'officer-1',
+      transcript: 'Good morning. How are you today?',
+    });
+
     const before = requests.filter((r) => r.url.includes('/realtime-session')).length;
 
     await act(async () => {
@@ -1019,6 +1025,11 @@ describe('every failure ends at the text interview', () => {
     expect(
       screen.getByRole('button', { name: /end this interview/i }),
     ).toBeInTheDocument();
+
+    // AND THE CONVERSATION SURVIVED IT. Blanking the transcript at the exact
+    // moment the officer went quiet would tell the learner everything they
+    // had said was gone.
+    expect(screen.getByText(/How are you today\?/)).toBeInTheDocument();
   });
 
   it('offers a retry, and only where trying again could plausibly help', async () => {
