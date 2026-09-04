@@ -239,6 +239,25 @@ export interface UseRealtimeInterviewReturn {
   end: () => Promise<InterviewDebrief | null>;
 }
 
+/**
+ * The fallback a session that was already live ends at.
+ *
+ * ONE OBJECT FOR BOTH WAYS OF GETTING HERE — a channel that closed, and a
+ * re-mint that failed — because from the learner's side they are the same
+ * event: the officer stopped talking and is not coming back. §3 treats them
+ * the same way too ("if re-minting itself fails... the interview falls back to
+ * the text transport with progress intact"), and a screen that told them their
+ * AI provider had refused a mint would be explaining the wrong layer.
+ */
+const CONNECTION_LOST: RealtimeFallback = {
+  code: 'connection_lost',
+  message: 'The voice connection dropped and could not be re-established.',
+  remedy:
+    'You can carry on in text — the interview picks up exactly where it left off.',
+  cause: null,
+  retryable: false,
+};
+
 export function useRealtimeInterview(
   id: string | null | undefined,
 ): UseRealtimeInterviewReturn {
@@ -521,6 +540,35 @@ export function useRealtimeInterview(
       if (!id || startingRef.current) return;
       startingRef.current = true;
 
+      /**
+       * Give up on this attempt.
+       *
+       * ON THE FIRST ATTEMPT the learner has not started speaking, so they are
+       * told exactly what went wrong and offered the text interview: an unbound
+       * role, a refused microphone and a failed mint are three different
+       * errands and only one of them is worth a retry.
+       *
+       * ON A RECONNECT none of that is the useful thing to say. The officer has
+       * gone silent mid-conversation and the learner is sitting in it, so the
+       * attempt is simply repeated up to {@link MAX_RECONNECTS} times and, when
+       * that is spent, the interview moves to text. A screen that instead
+       * reported "the provider refused the mint" would be explaining the wrong
+       * layer to somebody who only wants to finish their rehearsal.
+       */
+      const giveUp = (first: RealtimeFallback) => {
+        startingRef.current = false;
+        if (!isReconnect) {
+          fallBack(first);
+          return;
+        }
+        if (reconnectsRef.current < MAX_RECONNECTS) {
+          reconnectsRef.current += 1;
+          void connectRef.current(true);
+          return;
+        }
+        fallBack(CONNECTION_LOST);
+      };
+
       if (isMounted()) {
         setStage('connecting');
         setFallback(null);
@@ -538,14 +586,14 @@ export function useRealtimeInterview(
       try {
         stream = await requestMicrophone();
       } catch (error) {
-        startingRef.current = false;
         const problem = toCaptureProblem(error);
-        fallBack({
+        giveUp({
           code: 'microphone',
           message: problem.message,
           remedy: problem.remedy,
           cause: null,
-          retryable: problem.code !== 'insecure_origin' && problem.code !== 'unsupported',
+          retryable:
+            problem.code !== 'insecure_origin' && problem.code !== 'unsupported',
         });
         return;
       }
@@ -560,8 +608,7 @@ export function useRealtimeInterview(
           // learner who has not stored a key. Either way the answer is the text
           // interview (§7).
           stopStream(stream);
-          startingRef.current = false;
-          fallBack({
+          giveUp({
             code: 'ai_unavailable',
             message:
               session.cause === 'no_user_key'
@@ -576,8 +623,7 @@ export function useRealtimeInterview(
 
         if (session.status === 'failed') {
           stopStream(stream);
-          startingRef.current = false;
-          fallBack({
+          giveUp({
             code: 'mint_failed',
             // The API's own message, already redacted — never a key, never the
             // secret this route mints.
@@ -623,9 +669,8 @@ export function useRealtimeInterview(
         if (line) connection.speakVerbatim(line);
       } catch (error) {
         stopStream(stream);
-        startingRef.current = false;
-        fallBack({
-          code: isReconnect ? 'connection_lost' : 'connection_failed',
+        giveUp({
+          code: 'connection_failed',
           message:
             error instanceof Error
               ? error.message
@@ -633,7 +678,7 @@ export function useRealtimeInterview(
           remedy:
             'You can carry on in text — nothing you have already answered is lost.',
           cause: null,
-          retryable: !isReconnect,
+          retryable: true,
         });
       }
     },
@@ -650,6 +695,9 @@ export function useRealtimeInterview(
   // the first officer turn, and a tool call relayed against a stale interview
   // id. The refs are re-pointed on every render so the connection always calls
   // the current one.
+
+  const connectRef = useRef(connect);
+  connectRef.current = connect;
 
   const handleToolCallRef = useRef(handleToolCall);
   handleToolCallRef.current = handleToolCall;
@@ -691,14 +739,7 @@ export function useRealtimeInterview(
         return;
       }
 
-      fallBack({
-        code: 'connection_lost',
-        message: 'The voice connection dropped and could not be re-established.',
-        remedy:
-          'You can carry on in text — the interview picks up exactly where it left off.',
-        cause: null,
-        retryable: false,
-      });
+      fallBack(CONNECTION_LOST);
     },
     [connect, fallBack, isMounted],
   );
