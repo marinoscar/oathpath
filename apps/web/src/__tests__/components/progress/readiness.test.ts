@@ -10,10 +10,16 @@ import {
   READINESS_COMPONENT_ORDER,
   UNWIRED_READINESS_COMPONENTS,
   readinessHasNoEvidence,
+  readinessEnglishSentencesAttempted,
   readinessTrendText,
   findPreviousReadinessScore,
 } from '../../../components/progress/readiness';
-import { readinessSnapshot, cappedReadinessSnapshot } from '../../utils/readiness-fixtures';
+import {
+  readinessSnapshot,
+  cappedReadinessSnapshot,
+  englishPractisedReadinessSnapshot,
+  legacyEnglishReadinessSnapshot,
+} from '../../utils/readiness-fixtures';
 import type { ReadinessEvidenceCounts } from '../../../types';
 
 describe('READINESS_COMPONENT_ORDER', () => {
@@ -53,6 +59,42 @@ describe('readinessHasNoEvidence', () => {
     for (const key of ['coverage', 'recall', 'retention', 'consistency', 'remediation'] as const) {
       expect(readinessHasNoEvidence(key, zeroCounts)).toBe(false);
     }
+  });
+
+  it('separates "practised and missed" from "no practice yet" for english', () => {
+    // Both score `english` at 0 credit. Only the second is an absence of
+    // evidence; telling the first learner "No evidence yet" would deny four
+    // sentences they actually attempted (`english-test.md` §6.2).
+    const practised = englishPractisedReadinessSnapshot().evidenceCounts;
+
+    expect(readinessHasNoEvidence('english', practised)).toBe(false);
+    expect(readinessHasNoEvidence('english', zeroCounts)).toBe(true);
+  });
+
+  it("reads a pre-E10 history row's legacy english shape as no evidence", () => {
+    // `GET /api/readiness/history` never recomputes, so this shape is still
+    // served for snapshots written before E10 — and it only ever counted
+    // civics answers spoken in English, always 0.
+    const legacy = legacyEnglishReadinessSnapshot().evidenceCounts;
+
+    expect(readinessHasNoEvidence('english', legacy)).toBe(true);
+  });
+});
+
+describe('readinessEnglishSentencesAttempted', () => {
+  it('sums reading and writing sentences, credit-independently', () => {
+    expect(
+      readinessEnglishSentencesAttempted(englishPractisedReadinessSnapshot().evidenceCounts.english),
+    ).toBe(4);
+    expect(
+      readinessEnglishSentencesAttempted(readinessSnapshot().evidenceCounts.english),
+    ).toBe(0);
+  });
+
+  it('resolves the legacy shape to 0 rather than NaN or a crash', () => {
+    expect(
+      readinessEnglishSentencesAttempted(legacyEnglishReadinessSnapshot().evidenceCounts.english),
+    ).toBe(0);
   });
 });
 

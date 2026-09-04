@@ -65,7 +65,16 @@ const readinessEvidenceCountsSchema = z.object({
   }),
   consistency: z.object({ distinctPracticeDaysInLast14: z.number().int() }),
   remediation: z.object({ everWeakCount: z.number().int(), remediatedCount: z.number().int() }),
-  english: z.object({ distinctQuestionsCorrectSpokenInEnglish: z.number().int() }),
+  // `english-test.md` §6.2, replacing E6's single
+  // `distinctQuestionsCorrectSpokenInEnglish` count. The two credit fields are
+  // NOT `.int()`: a `partial` sentence contributes `0.5`, so a fractional
+  // credit is the ordinary case, not a rounding artefact.
+  english: z.object({
+    readingSentences: z.number().int(),
+    writingSentences: z.number().int(),
+    readingCredit: z.number(),
+    writingCredit: z.number(),
+  }),
   spoken: z.object({ attempts: z.number().int() }),
   interview: z.object({ attempts: z.number().int() }),
 });

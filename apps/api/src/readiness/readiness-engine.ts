@@ -28,10 +28,18 @@ import type { MasteryState } from '../practice/mastery/scheduler';
 // `ReadinessService` is responsible for querying Prisma and assembling
 // `ReadinessEvidence`, exactly as `PracticeService` assembles a
 // `MasteryRecord` before ever calling `nextSchedule`. This function never
-// sees a `userId`, a Prisma client, or a test-version code — it sees eight
-// already-resolved numbers (well, seven numbers and one array of mastery
-// rows and one array of attempt outcomes) and returns a result that is, by
+// sees a `userId`, a Prisma client, or a test-version code — it sees four
+// already-resolved numbers and three arrays (mastery rows, recent attempt
+// outcomes, and — since #141 — one entry per distinct English sentence
+// attempted in the trailing window) and returns a result that is, by
 // construction, reproducible from those inputs alone.
+//
+// `englishBestOutcomesInWindow` is the newest member of that contract and
+// takes the SAME shape as `recentQualifyingAttempts` for the same reason:
+// the window, the distinct-sentence grouping and the best-of reduction are
+// all QUERY concerns the caller owns, while the credit table and the two
+// denominators below are SCORING concerns this file owns. Neither half can
+// be tested without a database if they are mixed.
 //
 // -----------------------------------------------------------------------------
 // THE STRUCTURAL CAP (§2.9) — NO SECOND CLAMP, ANYWHERE, EVER
@@ -40,13 +48,32 @@ import type { MasteryState } from '../practice/mastery/scheduler';
 // `english` (0.05) + `spoken` (0.10) + `interview` (0.10) sum to 0.25 of the
 // total weight, and all three are mathematically 0 for a learner with no
 // evidence for any of them. The weighted score can therefore never exceed 75
-// for a typed-only learner — a fact that falls directly out of the weights
-// table below, and NOT a `min(score, 75)` step added on top of it. A second,
+// FOR A LEARNER WITH NONE OF THE THREE — §2.9's own wording, and worth
+// keeping exactly, because since #141 that is no longer the same set of
+// people as "a learner whose `capReason` is `typed_only`". English evidence
+// is earnable without ever speaking a civics answer, so a capped learner who
+// has it tops out at 75 + english's own 0.05 = 80, not 75. That is the
+// weights table talking, not a leak: `english` is a real, continuously
+// contributing component, and §6.3's instruction was to leave `capReason`
+// alone, NOT to withhold the 0.05 a learner earned. A fact that falls
+// directly out of the weights table below, and NOT a `min(score, 75)` step
+// added on top of it. A second,
 // hand-maintained ceiling constant is exactly the "two things that must
 // agree but are not derived from each other" category of bug
 // `journey-shell.md` and `ai-model-roles.ts` both already argue against —
 // see §2.9/§11 for the rejected alternative, recorded there so a later
 // reader does not "fix" this file by adding one back.
+//
+// `english` HAS REAL EVIDENCE SINCE #141 (epic #59 / E10) AND STILL DOES NOT
+// LIFT THE CAP, which is the one thing about that epic most likely to be
+// "corrected" by a later reader who notices the asymmetry and thinks it is an
+// oversight. It is not: `english-test.md` §6.3 rules it out by name. Reading
+// and writing English sentences is not evidence that a learner can answer a
+// CIVICS question aloud, and the cap exists specifically to withhold a high
+// score from a learner who has never done that. `capReason` below therefore
+// still reads exactly two paths — `spoken` and `interview` — and E10 changed
+// neither of them. What English evidence moves is `english`'s own 0.05
+// weight, and nothing else.
 // =============================================================================
 
 /**
@@ -104,6 +131,62 @@ type QualifyingOutcome = 'correct' | 'partial' | 'incorrect' | 'skipped';
 export const RECALL_MIN_QUALIFYING_ATTEMPTS = 5;
 
 /**
+ * What a `partial` response is worth, anywhere in this engine.
+ *
+ * ONE CONSTANT, TWO COMPONENTS, ON PURPOSE. `recall` (§2.2) has weighted a
+ * partial at half a correct since E6; `english` (`english-test.md` §6.2)
+ * credits a `partial` sentence the same, and that document is explicit that
+ * the number is REUSED rather than independently chosen: both are answering
+ * the identical underlying question ("how much should a not-quite-right-but-
+ * not-wrong response count for"), and two components silently settling on two
+ * different answers to it is exactly the drift this codebase's registries and
+ * shared constants exist to prevent. Declaring it once makes that claim
+ * structurally true rather than merely asserted in a comment.
+ */
+export const PARTIAL_ANSWER_CREDIT = 0.5;
+
+/**
+ * The two English segments (`english-test.md` §5.2), as a local string union
+ * rather than Prisma's `EnglishSegmentKind` — this file imports no Prisma,
+ * ever, exactly as `QualifyingOutcome` above restates `PracticeOutcome`'s
+ * values instead of importing them.
+ */
+export type EnglishSegment = 'reading' | 'writing';
+
+/** `english_attempts.outcome`'s three values (§5.1), restated for the same reason. */
+export type EnglishSegmentOutcome = 'correct' | 'partial' | 'incorrect';
+
+/**
+ * `english-test.md` §6.2's two target denominators — how many sentences'
+ * worth of credit, per segment, count as a full `1.0` for that segment.
+ *
+ * THEY DIFFER ON PURPOSE, AND THE DIFFERENCE IS THE DESIGN. A reading pass is
+ * scored against a recogniser's transcript — a learner-confirmed one, but
+ * still one imperfect step between what the learner said and what was scored
+ * — while a writing pass is scored against exactly the characters the learner
+ * typed, with no intermediate transformation at all. One reading pass is
+ * therefore weaker evidence of the underlying skill than one writing pass, so
+ * more of them are needed to reach the same confidence. §6.2's own worked
+ * arithmetic, reproduced because it is the thing a reader will otherwise
+ * mistake for a bug: three all-correct reading passes give
+ * `min(3/6, 1) = 0.5` → `0.25` of `english`, while three all-correct WRITING
+ * passes give `min(3/4, 1) = 0.75` → `0.375`. Same raw count, different
+ * contribution, because the two kinds of evidence are deliberately not
+ * interchangeable. Do not "fix" this into one shared denominator.
+ */
+export const ENGLISH_READING_TARGET = 6;
+export const ENGLISH_WRITING_TARGET = 4;
+
+/**
+ * How the two segment values combine into `english` (§6.2:
+ * `0.5 * readingValue + 0.5 * writingValue`) — an even split, so a learner
+ * who has only ever done one segment tops out at half the component no matter
+ * how much of that segment they do. Reading and writing are two separate
+ * requirements of the real test, not two interchangeable ways of clearing one.
+ */
+const ENGLISH_SEGMENT_SHARE = 0.5;
+
+/**
  * Everything `computeReadiness` needs, already resolved from Prisma by the
  * caller. §5's exact shape.
  */
@@ -120,9 +203,25 @@ export interface ReadinessEvidence {
    */
   recentQualifyingAttempts: Array<{ outcome: QualifyingOutcome }>;
 
+  /**
+   * One entry per DISTINCT `english_sentences` row this learner attempted
+   * inside the trailing `ENGLISH_WINDOW_DAYS` window (`english-test.md`
+   * §6.1), carrying that sentence's BEST in-window outcome — a sentence
+   * attempted three times in the window, twice `incorrect` and once
+   * `correct`, appears exactly once, as `correct` (§6.2).
+   *
+   * The caller applies the window, the distinct-sentence grouping and the
+   * best-of reduction; this function applies none of the three — the same
+   * division of labour `recentQualifyingAttempts` above already states for
+   * its own limit and filter. An empty array is the ordinary case for most
+   * learners and means `english = 0`, never "unmeasured": unlike `recall`,
+   * `english` has never had a second meaning for `0` to be confused with
+   * (§6.2's own closing paragraph).
+   */
+  englishBestOutcomesInWindow: Array<{ kind: EnglishSegment; outcome: EnglishSegmentOutcome }>;
+
   distinctPracticeDaysInLast14: number;
   distinctQuestionsCorrectSpoken: number;
-  distinctQuestionsCorrectSpokenInEnglish: number;
   mockInterviewsPassed: number;
 }
 
@@ -151,7 +250,14 @@ export interface ReadinessEvidenceCounts {
   retention: { masteredCount: number; reviewCount: number; totalAttemptedQuestions: number };
   consistency: { distinctPracticeDaysInLast14: number };
   remediation: { everWeakCount: number; remediatedCount: number };
-  english: { distinctQuestionsCorrectSpokenInEnglish: number };
+  english: {
+    /** Distinct sentences of each segment with any attempt in the window — the count that separates "no practice" from "practised and missed". */
+    readingSentences: number;
+    writingSentences: number;
+    /** The credited totals §6.2's two ratios were actually taken over. Fractional by construction: a `partial` sentence adds `PARTIAL_ANSWER_CREDIT`. */
+    readingCredit: number;
+    writingCredit: number;
+  };
   spoken: { attempts: number };
   interview: { attempts: number };
 }
@@ -233,7 +339,7 @@ function computeRecall(evidence: ReadinessEvidence): {
   const value =
     qualifyingAttempts < RECALL_MIN_QUALIFYING_ATTEMPTS
       ? 0
-      : safeRatio(correctCount + 0.5 * partialCount, qualifyingAttempts);
+      : safeRatio(correctCount + PARTIAL_ANSWER_CREDIT * partialCount, qualifyingAttempts);
 
   return {
     result: toResult('recall', value),
@@ -321,19 +427,67 @@ function computeRemediation(evidence: ReadinessEvidence): {
 }
 
 /**
- * §2.6 — declared now, zero evidence until E11. `min(distinctQuestions
- * CorrectSpokenInEnglish / 20, 1)`.
+ * `english-test.md` §6.2 — REAL EVIDENCE SINCE #141 (epic #59 / E10). This was
+ * `min(distinctQuestionsCorrectSpokenInEnglish / 20, 1)` over a number
+ * `ReadinessService` hardcoded to `0`, with `readiness-model.md` §2.6's own
+ * table naming a later epic as the one that would supply it. E10 supplied it,
+ * and it is not that number: `english_attempts` measures reading and writing
+ * ENGLISH SENTENCES, which is a different quantity from "civics questions
+ * answered aloud in English" and cannot be dressed up as one, so the formula
+ * this component is scored by changed with the evidence rather than the
+ * evidence being bent to fit the old formula.
+ *
+ * Credit each distinct in-window sentence once, at its best in-window
+ * outcome — `correct` = 1, `partial` = `PARTIAL_ANSWER_CREDIT`, `incorrect` =
+ * 0 — then:
+ *
+ *   readingValue = min(readingCredit / ENGLISH_READING_TARGET, 1)
+ *   writingValue = min(writingCredit / ENGLISH_WRITING_TARGET, 1)
+ *   english      = 0.5 * readingValue + 0.5 * writingValue
+ *
+ * A learner with no in-window attempts of either kind scores `0` with both
+ * `readingSentences` and `writingSentences` reporting a true `0`, which is
+ * what lets a renderer say WHICH evidence is missing ("no reading or writing
+ * practice in the last 30 days") instead of showing a bare, unexplained 0%.
+ * Note the two counts are what distinguishes that case from a learner who
+ * practised and missed everything: both score `0`, and they are not the same
+ * fact about a person.
+ *
+ * THIS DOES NOT LIFT THE STRUCTURAL CAP — see the file header and §6.3.
  */
 function computeEnglish(evidence: ReadinessEvidence): {
   result: ReadinessComponentResult;
   counts: ReadinessEvidenceCounts['english'];
 } {
-  const value = Math.min(evidence.distinctQuestionsCorrectSpokenInEnglish / 20, 1);
+  let readingSentences = 0;
+  let writingSentences = 0;
+  let readingCredit = 0;
+  let writingCredit = 0;
+
+  for (const sentence of evidence.englishBestOutcomesInWindow) {
+    const credit =
+      sentence.outcome === 'correct'
+        ? 1
+        : sentence.outcome === 'partial'
+          ? PARTIAL_ANSWER_CREDIT
+          : 0;
+
+    if (sentence.kind === 'reading') {
+      readingSentences += 1;
+      readingCredit += credit;
+    } else {
+      writingSentences += 1;
+      writingCredit += credit;
+    }
+  }
+
+  const readingValue = Math.min(readingCredit / ENGLISH_READING_TARGET, 1);
+  const writingValue = Math.min(writingCredit / ENGLISH_WRITING_TARGET, 1);
+  const value = ENGLISH_SEGMENT_SHARE * readingValue + ENGLISH_SEGMENT_SHARE * writingValue;
+
   return {
     result: toResult('english', value),
-    counts: {
-      distinctQuestionsCorrectSpokenInEnglish: evidence.distinctQuestionsCorrectSpokenInEnglish,
-    },
+    counts: { readingSentences, writingSentences, readingCredit, writingCredit },
   };
 }
 
@@ -413,6 +567,12 @@ export function computeReadiness(evidence: ReadinessEvidence): ReadinessResult {
   // all, even once. Read from the two `evidenceCounts` paths named
   // `attempts` specifically so a reader can find the cap's own inputs
   // without also knowing which components they happen to feed.
+  //
+  // TWO PATHS, NOT THREE. `evidenceCounts.english` is deliberately absent
+  // from this expression even though it now carries real counts
+  // (`english-test.md` §6.3): a learner could read and write every sentence
+  // in the bank perfectly and still have never once spoken a civics answer,
+  // which is the exact learner the cap exists to hold under 75.
   const capReason: CapReason =
     evidenceCounts.spoken.attempts === 0 && evidenceCounts.interview.attempts === 0
       ? 'typed_only'

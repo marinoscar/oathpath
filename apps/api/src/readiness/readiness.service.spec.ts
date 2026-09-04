@@ -7,8 +7,8 @@ import { PrismaService } from '../prisma/prisma.service';
 import { ReadinessService } from './readiness.service';
 
 // =============================================================================
-// ReadinessService.ensureNarrative — tests (issue #134, epic #55 / E6
-// "Readiness and Progress")
+// ReadinessService — tests (issue #134, epic #55 / E6; issue #141, epic #59 /
+// E10)
 // =============================================================================
 //
 // The Progress Guide's own decisions, not the plumbing `readiness-engine
@@ -47,7 +47,7 @@ function snapshotRow(overrides: Record<string, unknown> = {}) {
       retention: { masteredCount: 12, reviewCount: 20, totalAttemptedQuestions: 55 },
       consistency: { distinctPracticeDaysInLast14: 7 },
       remediation: { everWeakCount: 5, remediatedCount: 4 },
-      english: { distinctQuestionsCorrectSpokenInEnglish: 0 },
+      english: { readingSentences: 0, writingSentences: 0, readingCredit: 0, writingCredit: 0 },
       spoken: { attempts: 0 },
       interview: { attempts: 1 },
     },
@@ -60,7 +60,7 @@ function snapshotRow(overrides: Record<string, unknown> = {}) {
   };
 }
 
-describe('ReadinessService.ensureNarrative', () => {
+describe('ReadinessService', () => {
   let service: ReadinessService;
   let prisma: any;
   let clock: { now: jest.Mock; calendarDateIn: jest.Mock };
@@ -70,6 +70,9 @@ describe('ReadinessService.ensureNarrative', () => {
     prisma = {
       readinessSnapshot: {
         update: jest.fn(),
+      },
+      englishAttempt: {
+        findMany: jest.fn().mockResolvedValue([]),
       },
     };
 
@@ -237,6 +240,93 @@ describe('ReadinessService.ensureNarrative', () => {
       expect(result.narrative).toBeNull();
       expect(prisma.readinessSnapshot.update).not.toHaveBeenCalled();
       expect(Logger.prototype.warn).toHaveBeenCalled();
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // english evidence: the window and the best-of reduction (issue #141,
+  // epic #59 / E10 — `docs/specs/english-test.md` §6.1-§6.2)
+  // ---------------------------------------------------------------------------
+  //
+  // The half of the `english` component that is NOT in the pure engine. The
+  // engine owns the credit table and the two denominators (covered without a
+  // database in `readiness-engine.spec.ts`); this owns the 30-day boundary and
+  // the "one entry per distinct sentence, at its best in-window outcome" rule,
+  // and both halves have to be right for the component to be.
+
+  describe('english evidence assembly', () => {
+    const SENTENCE_A = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    const SENTENCE_B = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+
+    /** The private assembler, reached the way a unit test reaches one. */
+    function collect(): Promise<Array<{ kind: string; outcome: string }>> {
+      return (service as any).collectEnglishBestOutcomesInWindow(USER_A);
+    }
+
+    it('bounds the query at 30 days before the injected clock, never a wall-clock read', async () => {
+      await collect();
+
+      expect(clock.now).toHaveBeenCalled();
+      const where = prisma.englishAttempt.findMany.mock.calls[0][0].where;
+      expect(where.userId).toBe(USER_A);
+      expect(where.answeredAt.gte).toEqual(new Date('2026-05-02T12:00:00Z'));
+    });
+
+    it('uses only positive filters — no negative filter on any column', async () => {
+      await collect();
+
+      // `english_attempts.asrConfidence` is the table's one nullable column,
+      // and a `{ not: ... }` on a nullable column silently drops every null
+      // row (SQL's `NULL <> x` is UNKNOWN). This query neither selects nor
+      // filters on it, and every clause it does carry is a positive one — the
+      // structural reason the trap cannot be sprung here.
+      const serialized = JSON.stringify(prisma.englishAttempt.findMany.mock.calls[0][0]);
+      expect(serialized).not.toContain('not');
+      expect(serialized).not.toContain('asrConfidence');
+    });
+
+    it('credits a sentence once, at its best in-window outcome', async () => {
+      // §6.2's own worked case: twice incorrect and once correct counts ONCE,
+      // as correct — a learner is neither inflated by re-attempting a sentence
+      // they already passed, nor held down by the misses that preceded it.
+      prisma.englishAttempt.findMany.mockResolvedValue([
+        { sentenceId: SENTENCE_A, kind: 'reading', outcome: 'incorrect' },
+        { sentenceId: SENTENCE_A, kind: 'reading', outcome: 'correct' },
+        { sentenceId: SENTENCE_A, kind: 'reading', outcome: 'incorrect' },
+      ]);
+
+      await expect(collect()).resolves.toEqual([{ kind: 'reading', outcome: 'correct' }]);
+    });
+
+    it('ranks correct over partial over incorrect regardless of arrival order', async () => {
+      prisma.englishAttempt.findMany.mockResolvedValue([
+        { sentenceId: SENTENCE_A, kind: 'writing', outcome: 'correct' },
+        { sentenceId: SENTENCE_A, kind: 'writing', outcome: 'partial' },
+        { sentenceId: SENTENCE_B, kind: 'writing', outcome: 'incorrect' },
+        { sentenceId: SENTENCE_B, kind: 'writing', outcome: 'partial' },
+      ]);
+
+      await expect(collect()).resolves.toEqual([
+        { kind: 'writing', outcome: 'correct' },
+        { kind: 'writing', outcome: 'partial' },
+      ]);
+    });
+
+    it('keeps the two segments apart', async () => {
+      prisma.englishAttempt.findMany.mockResolvedValue([
+        { sentenceId: SENTENCE_A, kind: 'reading', outcome: 'correct' },
+        { sentenceId: SENTENCE_B, kind: 'writing', outcome: 'partial' },
+      ]);
+
+      await expect(collect()).resolves.toEqual([
+        { kind: 'reading', outcome: 'correct' },
+        { kind: 'writing', outcome: 'partial' },
+      ]);
+    });
+
+    it('is an empty array, never a null or a thrown error, with no rows at all', async () => {
+      prisma.englishAttempt.findMany.mockResolvedValue([]);
+      await expect(collect()).resolves.toEqual([]);
     });
   });
 });

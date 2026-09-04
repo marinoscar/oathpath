@@ -185,7 +185,7 @@ const COMPONENT_LABELS: Record<ComponentKey, string> = {
   retention: 'Retention (how much of what was studied has actually stuck)',
   consistency: 'Consistency (practice spread across recent days, not crammed into one)',
   remediation: 'Remediation (recovery on questions that were once missed repeatedly)',
-  english: 'Spoken English practice',
+  english: 'English reading and writing practice',
   spoken: 'Spoken practice (any language)',
   interview: 'Mock interviews passed',
 };
@@ -212,8 +212,16 @@ function evidenceSentence(key: ComponentKey, result: ReadinessResult): string {
       return counts.remediation.everWeakCount > 0
         ? `${counts.remediation.remediatedCount} of ${counts.remediation.everWeakCount} once-struggled questions recovered.`
         : 'no questions have ever been struggled on repeatedly.';
-    case 'english':
-      return `${counts.english.distinctQuestionsCorrectSpokenInEnglish} distinct questions answered correctly aloud in English.`;
+    case 'english': {
+      // `english-test.md` §6.2's own honesty convention: name the missing
+      // evidence rather than narrating a bare 0. "No practice in the window"
+      // and "practised and missed" are both `0` for this component and are
+      // not the same thing to say to a learner.
+      const { readingSentences, writingSentences } = counts.english;
+      return readingSentences + writingSentences > 0
+        ? `${readingSentences} reading and ${writingSentences} writing sentence(s) practiced in the last 30 days.`
+        : 'no reading or writing practice in the last 30 days.';
+    }
     case 'spoken':
       return `${counts.spoken.attempts} distinct questions answered correctly aloud.`;
     case 'interview':

@@ -48,7 +48,7 @@ export function readinessSnapshot(
       retention: { masteredCount: 12, reviewCount: 20, totalAttemptedQuestions: 55 },
       consistency: { distinctPracticeDaysInLast14: 7 },
       remediation: { everWeakCount: 5, remediatedCount: 4 },
-      english: { distinctQuestionsCorrectSpokenInEnglish: 0 },
+      english: { readingSentences: 0, writingSentences: 0, readingCredit: 0, writingCredit: 0 },
       spoken: { attempts: 0 },
       interview: { attempts: 1 },
     },
@@ -102,7 +102,7 @@ export function cappedReadinessSnapshot(
       retention: { masteredCount: 2, reviewCount: 6, totalAttemptedQuestions: 20 },
       consistency: { distinctPracticeDaysInLast14: 3 },
       remediation: { everWeakCount: 2, remediatedCount: 1 },
-      english: { distinctQuestionsCorrectSpokenInEnglish: 0 },
+      english: { readingSentences: 0, writingSentences: 0, readingCredit: 0, writingCredit: 0 },
       spoken: { attempts: 0 },
       interview: { attempts: 0 },
     },
@@ -113,6 +113,57 @@ export function cappedReadinessSnapshot(
       reason:
         'Your civics knowledge is strong, but you have limited interview practice. Completing two mock interviews is the best way to strengthen your readiness now.',
       path: '/practice',
+    },
+    ...overrides,
+  });
+}
+
+/**
+ * A learner who HAS practised English inside the 30-day window and earned no
+ * credit for it — four distinct sentences attempted, every one missed.
+ *
+ * `english` still scores `0` (`english-test.md` §6.2: `incorrect` earns no
+ * credit), so this fixture and `cappedReadinessSnapshot` are indistinguishable
+ * by score alone. They are distinguishable by `readingSentences` /
+ * `writingSentences`, and that is the entire reason those two counts exist:
+ * "practised and missed" is a measurement, "no practice yet" is an absence,
+ * and only the second may render "No evidence yet".
+ */
+export function englishPractisedReadinessSnapshot(
+  overrides: Partial<ReadinessSnapshotResponse> = {},
+): ReadinessSnapshotResponse {
+  const base = readinessSnapshot();
+
+  return readinessSnapshot({
+    id: 'snapshot-english-practised',
+    evidenceCounts: {
+      ...base.evidenceCounts,
+      english: { readingSentences: 3, writingSentences: 1, readingCredit: 0, writingCredit: 0 },
+    },
+    ...overrides,
+  });
+}
+
+/**
+ * A snapshot carrying `english`'s PRE-E10 wire shape.
+ *
+ * Not a museum piece: `GET /api/readiness/history` never recomputes a stored
+ * snapshot, so rows written before E10 deployed serve
+ * `distinctQuestionsCorrectSpokenInEnglish` verbatim and a history page
+ * spanning that deploy holds both shapes at once. This is what the renderer
+ * must not crash on — see `readinessEnglishSentencesAttempted`.
+ */
+export function legacyEnglishReadinessSnapshot(
+  overrides: Partial<ReadinessSnapshotResponse> = {},
+): ReadinessSnapshotResponse {
+  const base = readinessSnapshot();
+
+  return readinessSnapshot({
+    id: 'snapshot-legacy-english',
+    computedAt: '2026-04-01T12:00:00.000Z',
+    evidenceCounts: {
+      ...base.evidenceCounts,
+      english: { distinctQuestionsCorrectSpokenInEnglish: 0 },
     },
     ...overrides,
   });

@@ -39,6 +39,8 @@ import { ORIENTED_PROFILE, UNORIENTED_PROFILE } from '../utils/journey-fixtures'
 import { journeyProfileHandler } from '../utils/civics-fixtures';
 import {
   cappedReadinessSnapshot,
+  englishPractisedReadinessSnapshot,
+  legacyEnglishReadinessSnapshot,
   readinessHistoryResponse,
   readinessSnapshot,
 } from '../utils/readiness-fixtures';
@@ -477,6 +479,41 @@ describe('readiness', () => {
     // three — the same honesty rule `ProgressMastery`'s own empty state
     // already enforces one section up.
     expect(screen.queryByText('0%')).not.toBeInTheDocument();
+  });
+
+  it('renders a real 0% for english once sentences were attempted and missed', async () => {
+    server.use(...progressHandlers());
+    // Four sentences attempted in the window, none of them credited: `english`
+    // is 0, but it is a MEASUREMENT now, not an absence. Only `spoken` and
+    // `interview` may still say "No evidence yet".
+    serveReadiness(englishPractisedReadinessSnapshot());
+    renderProgress();
+
+    await screen.findByRole('progressbar', { name: /readiness score/i });
+
+    // The Day 3 base already has one credited interview, so `spoken` is the
+    // only row left with nothing behind it.
+    expect(screen.getAllByText('No evidence yet')).toHaveLength(1);
+    expect(
+      screen.getByRole('progressbar', { name: 'Reading and writing English: 0%' }),
+    ).toBeInTheDocument();
+  });
+
+  it("renders a pre-E10 history row's legacy english shape as no evidence, not a crash", async () => {
+    server.use(...progressHandlers());
+    // `GET /api/readiness/history` never recomputes, so snapshots stored
+    // before E10 still arrive carrying the retired
+    // `distinctQuestionsCorrectSpokenInEnglish` field and none of the four
+    // new ones. The page must read that as "no evidence" rather than NaN%.
+    serveReadiness(legacyEnglishReadinessSnapshot());
+    renderProgress();
+
+    await screen.findByRole('progressbar', { name: /readiness score/i });
+
+    // `english` and `spoken`; the Day 3 base's one interview keeps that row
+    // out of the count.
+    expect(screen.getAllByText('No evidence yet')).toHaveLength(2);
+    expect(screen.queryByText('NaN%')).not.toBeInTheDocument();
   });
 
   it('does not claim "No evidence yet" for a currently-earnable component, even at a low value', async () => {

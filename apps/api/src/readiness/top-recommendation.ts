@@ -17,7 +17,7 @@ import type { ReadinessComponentKey, ReadinessResult } from './readiness-engine'
 //
 // When `capReason === 'typed_only'`, the recommendation is always the
 // capped-evidence requirement (`componentKey: null`), never a headroom pick
-// among the five earnable components — a capped learner is told about the
+// among the earnable components — a capped learner is told about the
 // cap every time, because it is the single most consequential true thing
 // this product can say to them, ahead of any smaller headroom optimization.
 //
@@ -40,14 +40,43 @@ import type { ReadinessComponentKey, ReadinessResult } from './readiness-engine'
 // UNCAPPED: GREATEST `weight * (1 - value)`, TIE-BROKEN BY DECLARED ORDER
 // -----------------------------------------------------------------------------
 //
-// Among `coverage`, `recall`, `retention`, `consistency`, `remediation` only
-// — never `english`/`spoken`/`interview`, which are declared-but-unwired
-// (§2.6-§2.8): recommending "go do more spoken/interview practice" would be
-// recommending a feature that does not exist yet. Ties are broken by §2's
-// declared component order, the same stable-tie-break discipline
-// `selector.ts`'s `orderNewByCategoryCoverage` already applies, for the
-// identical reason: a comparator that can return a genuine tie must not
-// reorder nondeterministically between two calls on identical input.
+// Among the six components a learner can actually move today — never
+// `spoken`/`interview`, which have no practice surface of their own to send
+// anyone to: recommending them would be recommending a feature that does not
+// exist. Ties are broken by §2's declared component order, the same
+// stable-tie-break discipline `selector.ts`'s `orderNewByCategoryCoverage`
+// already applies, for the identical reason: a comparator that can return a
+// genuine tie must not reorder nondeterministically between two calls on
+// identical input.
+//
+// `english` IS THE SIXTH, SINCE #141 (epic #59 / E10), and it joined on this
+// file's own stated precondition rather than by exception: `english_attempts`
+// is real, `/api/english/*` is mounted, and English practice is something a
+// learner can go and do. `english-test.md` §6.4 is the instruction.
+//
+// -----------------------------------------------------------------------------
+// EACH COMPONENT NAMES ITS OWN DESTINATION
+// -----------------------------------------------------------------------------
+//
+// `path` moved into `copyFor` alongside the copy rather than staying a single
+// `'/practice'` shared by every branch. Behaviour is unchanged today — all six
+// point at `/practice` — but the header's rule above ("A RECOMMENDATION MUST
+// POINT AT THE DESTINATION IT NAMES") is only enforceable if the sentence and
+// the link are edited in the same three lines. The capped card is the worked
+// example of what happens otherwise: it named mock interviews and pointed at
+// the general practice page for two whole epics.
+//
+// `english`'s path is the live instance of that debt, and it is recorded here
+// rather than left to be discovered. THE READING AND WRITING SCREENS DO NOT
+// EXIST YET — they are issues #144 and #147, later in this same epic, and
+// `apps/web/src/App.tsx` today mounts no `/practice/english`,
+// `/practice/reading` or `/practice/writing` route. So this card points at
+// `/practice`, which is real, and its copy is written not to promise a screen
+// that would 404: it says English practice is what would move the number, and
+// does not say "tap here to start a reading test". Inventing the future path
+// now would ship a recommendation whose one action is a redirect to `/`.
+// WHEN #144/#147 LAND, RE-POINT THIS ONE PATH — exactly as #133 re-pointed
+// the capped card's — and tighten the copy to name the screen.
 // =============================================================================
 
 export interface ReadinessTopRecommendation {
@@ -58,13 +87,14 @@ export interface ReadinessTopRecommendation {
   path: string;
 }
 
-/** The five components a learner can actually move today (§8.2), in tie-break order. */
+/** The components a learner can actually move today (§8.2), in tie-break order. */
 const EARNABLE_COMPONENT_KEYS: readonly ReadinessComponentKey[] = [
   'coverage',
   'recall',
   'retention',
   'consistency',
   'remediation',
+  'english',
 ];
 
 /**
@@ -86,8 +116,11 @@ function cappedRecommendation(): ReadinessTopRecommendation {
   };
 }
 
-/** One honest, non-hyped title/reason per earnable component, grounded only in this result's own `evidenceCounts`. */
-function copyFor(key: ReadinessComponentKey, result: ReadinessResult): { title: string; reason: string } {
+/** One honest, non-hyped title/reason/destination per earnable component, grounded only in this result's own `evidenceCounts`. */
+function copyFor(
+  key: ReadinessComponentKey,
+  result: ReadinessResult,
+): { title: string; reason: string; path: string } {
   const counts = result.evidenceCounts;
 
   switch (key) {
@@ -98,6 +131,7 @@ function copyFor(key: ReadinessComponentKey, result: ReadinessResult): { title: 
         reason:
           `You've covered ${distinctQuestionsAttempted} of ${totalQuestionsInVersion} questions in ` +
           'the bank — practicing ones you haven’t touched yet broadens what you’re actually being tested on.',
+        path: '/practice',
       };
     }
     case 'recall': {
@@ -110,6 +144,7 @@ function copyFor(key: ReadinessComponentKey, result: ReadinessResult): { title: 
               'more correct answers without a hint or a reveal is the strongest evidence you can add.'
             : 'You don’t have enough unassisted answers yet to measure this — answering a few ' +
               'questions without a hint or a reveal is the fastest way to build that evidence.',
+        path: '/practice',
       };
     }
     case 'retention': {
@@ -122,6 +157,7 @@ function copyFor(key: ReadinessComponentKey, result: ReadinessResult): { title: 
               'haven’t been verified as mastered yet — a few more correct answers on different days will lock them in.'
             : 'Verifying what you’ve already studied on more than one day is what turns it from ' +
               '"seen once" into something you can rely on in the interview.',
+        path: '/practice',
       };
     }
     case 'consistency': {
@@ -131,6 +167,7 @@ function copyFor(key: ReadinessComponentKey, result: ReadinessResult): { title: 
         reason:
           `You've practiced on ${distinctPracticeDaysInLast14} of the last 14 days — spreading practice ` +
           'across more days is stronger evidence than one long session.',
+        path: '/practice',
       };
     }
     case 'remediation': {
@@ -145,6 +182,26 @@ function copyFor(key: ReadinessComponentKey, result: ReadinessResult): { title: 
               'more right now than new material.'
             : 'You don’t have any struggling questions outstanding right now — keep it that way by ' +
               'catching a slip early the next time one comes up.',
+        path: '/practice',
+      };
+    }
+    case 'english': {
+      const { readingSentences, writingSentences } = counts.english;
+      const practised = readingSentences + writingSentences;
+      return {
+        title: 'Practice reading and writing English',
+        reason:
+          practised > 0
+            ? `In the last 30 days you've worked through ${readingSentences} reading ` +
+              `sentence${readingSentences === 1 ? '' : 's'} and ${writingSentences} writing ` +
+              `sentence${writingSentences === 1 ? '' : 's'} — the interview tests both, and more of ` +
+              'whichever you’ve done less of is what moves this the most.'
+            : 'You haven’t practiced reading or writing a sentence in the last 30 days — the ' +
+              'interview asks for both, and neither takes long to build evidence for.',
+        // `/practice`, not a reading or writing screen: those are #144/#147 and
+        // do not exist yet. See this file's header — the copy above is written
+        // to stay true at this destination until they do.
+        path: '/practice',
       };
     }
     default:
@@ -176,7 +233,7 @@ export function buildTopRecommendation(result: ReadinessResult): ReadinessTopRec
 
   // `EARNABLE_COMPONENT_KEYS` is a non-empty constant, so `best` is always set.
   const { key } = best!;
-  const { title, reason } = copyFor(key, result);
+  const { title, reason, path } = copyFor(key, result);
 
-  return { componentKey: key, title, reason, path: '/practice' };
+  return { componentKey: key, title, reason, path };
 }

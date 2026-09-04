@@ -506,14 +506,20 @@ loop. `ReadinessService` owns every Prisma read that assembles the evidence,
 calls the engine, and persists the result — the engine itself never sees a
 `userId`.
 
-**The structural 75-point cap has no clamp.** `english` (0.05) + `spoken`
-(0.10) + `interview` (0.10) sum to 0.25 of the total weight and are
-mathematically `0` for a learner with no such evidence, so a typed-only
-score can never exceed 75 — a fact that falls directly out of the weights
-table, not a hand-maintained `min(score, 75)` ceiling that could drift out
-of sync with it. `capReason` (`'typed_only'` / `null`) is a separate,
-binary signal from `score` itself: it answers "is there a structural reason
-you can't move past a number," not "how close are you to that number."
+**The structural cap has no clamp.** `spoken` (0.10) + `interview` (0.10)
+sum to 0.20 of the total weight and are mathematically `0` for a learner
+with no spoken-answer or mock-interview evidence — the two paths
+`capReason` (`'typed_only'` / `null`) actually reads — so a `typed_only`
+score can never exceed 80, a fact that falls directly out of the weights
+table, not a hand-maintained `min(score, 80)` ceiling that could drift out
+of sync with it. `english` (0.05, real since #141/E10) is earnable
+independently of either — reading and writing English sentences is not
+evidence a learner can answer a civics question aloud, so `english`
+deliberately does not lift `capReason` — which is why a `typed_only`
+learner's ceiling is 80 with full `english` credit and 75 with none; see
+`docs/specs/readiness-model.md` §2.9. `capReason` is a separate, binary
+signal from `score` itself: it answers "is there a structural reason you
+can't move past a number," not "how close are you to that number."
 
 Stage transitions from a snapshot's score (`remembering → practicing` at
 50, `practicing → performing` at 65, `performing → ready` at 80 **and**

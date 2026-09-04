@@ -57,6 +57,8 @@ let sessions: Map<string, any>;
 let attempts: Map<string, any>;
 /** `readiness_snapshots`, keyed by id — the append-only store that makes staleness/history real. */
 let snapshots: Map<string, any>;
+/** `english_attempts`, keyed by id — the `english` component's own evidence table (issue #141, epic #59 / E10). */
+let englishAttempts: Map<string, any>;
 
 function seedProfile(
   userId: string,
@@ -99,21 +101,48 @@ function seedAttempt(overrides: Partial<Record<string, unknown>> = {}): string {
 }
 
 /**
+ * Seeds one `english_attempts` row. Mirrors `seedAttempt` above: a real
+ * in-memory row `englishAttempt.findMany` filters for real, not a fixed
+ * return value, so the `english` component's window and best-of-per-sentence
+ * behaviour can be exercised over real HTTP rather than only in
+ * `readiness.service.spec.ts`'s unit-level `collectEnglishBestOutcomesInWindow`
+ * tests.
+ */
+function seedEnglishAttempt(overrides: Partial<Record<string, unknown>> = {}): string {
+  const id = (overrides.id as string | undefined) ?? randomUUID();
+  englishAttempts.set(id, {
+    id,
+    userId: overrides.userId,
+    sentenceId: randomUUID(),
+    kind: 'reading',
+    outcome: 'correct',
+    answeredAt: new Date('2026-04-01T12:00:00.000Z'),
+    ...overrides,
+  });
+  return id;
+}
+
+/**
  * Wire `learner_profiles`, `civics_questions`, `question_mastery`,
- * `practice_sessions`, `practice_attempts` and `readiness_snapshots` into
- * the shared Prisma mock as small in-memory stores, filtering on `where`
- * for real — the same convention `progress.integration.spec.ts` and
- * `practice.integration.spec.ts` both establish. `readinessSnapshot`'s
- * generic `setupBaseMocks()` default (`test/fixtures/mock-setup.helper.ts`)
- * is overridden here with a real store, because this suite's own
- * assertions are specifically about which snapshot row a later request
- * sees.
+ * `practice_sessions`, `practice_attempts`, `english_attempts` and
+ * `readiness_snapshots` into the shared Prisma mock as small in-memory
+ * stores, filtering on `where` for real — the same convention
+ * `progress.integration.spec.ts` and `practice.integration.spec.ts` both
+ * establish. `readinessSnapshot`'s generic `setupBaseMocks()` default
+ * (`test/fixtures/mock-setup.helper.ts`) is overridden here with a real
+ * store, because this suite's own assertions are specifically about which
+ * snapshot row a later request sees; `englishAttempt`'s generic
+ * `setupBaseMocks()` default (an empty array, `test/fixtures/mock-
+ * setup.helper.ts`'s `setupEnglishAttemptMocks`) is overridden here for the
+ * same reason — the "english evidence" tests below assert on the `english`
+ * component's actual value, which a fixed `[]` can only ever score `0`.
  */
 function setupReadinessMocks(): void {
   profiles = new Map();
   sessions = new Map();
   attempts = new Map();
   snapshots = new Map();
+  englishAttempts = new Map();
 
   (prismaMock.learnerProfile.findUnique as jest.Mock).mockImplementation(
     async ({ where }: any) => profiles.get(where.userId) ?? null,
@@ -333,6 +362,21 @@ function setupReadinessMocks(): void {
   (prismaMock.readinessSnapshot.count as jest.Mock).mockImplementation(async ({ where }: any) => {
     return Array.from(snapshots.values()).filter((row) => row.userId === where.userId).length;
   });
+
+  // `collectEnglishBestOutcomesInWindow`'s query (readiness.service.ts) is
+  // two POSITIVE filters only — `userId` equality and `answeredAt: { gte }`
+  // — never a negative filter on a nullable column (that file's own
+  // comment), so this mock needs none of `evalAttemptWhere`'s three-valued
+  // NULL handling above to be a faithful stand-in for the real query.
+  (prismaMock.englishAttempt.findMany as jest.Mock).mockImplementation(
+    async ({ where = {} }: any) => {
+      const gte = where.answeredAt?.gte as Date | undefined;
+      return Array.from(englishAttempts.values())
+        .filter((row) => row.userId === where.userId)
+        .filter((row) => !gte || row.answeredAt.getTime() >= gte.getTime())
+        .map((row) => ({ ...row }));
+    },
+  );
 }
 
 describe('Readiness (Integration)', () => {
@@ -689,6 +733,141 @@ describe('Readiness (Integration)', () => {
       expect(recall.qualifyingAttempts).toBe(5);
       expect(recall.correctCount).toBe(5);
       expect(recall.incorrectCount).toBe(0);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // English evidence (issue #141, epic #59 / E10) — over real HTTP
+  // ---------------------------------------------------------------------------
+  //
+  // `readiness.service.spec.ts`'s "english evidence assembly" describe block
+  // already pins the window boundary and the best-of-per-sentence reduction
+  // in isolation. What that unit level cannot see is this: that a real
+  // `GET /api/readiness` round trip actually turns `english_attempts` rows
+  // into a nonzero `components.english.value` and a correspondingly moved
+  // `score` — the exact gap a fixed `[]` default (`setupBaseMocks()`'s
+  // `setupEnglishAttemptMocks`) would leave silently untested if this suite
+  // never overrode it.
+  describe('english evidence (issue #141, epic #59 / E10)', () => {
+    it('reading and writing attempts score the `english` component independently, at different values', async () => {
+      // Pinned (`X-Test-Clock`), not the real wall clock: `seedEnglishAttempt`'s
+      // default `answeredAt` (2026-04-01T12:00:00.000Z) must fall inside
+      // `english`'s trailing 30-day window relative to whatever instant
+      // `ReadinessService` reads via the injected `Clock` — an unpinned
+      // request would instead measure the window against the real current
+      // date, which this suite must not depend on.
+      const pinnedNow = '2026-04-15T12:00:00.000Z';
+
+      // Learner A: 3 distinct reading sentences, all correct — half of
+      // `ENGLISH_READING_TARGET` (6), no writing at all.
+      //   readingValue = min(3/6, 1) = 0.5, writingValue = 0
+      //   english = 0.5*0.5 + 0.5*0 = 0.25  ->  contribution 0.05*0.25 = 0.0125
+      // Plus remediation's vacuous full credit (0.1*1.0 = 0.10, exactly the
+      // "fresh user" baseline above) and nothing else: score = round(11.25) = 11.
+      for (let i = 0; i < 3; i += 1) {
+        seedEnglishAttempt({ userId: learnerA.id, kind: 'reading', outcome: 'correct' });
+      }
+
+      const responseA = await getReadiness(learnerA).set('X-Test-Clock', pinnedNow).expect(200);
+      const bodyA = responseA.body.data;
+
+      expect(bodyA.evidenceCounts.english).toEqual({
+        readingSentences: 3,
+        writingSentences: 0,
+        readingCredit: 3,
+        writingCredit: 0,
+      });
+      expect(bodyA.components.english.value).toBeCloseTo(0.25);
+      expect(bodyA.score).toBe(11);
+      // English evidence never lifts the cap — see the invariant test below,
+      // and asserted here too since this learner already has real evidence.
+      expect(bodyA.capReason).toBe('typed_only');
+
+      // Learner B: 4 distinct writing sentences, all correct — exactly
+      // `ENGLISH_WRITING_TARGET` (4), no reading at all.
+      //   readingValue = 0, writingValue = min(4/4, 1) = 1
+      //   english = 0.5*0 + 0.5*1 = 0.5  ->  contribution 0.05*0.5 = 0.025
+      // score = round((0.10 + 0.025) * 100) = round(12.5) = 13.
+      for (let i = 0; i < 4; i += 1) {
+        seedEnglishAttempt({ userId: learnerB.id, kind: 'writing', outcome: 'correct' });
+      }
+
+      const responseB = await getReadiness(learnerB).set('X-Test-Clock', pinnedNow).expect(200);
+      const bodyB = responseB.body.data;
+
+      expect(bodyB.evidenceCounts.english).toEqual({
+        readingSentences: 0,
+        writingSentences: 4,
+        readingCredit: 0,
+        writingCredit: 4,
+      });
+      expect(bodyB.components.english.value).toBeCloseTo(0.5);
+      expect(bodyB.score).toBe(13);
+
+      // The point of this test: two learners with real, distinct English
+      // evidence do NOT collapse to the same component value or the same
+      // score — reading and writing are credited against their own targets
+      // (6 vs 4), independently.
+      expect(bodyB.components.english.value).not.toBe(bodyA.components.english.value);
+      expect(bodyB.score).not.toBe(bodyA.score);
+    });
+
+    it('does not count an attempt outside the 30-day window, pinned by the injected Clock', async () => {
+      const pinnedNow = '2026-05-15T00:00:00.000Z';
+      // The window floor for that instant is 2026-04-15T00:00:00.000Z
+      // (`ENGLISH_WINDOW_DAYS` = 30). This row is 44 days before `pinnedNow`
+      // — well outside the window on either side of the boundary, so a test
+      // clock bug (e.g. reading the real wall clock instead) could not
+      // accidentally make it pass.
+      seedEnglishAttempt({
+        userId: learnerA.id,
+        kind: 'reading',
+        outcome: 'correct',
+        answeredAt: new Date('2026-04-01T00:00:00.000Z'),
+      });
+
+      const response = await getReadiness(learnerA).set('X-Test-Clock', pinnedNow).expect(200);
+      const body = response.body.data;
+
+      expect(body.evidenceCounts.english).toEqual({
+        readingSentences: 0,
+        writingSentences: 0,
+        readingCredit: 0,
+        writingCredit: 0,
+      });
+      expect(body.components.english.value).toBe(0);
+    });
+
+    it('english-test.md §6.3: full English credit on both segments still leaves capReason typed_only with no spoken or interview evidence', async () => {
+      // Pinned for the same reason as the test above: `seedEnglishAttempt`'s
+      // default `answeredAt` must fall inside the 30-day window relative to
+      // the instant `ReadinessService` actually reads.
+      const pinnedNow = '2026-04-15T12:00:00.000Z';
+
+      // `ENGLISH_READING_TARGET` (6) reading sentences and
+      // `ENGLISH_WRITING_TARGET` (4) writing sentences, every one correct —
+      // the maximum the `english` component can ever award.
+      for (let i = 0; i < 6; i += 1) {
+        seedEnglishAttempt({ userId: learnerA.id, kind: 'reading', outcome: 'correct' });
+      }
+      for (let i = 0; i < 4; i += 1) {
+        seedEnglishAttempt({ userId: learnerA.id, kind: 'writing', outcome: 'correct' });
+      }
+
+      const response = await getReadiness(learnerA).set('X-Test-Clock', pinnedNow).expect(200);
+      const body = response.body.data;
+
+      // Full credit on the component itself...
+      expect(body.components.english.value).toBe(1);
+      // ...and STILL `typed_only`: `readiness-engine.ts`'s own cap
+      // expression reads only `evidenceCounts.spoken.attempts` and
+      // `evidenceCounts.interview.attempts` — `english` is deliberately
+      // absent from it (§6.3), so no amount of reading/writing evidence can
+      // lift a learner who has never spoken a civics answer or completed a
+      // mock interview out of the structural 75-point cap.
+      expect(body.evidenceCounts.spoken.attempts).toBe(0);
+      expect(body.evidenceCounts.interview.attempts).toBe(0);
+      expect(body.capReason).toBe('typed_only');
     });
   });
 });

@@ -690,6 +690,40 @@ export function setupMockInterviewMocks(): void {
 }
 
 // ============================================================================
+// English attempt mocks (issue #141, epic #59 / E10)
+// ============================================================================
+
+/**
+ * Generic, spec-agnostic `english_attempts` default.
+ *
+ * `ReadinessService.collectEnglishBestOutcomesInWindow` now reads this table
+ * — a real `englishAttempt.findMany` — on EVERY readiness recompute
+ * (readiness.service.ts's own `english` evidence comment), and
+ * `PracticeService.completeSession` triggers a recompute synchronously on
+ * every session completion. That means EVERY existing integration spec that
+ * completes a practice session, or otherwise reaches `GET /api/readiness`,
+ * touches `english_attempts` too, whether or not that spec's own concern is
+ * English.
+ *
+ * Without a default here, `englishAttempt.findMany` (an unconfigured
+ * `mockDeep` method) resolves to `undefined`, and the
+ * `for (const row of rows)` loop right after that call in
+ * `collectEnglishBestOutcomesInWindow` throws `TypeError: rows is not
+ * iterable` — a crash, not a wrong score, because this query's result is
+ * iterated directly rather than only divided into like
+ * `mockInterview.count`'s `mockInterviewsPassed / 2` above.
+ *
+ * A spec asserting on the `english` component itself should override this
+ * with its own in-memory store, the same "generic default here, a real store
+ * where the suite's own assertions need one" split `setupReadinessSnapshotMocks`,
+ * `setupDailyActivityMocks` and `setupMockInterviewMocks` above already
+ * document. `readiness.integration.spec.ts` does exactly that.
+ */
+export function setupEnglishAttemptMocks(): void {
+  (prismaMock.englishAttempt.findMany as jest.Mock).mockResolvedValue([]);
+}
+
+// ============================================================================
 // Complete Mock Setup
 // ============================================================================
 
@@ -710,6 +744,7 @@ export function setupBaseMocks(): void {
   setupReadinessSnapshotMocks();
   setupDailyActivityMocks();
   setupMockInterviewMocks();
+  setupEnglishAttemptMocks();
 
   // Mock transactions
   mockPrismaTransaction();

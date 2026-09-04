@@ -51,15 +51,24 @@ export const READINESS_COMPONENT_LABELS: Record<ReadinessComponentKey, string> =
   retention: 'Long-term retention',
   consistency: 'Practice consistency',
   remediation: 'Fixing weak spots',
-  english: 'Spoken English practice',
+  english: 'Reading and writing English',
   spoken: 'Spoken practice',
   interview: 'Mock interviews',
 };
 
 /**
- * The three components that are mathematically `0` for every learner until
- * E11/E9/E8 ship (§2.6-§2.8) — the set this file's "no evidence yet" honesty
+ * The three components whose `0` means "nothing to measure yet" rather than
+ * "measured, and failing" — the set this file's "no evidence yet" honesty
  * rule applies to.
+ *
+ * The NAME predates E10: `spoken` and `interview` are still structurally `0`
+ * for every learner until E9/E8 ship (§2.7-§2.8), but `english` is wired now
+ * (`docs/specs/english-test.md` §6) and stays in this set anyway, because
+ * membership has never meant "unwired" to the one function that reads it — it
+ * means "an unevidenced `0` here is an absence, not a score". `english`'s `0`
+ * is still exactly that whenever the learner has attempted no sentences; the
+ * moment they attempt one, `readinessHasNoEvidence` reads `false` and a real
+ * percentage renders, membership notwithstanding.
  */
 export const UNWIRED_READINESS_COMPONENTS: ReadonlySet<ReadinessComponentKey> = new Set([
   'english',
@@ -68,15 +77,42 @@ export const UNWIRED_READINESS_COMPONENTS: ReadonlySet<ReadinessComponentKey> = 
 ]);
 
 /**
- * True when an unwired component has literally zero credited evidence — the
- * MANDATORY honesty rule (§2.6-§2.8, and this app's own `ProgressMastery`
+ * How many distinct English sentences the learner ATTEMPTED in `english`'s
+ * 30-day window — the number that separates "no practice yet" from
+ * "practised and missed", which earn identical (`0`) credit.
+ *
+ * THE LEGACY BRANCH IS NOT DEAD CODE — DO NOT DELETE IT. `GET
+ * /api/readiness/history` never recomputes a stored snapshot; it casts the
+ * row it read rather than re-parsing it. So every snapshot written before E10
+ * deployed still serves the retired `distinctQuestionsCorrectSpokenInEnglish`
+ * field, and the history list is the one place both shapes arrive together.
+ * A legacy row resolves to `0` attempts DELIBERATELY: that field counted
+ * civics answers spoken in English and was a literal `0` for every learner
+ * ever, so "no evidence" is not a fallback for it — it is what it always
+ * meant.
+ */
+export function readinessEnglishSentencesAttempted(
+  english: ReadinessEvidenceCounts['english'],
+): number {
+  if (!('readingSentences' in english)) return 0;
+  return english.readingSentences + english.writingSentences;
+}
+
+/**
+ * True when a component has no evidence AT ALL — the MANDATORY honesty rule
+ * (§2.6-§2.8, `english-test.md` §6.2, and this app's own `ProgressMastery`
  * empty-state convention): render "No evidence yet" for these three, never a
  * `0%` presented as a failing score.
  *
  * Read from `evidenceCounts` directly, per component, rather than assumed
- * from set membership alone — the day E8/E9/E11 ships, a learner's very
- * first piece of real evidence renders a real percentage immediately, with
- * no separate "is this feature live yet" flag for this file to fall behind.
+ * from set membership alone — the day E8/E9 ships, a learner's very first
+ * piece of real evidence renders a real percentage immediately, with no
+ * separate "is this feature live yet" flag for this file to fall behind.
+ * `english` is that day already, which is why it counts ATTEMPTS and not
+ * credit: a learner who read or wrote sentences and got them wrong has been
+ * measured at `0%`, exactly as `recall`'s sub-threshold `0` is a real
+ * measurement (`ReadinessBreakdown`'s own header), and answering them "No
+ * evidence yet" would deny practice they actually did.
  */
 export function readinessHasNoEvidence(
   key: ReadinessComponentKey,
@@ -84,7 +120,7 @@ export function readinessHasNoEvidence(
 ): boolean {
   switch (key) {
     case 'english':
-      return evidenceCounts.english.distinctQuestionsCorrectSpokenInEnglish === 0;
+      return readinessEnglishSentencesAttempted(evidenceCounts.english) === 0;
     case 'spoken':
       return evidenceCounts.spoken.attempts === 0;
     case 'interview':
