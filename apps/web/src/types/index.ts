@@ -1995,11 +1995,13 @@ export interface ProgressMastery {
 // `docs/specs/readiness-model.md` §2, §4, §5, §8 is the design these types
 // are a wire mapping of, not a re-derivation of it.
 //
-// `english`/`spoken`/`interview` are STRUCTURALLY ZERO until E11/E9/E8 ship
-// (§2.6-§2.8) — the frontend's own honesty rule (matching `ProgressMastery`'s
-// own empty-state convention) is to render "No evidence yet" for those three
-// rather than a `0%` presented as a failing score. See
-// `components/progress/readiness.ts`.
+// `spoken`/`interview` are STRUCTURALLY ZERO until E9/E8 ship (§2.7-§2.8),
+// and `english` is real as of E10 (`docs/specs/english-test.md` §6) but still
+// reads `0` for a learner with no reading or writing practice in its 30-day
+// window — the frontend's own honesty rule (matching `ProgressMastery`'s own
+// empty-state convention) is to render "No evidence yet" for those three
+// rather than a `0%` presented as a failing score, and, for `english`, to do
+// so ONLY when nothing was attempted. See `components/progress/readiness.ts`.
 
 /**
  * The eight components, in the exact order `readiness-engine.ts`'s own
@@ -2028,6 +2030,47 @@ export interface ReadinessComponentResult {
 
 export type ReadinessComponents = Record<ReadinessComponentKey, ReadinessComponentResult>;
 
+/**
+ * `english`'s evidence, as E10 computes it (`docs/specs/english-test.md`
+ * §6.2), fed by the `english_attempts` table.
+ *
+ * The two sentence counts are distinct sentences ATTEMPTED in the trailing
+ * 30-day window; the two credit values are what those attempts earned (a
+ * `correct` sentence scores `1.0`, a `partial` `0.5` — so the credit fields
+ * are deliberately NOT integers, exactly as the API's own zod schema notes).
+ *
+ * The counts exist so a renderer can tell "no practice yet" apart from
+ * "practised and missed" — both earn `0` credit and both score the component
+ * at `0`, but only one of them is an absence of evidence.
+ */
+export interface ReadinessEnglishEvidence {
+  readingSentences: number;
+  writingSentences: number;
+  readingCredit: number;
+  writingCredit: number;
+}
+
+/**
+ * `english`'s PRE-E10 evidence shape, kept because it is still on the wire —
+ * not as history.
+ *
+ * `GET /api/readiness/history` NEVER recomputes a stored snapshot (it casts
+ * the row it read rather than re-parsing it), so snapshots written before E10
+ * deployed keep serving this field verbatim, forever. A client reading the
+ * history list across that deploy boundary therefore sees BOTH shapes in one
+ * response, which is why `ReadinessEvidenceCounts['english']` is a union
+ * rather than the new shape alone: narrowing is forced at the one place that
+ * reads it (`components/progress/readiness.ts`) instead of left to a runtime
+ * check a future edit could quietly drop.
+ *
+ * The retired field counted civics answers spoken in English and was always a
+ * literal `0`, so a legacy row means exactly "no evidence" — see
+ * `readinessEnglishSentencesAttempted`.
+ */
+export interface LegacyReadinessEnglishEvidence {
+  distinctQuestionsCorrectSpokenInEnglish: number;
+}
+
 /** §5's `evidenceCounts` table, one shape per component, verbatim. */
 export interface ReadinessEvidenceCounts {
   coverage: { distinctQuestionsAttempted: number; totalQuestionsInVersion: number };
@@ -2041,7 +2084,7 @@ export interface ReadinessEvidenceCounts {
   retention: { masteredCount: number; reviewCount: number; totalAttemptedQuestions: number };
   consistency: { distinctPracticeDaysInLast14: number };
   remediation: { everWeakCount: number; remediatedCount: number };
-  english: { distinctQuestionsCorrectSpokenInEnglish: number };
+  english: ReadinessEnglishEvidence | LegacyReadinessEnglishEvidence;
   spoken: { attempts: number };
   interview: { attempts: number };
 }
