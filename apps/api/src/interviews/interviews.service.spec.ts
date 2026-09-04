@@ -1,4 +1,4 @@
-import { ConflictException, NotFoundException } from '@nestjs/common';
+import { ConflictException, Logger, NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 
 import { AiDispatchService } from '../ai/ai-dispatch.service';
@@ -14,6 +14,7 @@ import {
   type InterviewTurnOutcome,
 } from './interviews.service';
 import type { InterviewDebrief } from './dto/interview-debrief.dto';
+import { REALTIME_SESSION_TTL_SECONDS } from './realtime/realtime-tools';
 import { stripComments } from './test-support/strip-comments';
 
 // =============================================================================
@@ -66,6 +67,17 @@ const CATEGORY_ID = '44444444-4444-4444-8444-444444444444';
 const CATEGORY_NAME = 'American Government';
 
 const NOW = new Date('2026-06-01T12:00:00Z');
+
+/**
+ * What a mint hands back, in the tests below.
+ *
+ * DISTINCTIVE ENOUGH TO SEARCH FOR, because several assertions are of the form
+ * "this string appears nowhere in what was logged" — a fixture like `'secret'`
+ * would make those pass against a log line that happened not to contain a
+ * common word.
+ */
+const MINTED_SECRET = 'ek_fake_realtime_zzyxwvutsrqponmlkjihgfedcba';
+const SECRET_EXPIRY = new Date('2026-06-01T12:01:00Z');
 
 /**
  * The version row's pass rule.
@@ -350,7 +362,12 @@ describe('InterviewsService', () => {
   let store: Store;
   let prisma: any;
   let service: InterviewsService;
-  let dispatch: { run: jest.Mock; runStructured: jest.Mock; runStream: jest.Mock };
+  let dispatch: {
+    run: jest.Mock;
+    runStructured: jest.Mock;
+    runStream: jest.Mock;
+    createRealtimeSession: jest.Mock;
+  };
   let readiness: { recomputeSnapshot: jest.Mock };
   let engagement: { recordInterviewAttemptActivity: jest.Mock };
 
@@ -371,6 +388,14 @@ describe('InterviewsService', () => {
         status: 'ok',
         modelId: 'test-model',
         events: streamOf('Thank you. Let us continue.'),
+      })),
+      // The realtime mint (#157). Succeeds by default, so a test about a
+      // refusal has to arrange the refusal rather than inherit it.
+      createRealtimeSession: jest.fn(async () => ({
+        status: 'ok',
+        clientSecret: MINTED_SECRET,
+        expiresAt: SECRET_EXPIRY,
+        modelId: 'gpt-4o-realtime-preview',
       })),
     };
 
@@ -1287,6 +1312,259 @@ describe('InterviewsService', () => {
 
       for (const literal of ['6', '10', '12', '20', '65']) {
         expect(source).not.toMatch(new RegExp(`(?<![\\w.$])${literal}(?![\\w.$])`));
+      }
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // E11 — the realtime mint (issue #157)
+  // ---------------------------------------------------------------------------
+
+  describe('realtime session minting', () => {
+    /** An interview that is in progress and has turns left to take. */
+    async function liveInterview(userId = USER_A): Promise<string> {
+      const created = await service.createInterview(userId, {
+        transcriptRetained: false,
+      });
+      return created.interview.id;
+    }
+
+    /** The one dispatcher call this route makes. */
+    function mintRequest(): {
+      instructions: string;
+      tools: { name: string }[];
+      expiresInSeconds?: number;
+      modelId?: string;
+    } {
+      return dispatch.createRealtimeSession.mock.calls[0][1];
+    }
+
+    it('returns the secret, the provider’s expiry and the model, and nothing else', async () => {
+      // The closed list is the point: `realtime-interview.md` §3 says the
+      // browser holds the ephemeral secret "and nothing else", and a response
+      // that grew a field would be the first step away from that.
+      const result = await service.createRealtimeSession(
+        USER_A,
+        await liveInterview(),
+      );
+
+      expect(result).toEqual({
+        status: 'ok',
+        clientSecret: MINTED_SECRET,
+        expiresAt: SECRET_EXPIRY.toISOString(),
+        modelId: 'gpt-4o-realtime-preview',
+      });
+    });
+
+    it('mints on the caller’s own id, with no model named by this service', async () => {
+      await service.createRealtimeSession(USER_A, await liveInterview());
+
+      expect(dispatch.createRealtimeSession).toHaveBeenCalledWith(
+        USER_A,
+        expect.any(Object),
+      );
+      // NO `modelId` FIELD, EVER — `ai-dispatch.service.ts`'s own header rule.
+      // A feature that could name its own model could bind itself to whatever
+      // the admin configured for a more expensive role.
+      expect(mintRequest().modelId).toBeUndefined();
+    });
+
+    it('declares the three tools, and gives the model no field for a verdict', async () => {
+      await service.createRealtimeSession(USER_A, await liveInterview());
+
+      const tools = mintRequest().tools;
+      expect(tools.map((tool) => tool.name)).toEqual([
+        'next_question',
+        'grade_answer',
+        'end_phase',
+      ]);
+
+      // Restated here, at the layer that actually sends them, rather than only
+      // in `realtime-tools.spec.ts`: this is the assertion that the schema the
+      // provider is handed is the one with no `verdict` in it.
+      const grade = tools.find((tool) => tool.name === 'grade_answer') as any;
+      expect(Object.keys(grade.parameters.properties)).not.toContain('verdict');
+      expect(grade.parameters.additionalProperties).toBe(false);
+    });
+
+    it('grounds the instructions in the phase, and in no question, answer or pass mark', async () => {
+      // §4's whole point, asserted rather than promised. A model holding the
+      // bank can introduce a question `civics_questions` never contained; a
+      // model holding the threshold has the arithmetic for ending the civics
+      // phase itself.
+      const interviewId = await liveInterview();
+      await service.createRealtimeSession(USER_A, interviewId);
+
+      const instructions = mintRequest().instructions;
+
+      expect(instructions).toContain('opening small talk');
+      for (const question of BANK) {
+        expect(instructions).not.toContain(question.prompt);
+        expect(instructions).not.toContain(acceptedAnswerFor(question.id));
+      }
+      // The version row's own N and T. Neither is anywhere near this prompt.
+      expect(instructions).not.toMatch(/(?<![\w.$])(6|10)(?![\w.$])/);
+    });
+
+    it('asks for a bounded session lifetime rather than the provider’s default', async () => {
+      await service.createRealtimeSession(USER_A, await liveInterview());
+
+      expect(mintRequest().expiresInSeconds).toBe(REALTIME_SESSION_TTL_SECONDS);
+    });
+
+    it('flips the interview to voice mode on the first successful mint', async () => {
+      // §3: `mode` is a server-side write and the create DTO forbids a client
+      // from naming it. This is the only place it can change.
+      const interviewId = await liveInterview();
+      expect(store.interviews[0].mode).toBe('text');
+
+      await service.createRealtimeSession(USER_A, interviewId);
+
+      expect(store.interviews[0].mode).toBe('voice');
+    });
+
+    it('does not write mode again when a session is re-minted', async () => {
+      // Re-minting mid-interview is §3's ordinary case (an expired secret, a
+      // dropped connection), not an edge one.
+      const interviewId = await liveInterview();
+
+      await service.createRealtimeSession(USER_A, interviewId);
+      (prisma.mockInterview.update as jest.Mock).mockClear();
+      await service.createRealtimeSession(USER_A, interviewId);
+
+      expect(prisma.mockInterview.update).not.toHaveBeenCalled();
+      expect(store.interviews[0].mode).toBe('voice');
+    });
+
+    it('leaves the interview in text mode when no session was minted', async () => {
+      // `mode` records what HAPPENED. A deployment with no `realtime` binding
+      // must not accumulate interviews that claim to have been spoken.
+      dispatch.createRealtimeSession.mockResolvedValue({
+        status: 'unavailable',
+        cause: 'role_unbound',
+      });
+
+      await service.createRealtimeSession(USER_A, await liveInterview());
+
+      expect(store.interviews[0].mode).toBe('text');
+    });
+
+    it.each([
+      'no_user_key',
+      'ai_disabled',
+      'role_unbound',
+      'capability_unsupported',
+    ] as const)('reports %s as a typed payload naming realtime, never a throw', async (cause) => {
+      dispatch.createRealtimeSession.mockResolvedValue({
+        status: 'unavailable',
+        cause,
+      });
+
+      await expect(
+        service.createRealtimeSession(USER_A, await liveInterview()),
+      ).resolves.toEqual({ status: 'unavailable', cause, role: 'realtime' });
+    });
+
+    it('keeps a provider failure distinct from an unavailable one', async () => {
+      // "voice is not set up here" and "that did not work" send a client to two
+      // different places: fall back to text, or offer a retry first.
+      dispatch.createRealtimeSession.mockResolvedValue({
+        status: 'failed',
+        errorCode: 'rate_limited',
+        error: 'Too many requests.',
+        usageEventId: null,
+        modelId: 'gpt-4o-realtime-preview',
+      });
+
+      await expect(
+        service.createRealtimeSession(USER_A, await liveInterview()),
+      ).resolves.toEqual({
+        status: 'failed',
+        errorCode: 'rate_limited',
+        error: 'Too many requests.',
+      });
+    });
+
+    it('refuses to mint for an interview belonging to another learner, as a 404', async () => {
+      // §12, and the reason it is a 404 and not a 403: confirming that this id
+      // names a real interview belonging to somebody is itself the leak.
+      const interviewId = await liveInterview(USER_A);
+
+      await expect(
+        service.createRealtimeSession(USER_B, interviewId),
+      ).rejects.toBeInstanceOf(NotFoundException);
+
+      // AND NOTHING WAS SPENT FINDING OUT. A mint attempted before the
+      // ownership check would put a session on the wrong learner's key.
+      expect(dispatch.createRealtimeSession).not.toHaveBeenCalled();
+    });
+
+    it('refuses to mint for an unknown interview id, as a 404', async () => {
+      await expect(
+        service.createRealtimeSession(USER_A, 'ffffffff-0000-4000-8000-000000000001'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('refuses to mint for a completed interview', async () => {
+      const interviewId = await runToCompletion([true, true, true, true, true, true]);
+      await service.completeInterview(USER_A, interviewId);
+      dispatch.createRealtimeSession.mockClear();
+
+      await expect(
+        service.createRealtimeSession(USER_A, interviewId),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(dispatch.createRealtimeSession).not.toHaveBeenCalled();
+    });
+
+    it('refuses to mint for an abandoned interview', async () => {
+      const interviewId = await liveInterview();
+      store.interviews[0].status = 'abandoned';
+
+      await expect(
+        service.createRealtimeSession(USER_A, interviewId),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(dispatch.createRealtimeSession).not.toHaveBeenCalled();
+    });
+
+    it('refuses to mint for an interview with no turn left to take', async () => {
+      // Still `in_progress`, but the closing statement has been said and the
+      // only remaining action is `complete`. A session here could conduct
+      // nothing — its first `next_question` call could only be rejected.
+      const interviewId = await runToCompletion([true, true, true, true, true, true]);
+      dispatch.createRealtimeSession.mockClear();
+
+      await expect(
+        service.createRealtimeSession(USER_A, interviewId),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(dispatch.createRealtimeSession).not.toHaveBeenCalled();
+    });
+
+    it('never writes the minted secret to a log line', async () => {
+      // ASSERTED, NOT REVIEWED. The secret is a bearer credential for the
+      // minutes it is valid, and a log aggregator retains far longer than
+      // that. Both levels are captured: the success path logs, and the
+      // failure path warns.
+      const log = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+      const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+
+      try {
+        await service.createRealtimeSession(USER_A, await liveInterview());
+
+        dispatch.createRealtimeSession.mockResolvedValue({
+          status: 'unavailable',
+          cause: 'no_user_key',
+        });
+        await service.createRealtimeSession(USER_A, await liveInterview());
+
+        const written = JSON.stringify([...log.mock.calls, ...warn.mock.calls]);
+        expect(written).not.toContain(MINTED_SECRET);
+        // The line was written — otherwise this test would pass on a service
+        // that logs nothing at all, which is not the property being claimed.
+        expect(written).toContain('Realtime interview session minted');
+        expect(written).toContain('Realtime interview session could not be minted');
+      } finally {
+        log.mockRestore();
+        warn.mockRestore();
       }
     });
   });
