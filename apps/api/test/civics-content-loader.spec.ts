@@ -105,6 +105,16 @@ describe('assertTrustedForLoad — the unverified-content gate', () => {
     ).toThrow(/CIVICS_ALLOW_UNVERIFIED_CONTENT/);
   });
 
+  // The production branch is matched on its own distinguishing sentence, NOT
+  // on the bare word "production". Do not loosen this back to /production/:
+  // the DEV refusal message also contains that word ("... never set this in
+  // production"), so a bare match cannot tell the two branches apart. The
+  // "no allow-flag" case below is where that mattered — with the production
+  // branch deleted it falls through to the dev branch, which throws a message
+  // containing "production", so /production/ passed while proving nothing
+  // about the branch the test is named for.
+  const PRODUCTION_ONLY = /NODE_ENV=production never loads unverified civics content/;
+
   it('refuses unconditionally when NODE_ENV=production, even with the allow-flag set', () => {
     const file = fileWithStatus('UNVERIFIED_MODEL_DRAFT');
     expect(() =>
@@ -112,12 +122,12 @@ describe('assertTrustedForLoad — the unverified-content gate', () => {
         NODE_ENV: 'production',
         CIVICS_ALLOW_UNVERIFIED_CONTENT: 'true',
       }),
-    ).toThrow(/production/);
+    ).toThrow(PRODUCTION_ONLY);
   });
 
   it('refuses in production even with no allow-flag at all (belt and suspenders)', () => {
     const file = fileWithStatus('UNVERIFIED_MODEL_DRAFT');
-    expect(() => assertTrustedForLoad(file, 'f.json', { NODE_ENV: 'production' })).toThrow(/production/);
+    expect(() => assertTrustedForLoad(file, 'f.json', { NODE_ENV: 'production' })).toThrow(PRODUCTION_ONLY);
   });
 });
 
