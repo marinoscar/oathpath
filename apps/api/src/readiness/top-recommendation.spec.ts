@@ -2,15 +2,24 @@ import { computeReadiness, type ReadinessEvidence } from './readiness-engine';
 import { buildTopRecommendation } from './top-recommendation';
 
 // =============================================================================
-// buildTopRecommendation — english joins the earnable set (issue #141,
-// epic #59 / E10 "Reading and writing tests")
+// buildTopRecommendation — english joins the earnable set (issue #141), then
+// points at a real screen (#144/#147, epic #59 / E10 "Reading and writing
+// tests")
 // =============================================================================
 //
 // No DB and no fabricated `ReadinessResult`: every case below is built by
 // running the real `computeReadiness` over evidence, so the recommendation is
 // tested against numbers the engine actually produces rather than a
 // hand-written result object that could drift from it. `english-test.md` §6.4
-// is the change under test — `EARNABLE_COMPONENT_KEYS` gained a sixth entry.
+// is the first change under test — `EARNABLE_COMPONENT_KEYS` gained a sixth
+// entry — and the segment pick below is the second: now that
+// `/practice/reading` and `/practice/writing` are both mounted, the card
+// names one of them, chosen by which segment has the greater headroom.
+//
+// The segment cases are deliberately built from OUTCOMES rather than counts,
+// because credit-over-target is the thing being asserted: six missed reading
+// sentences are six sentences and zero evidence at the same time, and only
+// one of those two numbers may decide where a learner is sent.
 // =============================================================================
 
 function baseEvidence(overrides: Partial<ReadinessEvidence> = {}): ReadinessEvidence {
@@ -50,14 +59,77 @@ describe('buildTopRecommendation', () => {
     expect(recommendation.componentKey).toBe('english');
   });
 
-  it('points at a route that exists today, never an invented one', () => {
-    // The reading and writing screens are #144/#147 and are not built. A
-    // recommendation whose one action 404s is worse than one that lands on
-    // the general practice page — see `top-recommendation.ts`'s header, and
-    // re-point this when those screens land.
+  it('sends a learner with no English evidence at all to the reading screen', () => {
+    // Both segment values are 0, which is a tie, and a tie keeps the
+    // first-declared segment. The assertion that matters is the stability, not
+    // the preference: the same input must not alternate between two screens.
     const recommendation = buildTopRecommendation(computeReadiness(strongExceptEnglish()));
+    const again = buildTopRecommendation(computeReadiness(strongExceptEnglish()));
 
-    expect(recommendation.path).toBe('/practice');
+    expect(recommendation.path).toBe('/practice/reading');
+    expect(again.path).toBe('/practice/reading');
+  });
+
+  it('sends a learner to the segment with the most room left — reading', () => {
+    // reading 1/6 = 0.167, writing 1.5/4 = 0.375. Reading is the lower value,
+    // so reading is the greater headroom of the two equal shares.
+    const result = computeReadiness(
+      strongExceptEnglish({
+        englishBestOutcomesInWindow: [
+          { kind: 'reading', outcome: 'correct' },
+          { kind: 'writing', outcome: 'partial' },
+          { kind: 'writing', outcome: 'correct' },
+        ],
+      }),
+    );
+    const recommendation = buildTopRecommendation(result);
+
+    expect(recommendation.componentKey).toBe('english');
+    expect(recommendation.path).toBe('/practice/reading');
+    expect(recommendation.reason).toContain('reading is the half with the most room left');
+  });
+
+  it('sends a learner to the segment with the most room left — writing', () => {
+    // reading 3/6 = 0.5, writing 1/4 = 0.25. The mirror of the case above, and
+    // the reason the copy is chosen in the same three lines as the path: the
+    // sentence names writing only where the link goes to writing.
+    const result = computeReadiness(
+      strongExceptEnglish({
+        englishBestOutcomesInWindow: [
+          { kind: 'reading', outcome: 'correct' },
+          { kind: 'reading', outcome: 'correct' },
+          { kind: 'reading', outcome: 'correct' },
+          { kind: 'writing', outcome: 'correct' },
+        ],
+      }),
+    );
+    const recommendation = buildTopRecommendation(result);
+
+    expect(recommendation.componentKey).toBe('english');
+    expect(recommendation.path).toBe('/practice/writing');
+    expect(recommendation.reason).toContain('writing is the half with the most room left');
+  });
+
+  it('picks the segment by credit against its own target, not by raw sentence count', () => {
+    // Six reading sentences, all missed: reading 0/6 = 0, writing 1/4 = 0.25.
+    // The learner has done SIX TIMES as much reading as writing and still
+    // belongs on the reading screen, because none of it earned credit — and
+    // the copy must not tell them they have done less writing.
+    const result = computeReadiness(
+      strongExceptEnglish({
+        englishBestOutcomesInWindow: [
+          ...Array.from({ length: 6 }, () => ({
+            kind: 'reading' as const,
+            outcome: 'incorrect' as const,
+          })),
+          { kind: 'writing', outcome: 'correct' },
+        ],
+      }),
+    );
+    const recommendation = buildTopRecommendation(result);
+
+    expect(recommendation.path).toBe('/practice/reading');
+    expect(recommendation.reason).toContain('6 reading sentences and 1 writing sentence');
   });
 
   it('names the missing evidence when there is none, rather than a bare zero', () => {
@@ -65,6 +137,9 @@ describe('buildTopRecommendation', () => {
 
     expect(recommendation.reason).toContain('last 30 days');
     expect(recommendation.reason).toMatch(/haven’t practiced reading or writing/);
+    // Still says the interview asks for both, even though it can only link to
+    // one of the two screens.
+    expect(recommendation.reason).toContain('interview asks for both');
   });
 
   it('grounds its copy in the snapshot’s own counts once evidence exists', () => {
