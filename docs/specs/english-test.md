@@ -461,6 +461,13 @@ enforced test in this section exists because "review it and it'll look
 fine" is not sufficient — the check has to be exhaustive and mechanical,
 not a matter of a reviewer's attention holding up across every sentence.
 
+This is a rule about what may be added, and the 36 sentences already in the
+file are the exception it was written after rather than an example of it
+being kept: they were model-composed, mechanically validated word by word
+against the two lists on every load, and then read and approved by the
+repository owner. §1.2 records that in full. Do not read this paragraph as
+evidence that what shipped satisfies it.
+
 ### 1.5 The verification status is a load-time gate, not a label (issue #261)
 
 Each of the three files carries a status — `composition.status` on the

@@ -55,8 +55,8 @@ earlier design draft said they would):
   idempotency against a mocked Prisma client (`docs/TESTING.md`'s "API tests
   never touch a database" rule — no live database is needed to run it).
 - `apps/api/package.json` — the `content:validate`/`content:load` scripts
-  §5 below explains you should **not** reach for here, and `prisma:seed`,
-  which you should.
+  §5 below explains do not check English content, and `prisma:seed`, which
+  is what applies an English change to a database.
 
 ---
 
@@ -87,15 +87,16 @@ yesterday may not be today. Treat it as its own PR, reviewed by a second
 human against the freshly re-downloaded PDF, before touching any sentence.
 The rest of this runbook assumes the two lists themselves are not changing.
 
-**Neither hash above has ever been re-derived from a fresh download, and if
-you can reach `uscis.gov` you are the first person who can fix that.** No
-official USCIS source was reachable from the environment this content was
-written and approved in: `uscis.gov` returns HTTP 403 and `web.archive.org`
-is unreachable, while npm and GitHub resolve normally — a per-host network
-policy, not an offline machine. Every `sourceUrl`, `retrievedAt` and
-`sha256` in the three English files was therefore carried forward verbatim
-from the session that first recorded them. Each file's own note says so, in
-those words. From a network-capable environment:
+**Neither hash above has been re-derived since the session that first
+recorded it, and if you can reach `uscis.gov` you are the first person who
+can change that.** No official USCIS source was reachable from the
+environment this content was written in, or from the one it was approved in:
+`uscis.gov` returns HTTP 403 and `web.archive.org` is unreachable, while npm
+and GitHub resolve normally — a per-host network policy, not an offline
+machine. Every `sourceUrl`, `retrievedAt` and `sha256` in the three English
+files was therefore carried forward verbatim from that first session, and
+each file's own note says so rather than letting the values imply a check
+that did not happen. From a network-capable environment:
 
 1. Download both PDFs from the `sourceUrl` values in the table above.
 2. Re-derive each sha256 (`shasum -a 256 <file>`) and compare it to the
@@ -248,6 +249,10 @@ This is also why §5's mechanized check exists at all, and why it is
 review-by-reading cannot catch this specific failure, by construction, no
 matter how careful the reviewer is.
 
+This rule governs what you add. It is not a description of the 36 sentences
+already in the file, which were model-composed and then owner-approved — §3
+records that, and the file's `HUMAN_VERIFIED` status is what says so.
+
 ### What the tooling checks for you, and what it cannot
 
 The loader and its validator (`english-vocabulary.ts`) mechanically,
@@ -296,17 +301,15 @@ and, since issue #258, will no longer fail because of it either.** That
 script runs the **civics-shaped** structural validator
 (`validate-content.ts`), which expects a `categories[].code` field the
 English files do not have; it used to glob every `.json` file in
-`apps/api/prisma/content/` and reported 14 false `category.duplicateCode`
-errors on an untouched checkout. It is now scoped by filename to
-`civics-*.json` and prints every file it skipped, by name, so a skip nobody
-asked for is still visible. Verified by running it against this repository
-as-is:
+`apps/api/prisma/content/` and failed on an untouched checkout with a batch
+of fabricated `category.duplicateCode` errors. It is now scoped by filename
+to `civics-*.json` and prints every file it skipped, by name, so a skip
+nobody asked for is still visible. Verified by running it against this
+repository as-is (long line wrapped for this page):
 
 ```
 Checking 2 file(s) in …/prisma/content: civics-2008.json, civics-2025.json
-Not checked (not civics-*.json — another content domain, with its own
-validator): english-sentences.json, english-vocabulary-reading.json,
-english-vocabulary-writing.json
+Not checked (not civics-*.json — another content domain, with its own validator): english-sentences.json, english-vocabulary-reading.json, english-vocabulary-writing.json
 ```
 
 If your English file appears on that second line, the tool is working. It is
