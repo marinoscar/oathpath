@@ -62,7 +62,7 @@ describe('transcribeAudio', () => {
       http.post('*/api/ai/speech/transcribe', async ({ request }) => {
         contentType = request.headers.get('content-type');
         const form = await request.formData();
-        filePresent = isBlobLike(form.get('file'));
+        filePresent = isBlobLike(form.get('audio'));
         return HttpResponse.json({ data: { text: 'George Washington', confidence: 0.94 } });
       }),
     );
@@ -124,7 +124,7 @@ describe('transcribeAudio', () => {
           return HttpResponse.json({ message: 'Unauthorized' }, { status: 401 });
         }
         retryContentType = request.headers.get('content-type');
-        retryHadFile = isBlobLike((await request.formData()).get('file'));
+        retryHadFile = isBlobLike((await request.formData()).get('audio'));
         return HttpResponse.json({ data: { text: 'retried', confidence: null } });
       }),
     );

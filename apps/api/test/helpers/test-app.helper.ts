@@ -4,6 +4,7 @@ import {
   NestFastifyApplication,
 } from '@nestjs/platform-fastify';
 import fastifyCookie from '@fastify/cookie';
+import multipart from '@fastify/multipart';
 import { AppModule } from '../../src/app.module';
 import { PrismaService } from '../../src/prisma/prisma.service';
 import { prismaMock } from '../mocks/prisma.mock';
@@ -108,6 +109,22 @@ export async function createTestApp(
   // Register cookie plugin for auth tests
   await app.register(fastifyCookie, {
     secret: 'test-secret',
+  });
+
+  // Register the multipart plugin with the SAME limits main.ts uses.
+  //
+  // Not optional and not per-spec: without it, `request.isMultipart()` is false
+  // and every upload route answers "not a multipart request" in a test while
+  // working in production — a difference between the test app and the real one
+  // that hides exactly the bugs an integration test is standing up a real
+  // Fastify for. The limits are copied rather than defaulted because
+  // `files: 1` is behaviour a route under test relies on (`ai-speech.controller`
+  // reports a second file as a 400).
+  await app.register(multipart, {
+    limits: {
+      fileSize: 100 * 1024 * 1024,
+      files: 1,
+    },
   });
 
   app.setGlobalPrefix('api');

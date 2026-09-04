@@ -843,10 +843,12 @@ export async function transcribeAudio(
   opts: { fileName?: string; signal?: AbortSignal } = {},
 ): Promise<SpeechTranscription> {
   const form = new FormData();
-  // One file part. The API reads it with Fastify's `req.file()`, which takes
-  // the first file part whatever it is called; the name is still given
-  // explicitly so a future `req.file({ name })` does not silently find nothing.
-  form.append('file', blob, opts.fileName ?? defaultAudioFileName(blob));
+  // One file part, named `audio`. NOT an arbitrary name: the endpoint iterates
+  // the parts and REJECTS any file field it was not expecting (see
+  // `AUDIO_FIELD` in `apps/api/src/ai/ai-speech.controller.ts`), rather than
+  // taking whatever arrives first. That is the safer server, and it makes this
+  // string load-bearing — a rename here is a 400 for every learner.
+  form.append('audio', blob, opts.fileName ?? defaultAudioFileName(blob));
 
   return api.post<SpeechTranscription>('/ai/speech/transcribe', form, {
     signal: opts.signal,

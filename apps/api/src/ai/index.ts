@@ -21,6 +21,22 @@
 export { AiModule } from './ai.module';
 export { AiSettingsController } from './ai-settings.controller';
 export { AiUserKeyController } from './ai-user-key.controller';
+export { AiSpeechController } from './ai-speech.controller';
+// The two speech caps are exported as the ONE source a test, a client-facing
+// document or a future caller reads them from. Three numbers typed out in
+// three places is how a 10 MB endpoint comes to be documented as 20.
+export {
+  ACCEPTED_AUDIO_CONTENT_TYPES,
+  AiSpeechService,
+  MAX_AUDIO_BYTES_PER_SECOND,
+  MAX_TRANSCRIBE_AUDIO_BYTES,
+  MAX_TRANSCRIBE_BYTES,
+  MAX_TRANSCRIBE_SECONDS,
+} from './ai-speech.service';
+export type {
+  SynthesizedSpeech,
+  TranscribeUpload,
+} from './ai-speech.service';
 export { AiUserKeyService } from './ai-user-key.service';
 export { AiUserCredentialCleanupTask } from './tasks/ai-credential-cleanup.task';
 export { AiStatusService } from './ai-status.service';
@@ -107,6 +123,32 @@ export {
   aiUserKeyStatusSchema,
   updateAiUserKeySchema,
 } from './dto/ai-user-key.dto';
+export {
+  MAX_SYNTHESIS_TEXT_LENGTH,
+  aiSpeechFailedSchema,
+  aiSpeechRoleSchema,
+  aiSpeechUnavailableCauseSchema,
+  aiSpeechUnavailableSchema,
+  aiSynthesizeRequestSchema,
+  aiSynthesizeUnavailableResponseSchema,
+  aiTranscribeOkSchema,
+  aiTranscribeResponseSchema,
+} from './dto/ai-speech.dto';
+export {
+  AiSpeechFailedDto,
+  AiSpeechUnavailableDto,
+  AiSynthesizeRequestDto,
+  AiTranscribeOkDto,
+} from './dto/ai-speech.dto';
+export type {
+  AiSpeechFailedResponse,
+  AiSpeechRole,
+  AiSpeechUnavailableCause,
+  AiSpeechUnavailableResponse,
+  AiSynthesizeRequestInput,
+  AiSynthesizeUnavailableResponse,
+  AiTranscribeResponse,
+} from './dto/ai-speech.dto';
 export type {
   AiUserKeyStatus,
   UpdateAiUserKeyInput,
@@ -152,6 +194,12 @@ export type {
   AiStructuredRunOk,
   AiStructuredRunRequest,
   AiStructuredRunResult,
+  AiSynthesizeRunOk,
+  AiSynthesizeRunRequest,
+  AiSynthesizeRunResult,
+  AiTranscribeRunOk,
+  AiTranscribeRunRequest,
+  AiTranscribeRunResult,
   AiUnavailableCause,
 } from './ai-dispatch.service';
 export type { CatalogFilter } from './providers/model-classifier';

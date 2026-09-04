@@ -18,6 +18,8 @@ import type {
   AiRecordedCompletionResult,
   AiStreamEvent,
   AiStructuredCompletionResult,
+  AiSynthesisResult,
+  AiTranscriptionResult,
   AiUsage,
 } from './ai.types';
 import type { AiProvider } from './providers/ai-provider.interface';
@@ -57,6 +59,19 @@ const USAGE: AiUsage = {
   promptTokens: 10,
   completionTokens: 5,
   totalTokens: 15,
+};
+
+/**
+ * Usage as the SPEECH surface really reports it: all-null.
+ *
+ * The speech APIs bill by audio duration and report no token counts, so a
+ * fixture with plausible numbers would let these tests be written against
+ * figures production never sends. See `AiTranscriptionResult.usage`.
+ */
+const SPEECH_USAGE: AiUsage = {
+  promptTokens: null,
+  completionTokens: null,
+  totalTokens: null,
 };
 
 /** Settings for a deployment that is fully configured. */
@@ -119,6 +134,22 @@ function providerDouble(overrides: Partial<AiProvider> = {}): AiProvider {
       usageEventId: 'usage-row-1',
     } satisfies AiStructuredCompletionResult<{ verdict: string }>),
     stream: jest.fn(),
+    transcribe: jest.fn().mockResolvedValue({
+      success: true,
+      text: 'the president',
+      confidence: 0.92,
+      usage: SPEECH_USAGE,
+      errorCode: null,
+      error: null,
+    } satisfies AiTranscriptionResult),
+    synthesize: jest.fn().mockResolvedValue({
+      success: true,
+      audio: Buffer.from([0x49, 0x44, 0x33]),
+      contentType: 'audio/mpeg',
+      usage: SPEECH_USAGE,
+      errorCode: null,
+      error: null,
+    } satisfies AiSynthesisResult),
     ...overrides,
   } as AiProvider;
 }
@@ -598,6 +629,344 @@ describe('AiDispatchService.runStream', () => {
  * mentioning them is a comment one copy-paste away from a call site using
  * them.
  */
+// =============================================================================
+// The two speech methods (issue #95, epic #58)
+// =============================================================================
+//
+// They are siblings of `run`, not variants of it, so what is worth testing is
+// exactly what they SHARE with it and what they deliberately do not:
+//
+//   * They resolve through the same private `resolve` — same five checks, same
+//     order, the caller's own key last. Tested by producing each of the four
+//     causes through the speech methods and by the both-broken ordering case.
+//   * They pass the role's own key through to the provider, so the usage row
+//     `BaseAiProvider` writes is attributed to `transcribe`/`speak` and not to
+//     whatever role happened to be nearby.
+//   * An empty transcript is a SUCCESS and empty audio is a FAILURE. These
+//     look inconsistent until you read what each one means about the input,
+//     which is why both have a test.
+// =============================================================================
+
+const AUDIO = Buffer.from('fake webm bytes');
+
+/** Settings with both speech roles bound. */
+function speechSettings(overrides: Partial<AiSettings> = {}): AiSettings {
+  return readySettings({
+    models: {
+      ...DEFAULT_AI_SETTINGS.models,
+      tutor: 'gpt-5.4-mini',
+      grader: 'gpt-5.4-mini',
+      transcribe: 'gpt-4o-transcribe',
+      speak: 'gpt-4o-mini-tts',
+    },
+    ...overrides,
+  });
+}
+
+const TRANSCRIBE_REQUEST = {
+  audio: AUDIO,
+  contentType: 'audio/webm',
+  fileName: 'recording.webm',
+};
+
+describe('AiDispatchService.transcribe', () => {
+  it('returns the transcript, the confidence and the bound model', async () => {
+    const { service } = build(speechSettings(), USER_KEY);
+
+    expect(await service.transcribe(ALICE, TRANSCRIBE_REQUEST)).toEqual({
+      status: 'ok',
+      text: 'the president',
+      confidence: 0.92,
+      usage: SPEECH_USAGE,
+      modelId: 'gpt-4o-transcribe',
+    });
+  });
+
+  it('runs on the caller`s own key and names the transcribe role to the provider', async () => {
+    // The role key is what `BaseAiProvider.recordUsage` writes to
+    // `ai_usage_events.roleKey`. Asserted here, at the one place this service
+    // chooses it, rather than only end-to-end.
+    const { service, provider } = build(speechSettings(), USER_KEY);
+
+    await service.transcribe(ALICE, TRANSCRIBE_REQUEST);
+
+    expect(provider.transcribe).toHaveBeenCalledWith(
+      ALICE,
+      USER_KEY,
+      expect.objectContaining({
+        roleKey: 'transcribe',
+        modelId: 'gpt-4o-transcribe',
+        audio: AUDIO,
+        contentType: 'audio/webm',
+        fileName: 'recording.webm',
+      }),
+    );
+  });
+
+  it('passes a null confidence through rather than coalescing it to 0', async () => {
+    // The whole reason the field is nullable: a 0 asserts the recogniser was
+    // certain it heard nothing, on the signal a caller uses to decide an
+    // answer was MISHEARD rather than wrong.
+    const provider = providerDouble({
+      transcribe: jest.fn().mockResolvedValue({
+        success: true,
+        text: 'the president',
+        confidence: null,
+        usage: SPEECH_USAGE,
+        errorCode: null,
+        error: null,
+      } satisfies AiTranscriptionResult),
+    });
+    const { service } = build(speechSettings(), USER_KEY, provider);
+
+    const result = await service.transcribe(ALICE, TRANSCRIBE_REQUEST);
+
+    expect(result).toMatchObject({ status: 'ok', confidence: null });
+  });
+
+  it('treats an empty transcript as a success, unlike an empty completion', async () => {
+    // A recording of silence really did transcribe to nothing. `run` calls an
+    // empty completion a failure; this must not inherit that.
+    const provider = providerDouble({
+      transcribe: jest.fn().mockResolvedValue({
+        success: true,
+        text: '',
+        confidence: 0.1,
+        usage: SPEECH_USAGE,
+        errorCode: null,
+        error: null,
+      } satisfies AiTranscriptionResult),
+    });
+    const { service } = build(speechSettings(), USER_KEY, provider);
+
+    expect(await service.transcribe(ALICE, TRANSCRIBE_REQUEST)).toMatchObject({
+      status: 'ok',
+      text: '',
+    });
+  });
+
+  it('reports a provider failure as failed, not unavailable', async () => {
+    const provider = providerDouble({
+      transcribe: jest.fn().mockResolvedValue({
+        success: false,
+        text: null,
+        confidence: null,
+        usage: SPEECH_USAGE,
+        errorCode: 'unsupported_format',
+        error: 'The audio format is not supported.',
+      } satisfies AiTranscriptionResult),
+    });
+    const { service } = build(speechSettings(), USER_KEY, provider);
+
+    expect(await service.transcribe(ALICE, TRANSCRIBE_REQUEST)).toEqual({
+      status: 'failed',
+      errorCode: 'unsupported_format',
+      error: 'The audio format is not supported.',
+      usageEventId: null,
+      modelId: 'gpt-4o-transcribe',
+    });
+  });
+
+  it('reports a success with no transcript at all as failed', async () => {
+    // `null`, not `''` — a provider contract violation rather than silence.
+    const provider = providerDouble({
+      transcribe: jest.fn().mockResolvedValue({
+        success: true,
+        text: null,
+        confidence: null,
+        usage: SPEECH_USAGE,
+        errorCode: null,
+        error: null,
+      } satisfies AiTranscriptionResult),
+    });
+    const { service } = build(speechSettings(), USER_KEY, provider);
+
+    expect(await service.transcribe(ALICE, TRANSCRIBE_REQUEST)).toMatchObject({
+      status: 'failed',
+      errorCode: 'empty_transcription',
+    });
+  });
+
+  it('never rejects when the provider throws', async () => {
+    const provider = providerDouble({
+      transcribe: jest.fn().mockRejectedValue(new Error('socket hang up')),
+    });
+    const { service } = build(speechSettings(), USER_KEY, provider);
+
+    await expect(
+      service.transcribe(ALICE, TRANSCRIBE_REQUEST),
+    ).resolves.toMatchObject({ status: 'failed', errorCode: 'dispatch_error' });
+  });
+});
+
+describe('AiDispatchService.synthesize', () => {
+  it('returns the audio, the provider`s content type and the bound model', async () => {
+    const { service } = build(speechSettings(), USER_KEY);
+
+    const result = await service.synthesize(ALICE, { text: 'Who is the President?' });
+
+    expect(result).toMatchObject({
+      status: 'ok',
+      contentType: 'audio/mpeg',
+      modelId: 'gpt-4o-mini-tts',
+    });
+    expect((result as { audio: Buffer }).audio).toEqual(
+      Buffer.from([0x49, 0x44, 0x33]),
+    );
+  });
+
+  it('runs on the caller`s own key and names the speak role to the provider', async () => {
+    const { service, provider } = build(speechSettings(), USER_KEY);
+
+    await service.synthesize(ALICE, { text: 'Hello', voice: 'alloy', format: 'mp3' });
+
+    expect(provider.synthesize).toHaveBeenCalledWith(
+      ALICE,
+      USER_KEY,
+      expect.objectContaining({
+        roleKey: 'speak',
+        modelId: 'gpt-4o-mini-tts',
+        text: 'Hello',
+        voice: 'alloy',
+        format: 'mp3',
+      }),
+    );
+  });
+
+  it('treats zero-length audio as a failure, unlike an empty transcript', async () => {
+    // There is no text whose honest synthesis is no sound, so this direction
+    // of the asymmetry is deliberate.
+    const provider = providerDouble({
+      synthesize: jest.fn().mockResolvedValue({
+        success: true,
+        audio: Buffer.alloc(0),
+        contentType: 'audio/mpeg',
+        usage: SPEECH_USAGE,
+        errorCode: null,
+        error: null,
+      } satisfies AiSynthesisResult),
+    });
+    const { service } = build(speechSettings(), USER_KEY, provider);
+
+    expect(await service.synthesize(ALICE, { text: 'Hello' })).toMatchObject({
+      status: 'failed',
+      errorCode: 'empty_synthesis',
+      error: 'The provider reported success and returned no audio.',
+    });
+  });
+
+  it('treats audio with no content type as a failure, and says which half was missing', async () => {
+    const provider = providerDouble({
+      synthesize: jest.fn().mockResolvedValue({
+        success: true,
+        audio: Buffer.from([1, 2, 3]),
+        contentType: null,
+        usage: SPEECH_USAGE,
+        errorCode: null,
+        error: null,
+      } satisfies AiSynthesisResult),
+    });
+    const { service } = build(speechSettings(), USER_KEY, provider);
+
+    expect(await service.synthesize(ALICE, { text: 'Hello' })).toMatchObject({
+      status: 'failed',
+      errorCode: 'empty_synthesis',
+      error: 'The provider reported success and returned no content type.',
+    });
+  });
+
+  it('never rejects when the provider throws', async () => {
+    const provider = providerDouble({
+      synthesize: jest.fn().mockRejectedValue(new Error('socket hang up')),
+    });
+    const { service } = build(speechSettings(), USER_KEY, provider);
+
+    await expect(
+      service.synthesize(ALICE, { text: 'Hello' }),
+    ).resolves.toMatchObject({ status: 'failed', errorCode: 'dispatch_error' });
+  });
+});
+
+describe('the speech methods share `resolve` with `run`', () => {
+  it.each([
+    ['no key stored', speechSettings(), null, 'no_user_key'],
+    ['the master switch off', speechSettings({ enabled: false }), USER_KEY, 'ai_disabled'],
+    [
+      'the role unbound',
+      readySettings({
+        models: { ...DEFAULT_AI_SETTINGS.models, transcribe: null, speak: null },
+      }),
+      USER_KEY,
+      'role_unbound',
+    ],
+  ] as const)(
+    'reports %s as its own cause, for both methods',
+    async (_case, settings, secret, cause) => {
+      const { service, provider } = build(settings, secret);
+
+      expect(await service.transcribe(ALICE, TRANSCRIBE_REQUEST)).toEqual({
+        status: 'unavailable',
+        cause,
+      });
+      expect(await service.synthesize(ALICE, { text: 'Hello' })).toEqual({
+        status: 'unavailable',
+        cause,
+      });
+
+      // NO CALL WAS ATTEMPTED. `unavailable` is not a failure that happened,
+      // it is a call that never ran — and a learner's key must not be spent
+      // finding that out.
+      expect(provider.transcribe).not.toHaveBeenCalled();
+      expect(provider.synthesize).not.toHaveBeenCalled();
+    },
+  );
+
+  it('reports capability_unsupported when the provider has no speech surface', async () => {
+    // The FIRST cause this codebase can produce in production: a text-only
+    // provider (Anthropic, Kimi, Qwen) declares no `transcribe`/`tts` family
+    // at all, while OpenAI declares all six.
+    const provider = providerDouble({
+      capabilities: new Set(['text']),
+      supports: jest.fn((family: string) => family === 'text'),
+    } as Partial<AiProvider>);
+    const { service } = build(speechSettings(), USER_KEY, provider);
+
+    expect(await service.transcribe(ALICE, TRANSCRIBE_REQUEST)).toEqual({
+      status: 'unavailable',
+      cause: 'capability_unsupported',
+    });
+    expect(await service.synthesize(ALICE, { text: 'Hello' })).toEqual({
+      status: 'unavailable',
+      cause: 'capability_unsupported',
+    });
+  });
+
+  it('reports the administrator`s gap before the caller`s missing key', async () => {
+    // Both broken at once. Telling the caller about their own missing key
+    // would send them to store one that still would not work — the ordering
+    // `run` already guarantees, inherited here rather than re-implemented.
+    const { service } = build(speechSettings({ enabled: false }), null);
+
+    expect(await service.transcribe(ALICE, TRANSCRIBE_REQUEST)).toEqual({
+      status: 'unavailable',
+      cause: 'ai_disabled',
+    });
+  });
+
+  it('does not decrypt the caller`s key for a call an unbound role would refuse', async () => {
+    // The reason the key lookup is step five: the refusal costs one settings
+    // read, not a trip through the cipher.
+    const settings = readySettings({
+      models: { ...DEFAULT_AI_SETTINGS.models, transcribe: null },
+    });
+    const { service, credentials } = build(settings, USER_KEY);
+
+    await service.transcribe(ALICE, TRANSCRIBE_REQUEST);
+
+    expect(credentials.getSecret).not.toHaveBeenCalled();
+  });
+});
+
 const DISPATCH_SOURCE = readFileSync(
   join(__dirname, 'ai-dispatch.service.ts'),
   'utf8',
