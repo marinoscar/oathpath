@@ -49,11 +49,19 @@ import type {
 // `planned` and `threshold` are the engine's `InterviewPassRule`, which came
 // from the `civics_test_versions` row. `asked`/`correct`/`stopReason` are the
 // engine's own counters. `outcome` and `acceptedAnswers` are read off the
-// `practice_attempts` rows the grading ladder wrote. The readiness block is the
-// snapshot `ReadinessService` just computed. This file arranges those facts; it
-// does not decide any of them, and it contains no threshold literal — a test
-// reads its source off disk and asserts so, the same way the engine's own spec
-// does for `interview-engine.ts`.
+// `practice_attempts` rows the grading ladder wrote, and since #160 so are
+// `input_mode`, `failure_cause` and `asr_confidence`; the segment results are
+// `english_attempts` rows, paired to this interview by the caller. The
+// readiness block is the snapshot `ReadinessService` just computed. This file
+// arranges those facts; it does not decide any of them, and it contains no
+// threshold literal — a test reads its source off disk and asserts so, the same
+// way the engine's own spec does for `interview-engine.ts`.
+//
+// THE ONE THING THIS FILE DOES DECIDE is what a debrief CALLS a mishearing, and
+// that is deliberate rather than an exception: the mapping from the whole
+// six-value `failure_cause` enum to a single boolean is a presentation choice,
+// it is made once here rather than once per caller, and both facts survive it
+// — `outcome` is copied through beside `misheard`, untouched.
 // =============================================================================
 
 /** One graded civics attempt, as this builder reads it. */
