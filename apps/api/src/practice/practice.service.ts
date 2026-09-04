@@ -742,6 +742,9 @@ export class PracticeService {
     // question in the first place (`mastery/selector.ts`'s own
     // `excludeUnanswerable`), so this only matters for a question id a client
     // posted rather than was handed.
+    //
+    // It is skipped for a MISHEARD attempt too (issue #244) — see the guard
+    // itself, where that second condition and its reason are written out.
     const attempt = await this.prisma.$transaction(async (tx) => {
       const created = await tx.practiceAttempt.create({
         data: {
@@ -826,7 +829,49 @@ export class PracticeService {
         include: { question: { select: QUESTION_SELECT } },
       });
 
-      if (status !== 'state_required') {
+      // -----------------------------------------------------------------
+      // AND SKIPPED FOR A MISHEARD ATTEMPT (issue #244, epic #58 / E9)
+      // -----------------------------------------------------------------
+      //
+      // THIS LINE IS WHERE THE EPIC'S "NEVER PENALISED" GUARANTEE IS
+      // ACTUALLY ENFORCED — not by the `outcome` value, which stays
+      // `incorrect` and is honest as written: the transcript genuinely did
+      // not match. `failure_cause: 'misheard'` is what distinguishes the
+      // row for any reader; `voice.md` §5's requirement table is about the
+      // PENALTY, and penalties land here, in `question_mastery`.
+      //
+      // A mishearing is not evidence about recall in either direction. The
+      // recogniser reported it was unsure of the TEXT (see {@link
+      // isMisheardAttempt}), so this row says nothing about whether the
+      // learner knew the answer — and `nextSchedule` has no way to express
+      // that: every `AttemptOutcome` it accepts is a claim about recall,
+      // and the only one this attempt could map to is `incorrect`
+      // (`mastery/outcome-mapping.ts` collapses everything that is not
+      // `correct`). Feeding it in would reset `correctStreak`, increment
+      // `lapses`, pull `dueAt` in and possibly move the row to `lapsed` —
+      // an accent or a noisy mic charged to the learner as forgetting, and
+      // indistinguishable afterwards from not knowing the material. That is
+      // exactly the harm the epic exists to prevent, applied at the one
+      // place it would have permanently stuck.
+      //
+      // THE REAL EVIDENCE ARRIVES ON THE RETRY. §3.3 offers the learner one,
+      // it comes back through this same method carrying
+      // `retryOfAttemptId`, and it schedules mastery normally — so the
+      // question is not left unscheduled, merely scheduled from the attempt
+      // that actually heard them. Declining to schedule here is a deferral,
+      // not a discount; it is the same refusal the `state_required` skip
+      // above makes, for the same reason (no honest grade available), from a
+      // different cause.
+      //
+      // THE ROW IS STILL WRITTEN AND STILL COUNTS AS AN INTERACTION. Nothing
+      // above this guard is conditional on `misheard`: the attempt is
+      // persisted with its outcome, its confidence and its cause, so the
+      // mishearing remains visible evidence rather than a gap. And accrual
+      // (issue #119, below, after the commit) is deliberately unaffected —
+      // the learner did practice, and E7's streak and daily-goal counters
+      // measure engagement, not correctness. Withholding a scheduling
+      // penalty must never also withhold credit for showing up.
+      if (status !== 'state_required' && !misheard) {
         await this.grading.scheduleMastery(
           tx,
           userId,

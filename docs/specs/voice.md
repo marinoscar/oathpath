@@ -295,8 +295,9 @@ site that can drift from it silently on the next edit.
 
 ```ts
 /** Below this, a transcription is presented to the learner as uncertain and,
- *  if left uncorrected and ultimately wrong, is graded as `misheard` rather
- *  than `incorrect`. See docs/specs/voice.md §3. */
+ *  if left uncorrected and ultimately graded as a miss, maps onto
+ *  `practice_attempts.failure_cause = 'misheard'` — the outcome itself
+ *  stays whatever grading found. See docs/specs/voice.md §3. */
 export const ASR_CONFIDENCE_THRESHOLD = 0.6;
 ```
 
@@ -372,15 +373,23 @@ Two branches from there:
   type it), that second attempt is written as a **new** `practice_attempts`
   row with `retryOfAttemptId` pointing at the first row's `id` (§8), and the
   first row is left exactly as graded: its `outcome` is whatever the ladder
-  produced (ordinarily `incorrect`), never a new or different value — only
-  `failureCause` was overridden, as above. **No `PracticeOutcome` enum
-  change was needed, or made.** The existing `correct`/`partial`/
-  `incorrect`/`skipped` set is unchanged; an earlier draft of this document
-  anticipated a retry-specific outcome value, and that turned out to be
-  unnecessary — what makes the first row legible as a corrected mishearing
-  rather than a second, unrelated failure is `failureCause: 'misheard'` plus
-  the `retryOfAttemptId` link on the row that supersedes it (§3.2), not a
-  new state on `outcome` itself.
+  produced — ordinarily `incorrect`, and honestly so: the transcript genuinely
+  did not match an accepted answer. **No `PracticeOutcome` enum change was
+  made, deliberately.** The existing `correct`/`partial`/`incorrect`/
+  `skipped` set is unchanged — a fifth, retry-specific value was considered
+  and rejected, because it would ripple a migration through every reader of
+  `outcome` (readiness's `spoken` component, progress, mock interviews) for a
+  fact `failureCause` already records with no schema change at all. What
+  makes the first row legible as a corrected mishearing rather than a second,
+  unrelated failure is `failureCause: 'misheard'` plus the `retryOfAttemptId`
+  link on the row that supersedes it (§3.2) — and, more precisely still, the
+  guarantee this whole mechanism exists to give is enforced one layer down
+  from `outcome` entirely: a `misheard` attempt is excluded from
+  `scheduleMastery`'s call (`apps/api/src/practice/practice.service.ts`,
+  `recordAttempt`), so `correctStreak`, `lapses`, `state` and `dueAt` never
+  see it. `outcome` stays a truthful record of what the grader found;
+  `failureCause` says why it's not damning; the scheduler guard is where the
+  "never penalised" promise actually lives.
 
   **A skip can never be `misheard`.** `skipped` together with a `transcript`
   or an `asr_confidence` is rejected by the request schema outright — a 400,
@@ -409,14 +418,16 @@ An attempt that another attempt points at through `retryOfAttemptId` is
 
 - **A superseded attempt is never deleted.** It stays in `practice_attempts`
   exactly as written — `outcome` whatever grading produced (ordinarily
-  `incorrect`), `failureCause: misheard` (overriding the grader, per §3.1),
-  `transcript` holding the confirmed text (which, in the branch that leads
-  to a retry, is the unedited recogniser guess the learner confirmed as-is —
-  see §3.1). It is real evidence that a mishearing happened, and deleting
-  evidence to make a number look better is precisely what this product's
-  evidence-ledger design (`schema.prisma`'s own header on this table:
-  "readiness has to be reconstructed from repeated, timestamped evidence")
-  does not do anywhere else, and does not start doing here.
+  `incorrect`, and left that way: it is the honest record that the
+  transcript did not match), `failureCause: misheard` (overriding the
+  grader, per §3.1), `transcript` holding the confirmed text (which, in the
+  branch that leads to a retry, is the unedited recogniser guess the learner
+  confirmed as-is — see §3.1). It is real evidence that a mishearing
+  happened, and deleting evidence to make a number look better is precisely
+  what this product's evidence-ledger design (`schema.prisma`'s own header
+  on this table: "readiness has to be reconstructed from repeated,
+  timestamped evidence") does not do anywhere else, and does not start doing
+  here.
 - **A superseded attempt is excluded from the practice session's summary
   counts.** `PracticeSession.summary` (score, per-category breakdown,
   timing — `docs/specs/practice-sessions.md`) is computed once at session
@@ -435,11 +446,17 @@ in the branch where the learner's confirmed text actually matched — the
 first branch in §3.1's worked example — and a row that is `correct` is
 never the one a retry supersedes in the first place: nothing offers a retry
 for an attempt that already graded `correct`. The row that *can* be
-superseded is the low-confidence, `failureCause: 'misheard'` one, which by
-construction is not `correct` (§3.1), so it was never counted in `spoken`
-to begin with. No filter or exclusion needs to be added to
-`readiness.service.ts` for §3.2's supersession rule to hold there; it
-already only reads the kind of row a superseded attempt never is.
+superseded is the low-confidence one — `isMisheardAttempt` requires a
+non-`correct` outcome as one of its own three conditions, so `failureCause:
+'misheard'` and `outcome: 'correct'` never co-occur on any row by
+construction, not by coincidence. §3.1's protection for this row lands at
+the mastery scheduler guard, not at `outcome`, which is why the row was
+never counted in `spoken` to begin with: it is excluded there for the
+mundane reason every other `incorrect` row is (the component reads
+`outcome: 'correct'` only), regardless of how `failureCause` reads. No
+filter or exclusion needs to be added to `readiness.service.ts` for §3.2's
+supersession rule to hold there; it already only reads the kind of row a
+superseded attempt never is.
 
 ### 3.3 The one-attempt-per-question rule, relaxed for exactly one case
 
@@ -879,7 +896,7 @@ load-bearing rather than a preference:
 | 1 | **Browser TTS is the default; `speak` is an optional upgrade.** | "Hear the question" must work on a fresh install with zero configuration and zero cost — an admin who has not touched AI settings at all must not be the reason a learner cannot hear a question read aloud. §2. |
 | 2 | **Wiring a voice role must not break existing installations.** | `systemReady` was computed over every `wiredModelRoles()` member; wiring `transcribe`/`speak` alone, without narrowing `systemReady` to the text roles in the same commit, would make every deployed installation report not-ready the instant this epic merges — for a capability nobody asked for yet, discovered by an admin who changed nothing. §1. |
 | 3 | **The transcript is confirmed by the learner before grading.** | This is the anti-penalty mechanism `VISION.md` line 228 requires. Grading raw ASR output treats a speech-recognition failure as a civics-knowledge failure — the exact conflation this epic exists to prevent. §3. |
-| 4 | **Low confidence is `misheard`, not incorrect.** | Without this, an accent or a noisy microphone becomes a wrong-answer data point indistinguishable from not knowing the material, corrupting the readiness model's `spoken` component with recognizer noise rather than learner evidence. §3, §3.1. |
+| 4 | **A low-confidence miss is flagged `failureCause: misheard` and withheld from mastery scheduling — `outcome` stays whatever grading honestly found.** | Without the scheduling withholding, an accent or a noisy microphone becomes a scheduling penalty (a reset streak, a lapse, a pulled-in `dueAt`) indistinguishable from not knowing the material — the recognizer's own uncertainty about the TEXT says nothing about the learner's recall, so `question_mastery` must never see it. §3, §3.1. |
 | 5 | **Audio is not stored.** | An unnecessary recording of someone's voice, made while they practice for a naturalization interview, is a liability this product has no use for and every reason to avoid — retaining it would create a sensitive data store with no corresponding feature need. §4. |
 | 6 | **Voice is always optional.** | `VISION.md`'s "type instead when voice is inconvenient" and "switch between voice and text without losing progress" are stated as user-facing requirements, not aspirations; a learner who cannot or does not want to use voice must have the identical practice experience by text. §5. |
 
@@ -892,7 +909,7 @@ load-bearing rather than a preference:
 | **A combined `voiceReady` flag** | Reproduces the exact mistake `ai-settings.md` §5 already rejected once for `systemReady`/`userKeyConfigured`, and `ai-evaluation.md` §4 rejected again for a single `unavailable: boolean`: `transcribe` unbound and `speak` unbound are different facts with different remedies and different urgency (one hides a control, one is invisible by design), and a caller merging them into one flag cannot render either message correctly. §1. |
 | **Grading the raw transcript without confirmation** | Directly violates `VISION.md` line 228. A learner who says the right answer and is misheard would be graded exactly as if they had said the wrong thing, with no mechanism to distinguish the two — the precise unfairness this epic's slice exists to remove. §3. |
 | **Retaining audio for review** ("in case a learner disputes a grade") | The retry mechanism (§3.1) already gives a learner a correction path with no audio required — the transcript, the confidence score, and the linked retry attempt are sufficient evidence for any dispute this could otherwise justify recording. Storing audio "just in case" is exactly the liability `Decisions locked` #5 exists to foreclose, and a feature built to be able to replay a recording is a feature that has quietly reintroduced storage this epic's own acceptance criteria rule out. §4. |
-| **Mapping low confidence directly to `incorrect`** | Punishes the exact learner `VISION.md` names — a good-English-speaker with an accent, or anyone practicing in a noisy room — with a wrong-answer record for a recognizer failure that has nothing to do with civics knowledge. This corrupts the readiness model's `spoken` component with recognizer noise indistinguishable from real gaps in learner knowledge. §3, §3.1. |
+| **Letting a low-confidence miss flow through with no `failureCause` flag and no mastery-scheduling exclusion** | `outcome` was always going to stay whatever grading found — the design never routes around `incorrect` at that column. What this alternative would have skipped is the two things that actually protect the learner: the `failureCause: 'misheard'` flag that tells a reader why the row missed, and the scheduler guard (§3.1) that keeps the miss out of `question_mastery`. Without them, a good-English-speaker's accent or a noisy room becomes a reset streak, a lapse, and a pulled-in `dueAt`, indistinguishable afterwards from a real gap in learner knowledge. §3, §3.1. |
 | **Using the server key (`('ai', 'openai')`) for transcription or synthesis** | Concentrates every speech call's real cost on the administrator's account with no per-user attribution, invisibly — nothing in `AiTranscriptionResult`/`AiSynthesisResult` would ever distinguish a fallback call from a normal one, reproducing `ai-evaluation.md` §5's rejected alternative for a second inference surface. §6. |
 | **Storing the audio blob client-side for replay** | Same liability as server-side retention (`Decisions locked` #5), moved to the browser instead of the database, and equally rejected: an `IndexedDB` or `localStorage` recording of a learner's voice, made while practicing for an immigration interview, is retained sensitive data regardless of which machine holds it. §4. |
 | **Overloading `AiDispatchService.run`'s request type with optional audio fields** | Reproduces the "bag of optional fields" shape `AiStreamEvent`'s own header already rejects for a different surface: a text caller would compile against fields it never populates, and a compiler asking "did you mean to pass audio here" is better than an incident report asking why a completion request silently carried an empty buffer. Two new methods (`transcribe`, `synthesize`) keep each request type honest about what it actually needs. §6. |
@@ -916,11 +933,6 @@ load-bearing rather than a preference:
   confirm-transcript screen. This document specifies the API contracts and
   product rules those components must honor; their implementation is a
   frontend-dev concern against this spec, not restated here.
-- **A `PracticeOutcome` value for a low-confidence attempt routed to
-  retry.** §3.1 states the constraint (it is not `incorrect`) without
-  choosing the exact enum member; that is a database-migration-issue
-  decision made against the existing `correct`/`partial`/`incorrect`/
-  `skipped` set.
 - **Rate limiting or spend caps on speech calls.** Carried over from
   `ai-settings.md` §18 and `ai-evaluation.md` §13 — still nobody's job yet,
   and not special-cased for audio despite its different cost profile

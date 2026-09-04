@@ -961,6 +961,57 @@ export class InterviewsService {
         // refusal `recordAttempt` makes: lapsing a question's mastery for a
         // system limitation (no state on the profile) rather than for anything
         // the learner did would be a discount the learner never earned.
+        //
+        // -------------------------------------------------------------------
+        // THIS GUARD IS DELIBERATELY ONE CONDITION SHORTER THAN ITS SIBLING
+        // (issue #244, epic #58 / E9)
+        // -------------------------------------------------------------------
+        //
+        // `PracticeService.recordAttempt`'s matching guard now reads
+        // `status !== 'state_required' && !misheard`: a misheard attempt is
+        // recorded but never scheduled, because the recogniser's own
+        // uncertainty about the TEXT makes the row no evidence about recall in
+        // either direction, and every `AttemptOutcome` the scheduler accepts
+        // is a claim about recall. This one has no `!misheard` half, and that
+        // is correct TODAY for one reason only: THE INTERVIEW PATH CANNOT
+        // PRODUCE A MISHEARD ATTEMPT. Not "does not in practice" — cannot,
+        // four times over:
+        //
+        //   1. `interview-turn.dto.ts` is `z.strictObject({ text })`. There is
+        //      no `asrConfidence` field, and `strictObject` rejects unknown
+        //      keys, so a confidence cannot arrive even as a stray property.
+        //   2. `inputMode: 'typed'` is hardcoded on the attempt written above
+        //      (:908) — an interview turn is never marked spoken.
+        //   3. `isMisheardAttempt` is never called on this path. It is
+        //      `PracticeService`'s, invoked at exactly one call site, and
+        //      nothing here computes the `misheard` flag at all.
+        //   4. `PersistableFailureCause` — the type of `graded.failureCause`
+        //      — EXCLUDES `'misheard'` at the type level, via
+        //      `UNGROUNDED_FAILURE_CAUSES` in `practice/grading.ts`. So the AI
+        //      grader cannot supply the cause on this path either, and the
+        //      compiler enforces it.
+        //
+        // WIRING E9 VOICE INTO INTERVIEWS MAKES THIS GUARD WRONG IMMEDIATELY
+        // (E11 / #60 is the epic that will). The moment an interview turn
+        // carries a real `asrConfidence`, a learner misheard by the recogniser
+        // starts being charged a mastery penalty here — `correctStreak` reset,
+        // `lapses` incremented, `dueAt` pulled in — which is precisely the harm
+        // #244 removed from the practice path, reappearing on the path where a
+        // nervous applicant is most likely to be misheard.
+        //
+        // AND NOTHING WOULD FORCE THE AUTHOR TO NOTICE. Adding the field is a
+        // change to the DTO and to the attempt write; this line would keep
+        // compiling untouched, no test asserts the condition exists, and the
+        // symptom is a slightly-too-low readiness score rather than an error.
+        // That is why the evidence above is written out rather than left to be
+        // re-derived: whoever wires voice in must read this and add the half.
+        //
+        // ISSUE #245 TRACKS THE REAL FIX — moving the skip rule INSIDE
+        // `AttemptGradingService.scheduleMastery`, so it is decided once for
+        // both call sites and they cannot disagree. Prefer that to adding
+        // `&& !misheard` here a second time: a rule stated twice is a rule that
+        // can be fixed in one place and silently left stale in the other, which
+        // is the exact situation this comment exists to describe.
         if (graded.answerResolution !== 'state_required') {
           await this.grading.scheduleMastery(
             tx,

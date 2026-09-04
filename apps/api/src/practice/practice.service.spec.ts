@@ -1158,6 +1158,108 @@ describe('PracticeService', () => {
         expect(isMisheardAttempt(0, 'incorrect')).toBe(true);
       });
     });
+
+    // -------------------------------------------------------------------------
+    // The mastery-scheduling guard: `!misheard` — issue #244, epic #58 / E9
+    // -------------------------------------------------------------------------
+    //
+    // `recordAttempt`'s guard is `if (status !== 'state_required' &&
+    // !misheard)`. This is the half of the fix that makes the penalty
+    // PERMANENT-proof: `isMisheardAttempt`'s own describe block above proves
+    // the pure function's boundary, but says nothing about whether
+    // `recordAttempt` actually WIRES it into the scheduling call — a guard
+    // that computed `misheard` correctly but forgot to consult it (or
+    // consulted the wrong boolean) would pass every test above and still
+    // charge the learner. These tests call `recordAttempt` for real and
+    // assert on `AttemptGradingService.scheduleMastery`'s own effect —
+    // `prisma.questionMastery.upsert` — because `scheduleMastery` here is the
+    // REAL implementation, not a mock (see this file's own header comment on
+    // `AttemptGradingService`).
+    describe('the mastery-scheduling guard (issue #244)', () => {
+      it('does NOT call scheduleMastery for a misheard attempt', async () => {
+        await service.recordAttempt(
+          USER_A,
+          SESSION_ID,
+          attemptInput({
+            responseText: 'the head of the executive ranch',
+            inputMode: 'spoken',
+            transcript: 'the head of the executive ranch',
+            asrConfidence: 0.41, // below threshold, and the answer missed
+          }),
+        );
+
+        // Sanity: this IS the misheard path — if it weren't, a failure here
+        // would be indistinguishable from the guard test below.
+        expect(written().failureCause).toBe('misheard');
+        expect(prisma.questionMastery.findUnique).not.toHaveBeenCalled();
+        expect(prisma.questionMastery.upsert).not.toHaveBeenCalled();
+      });
+
+      it('DOES still call scheduleMastery for an ordinary (non-misheard) incorrect attempt', async () => {
+        await service.recordAttempt(
+          USER_A,
+          SESSION_ID,
+          attemptInput({
+            responseText: 'a wrong answer',
+            inputMode: 'typed',
+          }),
+        );
+
+        expect(written().failureCause).toBeUndefined();
+        expect(prisma.questionMastery.upsert).toHaveBeenCalledTimes(1);
+      });
+
+      it('a CORRECT outcome always schedules mastery, even at a very low confidence', async () => {
+        // Condition 3 of isMisheardAttempt: outcome !== 'correct'. A right
+        // answer heard poorly must still schedule normally — a false
+        // "misheard" here would silently stop a correct streak from
+        // advancing.
+        await service.recordAttempt(
+          USER_A,
+          SESSION_ID,
+          attemptInput({
+            responseText: 'Congress',
+            inputMode: 'spoken',
+            transcript: 'Congress',
+            asrConfidence: 0.1,
+          }),
+        );
+
+        expect(written().failureCause).toBeUndefined();
+        expect(prisma.questionMastery.upsert).toHaveBeenCalledTimes(1);
+      });
+
+      // Each of isMisheardAttempt's three conditions, exercised through the
+      // real `recordAttempt` transaction — not just the pure function. A
+      // future edit that widens or narrows THE GUARD ITSELF (e.g. inverting
+      // the boolean, or gating on `finalOutcome` before it is computed)
+      // would still pass the pure-function tests above and fail only here.
+      it.each([
+        ['a known confidence strictly below threshold on a miss', 0.41, false],
+        ['confidence exactly AT the threshold on a miss (not misheard)', 0.6, true],
+        ['no confidence reported at all (undefined -> unknown is not low)', undefined, true],
+      ] as const)(
+        'schedules mastery correctly for: %s',
+        async (_label, asrConfidence, expectScheduled) => {
+          await service.recordAttempt(
+            USER_A,
+            SESSION_ID,
+            attemptInput({
+              responseText: 'the head of the executive ranch',
+              inputMode: 'spoken',
+              transcript: 'the head of the executive ranch',
+              ...(asrConfidence === undefined ? {} : { asrConfidence }),
+            }),
+          );
+
+          if (expectScheduled) {
+            expect(prisma.questionMastery.upsert).toHaveBeenCalledTimes(1);
+          } else {
+            expect(prisma.questionMastery.upsert).not.toHaveBeenCalled();
+          }
+        },
+      );
+    });
   });
 
   // ===========================================================================
