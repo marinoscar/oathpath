@@ -294,3 +294,48 @@ describe('announcing, and both themes at 360px', () => {
     ).toBeInTheDocument();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Issue #109, epic #58 / E9 — the degradation rule, row 2.
+//
+// The two tests above ("SPEAKS ANYWAY" and "says nothing about the missing
+// binding") already hold each half of this. It is asserted once more as a
+// SINGLE claim because the two halves are only worth anything together: a
+// silent component that stopped speaking would pass the second test, and a
+// speaking component that grew an explanation would pass the first. `voice.md`
+// §1's table says both at once — "no warning renders anywhere AND the question
+// still plays" — so one test says both at once.
+// ---------------------------------------------------------------------------
+
+describe('`speak` unbound is NOT a degraded state', () => {
+  it('plays the question and explains nothing, on a system that is otherwise ready', async () => {
+    installSpeechSynthesis();
+    // A READY deployment that simply has no premium voice bound — which since
+    // E9 narrowed `systemReady` to the text roles is the ordinary state of
+    // every fresh install, not a misconfiguration.
+    mockStatus({ systemReady: true, unboundRoles: ['speak'] });
+
+    const onPlayed = vi.fn();
+    renderIt({ text: QUESTION, premiumVoice: true, onPlayed });
+    await waitFor(() => expect(statusCalls).toBe(1));
+
+    fireEvent.click(screen.getByRole('button', { name: /read the question aloud/i }));
+
+    // It played.
+    await waitFor(() => expect(spoken).toHaveLength(1));
+    expect(spoken[0].text).toBe(QUESTION);
+    expect(onPlayed).toHaveBeenCalledWith('browser');
+    expect(synthesizeCalls).toBe(0);
+
+    // And nothing explained itself. Nothing is missing: the learner asked to
+    // hear the question and heard it. An `AiNotReady`-shaped message here —
+    // including the "not a problem with your key" sentence, which is correct
+    // everywhere it belongs and wrong here — would tell somebody the product
+    // is broken while it is reading their question to them.
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.queryByText(/not available yet/i)).toBeNull();
+    expect(screen.queryByText(/administrator/i)).toBeNull();
+    expect(screen.queryByText(/not a problem with your key/i)).toBeNull();
+    expect(screen.queryByText(/speak/i)).toBeNull();
+  });
+});
