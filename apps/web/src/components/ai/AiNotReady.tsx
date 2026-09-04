@@ -35,6 +35,41 @@
  * once, the copy stays consistent and correct; written per surface, the
  * "not your key" sentence is the first thing to get dropped as boilerplate —
  * and dropping it is exactly the failure.
+ *
+ * =============================================================================
+ * TWO SCOPES: APP-WIDE (`systemReady`) AND ONE ROLE (`role`)
+ * =============================================================================
+ *
+ * Issue #109, epic #58 / E9 added the second scope. `transcribe` and `speak`
+ * are wired now, and `systemReady` deliberately stopped depending on them
+ * (`docs/specs/voice.md` §1): an installation with only `tutor` and `grader`
+ * bound is a NORMAL, WORKING installation. So a learner can reach a spoken
+ * practice session with a good key, `systemReady === true`, and no speech
+ * recognition on the deployment at all — a state this component, reading
+ * `systemReady` alone, rendered nothing for.
+ *
+ * `role` is the whole addition. With it, this component renders for THAT
+ * role's unbound state (`status.unboundRoles.includes(role)`) instead of the
+ * app-wide one, and every other behaviour is unchanged: the sentence, the
+ * `info` severity, the admin-only naming of the role, the admin-only link to
+ * `/admin/settings/ai`, the calm tone. Without it, nothing about this
+ * component's behaviour moved — `systemReady` is still the question asked, and
+ * the app-wide callers were not touched.
+ *
+ * WHY NOT A SECOND COMPONENT FOR VOICE. Because the sentence above is the
+ * first thing to get dropped as boilerplate when the copy is rewritten
+ * somewhere else — this file's own header already says so, and a
+ * `VoiceNotReady` written from scratch is precisely the rewrite it warns
+ * about. The two states also want IDENTICAL copy for everything except which
+ * role is named, and two files with identical copy diverge on the first edit
+ * that touches only one of them. One component, one prop, one sentence.
+ *
+ * THE TWO SCOPES MUST NOT MERGE. `systemReady === false` (no provider, master
+ * switch off, `tutor`/`grader` unbound) and `transcribe` unbound are different
+ * problems, with different remedies, that a learner experiences differently:
+ * the first takes every AI feature away, the second takes away one optional
+ * input method while the session continues, fully usable, in text. A caller
+ * asks for one scope or the other; nothing here ever renders both.
  */
 
 import { Alert, AlertTitle, Box, Button, Typography } from '@mui/material';
@@ -54,6 +89,22 @@ export interface AiNotReadyProps {
    * only thing that knows which is true.
    */
   feature?: string;
+
+  /**
+   * Ask about ONE role instead of the whole system.
+   *
+   * The key exactly as the API's `AI_MODEL_ROLES` registry spells it —
+   * `'transcribe'`, `'speak'` — because it is matched against
+   * `status.unboundRoles`, whose members are those keys, and shown to an
+   * administrator who will go looking for that same word on
+   * `/admin/settings/ai`.
+   *
+   * When set, this component renders if and only if that role is unbound, and
+   * `systemReady` is not consulted at all: a deployment can be perfectly ready
+   * and still have no model bound to `transcribe` (see the file header). When
+   * absent, behaviour is exactly what it has always been.
+   */
+  role?: string;
 }
 
 /**
@@ -62,16 +113,23 @@ export interface AiNotReadyProps {
  * RETURNS NULL WHEN READY, so a consumer can mount it unconditionally above
  * its own content rather than duplicating the `systemReady` check. That is the
  * shape that makes "every AI surface shows this" cheap enough to actually
- * happen.
+ * happen. With `role`, the same holds one level down: mount it unconditionally
+ * and it says nothing unless that role is the thing that is missing.
  */
-export function AiNotReady({ feature }: AiNotReadyProps) {
+export function AiNotReady({ feature, role }: AiNotReadyProps) {
   const { status, isLoading } = useAiStatus();
   const { hasPermission } = usePermissions();
 
-  // Nothing to say while the answer is unknown, and nothing to say when the
-  // system is ready. A spinner here would put a loading state above every AI
-  // surface for a fact that is already cached.
-  if (isLoading || !status || status.systemReady) return null;
+  // Nothing to say while the answer is unknown. A spinner here would put a
+  // loading state above every AI surface for a fact that is already cached.
+  if (isLoading || !status) return null;
+
+  // The two scopes. A role-scoped caller asks only about its own role — a
+  // ready system with an unbound `transcribe` is exactly the case E9 created
+  // and the case `systemReady` cannot see.
+  if (role ? !status.unboundRoles.includes(role) : status.systemReady) {
+    return null;
+  }
 
   const isAdmin = hasPermission('system_settings:read');
   const what = feature ? `${feature} is` : 'This is';
@@ -95,8 +153,18 @@ export function AiNotReady({ feature }: AiNotReadyProps) {
         <Box sx={{ mt: 2 }}>
           {/* NAMED, not "some models". An admin who lands here should be one
               click and one glance from fixing it, and "which one?" is the
-              question they would otherwise have to go and answer. */}
-          {status.unboundRoles.length > 0 ? (
+              question they would otherwise have to go and answer.
+
+              A role-scoped alert names ITS role and no other. Listing every
+              unbound role on a voice surface would tell an admin that
+              `tutor` is unbound while they are looking at a missing
+              microphone — true, irrelevant here, and answered already by the
+              app-wide alert whose job it is. */}
+          {role ? (
+            <Typography variant="body2" sx={{ mb: 1 }}>
+              As an administrator: no model is bound to <strong>{role}</strong>.
+            </Typography>
+          ) : status.unboundRoles.length > 0 ? (
             <Typography variant="body2" sx={{ mb: 1 }}>
               As an administrator: no model is bound to{' '}
               <strong>{formatRoles(status.unboundRoles)}</strong>.

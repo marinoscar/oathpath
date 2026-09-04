@@ -43,7 +43,10 @@ function mockStatus(status: AiStatus) {
   server.use(http.get('*/api/ai/status', () => HttpResponse.json({ data: status })));
 }
 
-function renderIt(props: { feature?: string } = {}, user = mockUser) {
+function renderIt(
+  props: { feature?: string; role?: string } = {},
+  user = mockUser,
+) {
   const auth = {
     user,
     isLoading: false,
@@ -232,5 +235,121 @@ describe('AiNotReady — role formatting', () => {
     renderIt({}, mockAdminUser);
 
     expect(await screen.findByText('tutor, grader and speak')).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The role-scoped variant (issue #109, epic #58 / E9).
+//
+// `transcribe` and `speak` are wired now, and `systemReady` deliberately
+// stopped depending on them (`docs/specs/voice.md` §1): an installation with
+// only `tutor` and `grader` bound is a NORMAL, WORKING installation. That
+// created a state this component could not see — a ready system with no
+// speech recognition — and `role` is the whole of the addition that lets it.
+// ---------------------------------------------------------------------------
+
+describe('AiNotReady — scoped to one role', () => {
+  const READY_BUT_NO_TRANSCRIBE: AiStatus = {
+    ...READY,
+    // READY. This is the case the epic created, and the reason a second
+    // component was tempting: `systemReady` says everything is fine, and for
+    // every text feature it is.
+    systemReady: true,
+    unboundRoles: ['transcribe'],
+  };
+
+  it('RENDERS FOR AN UNBOUND ROLE ON A READY SYSTEM', async () => {
+    // Without this, a learner reaches a spoken practice session with a good
+    // key, a ready system, and a microphone that cannot work — and nothing on
+    // screen says why.
+    mockStatus(READY_BUT_NO_TRANSCRIBE);
+    renderIt({ role: 'transcribe', feature: 'Answering out loud' });
+
+    expect(
+      await screen.findByText(/Answering out loud is not available yet/i),
+    ).toBeInTheDocument();
+  });
+
+  it('keeps the sentence it exists for', async () => {
+    // The reason this is a prop rather than a second component: copy written
+    // per surface loses this line first.
+    mockStatus(READY_BUT_NO_TRANSCRIBE);
+    renderIt({ role: 'transcribe' });
+
+    expect(
+      await screen.findByText(/This is not a problem with your key/i),
+    ).toBeInTheDocument();
+  });
+
+  it('stays calm — info, exactly as the app-wide variant', async () => {
+    mockStatus(READY_BUT_NO_TRANSCRIBE);
+    renderIt({ role: 'transcribe' });
+
+    const alert = await screen.findByRole('alert');
+    expect(alert.className).toMatch(/Info|info/);
+    expect(alert.className).not.toMatch(/Error|error/);
+  });
+
+  it('renders nothing when that role IS bound, even on a broken system', async () => {
+    // `systemReady: false` is somebody else's problem and somebody else's
+    // message. A role-scoped caller asks one question and gets one answer.
+    mockStatus({ ...READY, systemReady: false, unboundRoles: ['tutor', 'grader'] });
+    const { container } = renderIt({ role: 'transcribe' });
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it('names ITS role to an admin and no other', async () => {
+    // An admin looking at a missing microphone does not need to be told that
+    // `tutor` is unbound: true, answered by the app-wide alert, and noise on
+    // top of the actual answer here.
+    mockStatus({ ...READY, systemReady: false, unboundRoles: ['tutor', 'transcribe'] });
+    renderIt({ role: 'transcribe' }, mockAdminUser);
+
+    expect(await screen.findByText('transcribe')).toBeInTheDocument();
+    expect(screen.queryByText(/tutor/i)).toBeNull();
+  });
+
+  it('gives an admin the same link, and a non-admin none of it', async () => {
+    mockStatus(READY_BUT_NO_TRANSCRIBE);
+    const admin = renderIt({ role: 'transcribe' }, mockAdminUser);
+    expect(
+      await screen.findByRole('link', { name: /Open AI settings/i }),
+    ).toHaveAttribute('href', '/admin/settings/ai');
+    admin.unmount();
+
+    renderIt({ role: 'transcribe' });
+    await screen.findByRole('alert');
+    expect(screen.queryByRole('link', { name: /Open AI settings/i })).toBeNull();
+    expect(screen.queryByText('transcribe')).toBeNull();
+  });
+
+  it('does not consult the master switch or the provider for a role', async () => {
+    // Those are the app-wide diagnosis. A role-scoped alert that started
+    // explaining them would be the merge this prop exists to avoid: one
+    // message for two problems with two different remedies.
+    mockStatus({
+      ...READY,
+      systemReady: false,
+      enabled: false,
+      providerConfigured: false,
+      unboundRoles: ['transcribe'],
+    });
+    renderIt({ role: 'transcribe' }, mockAdminUser);
+
+    await screen.findByRole('alert');
+    expect(screen.queryByText(/master switch/i)).toBeNull();
+    expect(screen.queryByText(/no AI provider has been chosen/i)).toBeNull();
+    expect(screen.getByText('transcribe')).toBeInTheDocument();
+  });
+
+  it('leaves the app-wide behaviour untouched when no role is given', async () => {
+    // The regression guard for every existing caller: `systemReady` is still
+    // the question asked, and the answer is still the whole list.
+    mockStatus(UNBOUND);
+    renderIt({}, mockAdminUser);
+
+    expect(await screen.findByText(/tutor and grader/i)).toBeInTheDocument();
   });
 });
