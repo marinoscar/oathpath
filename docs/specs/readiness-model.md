@@ -145,7 +145,7 @@ the entire mechanism by which this score can never overclaim itself (§2.9).
 | 4 | `consistency` | 0.10 | `min(distinctPracticeDaysInLast14, 7) / 7` | now |
 | 5 | `remediation` | 0.10 | `remediatedCount / everWeakCount`, or `1.0` if `everWeakCount === 0` | now |
 | 6 | `english` | 0.05 | `0.5·min(readingCredit/6, 1) + 0.5·min(writingCredit/4, 1)`, credited per distinct sentence at its best outcome in a trailing 30-day window | now |
-| 7 | `spoken` | 0.10 | `min(distinctQuestionsCorrectSpoken / 20, 1)` | E9 |
+| 7 | `spoken` | 0.10 | `min(distinctQuestionsCorrectSpoken / 20, 1)` | now |
 | 8 | `interview` | 0.10 | `min(mockInterviewsPassed / 2, 1)` | E8 |
 | | | **1.00** | | |
 
@@ -331,17 +331,20 @@ A learner with no in-window `english_attempts` rows of either kind reads
 `english`'s `0` has had exactly one meaning since before this component had
 any real evidence to read (§2.9 restates why that matters for the cap).
 
-### 2.7 `spoken` (0.10) — any language, `input_mode = 'spoken'`
+### 2.7 `spoken` (0.10) — real, since #104 (epic #58 / E9)
 
 `min(distinctQuestionsCorrectSpoken / 20, 1)` — `practice_attempts` rows
 where `inputMode = 'spoken'` (declared in `practice-sessions.md` §2.2,
-unwired until E9) and `outcome = 'correct'`, counted by distinct
-`questionId`. Zero evidence until E9. `20` is the same reasoning §2.6 gives:
-a round, generous denominator that reaches full credit well before a
-learner has spoken every question in a ~100–128-question bank, because full
-credit here is meant to represent "has demonstrated real spoken fluency
-across a meaningful slice of the material," not "has spoken the entire
-bank."
+wired by #104's spoken practice mode) and `outcome = 'correct'`, counted by
+distinct `questionId`. A learner with no spoken-and-correct attempts reads
+`spoken = 0` — the ordinary case for a learner who has only ever typed, not
+a distinct "unmeasured" state, the identical posture `english`'s §2.6
+closing paragraph already takes for the same reason. `20` is the same
+reasoning §2.6 gives: a round, generous denominator that reaches full
+credit well before a learner has spoken every question in a
+~100–128-question bank, because full credit here is meant to represent
+"has demonstrated real spoken fluency across a meaningful slice of the
+material," not "has spoken the entire bank."
 
 ### 2.8 `interview` (0.10) — the constant PRD.md already chose
 
@@ -366,15 +369,17 @@ each other.
 ### 2.9 The structural cap: why a `typed_only` learner is held under 80, and English pushes that ceiling to 80, not past it
 
 **`spoken` (0.10) and `interview` (0.10) sum to `0.20` of the total weight,
-and both are mathematically `0` for a learner with no spoken-answer
-evidence and no mock-interview evidence — `spoken` because E9 has not
-shipped, `interview` because a `mockInterviewsPassed` count of `0` reads as
-`0` whether or not a learner has ever attempted one. The weighted score can
-therefore never exceed `0.80` — 80 out of 100 — for a learner with neither
-kind of evidence, regardless of how much `english` credit they have earned.
-This is the cap `capReason: 'typed_only'` (§3) names, and it still falls
-directly out of the weights table above, not a second clamp anywhere in
-this document's engine.**
+and both read `0` for a learner with no spoken-answer evidence and no
+mock-interview evidence — an ordinary, honest zero for a learner who has
+never yet answered a question correctly with `inputMode: 'spoken'` or
+passed a mock interview, the identical "no evidence yet" reading `english`'s
+own `0` already carries (§2.6), not a placeholder standing in for an epic
+that has not shipped. The weighted score can therefore never exceed `0.80`
+— 80 out of 100 — for a learner with neither kind of evidence, regardless of
+how much `english` credit they have earned. This is the cap
+`capReason: 'typed_only'` (§3) names, and it still falls directly out of the
+weights table above, not a second clamp anywhere in this document's
+engine.**
 
 **Before #141 (epic #59 / E10), `english` was also mathematically `0` for
 every learner, which made `0.75` — not `0.80` — the honest ceiling this
@@ -599,7 +604,7 @@ export function computeReadiness(evidence: ReadinessEvidence): ReadinessResult;
 assembling `ReadinessEvidence`, exactly as `PracticeService` assembles a
 `MasteryRecord` before ever calling `nextSchedule`.** `computeReadiness`
 itself never sees a `userId`, a Prisma client, or a test-version code — it
-sees six already-resolved numbers and three arrays (mastery rows, recent
+sees four already-resolved numbers and three arrays (mastery rows, recent
 attempt outcomes, and — since #141 — one entry per distinct English
 sentence attempted in the trailing window) and returns a result that is, by
 construction, reproducible from those inputs alone.
@@ -843,10 +848,11 @@ optimization among components they can already move freely.
 **When not capped**, the recommendation picks the component — among the
 six currently-earnable ones (`coverage`, `recall`, `retention`,
 `consistency`, `remediation`, and, since #141 (epic #59 / E10), `english` —
-never `spoken`/`interview`, which are still declared-but-unwired exactly as
-§2.7–§2.8 describe, and recommending "go do more spoken/interview practice"
-as a headroom pick rather than as the cap message itself would be
-recommending a feature that does not exist yet) — with the greatest
+never `spoken`/`interview`, which read real evidence today (§2.7–§2.8) but
+are never a candidate for this pick regardless: recommending "go do more
+spoken/interview practice" as a headroom pick would send a learner to no
+practice destination of its own, distinct from the general practice surface
+every other headroom pick already shares) — with the greatest
 `weight * (1 - value)`, the "weighted headroom": how
 much this component could still add to the score, scaled by how much it's
 worth. Ties are broken by §2's declared component order (`coverage` before
@@ -890,12 +896,16 @@ document does not re-argue.
 Restated here so a later reader does not mistake a silence in this document
 for an oversight:
 
-- **Producing spoken, interview, or English evidence itself.** E8 (mock
-  interviews), E9 (spoken practice), and E11 (realtime/reading-writing
-  scoring) are the epics that ever write the `practice_attempts` rows
-  `spoken`, `english`, and `interview` read. This epic declares the three
-  components and their formulas (§2.6–§2.8) and leaves every one of them at
-  `0` until its producer ships.
+- **Producing spoken, interview, or English evidence was never this
+  document's own job — this engine only scores whatever evidence its caller
+  assembles.** `interview` evidence is produced by #133 (epic #57 / E8,
+  mock interviews), `english` evidence by #141 (epic #59 / E10, reading and
+  writing scoring), and `spoken` evidence by #104 (epic #58 / E9, spoken
+  practice mode inside the practice session) — all three real today (§2.6,
+  §2.7, §2.8). This corrects this section's own original placeholder,
+  written when this document first declared all three components and named
+  a future, repeat-numbered "E11" as `english`'s producer before E10's issue
+  existed to name instead.
 - **E7's engagement layer.** Streaks, `daily_activity`, points, and
   celebrations are E7's design entirely; §2.4 states at length why
   `consistency` is not that layer wearing a different name, and
@@ -906,10 +916,12 @@ for an oversight:
   forever, by the same structural argument that keeps every other
   AI-driven feature in this codebase off a background job.
 - **Widening `capReason` beyond `'typed_only'`.** A second cap reason would
-  need a second structural gap in the weights table the way `typed_only`
-  has one in `english`/`spoken`/`interview` today; nothing in E1–E11 creates
-  a second such gap, so this document declares no second value for one that
-  does not yet, and may never, exist.
+  need a second structural gap in `capReason`'s own two-path computation the
+  way `typed_only` has one in `spoken`/`interview` (§2.9, §3) —
+  deliberately not `english`, which reads real evidence but was never one
+  of the two paths `capReason` gates on; nothing in E1–E11 creates a second
+  such gap, so this document declares no second value for one that does
+  not yet, and may never, exist.
 
 ---
 
@@ -1002,7 +1014,8 @@ exactly on the threshold, on purpose, to pin the boundary case (`>=`, not
 `7` (still capped). Rows with `lapses >= 2`: `5`, of which `4` are
 currently `review`/`mastered`. Dana has now completed and passed **one**
 mock interview (`mockInterviewsPassed: 1`) — still no spoken-practice
-evidence, since E9 has not shipped.
+evidence: she has not yet answered a question correctly with
+`inputMode: 'spoken'`.
 
 | Component | value | weight | contribution |
 |---|---|---|---|
@@ -1011,7 +1024,7 @@ evidence, since E9 has not shipped.
 | retention | `(12·1.0 + 20·0.6)/55 = 24/55 = 0.436364` | 0.20 | `0.0872727` |
 | consistency | `min(7,7)/7 = 1.0` | 0.10 | `0.10` |
 | remediation | `4/5 = 0.8` | 0.10 | `0.08` |
-| english | `0` | 0.05 | `0` |
+| english | `0` (no `english_attempts` evidence) | 0.05 | `0` |
 | spoken | `0` | 0.10 | `0` |
 | interview | `min(1/2,1) = 0.5` | 0.10 | `0.05` |
 | **sum** | | **1.00** | **0.5897727** |
@@ -1025,7 +1038,7 @@ READINESS_PERFORMING_THRESHOLD (65)` → `null`. **Stage stays `practicing`**
 — the cap lifting and a stage transition are independent facts; one can
 change without the other.
 
-Top recommendation, no longer capped, computed over the five
+Top recommendation, no longer capped, computed over the six
 currently-earnable components' weighted headroom (`weight × (1 − value)`):
 
 | Component | headroom |
@@ -1035,6 +1048,7 @@ currently-earnable components' weighted headroom (`weight × (1 − value)`):
 | retention | `0.20 × (1 − 0.436364) = 0.112727` |
 | consistency | `0.10 × (1 − 1.0) = 0` |
 | remediation | `0.10 × (1 − 0.8) = 0.02` |
+| english | `0.05 × (1 − 0) = 0.05` |
 
 `retention` has the greatest headroom (`0.112727`) → `topRecommendation:
 { componentKey: 'retention', ... }` — Dana's `review`-state rows (20 of
@@ -1057,7 +1071,7 @@ issue text.
 
 | This document said | What shipped | Why the shipped design is right |
 |---|---|---|
-| §2.7: `spoken`'s formula is declared now "exactly the unwired-role idiom one layer up" (§2.6), with "zero evidence until E9" — reading, by analogy with `english` (§2.6, a literal hardcoded `0`) and `interview` (§2.8, a literal hardcoded `0`), as a stub returning `0` unconditionally until E9 ships. | `ReadinessService.assembleEvidence` computes `distinctQuestionsCorrectSpoken` for real, today — a genuine Prisma query for distinct `questionId`s among `practice_attempts` rows with `inputMode: 'spoken', outcome: 'correct'`, not a hardcoded `0`. Its own comment states the reasoning: "`inputMode: 'spoken'` already exists on `practice_attempts`... nothing stops reading it honestly today." The *result* is `0` for every user today, because no code path writes `inputMode: 'spoken'` yet (E9 is what will), so this is not an observable behavior change from what §2.7 promised — a typed-only learner still scores `spoken: 0`. | This is a genuine, deliberate implementation judgment call, not an error: unlike `english` (no column exists to read at all — a real one would need to be invented) and `interview` (no grouping key exists to turn attempt rows into "interview sessions" — inventing one would be guessing at E8's design), `spoken`'s one input (`inputMode = 'spoken'`) already exists as a real column with a real, unambiguous meaning. Reading it for real costs nothing extra and needs no future migration or follow-up edit once E9 starts writing it — the component goes live the moment E9 ships, with no change to this file. Hardcoding `0` here would have been the *safer-looking* choice that was actually less honest: it would silently stay `0` even after E9 started writing real spoken attempts, until someone remembered to come back and wire it up. |
+| §2.7: `spoken`'s formula is declared now "exactly the unwired-role idiom one layer up" (§2.6), with "zero evidence until E9" — reading, by analogy with `english` (§2.6, a literal hardcoded `0`) and `interview` (§2.8, a literal hardcoded `0`), as a stub returning `0` unconditionally until E9 ships. | `ReadinessService.assembleEvidence` computes `distinctQuestionsCorrectSpoken` for real, today — a genuine Prisma query for distinct `questionId`s among `practice_attempts` rows with `inputMode: 'spoken', outcome: 'correct'`, not a hardcoded `0`. Its own comment states the reasoning: "`inputMode: 'spoken'` already exists on `practice_attempts`... nothing stops reading it honestly today." At the time this was written, the *result* was `0` for every user, because no code path yet wrote `inputMode: 'spoken'` — so this was not, at that point, an observable behavior change from what §2.7 promised. Since #104 (epic #58 / E9) shipped spoken practice mode, `practice_attempts` rows with `inputMode: 'spoken'` are genuinely produced, so this component now reads real, nonzero evidence for a learner who has actually answered a question correctly aloud; a typed-only learner still scores `spoken: 0`. | This was a genuine, deliberate implementation judgment call, not an error: unlike `english` (no column existed to read at all — a real one would need to be invented) and `interview` (no grouping key existed to turn attempt rows into "interview sessions" — inventing one would have been guessing at E8's design), `spoken`'s one input (`inputMode = 'spoken'`) already existed as a real column with a real, unambiguous meaning. Reading it for real cost nothing extra and needed no future migration or follow-up edit once E9 started writing it — the component went live the moment E9 shipped, with no change to this file. Hardcoding `0` here would have been the *safer-looking* choice that was actually less honest: it would have silently stayed `0` even after E9 started writing real spoken attempts, until someone remembered to come back and wire it up — and since E9 shipped with no edit to this file needed at all, that is exactly the outcome this decision avoided. |
 
 No other divergence was found. §2's formulas and weights, §3's `capReason`
 rule, §4's `readiness_snapshots` schema, §5's `ReadinessEvidence`/
