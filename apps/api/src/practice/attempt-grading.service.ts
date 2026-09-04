@@ -27,6 +27,11 @@ import {
   toStoredMasteryOutcome,
 } from './mastery/outcome-mapping';
 import {
+  masterySkipReason,
+  type MasteryEvidence,
+  type MasterySkipReason,
+} from './mastery/mastery-skip';
+import {
   initialMasteryRecord,
   nextSchedule,
   type AttemptOutcome,
@@ -443,6 +448,29 @@ export class AttemptGradingService {
    * calling this method, so this method itself needs no knowledge of
    * `practice_attempts.outcome` or `.gradingMethod` at all.
    *
+   * ---------------------------------------------------------------------------
+   * STEP ZERO: THE SKIP RULE, WHICH LIVES HERE NOW (issue #245, epic #60 / E11)
+   * ---------------------------------------------------------------------------
+   *
+   * It used to live at the call sites, and the two call sites disagreed —
+   * `PracticeService.recordAttempt` refused a `state_required` attempt AND a
+   * misheard one; `InterviewsService.recordApplicantTurn` refused only the
+   * first. That was correct for as long as a text interview could not produce a
+   * misheard attempt, and wrong the moment E11's realtime transport gave an
+   * interview turn a real `asrConfidence`. `mastery/mastery-skip.ts` carries
+   * the whole argument, including why the fix is one shared function rather
+   * than a second `&& !misheard` copied into the interview path.
+   *
+   * `evidence` is REQUIRED, and that is the mechanism rather than an
+   * inconvenience: the failure the old shape had was that a new call site kept
+   * compiling while silently skipping a rule nothing forced it to state. A
+   * required parameter makes the omission a compile error instead.
+   *
+   * The return value names which rule refused, or `null` when the row was
+   * written. A caller that wants to log or assert on the refusal reads it;
+   * one that does not can ignore it, exactly as both callers ignored the old
+   * `if` statement's condition once it had served its purpose.
+   *
    * A FOURTH STEP, added by issue #82 (epic #54 / E5, memory-model.md §7):
    * once the `question_mastery` row is upserted, check whether this exact
    * mastery event — this learner's CURRENT journey stage, plus the state
@@ -468,7 +496,23 @@ export class AttemptGradingService {
     questionId: string,
     outcome: AttemptOutcome,
     now: Date,
-  ): Promise<void> {
+    // THE FACTS THE SKIP RULE READS. Required — see the doc comment.
+    evidence: MasteryEvidence,
+  ): Promise<MasterySkipReason | null> {
+    const skip = masterySkipReason(evidence);
+
+    // NOTHING IS WRITTEN, AND NOTHING ELSE ABOUT THE ATTEMPT CHANGES. The row
+    // is already persisted by the caller, the day's activity still accrues, and
+    // the stage transition below is not reached either — a mastery event that
+    // did not happen must not advance a learner's journey stage on the strength
+    // of it.
+    if (skip !== null) {
+      this.logger.debug(
+        `Mastery scheduling skipped for user ${userId} on question ${questionId} (${skip})`,
+      );
+      return skip;
+    }
+
     const existing = await tx.questionMastery.findUnique({
       where: { userId_questionId: { userId, questionId } },
     });
@@ -545,5 +589,7 @@ export class AttemptGradingService {
         });
       }
     }
+
+    return null;
   }
 }

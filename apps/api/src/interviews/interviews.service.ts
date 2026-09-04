@@ -17,6 +17,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { EngagementService } from '../engagement/engagement.service';
 import { ReadinessService } from '../readiness/readiness.service';
 import { AttemptGradingService } from '../practice/attempt-grading.service';
+import { isMisheardAttempt } from '../practice/mastery/mastery-skip';
 import { toAttemptOutcome } from '../practice/mastery/outcome-mapping';
 import { excludeUnanswerable } from '../practice/question-selection';
 import type { DynamicScope } from '../civics/answer-resolution';
@@ -250,8 +251,65 @@ interface GradedCivicsAnswer {
   failureCause: PersistableFailureCause | null;
   aiFeedback: GradingVerdict | null;
   aiUsageEventId: string | null;
+  /**
+   * The recogniser's own confidence, or `null` when there was no recogniser.
+   *
+   * `null` on every text turn — `interview-turn.dto.ts` has no field that could
+   * carry one — and set only on a realtime civics turn, from `grade_answer`'s
+   * `confidence` argument (`realtime-tools.ts`). It is written to the attempt
+   * row AND handed to the mastery skip rule; those are two different
+   * consumers of one measurement, which is why it is carried rather than
+   * collapsed into {@link GradedCivicsAnswer.misheard} alone.
+   */
+  asrConfidence: number | null;
+  /**
+   * Whether the recogniser's own uncertainty is the better explanation of this
+   * miss (`isMisheardAttempt`, `practice/mastery/mastery-skip.ts`).
+   *
+   * Decided SERVER-SIDE, after grading, from the confidence and the outcome —
+   * never from anything the model reported about the answer. It overrides any
+   * `failureCause` the AI grader supplied, exactly as it does on the practice
+   * path, and it leaves `outcome` untouched: the transcript genuinely did not
+   * match, and saying otherwise would make a wrong answer count as right.
+   */
+  misheard: boolean;
   answeredAt: Date;
 }
+
+/**
+ * How one turn reached this service — the two `practice_attempts` columns that
+ * record it, and nothing else.
+ *
+ * A NAMED PAIR RATHER THAN A `mode` FLAG, because these are the two columns
+ * that actually get written and a reader of the attempt row sees exactly them.
+ * `mock_interviews.mode` is the coarse, one-way summary one layer up (§3); this
+ * is the live, per-turn truth §6 says the summary sits on top of.
+ */
+interface TurnTransport {
+  inputMode: 'typed' | 'spoken';
+  promptMode: 'read' | 'heard';
+}
+
+/**
+ * The text transport's transport (issue #133, E8).
+ *
+ * Written out explicitly rather than defaulted at the call site: a turn that
+ * did not record how the answer was given and how the prompt was delivered has
+ * lost both facts permanently — nothing on the server can reconstruct either
+ * afterwards.
+ */
+const TYPED_TURN: TurnTransport = { inputMode: 'typed', promptMode: 'read' };
+
+/**
+ * The realtime transport's transport (issue #158, E11, §6).
+ *
+ * `spoken` because the applicant said it and `heard` because the officer spoke
+ * the question rather than displaying it. Both are exactly what
+ * `readiness-model.md` §2.7's `spoken` component counts, which is the mechanism
+ * by which a voice interview weighs more than a typed one (§8) — with no new
+ * readiness code at all.
+ */
+const SPOKEN_TURN: TurnTransport = { inputMode: 'spoken', promptMode: 'heard' };
 
 @Injectable()
 export class InterviewsService {
@@ -1051,6 +1109,12 @@ export class InterviewsService {
     text: string,
     graded: GradedCivicsAnswer | null,
     state: EngineState,
+    /**
+     * How this turn reached us. Defaulted to the text transport so E8's own
+     * call sites read exactly as they did; the realtime handler passes
+     * {@link SPOKEN_TURN} (§6).
+     */
+    transport: TurnTransport = TYPED_TURN,
   ): Promise<void> {
     await this.prisma.$transaction(async (tx) => {
       let attemptId: string | null = null;
@@ -1067,11 +1131,17 @@ export class InterviewsService {
             sessionId: null,
             mockInterviewId: interview.id,
             source: 'mock_interview',
-            // Text mode. E9 wires `spoken`/`heard` through the same rows —
-            // nothing can tell after the fact whether an old typed answer was
-            // typed or transcribed, which is why both are written explicitly.
-            inputMode: 'typed',
-            promptMode: 'read',
+            // FROM THE TRANSPORT, no longer hardcoded (issue #158, E11 §6).
+            // Nothing on the server can reconstruct either after the fact —
+            // on the realtime transport the audio never reaches this process
+            // at all — so a row that did not record how the answer was given
+            // and how the prompt was delivered has lost both facts
+            // permanently. `spoken`/`heard` here is also exactly what
+            // `readiness-model.md` §2.7's `spoken` component counts, which is
+            // the whole of §8's "a voice interview weighs more than a typed
+            // one" — no readiness code changes for it.
+            inputMode: transport.inputMode,
+            promptMode: transport.promptMode,
             responseText: interview.transcriptRetained ? graded.responseText : null,
             outcome: graded.outcome,
             gradingMethod: graded.gradingMethod,
@@ -1100,6 +1170,37 @@ export class InterviewsService {
                   aiFeedback: graded.aiFeedback as unknown as Prisma.InputJsonValue,
                 }
               : {}),
+            // ---------------------------------------------------------------
+            // THE `misheard` OVERRIDE, DELIBERATELY SPREAD LAST (issue #158)
+            // ---------------------------------------------------------------
+            //
+            // Character for character the rule `PracticeService.recordAttempt`
+            // applies, in the same position and for the same reason: it
+            // overwrites whatever cause the grader supplied, and the ORDER of
+            // these spreads is the whole mechanism — reversing them would
+            // silently restore the grader's guess. The recogniser's own
+            // uncertainty about the TEXT is better evidence about why an
+            // answer missed than a model's inference from the text it
+            // produced.
+            //
+            // `outcome` above is untouched. A mishearing is not a right
+            // answer; it is a miss whose cause we can name honestly.
+            ...(graded.misheard ? { failureCause: 'misheard' as const } : {}),
+            // THE RECOGNISER'S OWN NUMBER, so a reader of this row can see
+            // what the cause above was concluded from. Null on every text
+            // turn.
+            asrConfidence: graded.asrConfidence,
+            // DELIBERATELY NOT WRITTEN, and the absence is a decision rather
+            // than an omission. `practice_attempts.transcript` means "the text
+            // the learner CONFIRMED after the recogniser's guess"
+            // (`voice.md` §3, and the column's own schema comment). A live
+            // realtime turn has no confirm step — that is what makes it a
+            // conversation rather than a form — so writing the heard text here
+            // would claim a confirmation that never happened, and a later
+            // epic grading "whatever the learner confirmed" would silently
+            // grade something else. What was heard is `responseText`, subject
+            // to retention exactly as a typed answer is.
+            transcript: null,
             // ALWAYS FALSE INSIDE AN INTERVIEW (§6.1, §10). Neither affordance
             // exists here, which makes an interview answer unusually CLEAN
             // evidence for readiness's `recall` component, whose filter is
@@ -1119,73 +1220,65 @@ export class InterviewsService {
         attemptId = attempt.id;
 
         // SYNCHRONOUS MASTERY SCHEDULING, INSIDE THIS SAME TRANSACTION — the
-        // identical placement `recordAttempt` uses, including the
-        // `state_required` skip. §7: an interview answer is at least as good
-        // evidence as a practice attempt, so it advances `question_mastery`
-        // exactly as one does. Skipping a `state_required` attempt is the same
-        // refusal `recordAttempt` makes: lapsing a question's mastery for a
-        // system limitation (no state on the profile) rather than for anything
-        // the learner did would be a discount the learner never earned.
+        // identical placement `recordAttempt` uses. §7: an interview answer is
+        // at least as good evidence as a practice attempt, so it advances
+        // `question_mastery` exactly as one does.
         //
         // -------------------------------------------------------------------
-        // THIS GUARD IS DELIBERATELY ONE CONDITION SHORTER THAN ITS SIBLING
-        // (issue #244, epic #58 / E9)
+        // THE SKIP RULE IS NO LONGER THIS METHOD'S, AND THAT IS THE POINT
+        // (issue #245, epic #60 / E11)
         // -------------------------------------------------------------------
         //
-        // `PracticeService.recordAttempt`'s matching guard now reads
-        // `status !== 'state_required' && !misheard`: a misheard attempt is
-        // recorded but never scheduled, because the recogniser's own
-        // uncertainty about the TEXT makes the row no evidence about recall in
-        // either direction, and every `AttemptOutcome` the scheduler accepts
-        // is a claim about recall. This one has no `!misheard` half, and that
-        // is correct TODAY for one reason only: THE INTERVIEW PATH CANNOT
-        // PRODUCE A MISHEARD ATTEMPT. Not "does not in practice" — cannot,
-        // four times over:
+        // WHAT USED TO BE HERE: a guard reading
+        // `graded.answerResolution !== 'state_required'`, deliberately ONE
+        // CONDITION SHORTER than `PracticeService.recordAttempt`'s
+        // `status !== 'state_required' && !misheard`. The comment that stood
+        // here explained at length that the shorter guard was correct only
+        // because the text interview path could not produce a misheard attempt
+        // — no `asrConfidence` on the DTO, `inputMode` hardcoded to `'typed'`,
+        // `isMisheardAttempt` never called on this path, and
+        // `PersistableFailureCause` excluding `'misheard'` at the type level —
+        // and it named the epic that would break every one of those four:
+        // "WIRING E9 VOICE INTO INTERVIEWS MAKES THIS GUARD WRONG IMMEDIATELY
+        // (E11 / #60 is the epic that will)".
         //
-        //   1. `interview-turn.dto.ts` is `z.strictObject({ text })`. There is
-        //      no `asrConfidence` field, and `strictObject` rejects unknown
-        //      keys, so a confidence cannot arrive even as a stray property.
-        //   2. `inputMode: 'typed'` is hardcoded on the attempt written above
-        //      (:908) — an interview turn is never marked spoken.
-        //   3. `isMisheardAttempt` is never called on this path. It is
-        //      `PracticeService`'s, invoked at exactly one call site, and
-        //      nothing here computes the `misheard` flag at all.
-        //   4. `PersistableFailureCause` — the type of `graded.failureCause`
-        //      — EXCLUDES `'misheard'` at the type level, via
-        //      `UNGROUNDED_FAILURE_CAUSES` in `practice/grading.ts`. So the AI
-        //      grader cannot supply the cause on this path either, and the
-        //      compiler enforces it.
+        // THIS IS THAT EPIC. A realtime civics turn carries the recogniser's
+        // own `confidence` (`realtime-tools.ts`'s `grade_answer` schema), so
+        // `isMisheardAttempt` can now return `true` on this path, and the old
+        // guard would have charged a nervous applicant a real mastery penalty
+        // — `correctStreak` reset, `lapses` incremented, `dueAt` pulled in —
+        // for an accent or a noisy connection, mid-rehearsal, at the moment a
+        // learner is most likely to be misheard.
         //
-        // WIRING E9 VOICE INTO INTERVIEWS MAKES THIS GUARD WRONG IMMEDIATELY
-        // (E11 / #60 is the epic that will). The moment an interview turn
-        // carries a real `asrConfidence`, a learner misheard by the recogniser
-        // starts being charged a mastery penalty here — `correctStreak` reset,
-        // `lapses` incremented, `dueAt` pulled in — which is precisely the harm
-        // #244 removed from the practice path, reappearing on the path where a
-        // nervous applicant is most likely to be misheard.
-        //
-        // AND NOTHING WOULD FORCE THE AUTHOR TO NOTICE. Adding the field is a
-        // change to the DTO and to the attempt write; this line would keep
-        // compiling untouched, no test asserts the condition exists, and the
-        // symptom is a slightly-too-low readiness score rather than an error.
-        // That is why the evidence above is written out rather than left to be
-        // re-derived: whoever wires voice in must read this and add the half.
-        //
-        // ISSUE #245 TRACKS THE REAL FIX — moving the skip rule INSIDE
+        // The comment also named the RIGHT fix and asked for it by number:
+        // issue #245, "moving the skip rule INSIDE
         // `AttemptGradingService.scheduleMastery`, so it is decided once for
         // both call sites and they cannot disagree. Prefer that to adding
-        // `&& !misheard` here a second time: a rule stated twice is a rule that
-        // can be fixed in one place and silently left stale in the other, which
-        // is the exact situation this comment exists to describe.
-        if (graded.answerResolution !== 'state_required') {
-          await this.grading.scheduleMastery(
-            tx,
-            userId,
-            graded.questionId,
-            toAttemptOutcome(graded.outcome, graded.gradingMethod),
-            graded.answeredAt,
-          );
-        }
+        // `&& !misheard` here a second time: a rule stated twice is a rule
+        // that can be fixed in one place and silently left stale in the
+        // other." That is what shipped. `practice/mastery/mastery-skip.ts` is
+        // the rule; this call states the facts it reads and decides nothing.
+        //
+        // AND THE OLD COMMENT'S LAST WARNING IS CLOSED TOO — "nothing would
+        // force the author to notice". `scheduleMastery`'s `evidence`
+        // parameter is REQUIRED, so a future call site that forgets the rule
+        // does not compile, and `interviews.service.spec.ts` asserts that a
+        // low-confidence spoken interview answer writes no mastery row.
+        await this.grading.scheduleMastery(
+          tx,
+          userId,
+          graded.questionId,
+          toAttemptOutcome(graded.outcome, graded.gradingMethod),
+          graded.answeredAt,
+          {
+            answerResolution: graded.answerResolution as 'resolved' | 'state_required',
+            outcome: graded.outcome,
+            // `null` on every text turn, because `interview-turn.dto.ts` has
+            // no field that could carry one. Non-null only on a realtime
+            // civics turn, where the provider reported one.
+            asrConfidence: graded.asrConfidence,
+          },
+        );
       }
 
       await tx.mockInterviewTurn.create({
@@ -1325,6 +1418,16 @@ export class InterviewsService {
     interview: { testVersionCode: string },
     prompt: Extract<InterviewPrompt, { kind: 'civics' }>,
     text: string,
+    /**
+     * The recogniser's confidence, on a spoken turn only.
+     *
+     * `null` from the text transport, which has no field that could carry one.
+     * It plays NO part in grading — the ladder below never sees it — and is
+     * read once, at the end, to decide {@link GradedCivicsAnswer.misheard}. A
+     * confidence that changed a verdict would be the recogniser voting on
+     * whether an answer was right.
+     */
+    asrConfidence: number | null = null,
   ): Promise<GradedCivicsAnswer> {
     const question = await this.prisma.civicsQuestion.findUnique({
       where: { id: prompt.questionId },
@@ -1377,9 +1480,11 @@ export class InterviewsService {
       { status, outcome, responseText },
     );
 
+    const finalOutcome = aiGrading?.outcome ?? outcome;
+
     return {
       questionId: question.id,
-      outcome: aiGrading?.outcome ?? outcome,
+      outcome: finalOutcome,
       gradingMethod: aiGrading ? 'ai' : 'exact',
       responseText,
       snapshot,
@@ -1388,6 +1493,14 @@ export class InterviewsService {
       failureCause: aiGrading?.failureCause ?? null,
       aiFeedback: aiGrading?.aiFeedback ?? null,
       aiUsageEventId: aiGrading?.aiUsageEventId ?? null,
+      asrConfidence,
+      // THE SAME FUNCTION AND THE SAME THRESHOLD THE PRACTICE PATH USES, never
+      // a second rule invented for realtime (`realtime-interview.md` §4.2:
+      // "the identical `ASR_CONFIDENCE_THRESHOLD` comparison `voice.md` §3
+      // already specifies... never a second threshold invented for realtime").
+      // Computed AFTER grading, because condition 3 reads the final outcome: a
+      // right answer is right however it was heard.
+      misheard: isMisheardAttempt(asrConfidence, finalOutcome),
       answeredAt,
     };
   }

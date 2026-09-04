@@ -7,7 +7,6 @@ import {
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 
-import { ASR_CONFIDENCE_THRESHOLD } from '../ai/ai.types';
 import { type DynamicScope } from '../civics/answer-resolution';
 import { Clock } from '../common/clock/clock';
 import { PrismaService } from '../prisma/prisma.service';
@@ -16,6 +15,7 @@ import { ReadinessService } from '../readiness/readiness.service';
 import { AttemptGradingService } from './attempt-grading.service';
 import { excludeUnanswerable } from './question-selection';
 import { type GradingVerdict } from './grading';
+import { isMisheardAttempt } from './mastery/mastery-skip';
 import { toAttemptOutcome } from './mastery/outcome-mapping';
 import {
   classifyMasteryBucket,
@@ -830,56 +830,58 @@ export class PracticeService {
       });
 
       // -----------------------------------------------------------------
-      // AND SKIPPED FOR A MISHEARD ATTEMPT (issue #244, epic #58 / E9)
+      // MASTERY SCHEDULING, WITH THE SKIP RULE ONE LAYER DOWN (issue #244,
+      // epic #58 / E9; moved by issue #245, epic #60 / E11)
       // -----------------------------------------------------------------
       //
-      // THIS LINE IS WHERE THE EPIC'S "NEVER PENALISED" GUARANTEE IS
-      // ACTUALLY ENFORCED — not by the `outcome` value, which stays
-      // `incorrect` and is honest as written: the transcript genuinely did
-      // not match. `failure_cause: 'misheard'` is what distinguishes the
-      // row for any reader; `voice.md` §5's requirement table is about the
-      // PENALTY, and penalties land here, in `question_mastery`.
+      // THIS CALL IS WHERE E9'S "NEVER PENALISED" GUARANTEE IS ACTUALLY
+      // ENFORCED — not by the `outcome` value, which stays `incorrect` and
+      // is honest as written: the transcript genuinely did not match.
+      // `failure_cause: 'misheard'` is what distinguishes the row for any
+      // reader; `voice.md` §5's requirement table is about the PENALTY, and
+      // penalties land in `question_mastery`.
       //
-      // A mishearing is not evidence about recall in either direction. The
-      // recogniser reported it was unsure of the TEXT (see {@link
-      // isMisheardAttempt}), so this row says nothing about whether the
-      // learner knew the answer — and `nextSchedule` has no way to express
-      // that: every `AttemptOutcome` it accepts is a claim about recall,
-      // and the only one this attempt could map to is `incorrect`
-      // (`mastery/outcome-mapping.ts` collapses everything that is not
-      // `correct`). Feeding it in would reset `correctStreak`, increment
-      // `lapses`, pull `dueAt` in and possibly move the row to `lapsed` —
-      // an accent or a noisy mic charged to the learner as forgetting, and
-      // indistinguishable afterwards from not knowing the material. That is
-      // exactly the harm the epic exists to prevent, applied at the one
-      // place it would have permanently stuck.
-      //
-      // THE REAL EVIDENCE ARRIVES ON THE RETRY. §3.3 offers the learner one,
-      // it comes back through this same method carrying
-      // `retryOfAttemptId`, and it schedules mastery normally — so the
-      // question is not left unscheduled, merely scheduled from the attempt
-      // that actually heard them. Declining to schedule here is a deferral,
-      // not a discount; it is the same refusal the `state_required` skip
-      // above makes, for the same reason (no honest grade available), from a
-      // different cause.
+      // WHAT CHANGED IN #245 IS WHERE THE REFUSAL IS DECIDED, NOT WHETHER.
+      // It used to be an `if` around this call, and `InterviewsService` held
+      // a second copy of the same `if` that was one condition shorter — a
+      // divergence nothing could catch, because the shorter copy compiled
+      // fine and its symptom was a slightly-too-low readiness score. The
+      // rule is now `mastery/mastery-skip.ts`, read inside
+      // `scheduleMastery`, and every caller states the facts it reads
+      // instead of pre-judging them. That file carries the argument in full;
+      // what is worth repeating here is only the harm: a mishearing is not
+      // evidence about recall in either direction, and feeding it to
+      // `nextSchedule` would reset `correctStreak`, increment `lapses` and
+      // pull `dueAt` in — an accent or a noisy mic charged to the learner as
+      // forgetting, indistinguishable afterwards from not knowing the
+      // material.
       //
       // THE ROW IS STILL WRITTEN AND STILL COUNTS AS AN INTERACTION. Nothing
-      // above this guard is conditional on `misheard`: the attempt is
-      // persisted with its outcome, its confidence and its cause, so the
-      // mishearing remains visible evidence rather than a gap. And accrual
-      // (issue #119, below, after the commit) is deliberately unaffected —
-      // the learner did practice, and E7's streak and daily-goal counters
-      // measure engagement, not correctness. Withholding a scheduling
-      // penalty must never also withhold credit for showing up.
-      if (status !== 'state_required' && !misheard) {
-        await this.grading.scheduleMastery(
-          tx,
-          userId,
-          question.id,
-          toAttemptOutcome(finalOutcome, gradingMethod),
-          answeredAt,
-        );
-      }
+      // above is conditional on the skip: the attempt is persisted with its
+      // outcome, its confidence and its cause, so the mishearing remains
+      // visible evidence rather than a gap. And accrual (issue #119, below,
+      // after the commit) is deliberately unaffected — the learner did
+      // practice, and E7's streak and daily-goal counters measure
+      // engagement, not correctness. Withholding a scheduling penalty must
+      // never also withhold credit for showing up.
+      await this.grading.scheduleMastery(
+        tx,
+        userId,
+        question.id,
+        toAttemptOutcome(finalOutcome, gradingMethod),
+        answeredAt,
+        // THE TWO FACTS, STATED RATHER THAN PRE-JUDGED (issue #245). This call
+        // used to be wrapped in `if (status !== 'state_required' && !misheard)`;
+        // the rule now lives inside `scheduleMastery` so the interview path
+        // cannot hold a shorter copy of it. `misheard` is still computed above
+        // — it is also the `failureCause` override on the row itself, which is
+        // a statement about the ATTEMPT and stays here.
+        {
+          answerResolution: status,
+          outcome: finalOutcome,
+          asrConfidence: input.asrConfidence,
+        },
+      );
 
       return created;
     });
@@ -1037,6 +1039,15 @@ export class PracticeService {
         attempt.questionId,
         toAttemptOutcome('correct', 'self'),
         scheduledAt,
+        // A SELF-MARK IS NEVER SKIPPED, and both fields say so on purpose
+        // rather than by omission. `answerResolution: 'resolved'` because the
+        // learner has just been SHOWN the accepted answers and asserted they
+        // knew it — there is nothing left unresolved. No `asrConfidence`
+        // because a self-mark is a button, not a recognition: even on a
+        // spoken attempt whose original row is `misheard`, condition 3 of
+        // `isMisheardAttempt` ("the outcome is not correct") already excludes
+        // this call, since a self-mark's outcome is `correct` by definition.
+        { answerResolution: 'resolved', outcome: 'correct' },
       );
 
       return result;
@@ -1587,76 +1598,19 @@ function toAttemptResponse(attempt: any): PracticeAttemptResponse {
 }
 
 /**
- * Is this attempt's failure better explained by the recogniser than by the
- * learner? (issue #104, epic #58 / E9)
+ * The misheard rule is `mastery/mastery-skip.ts`'s now (issue #245, E11).
  *
- * -----------------------------------------------------------------------------
- * THREE CONDITIONS, AND EACH ONE IS LOAD-BEARING
- * -----------------------------------------------------------------------------
+ * `isMisheardAttempt` lived here for two epics, while `PracticeService` was
+ * its only caller. `AttemptGradingService.scheduleMastery` is the second, and
+ * a rule two services read is a rule neither of them should own — see that
+ * file's header for why moving it was the fix the old guard's comment asked
+ * for rather than a second copy of the condition.
  *
- * 1. **A confidence was reported at all.** `null`/`undefined` NEVER produces
- *    `misheard`, and this is the condition most likely to be "simplified" away
- *    by someone reading `< 0.6` and reaching for `(confidence ?? 0)`. Unknown
- *    is not low. Several transcription models report no confidence whatsoever
- *    (`OpenAiProvider.runTranscription`: the `gpt-4o-transcribe` family
- *    cannot), so collapsing the two would stamp `misheard` on every attempt
- *    whose confidence merely could not be read — telling a learner the system
- *    struggled to hear them when, as far as anything here knows, it did not.
- *    `schema.prisma`'s `asrConfidence` comment makes the same point about the
- *    column; this is the code that has to honour it.
- *
- * 2. **The confidence is strictly below {@link ASR_CONFIDENCE_THRESHOLD}.**
- *    The number lives in one place for the reason its own doc gives; `0.6`
- *    exactly is trusted, because the boundary has to fall on one side and
- *    trusting the transcript is the side that cannot invent a mishearing.
- *
- * 3. **The outcome is not `correct`.** A right answer is right however it was
- *    heard. Writing a failure cause beside a correct outcome would manufacture
- *    a failure to explain where there is none — the same rule
- *    `persistedFailureCause` already applies to a grader's `correct` verdict.
- *
- * -----------------------------------------------------------------------------
- * WHY THIS OVERRIDES A GRADER-SUPPLIED CAUSE RATHER THAN DEFERRING TO IT
- * -----------------------------------------------------------------------------
- *
- * The grader sees TEXT. It is handed the question, the accepted answers and a
- * string, and asked what that string means; when it offers a cause it is
- * inferring, from words alone, why a person got something wrong. The
- * recogniser's confidence is a MEASUREMENT of how well those words captured
- * what was said — evidence about the pipeline rather than an inference about
- * the learner — and when it says the capture was poor, that is the better
- * explanation of a miss than any reading of its output can be.
- *
- * It is also the fairness-preserving direction, which is the reason the
- * override exists at all. `VISION.md` line 228 promises a learner may
- * "practice without being unfairly penalized for accent or speech-recognition
- * errors", and `misheard` is precisely the value `PracticeFailureCause` has
- * for that. The alternative — recording `not_known` or `not_recalled` on an
- * answer the recogniser garbled — tells a learner something about themselves
- * that nothing observed. `docs/specs/ai-evaluation.md` §8 calls that a
- * manufactured diagnosis and it is the failure the whole taxonomy exists to
- * avoid.
- *
- * Note the direction of the risk if this rule is ever wrong: `misheard` never
- * makes a wrong answer count as correct, never advances mastery, and never
- * raises a readiness score. The worst a false `misheard` does is decline to
- * blame a learner. The worst a false `not_known` does is tell them they do not
- * know something they do.
- *
- * Nothing here consults `inputMode`, and it does not need to: the DTO rejects
- * an `asrConfidence` on a typed attempt outright, so a confidence only ever
- * arrives on a spoken one. It rejects one on a SKIPPED attempt too — which is
- * why "not `correct`" can be stated as plainly as the spec states it, without
- * a carve-out for the learner who declined to answer at all.
+ * It is still imported and still used HERE, once, for something that is not a
+ * scheduling decision at all: the `failureCause: 'misheard'` override on the
+ * attempt row above. That is a statement about the ATTEMPT — what the
+ * recogniser reported about this capture — and it belongs at the write.
  */
-export function isMisheardAttempt(
-  asrConfidence: number | null | undefined,
-  outcome: string,
-): boolean {
-  if (asrConfidence === null || asrConfidence === undefined) return false;
-  if (asrConfidence >= ASR_CONFIDENCE_THRESHOLD) return false;
-  return outcome !== 'correct';
-}
 
 /**
  * The attempts that count, with the superseded ones removed (issue #104, E9).
