@@ -513,8 +513,93 @@ export class ReadinessService {
     // recency-scoped recall signal, not a bank-scoped one, so it is read
     // exactly like `journey.service.ts`'s own `hasPractisedOn` reads the
     // caller's attempts — by `userId` alone.
+    //
+    // -----------------------------------------------------------------------
+    // TWO EXCLUSIONS BEYOND `hintUsed`/`revealed` (issue #244, epic #58 / E9)
+    // -----------------------------------------------------------------------
+    //
+    // `recall` and `question_mastery` are THE TWO PLACES A MISHEARING COULD BE
+    // CHARGED TO THE LEARNER, and both now refuse it. The other half is the
+    // guard in `PracticeService.recordAttempt` (`!misheard` on the
+    // `scheduleMastery` call) — read them together; neither is sufficient
+    // alone, because they are penalties of different kinds. Mastery is the
+    // permanent one (`correctStreak` reset, `lapses` incremented, `dueAt`
+    // pulled in); this one decays as the window slides, but while it lasts it
+    // is a fifth of the readiness score (`COMPONENT_WEIGHTS.recall` = 0.2)
+    // saying the learner is less ready than they are.
+    //
+    // 1. `failureCause: 'misheard'`. The recogniser reported it was unsure of
+    //    the TEXT (`PracticeService.isMisheardAttempt` — all three of its
+    //    conditions), so the row is not evidence about recall in either
+    //    direction, and `recall` is a claim about recall specifically. Counting
+    //    it turns an accent or a noisy mic into a wrong-answer data point
+    //    indistinguishable from not knowing the material (`voice.md` §5).
+    //
+    // 2. Superseded rows — `retries: { none: {} }`, i.e. no later attempt
+    //    points at this one through `retryOfAttemptId`. This is NOT redundant
+    //    with (1), and the tempting argument that it is deserves stating so it
+    //    is not "simplified" back out: `requireRetryTarget`
+    //    (`practice.service.ts`) admits a retry on FOUR conditions — the
+    //    target exists and is the caller's, it is in this session and at this
+    //    question, it is not itself a retry, and nothing already supersedes it
+    //    — and being MISHEARD IS NOT AMONG THEM. `record-attempt.dto.ts` says
+    //    as much outright ("NOT restricted to a spoken attempt"). So an
+    //    ordinary wrong answer can be superseded, and without this clause the
+    //    original and its correction would read here as one wrong plus one
+    //    right for a question the learner answered once. The two exclusions
+    //    are independent in both directions: a misheard attempt the learner
+    //    declined to retry is caught only by (1), and a superseded attempt
+    //    that was never misheard only by (2).
+    //
+    // BOTH ARE `where` CLAUSES RATHER THAN A `.filter()` ON THE RESULT, and
+    // that placement is the substantive decision, not a style one. Prisma
+    // applies `where` before `take`, so the window means "the 20 most recent
+    // attempts THAT CARRY RECALL EVIDENCE" — it slides past an excluded row to
+    // an older qualifying one. Filtering after `take: 20` would mean "the last
+    // 20 attempts, some of which we ignore", which costs the learner a slot per
+    // mishearing and silently shrinks the denominator toward
+    // `RECALL_MIN_QUALIFYING_ATTEMPTS` — a learner with a bad microphone could
+    // drop under the evidence floor and score `recall: 0` for having been
+    // misheard often enough. A mishearing must cost nothing at all, a slot
+    // included.
+    //
+    // `readiness-engine.ts` is unchanged and must stay so: its
+    // `recentQualifyingAttempts` contract says the rows arrive "already limited
+    // and filtered by the caller — this function applies neither the limit nor
+    // the filter itself (§5)". This IS that caller, and this is that filter.
+    // Both columns are indexed for it (`@@index([retryOfAttemptId])`).
+    //
+    // -----------------------------------------------------------------------
+    // WHY (1) IS AN EXPLICIT `OR ... IS NULL` AND NOT `{ not: 'misheard' }`
+    // -----------------------------------------------------------------------
+    //
+    // DO NOT "SIMPLIFY" THIS TO `failureCause: { not: 'misheard' }`. It reads
+    // as the same condition and is not, because `failure_cause` is NULLABLE
+    // and NULL is its overwhelmingly common value — every deterministically
+    // graded attempt has one (`practice.service.ts`: the three AI columns are
+    // omitted entirely when no grader ran).
+    //
+    // Prisma compiles `{ not: 'misheard' }` to a bare `failure_cause <>
+    // 'misheard'`, and `NULL <> 'misheard'` is NULL, not TRUE — so SQL's
+    // three-valued logic DROPS every null-cause row. The `NOT: { failureCause:
+    // 'misheard' }` spelling is no better: it compiles to `NOT (failure_cause =
+    // 'misheard')`, which is NULL for the same rows and drops them too. Both
+    // were checked against the generated SQL, not assumed.
+    //
+    // The failure that would cause is silent and severe rather than loud: the
+    // recall window would keep ONLY ai-graded attempts, most learners would
+    // fall under `RECALL_MIN_QUALIFYING_ATTEMPTS` (5), and `computeRecall`
+    // would return a well-formed `0` — a fifth of the readiness score reading
+    // "no recall evidence" for a learner with hundreds of correct answers, with
+    // nothing throwing and no row missing from any table to point at.
     const recentQualifyingAttemptRows = await this.prisma.practiceAttempt.findMany({
-      where: { userId, hintUsed: false, revealed: false },
+      where: {
+        userId,
+        hintUsed: false,
+        revealed: false,
+        OR: [{ failureCause: null }, { failureCause: { not: 'misheard' } }],
+        retries: { none: {} },
+      },
       orderBy: { answeredAt: 'desc' },
       take: 20,
       select: { outcome: true },
