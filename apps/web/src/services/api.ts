@@ -12,6 +12,19 @@ export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api';
 
 interface RequestOptions extends RequestInit {
   skipAuth?: boolean;
+  /**
+   * How to read a SUCCESSFUL response body. Defaults to `'json'`.
+   *
+   * `'json'` unwraps the `{ data }` envelope the API's `TransformInterceptor`
+   * puts around every JSON route. `'blob'` hands back the raw bytes untouched,
+   * and exists for exactly one shape of route: one that answers with BYTES
+   * rather than an envelope. `POST /api/ai/speech/synthesize` streams audio
+   * (`docs/specs/voice.md` §9), and `response.json()` over an MP3 throws on the
+   * first byte — so the choice has to be made HERE, before the body is read,
+   * rather than by a caller trying to recover afterwards from a body that has
+   * already been consumed.
+   */
+  responseType?: 'json' | 'blob';
 }
 
 class ApiService {
@@ -30,14 +43,25 @@ class ApiService {
     endpoint: string,
     options: RequestOptions = {},
   ): Promise<T> {
-    const { skipAuth = false, ...fetchOptions } = options;
+    const { skipAuth = false, responseType = 'json', ...fetchOptions } = options;
 
     const headers: HeadersInit = {
       ...fetchOptions.headers,
     };
 
     // Only set Content-Type for requests with a body (Fastify 5 is strict about this)
-    if (fetchOptions.body) {
+    //
+    // ...EXCEPT FOR A `FormData` BODY, WHICH MUST CARRY NO CONTENT-TYPE AT ALL.
+    // A multipart request is only parseable if the header names the boundary
+    // string that separates its parts — `multipart/form-data; boundary=…` — and
+    // only the browser knows that string, because only the browser generated
+    // it. It fills the header in itself, but ONLY when we have not already set
+    // one. Overriding it with `application/json` produces a request no server
+    // can parse: Fastify's multipart plugin never sees a file, and the failure
+    // surfaces as a confusing complaint about a missing field rather than as
+    // the header problem it actually is. `POST /api/ai/speech/transcribe`
+    // (`docs/specs/voice.md` §9) is the first route in this app to send one.
+    if (fetchOptions.body && !isFormData(fetchOptions.body)) {
       (headers as Record<string, string>)['Content-Type'] = 'application/json';
     }
 
@@ -55,10 +79,22 @@ class ApiService {
       // Try to refresh token (only once, avoid infinite loops)
       const refreshed = await this.refreshToken();
       if (refreshed) {
-        // Update authorization header with new token and retry ONCE
+        // Update authorization header with new token and retry ONCE.
+        //
+        // BUILT FROM THE HEADERS THE FIRST ATTEMPT ACTUALLY SENT, not from a
+        // second hand-written literal. The literal this replaced hard-coded
+        // `Content-Type: application/json`, so a multipart upload that hit an
+        // expired access token — the ordinary case after fifteen idle minutes —
+        // would be retried with a JSON content type over a multipart body and
+        // fail in a way the first attempt never could.
+        //
+        // THE `FormData` BODY ITSELF SURVIVES THE RETRY. `fetchOptions.body` is
+        // a `FormData` object, not a consumed `ReadableStream`: `fetch`
+        // serializes it afresh on each send, and the `Blob` parts inside it are
+        // re-readable. (A caller passing a raw stream as `body` could NOT be
+        // retried — that is why nothing in this file does.)
         const retryHeaders: HeadersInit = {
-          'Content-Type': 'application/json',
-          ...fetchOptions.headers,
+          ...headers,
           'Authorization': `Bearer ${this.accessToken}`,
         };
 
@@ -78,12 +114,7 @@ class ApiService {
           );
         }
 
-        if (retryResponse.status === 204) {
-          return undefined as T;
-        }
-
-        const data = await retryResponse.json();
-        return data.data ?? data;
+        return this.parseResponse<T>(retryResponse, responseType);
       }
       throw new ApiError('Unauthorized', 401);
     }
@@ -98,9 +129,29 @@ class ApiService {
       );
     }
 
+    return this.parseResponse<T>(response, responseType);
+  }
+
+  /**
+   * Read a successful response body, once, the way the caller asked for.
+   *
+   * One method rather than the two identical copies this replaced (the ordinary
+   * path and the post-refresh retry), because a body can only be read once and
+   * the two copies drifting is a bug that shows up only on the retry — i.e.
+   * only after a token expires, which is exactly when nobody is watching.
+   */
+  private async parseResponse<T>(
+    response: Response,
+    responseType: 'json' | 'blob',
+  ): Promise<T> {
     // Handle 204 No Content
     if (response.status === 204) {
       return undefined as T;
+    }
+
+    if (responseType === 'blob') {
+      // No envelope to unwrap and nothing to interpret: these are bytes.
+      return (await response.blob()) as T;
     }
 
     const data = await response.json();
@@ -162,7 +213,7 @@ class ApiService {
     return this.request<T>(endpoint, {
       ...options,
       method: 'POST',
-      body: body ? JSON.stringify(body) : undefined,
+      body: serializeBody(body),
     });
   }
 
@@ -170,7 +221,7 @@ class ApiService {
     return this.request<T>(endpoint, {
       ...options,
       method: 'PUT',
-      body: body ? JSON.stringify(body) : undefined,
+      body: serializeBody(body),
     });
   }
 
@@ -178,13 +229,42 @@ class ApiService {
     return this.request<T>(endpoint, {
       ...options,
       method: 'PATCH',
-      body: body ? JSON.stringify(body) : undefined,
+      body: serializeBody(body),
     });
   }
 
   delete<T>(endpoint: string, options?: RequestOptions) {
     return this.request<T>(endpoint, { ...options, method: 'DELETE' });
   }
+}
+
+/**
+ * `body instanceof FormData`, guarded for an environment without the global.
+ *
+ * Guarded rather than bare because this module is imported by tests and by any
+ * future non-browser consumer, where a bare `instanceof` against an undefined
+ * global is a `ReferenceError` on a line whose whole job is to answer "no".
+ */
+function isFormData(body: unknown): body is FormData {
+  return typeof FormData !== 'undefined' && body instanceof FormData;
+}
+
+/**
+ * Turn a caller's body into something `fetch` can send.
+ *
+ * `FormData` PASSES THROUGH UNTOUCHED, and that is the entire reason this
+ * function exists. `JSON.stringify(someFormData)` is not an error — it is
+ * `"{}"` — so a multipart upload sent down the JSON path fails SILENTLY, with a
+ * perfectly well-formed request body containing none of the file it was
+ * supposed to carry.
+ *
+ * The falsy check is the pre-existing behaviour, preserved deliberately: a
+ * `post(url)` with no body must send no body.
+ */
+function serializeBody(body: unknown): BodyInit | undefined {
+  if (!body) return undefined;
+  if (isFormData(body)) return body;
+  return JSON.stringify(body);
 }
 
 export class ApiError extends Error {
@@ -222,6 +302,7 @@ import type {
   AiKeyStatus,
   AiStatus,
   AiUsage,
+  SpeechTranscription,
   NotificationEventDef,
   AppNotification,
   NotificationListResponse,
@@ -716,6 +797,105 @@ export async function getAiStatus(): Promise<AiStatus> {
 export async function getAiUsage(days?: number): Promise<AiUsage> {
   const query = days === undefined ? '' : `?days=${days}`;
   return api.get<AiUsage>(`/ai/usage${query}`);
+}
+
+// =============================================================================
+// Speech — the caller's own voice, on the caller's own key (epic #58 / E9)
+// =============================================================================
+//
+// Both routes are `@Auth()` with no permissions and no user-id parameter
+// (`docs/specs/voice.md` §10): every learner practises with their own voice on
+// their own key, and there is no "use voice" privilege in this product's
+// authorization model.
+//
+// NEITHER FUNCTION PERSISTS ANYTHING. Audio travels up, text comes back, and
+// the `Blob` is the caller's to drop the moment the promise settles —
+// `docs/specs/voice.md` §4: "Transcribe, keep the text, discard the buffer."
+
+/**
+ * Turn one recording into text — `POST /api/ai/speech/transcribe` (#99).
+ *
+ * MULTIPART, WHICH IS WHY THIS DOES NOT LOOK LIKE ITS NEIGHBOURS. The body is a
+ * `FormData` carrying one audio part; `ApiService.request` deliberately leaves
+ * `Content-Type` unset for it so the browser can name its own boundary. See the
+ * long note at the top of this file — sending JSON's content type over a
+ * multipart body is unparseable at the other end.
+ *
+ * THE RESPONSE CARRIES NO AUDIO, in either direction of interpretation: nothing
+ * comes back but `{ text, confidence }`, and nothing is stored anywhere by
+ * making this call. `confidence` is `number | null` and **null means unknown,
+ * never zero** — see `SpeechTranscription`, where getting that backwards is
+ * spelled out as the thing that marks a good answer `misheard`.
+ *
+ * NOT A GRADE AND NOT AN ANSWER. What comes back is what the recognizer heard,
+ * and `docs/specs/voice.md` §3 requires the learner to confirm it before
+ * anything is graded on it.
+ *
+ * @param blob  the recording, held in memory only for this call's duration.
+ * @param opts.fileName  what to call the part. Providers key their decoder off
+ *   the extension, so it must match the blob's own type rather than be a fixed
+ *   `audio.webm` that lies about an mp4.
+ * @param opts.signal  aborts the upload. A learner who navigates away mid-send
+ *   should not be billed for the transcription of an answer nobody will read.
+ */
+export async function transcribeAudio(
+  blob: Blob,
+  opts: { fileName?: string; signal?: AbortSignal } = {},
+): Promise<SpeechTranscription> {
+  const form = new FormData();
+  // One file part. The API reads it with Fastify's `req.file()`, which takes
+  // the first file part whatever it is called; the name is still given
+  // explicitly so a future `req.file({ name })` does not silently find nothing.
+  form.append('file', blob, opts.fileName ?? defaultAudioFileName(blob));
+
+  return api.post<SpeechTranscription>('/ai/speech/transcribe', form, {
+    signal: opts.signal,
+  });
+}
+
+/**
+ * Speak one piece of text — `POST /api/ai/speech/synthesize` (#99).
+ *
+ * THE PREMIUM UPGRADE, NEVER THE DEFAULT. `docs/specs/voice.md` §2 (decision 1)
+ * makes the browser's own `speechSynthesis` the default text-to-speech: it
+ * needs no binding, no key and no per-call cost, so "hear this question aloud"
+ * works on a fresh install where nobody has configured anything. This route is
+ * the optional, provider-hosted, better-sounding upgrade on top — reached only
+ * when an admin has bound the `speak` role AND the learner asked for it.
+ *
+ * ANSWERS BYTES, NOT JSON, which is why it passes `responseType: 'blob'`. A
+ * `speak`-unbound deployment answers a 404-shaped "not available" rather than a
+ * 500 (§9), and that arrives here as an `ApiError` a caller should treat as
+ * "use the browser voice", never as a failure worth showing anybody.
+ */
+export async function synthesizeSpeech(
+  text: string,
+  opts: { signal?: AbortSignal } = {},
+): Promise<Blob> {
+  return api.post<Blob>(
+    '/ai/speech/synthesize',
+    { text },
+    { responseType: 'blob', signal: opts.signal },
+  );
+}
+
+/**
+ * A file name whose extension matches the blob's own MIME type.
+ *
+ * Speech-to-text providers dispatch on the extension, so a fixed `audio.webm`
+ * over a Safari-recorded mp4 is rejected as a corrupt webm — a failure that
+ * reads as "your recording was bad" on the one browser where nothing was wrong
+ * with it.
+ *
+ * Exported so this mapping can be asserted directly: the multipart part name it
+ * produces does not survive the test stack's realm crossing, so a round-trip
+ * assertion over it would be testing the harness rather than this decision.
+ */
+export function defaultAudioFileName(blob: Blob): string {
+  const subtype = blob.type.split(';')[0]?.split('/')[1] ?? '';
+  const extension =
+    subtype === 'mpeg' ? 'mp3' : /^[a-z0-9]+$/i.test(subtype) ? subtype : 'webm';
+  return `answer.${extension}`;
 }
 
 // =============================================================================
