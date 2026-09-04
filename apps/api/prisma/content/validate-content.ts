@@ -363,10 +363,36 @@ export function loadContentFile(path: string): ContentFile {
 
 const CONTENT_DIR = __dirname;
 
-function discoverContentFiles(dir: string): string[] {
-  return readdirSync(dir)
+// This validator checks CIVICS content against the civics schema, and only
+// that. Since E10 (epic #59 / issue #130) this same directory also holds
+// `english-*.json`, whose shape is entirely different — three files with no
+// `testVersionCode`, no `questions`, and categories keyed on `tag` rather
+// than `code` — so globbing every `.json` here reported 15 fabricated
+// `category.duplicateCode` errors and exited 1 on an untouched checkout
+// (issue #258).
+//
+// Scoped by NAME (`civics-*.json`), never by shape. A shape sniffer would
+// make a genuinely broken civics file — a bad merge, a truncated write, a
+// renamed key — look like "not civics content" and disappear from this
+// report silently, which is precisely the failure a validator exists to
+// prevent; with a name rule, that same file still gets validated and still
+// fails loudly. The cost is the mirror case: a civics file renamed off the
+// prefix would stop being checked, so `runCli` prints every file it skipped
+// and why, and a directory with no civics file at all is still a hard error.
+// `load-content.ts`'s own discovery answers the same question from the other
+// side (it excludes `english-`), for the reason stated there: its temp-dir
+// tests load fixture files that are civics content under other names.
+const CIVICS_FILE_PREFIX = 'civics-';
+
+function discoverContentFiles(dir: string): { civics: string[]; skipped: string[] } {
+  const json = readdirSync(dir)
     .filter((name) => name.endsWith('.json'))
-    .map((name) => join(dir, name));
+    .sort();
+
+  return {
+    civics: json.filter((name) => name.startsWith(CIVICS_FILE_PREFIX)).map((name) => join(dir, name)),
+    skipped: json.filter((name) => !name.startsWith(CIVICS_FILE_PREFIX)),
+  };
 }
 
 function printReport(report: ValidationReport): void {
@@ -394,15 +420,23 @@ function printReport(report: ValidationReport): void {
 
 export function runCli(argv: string[] = process.argv.slice(2)): number {
   const strict = argv.includes('--strict');
-  const files = discoverContentFiles(CONTENT_DIR);
+  const { civics: files, skipped } = discoverContentFiles(CONTENT_DIR);
 
   if (files.length === 0) {
-    console.error(`No content files found in ${CONTENT_DIR}`);
+    console.error(`No ${CIVICS_FILE_PREFIX}*.json content files found in ${CONTENT_DIR}`);
     return 1;
   }
 
   console.log(`Civics content validator — mode: ${strict ? '--strict (release gate)' : 'default'}`);
   console.log(`Checking ${files.length} file(s) in ${CONTENT_DIR}: ${files.map((f) => basename(f)).join(', ')}`);
+  if (skipped.length > 0) {
+    // Named, never silent: a skip this validator does not print is a skip
+    // nobody can notice (issue #258).
+    console.log(
+      `Not checked (not ${CIVICS_FILE_PREFIX}*.json — another content domain, with its own ` +
+        `validator): ${skipped.join(', ')}`,
+    );
+  }
 
   const reports = files.map((f) => validateContent(loadContentFile(f), { fileLabel: basename(f) }));
   reports.forEach(printReport);
