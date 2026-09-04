@@ -17,6 +17,7 @@ import { JourneyModule } from './journey/journey.module';
 import { CivicsModule } from './civics/civics.module';
 import { PracticeModule } from './practice/practice.module';
 import { ProgressModule } from './progress/progress.module';
+import { EnglishModule } from './english/english.module';
 import { ReadinessModule } from './readiness/readiness.module';
 import { EngagementModule } from './engagement/engagement.module';
 import { InterviewsModule } from './interviews/interviews.module';
@@ -97,6 +98,18 @@ import configuration from './config/configuration';
     // shared provider. `@Auth()` with no permissions, no route parameter
     // carrying a user id.
     ProgressModule,
+    // The English reading and writing tests (#136, epic #59 / E10): the
+    // deterministic word-error-rate scorer, the sentence picker, and three
+    // routes. Registered next to ProgressModule because it is the same kind of
+    // thing one skill over — a per-learner evidence stream with its own table
+    // (`english_attempts`) and its own read aggregate. It imports NOTHING but
+    // PrismaModule: a reading attempt is transcribed by the speech surface E9
+    // already shipped before it reaches this module, dictation for the writing
+    // test is the browser's own speechSynthesis, and scoring is deterministic —
+    // so there is no AiModule dependency, and no recompute trigger either
+    // (english-test.md §6.5 adds no third schedule). `@Auth()` with no
+    // permissions, no route parameter carrying a user id.
+    EnglishModule,
     // The eight-component readiness score (#122/#127, epic #55 / E6): the
     // pure engine, its two read endpoints, and the nightly recompute cron.
     // Registered next to ProgressModule for the same reason ProgressModule

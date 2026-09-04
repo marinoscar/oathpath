@@ -491,6 +491,36 @@ the dispatch and grounding design.
 Reused permissions, not invented — see [`docs/specs/civics-content.md`](docs/specs/civics-content.md)
 §9 and [`docs/runbooks/updating-civics-content.md`](docs/runbooks/updating-civics-content.md).
 
+### English (Per User)
+- `GET /api/english/next?kind=reading|writing` - The next sentence for that segment, chosen **deterministically**: untried (by composed order), then most-recently-`incorrect`, then `partial`, then `correct` (each least-recently-seen first), within the newest vocabulary revision only, skipping the sentence just answered unless it is the only one
+- `POST /api/english/attempts` - Score one reading or writing attempt against its sentence and record it — unless the reading transcript was not trusted, in which case **no row is written at all**
+- `GET /api/english/progress` - The caller's own history: per sentence, per **USCIS vocabulary category**, and per segment
+
+All three are `@Auth()` with no permissions, and no route accepts a user
+id. The response to `next` carries the sentence `text` for **both**
+segments, writing included: dictation's default is the browser's own
+`window.speechSynthesis`, which needs the string client-side and needs no
+key, no admin configuration and no per-call cost
+([`docs/specs/english-test.md`](docs/specs/english-test.md) §4). The
+"never shown" rule of the writing screen is a **DOM** invariant enforced
+there, not a network one — withholding `text` would leave server-side
+synthesis as the only way to hear a writing sentence, which §4 forbids as
+the only way.
+
+`POST /api/english/attempts` returns a discriminated union on `status`,
+**always HTTP 200**: `scored` wrote one `english_attempts` row;
+`misheard` wrote **nothing**. `misheard` is not an outcome value — it is
+the ABSENCE of a recorded failure, and it is the one place this codebase
+diverges from practice's own handling of the same signal (there,
+`misheard` is a `failureCause` on a row that IS written). §3 gives the
+reason: a civics attempt records what the learner *knew*, so even a
+mistrusted transcript is evidence an attempt happened; a reading attempt
+records whether they produced an exact sequence of words, computed over
+that transcript itself, so a transcript we do not believe is not weak
+evidence of a reading skill — it is none. See
+[`docs/specs/english-test.md`](docs/specs/english-test.md) §7 and
+[`docs/API.md`](docs/API.md#english).
+
 ### Practice (Per User)
 - `POST /api/practice/sessions` - Start a session (`quick` or `category`); closes any existing `in_progress` session for the caller first
 - `GET /api/practice/sessions` - List the caller's sessions, paginated, newest first
@@ -689,6 +719,22 @@ a Viewer, the default role, unable to practise at all. There is no "use
 voice" privilege in this product's authorization model. See
 [`docs/specs/voice.md`](docs/specs/voice.md) §10.
 
+**English adds no permission strings either, for the same reason.** All
+three `/api/english/*` routes are `@Auth()` with no permissions: every
+authenticated learner owns their own reading and writing attempts,
+exactly as they own their own practice attempts and their own readiness
+snapshots, and no route accepts a user id — `@CurrentUser('id')` is the
+only source of one, so there is no "read another learner's English
+progress" or "submit an attempt on someone else's behalf" action for a
+permission to gate in the first place. Gating it would leave a Viewer,
+the default role, unable to practise reading and writing at all. A
+`english_sentences` row is shared content with no owner (exactly as
+`civics_questions` is), so an unknown sentence id is a **404** because it
+genuinely does not exist; an `english_attempts` row is private, and
+protected structurally rather than by a check — **no route on the module
+accepts an attempt id at all**, so cross-user access has no expressible
+request. See [`docs/specs/english-test.md`](docs/specs/english-test.md) §7.
+
 ## Database Tables
 
 - `users` - User accounts with profile info
@@ -718,6 +764,8 @@ voice" privilege in this product's authorization model. See
 - `learner_profiles.streak_freezes` / `learner_profiles.streak_freezes_granted_at` - The freeze budget (E7, epic #56): an integer ceiling of 2 (`STREAK_FREEZE_MAX`, `apps/api/src/engagement/streaks/freeze-settlement.ts`), replenished at most once per 7 days, and the timestamp of the last grant. Read and written only by `EngagementService`'s settlement pass (`GET /api/engagement/summary`'s own request path — engagement's sole recompute trigger, deliberately unlike readiness's two). See `docs/specs/habit-streaks.md` §4.3-§4.5
 - `mock_interviews` - One row per mock interview run (E8, epic #57): `mode` (`text`/`voice`, only `text` wired), `status` (`in_progress`/`completed`/`abandoned`), `test_version_code` and `senior_exemption` (frozen from `learner_profiles` at creation, never re-read), `civics_asked`/`civics_correct`/`passed_civics` (a derived running tally, not a second source of truth over the `practice_attempts` rows), `result` (the cached debrief JSON, written once at completion), and `transcript_retained` (`@default(false)` **at the database level** — the conservative retention default must survive a bug, not only a correctly-written call site). See `docs/specs/mock-interview.md` §8, §12
 - `mock_interview_turns` - One row per line of an interview's conversation, in order (E8, epic #57): `role` (`officer`/`applicant`), `phase`, `question_id` (set only on a civics officer turn), `attempt_id` (set only on a civics applicant turn — the `practice_attempts` row it produced), and `text`, which is written empty (not null) for an applicant turn when the interview's `transcript_retained` is `false` — the turn's structure survives; the learner's words do not. See `docs/specs/mock-interview.md` §8.2
+- `english_sentences` - The composed reading/writing sentences a learner practises on (E10, epic #59): `kind` (`reading`/`writing`), `version`, `ordinal`, `text`, and `vocab_tags` — the official USCIS vocabulary categories this sentence's own words resolve to, **derived by the loader from the same word-by-word validation pass that enforces the content rule**, never hand-authored, so a tag set cannot drift from the words it describes. The provenance triple (`source_url`, `retrieved_at`, `content_sha256`) does **not** mean what it means on `civics_questions`: USCIS publishes vocabulary LISTS and no sentence list at all, so a sentence here is composed rather than transcribed and its authority is the list it was built from — the triple points at that list's official PDF and the exact bytes retrieved for it. Upserted on `(kind, version, ordinal)`. See `docs/specs/english-test.md` §1 and §5
+- `english_attempts` - One row per scored reading or writing attempt (E10, epic #59): `kind`, `response_text` (for writing exactly what the learner typed; for reading the learner-CONFIRMED transcript, never the recogniser's raw guess), `asr_confidence` (reading only, `null` means unknown and never low), `wer`, `diff_ops` (the word-level alignment, so a screen can show *which* word rather than only a number), `outcome` (`EnglishOutcome` — three values, no `skipped`), `replay_count`, `answered_at`. **A low-confidence reading attempt writes no row here at all** — `misheard` is the absence of a record, the one place this codebase diverges from `practice_attempts`, where `misheard` is a `failure_cause` on a row that IS written; `docs/specs/english-test.md` §3 gives the reason. No audio column, no `storage_objects` reference, and never will be. See `docs/specs/english-test.md` §5
 
 ## Access Control: Email Allowlist
 

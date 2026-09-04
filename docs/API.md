@@ -1855,6 +1855,274 @@ public exam material, so the diff itself is what a reviewer needs.
 
 ---
 
+### English
+
+Issue #136, epic #59 (E10 "Reading and writing tests"). The naturalization
+interview's other two segments: one sentence read aloud and scored on word
+accuracy, one sentence heard and typed back. Design rationale — where the
+sentences come from and why they are composed rather than transcribed, the
+word-error-rate thresholds, the accent rule, the dictation-not-display rule,
+and the readiness formula — lives in
+[`docs/specs/english-test.md`](specs/english-test.md); this section covers
+only the wire contract.
+
+**Every route below is `@Auth()` with no permissions**, and every route is
+caller-scoped: the learner is resolved from `@CurrentUser('id')`, never from
+a path, query, or body parameter. Every authenticated learner owns their own
+reading and writing attempts, exactly as they own their own practice
+attempts, so gating these routes would leave the default Viewer role unable
+to practise reading and writing at all. This module adds **no permission
+string**.
+
+**A sentence is shared content; an attempt is not.** `english_sentences` has
+no owner — every learner reads the same bank, exactly as they read the same
+civics questions — so an unknown sentence id is a **404 because it genuinely
+does not exist**, not because it belongs to somebody else. Attempt rows are
+private, and they are protected structurally rather than by a check: **no
+route here accepts an attempt id at all.** There is no read-one-attempt
+endpoint, no self-mark, and no update, so cross-user access has no
+expressible request.
+
+**Scoring is deterministic and identical for both segments.** Both the
+sentence and what the learner produced are normalised through the same
+pipeline civics answers use, then aligned **word by word**. The error
+**count** is checked first and the word-error rate only bounds the
+single-error case:
+
+| Condition | Outcome |
+|---|---|
+| `errors === 0` | `correct` |
+| `errors === 1` and `wer <= 0.34` | `correct` |
+| otherwise, `wer <= 0.50` | `partial` |
+| otherwise | `incorrect` |
+
+One word wrong is not a failure; two words wrong is not reading the
+sentence. A flat threshold cannot say that, because the sentences run 3 to 8
+words after normalisation: one error in a 3-word sentence is `0.333`, while
+two errors in an 8-word sentence is only `0.250` — a smaller rate for the
+worse mistake. There is **no AI grader rung here**, unlike Practice.
+
+#### GET /english/next
+The next sentence for one segment. **Selection is deterministic** — no
+randomness anywhere — and weighted by bucket, in this order:
+
+1. **untried** — no attempt row for that sentence, ever; by composed order
+2. **failed** — most recent outcome `incorrect`; oldest attempt first
+3. **partial** — most recent outcome `partial`; oldest attempt first
+4. **passed** — most recent outcome `correct`; oldest attempt first
+
+So every sentence is seen before any is repeated, and a sentence that was
+missed comes back before one that was passed. Only the **newest vocabulary
+revision** present is drawn from. The sentence behind the caller's single
+most recent attempt of that segment is skipped, **unless it is the only
+candidate** — being handed back the sentence just submitted (and just shown
+the answer to) measures nothing, but rendering "no sentences available" over
+a bank that has one would be a worse lie than a repeat.
+
+**Query Parameters:**
+
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `kind` | yes | `reading` or `writing`. No default: whichever one was chosen, a client that forgot the parameter would silently practise the wrong skill and record evidence under the wrong segment |
+
+**Response:**
+```json
+{
+  "data": {
+    "sentence": {
+      "id": "uuid",
+      "kind": "reading",
+      "version": "v1",
+      "ordinal": 1,
+      "text": "Who was the first President?",
+      "vocabTags": ["PEOPLE", "QUESTION WORDS"],
+      "wordCount": 5
+    }
+  }
+}
+```
+
+`sentence` is `null` when no sentences are loaded for that segment — an
+honest absence, not a 404: the request was valid and the answer is that the
+bank is empty.
+
+| Field | Description |
+|-------|-------------|
+| `version` | The **vocabulary-list revision** this sentence was composed and validated against — never a version of its own text. A client can tell that a bank it cached has been superseded |
+| `vocabTags` | The USCIS vocabulary categories this sentence's own words resolve to, **derived** by the content loader from the same word-by-word validation pass, never hand-authored |
+| `wordCount` | The **scorer's** own token count, not a space split: "President of the United States" is one token after normalisation, so a client counting words itself would show a number the outcome was not computed against |
+
+**`text` is returned for the writing segment too, and the writing screen must
+never render it.** Dictation defaults to the browser's own
+`window.speechSynthesis`, which takes a string, in the browser — so the
+client must hold the text to say it at all, on every deployment, with no AI
+key, no admin configuration and no per-call cost. The "never shown" rule is
+an invariant of the **screen**, not of the wire; withholding `text` here
+would leave server-side synthesis (an optional, admin-bound upgrade) as the
+only way to hear a writing sentence.
+
+#### POST /english/attempts
+Scores one submission and, unless the reading transcript was not trusted,
+records it as one `english_attempts` row.
+
+**Request Body:**
+```json
+{
+  "sentenceId": "uuid",
+  "responseText": "Who was the first President?",
+  "asrConfidence": 0.92,
+  "replayCount": 0
+}
+```
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `sentenceId` | yes | The sentence being attempted. Its `kind` and its text — the scoring reference — both come from that row |
+| `responseText` | yes | What was actually produced: exactly what was typed (writing), or the **confirmed** transcript (reading), never the raw recogniser output. Max 2000 characters. An empty string is accepted and scores honestly as `incorrect` |
+| `asrConfidence` | no | **Reading only**, `0`–`1`. **Absent means the recogniser reported none — it is never `0`.** Sending it on a writing attempt is a 400 |
+| `replayCount` | no | **Writing only.** How many times the dictated sentence was replayed. Defaults to `0`, **gates nothing**, and has no server-side limit. A non-zero count on a reading attempt is a 400 — a reading sentence is shown, not dictated |
+
+**The client never sends the verdict.** There is no `outcome`, `wer`,
+`diffOps`, `errors`, `kind`, `userId` or `answeredAt` field on this request,
+and unknown keys are rejected with a 400 naming them rather than dropped.
+
+**Response** — a discriminated union on `status`, **always HTTP 200**:
+
+```json
+{
+  "data": {
+    "status": "scored",
+    "attemptId": "uuid",
+    "outcome": "correct",
+    "sentenceId": "uuid",
+    "kind": "writing",
+    "text": "We pay taxes.",
+    "responseText": "we pay taxes",
+    "wer": 0,
+    "errors": 0,
+    "substitutions": 0,
+    "deletions": 0,
+    "insertions": 0,
+    "referenceTokenCount": 3,
+    "diff": [
+      { "kind": "match", "reference": "we", "hypothesis": "we", "referenceIndex": 0 }
+    ],
+    "normalizedReference": "we pay taxes",
+    "normalizedHypothesis": "we pay taxes",
+    "answeredAt": "2026-09-04T12:00:00.000Z",
+    "asrConfidence": null,
+    "replayCount": 0
+  }
+}
+```
+
+```json
+{
+  "data": {
+    "status": "misheard",
+    "sentenceId": "uuid",
+    "kind": "reading",
+    "text": "Who was the first President?",
+    "responseText": "hoo woz the ferst prezident",
+    "wer": 0.8,
+    "errors": 4,
+    "diff": [],
+    "asrConfidence": 0.42,
+    "confidenceThreshold": 0.6
+  }
+}
+```
+
+**`misheard` means NO ROW WAS WRITTEN AT ALL** — not an `incorrect` row, not
+a flagged row, nothing. It occurs when all four hold: the sentence is
+`reading`, a confidence was reported, it is **strictly below** `0.6`, and the
+score was not `correct`. The learner is offered a retry, and only the retry
+produces evidence. Note what each condition excludes: a **`null` or absent**
+confidence is *unknown*, and unknown is **not** low — a transcript from a
+model that reports no confidence is scored and recorded normally; `0.6`
+exactly is trusted; and a low-confidence transcript that scored `correct`
+anyway is recorded, because whatever the recogniser's misgivings, the words
+it produced were the sentence.
+
+This is a deliberate divergence from Practice, where a mishearing is a
+`failureCause` on a row that **is** written. A civics attempt records what
+the learner *knew*, so even a mistrusted transcript is evidence an attempt
+happened; a reading attempt records whether they produced an exact sequence
+of words, computed over that transcript itself — so a transcript we do not
+believe is not weak evidence of a reading skill, it is none.
+
+**A mishearing is not a client error**, which is why it is a 200: the request
+was well formed, and the response carries the diff and the WER so the retry
+screen can show what was heard. A 4xx would route all of that into a
+client's generic error handling.
+
+**`text` on the response is the reveal.** On a writing attempt this is the
+first time the learner sees the sentence they were dictated, beside their own
+words and the diff between them.
+
+**Error Cases:**
+- 400 Bad Request — `asrConfidence` on a writing attempt, a non-zero
+  `replayCount` on a reading attempt, an out-of-range `asrConfidence`, an
+  unknown key, or a response over 2000 characters
+- 404 Not Found — no such sentence
+
+#### GET /english/progress
+The caller's own history with the English bank, at three grains. Scoped to
+the current vocabulary revision — the same bank `GET /english/next` draws
+from, resolved by the same function, so the two can never disagree about
+which sentences exist.
+
+**Response:**
+```json
+{
+  "data": {
+    "sentences": [
+      {
+        "sentenceId": "uuid",
+        "kind": "writing",
+        "text": "We pay taxes.",
+        "ordinal": 1,
+        "vocabTags": ["CIVICS"],
+        "attempts": 2,
+        "bestOutcome": "correct",
+        "lastOutcome": "partial",
+        "lastWer": 0.33,
+        "lastAnsweredAt": "2026-09-04T12:00:00.000Z"
+      }
+    ],
+    "vocabTags": [
+      { "tag": "CIVICS", "sentencesTotal": 8, "sentencesAttempted": 5, "sentencesPassed": 3, "attempts": 11 }
+    ],
+    "byKind": [
+      {
+        "kind": "reading",
+        "sentencesTotal": 18,
+        "sentencesAttempted": 4,
+        "sentencesPassed": 3,
+        "attempts": 6,
+        "averageWer": 0.14,
+        "version": "v1"
+      }
+    ]
+  }
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `sentences` | **Every** sentence in the current bank, attempted or not — a never-tried sentence appears with `attempts: 0` and null outcomes, because "never tried" is the fact a coverage screen most needs |
+| `bestOutcome` / `lastOutcome` | Best-ever and most-recent, reported separately because they answer different questions: passing a sentence in March and slipping on it yesterday is not the same as never having passed it |
+| `vocabTags` | The same evidence rolled up by USCIS vocabulary category. A sentence counts toward **every** tag it carries, so these totals deliberately sum to more than the bank size — the question each row answers is "of the sentences exercising this category, how many has this learner got right" |
+| `byKind` | Always both segments, present even with no attempts |
+| `byKind[].averageWer` | The mean word-error rate across that segment's attempts, or **`null`** — never `0` — when there are none: a mean of zero is a perfect record, the exact opposite of no record |
+
+Attempts against a **superseded** revision are not counted here (they are
+neither deleted nor invalidated — they simply describe sentences nobody is
+offered any more), so `sentencesAttempted` can never exceed
+`sentencesTotal`.
+
+---
+
 ### Practice
 
 Issue #73, epic #52 (E3). The practice loop: open a session, be asked a
