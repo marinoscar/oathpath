@@ -42,7 +42,7 @@ function readinessResult(overrides: Partial<ReadinessResult> = {}): ReadinessRes
       retention: { masteredCount: 12, reviewCount: 20, totalAttemptedQuestions: 55 },
       consistency: { distinctPracticeDaysInLast14: 7 },
       remediation: { everWeakCount: 5, remediatedCount: 4 },
-      english: { distinctQuestionsCorrectSpokenInEnglish: 0 },
+      english: { readingSentences: 0, writingSentences: 0, readingCredit: 0, writingCredit: 0 },
       spoken: { attempts: 0 },
       interview: { attempts: 1 },
     },
@@ -173,7 +173,11 @@ describe('buildProgressGuidePrompt', () => {
     it('lists all eight components, in readiness-engine.ts\'s declared order', () => {
       const [, user] = buildProgressGuidePrompt(readinessResult());
 
-      const order = ['Coverage', 'Recall', 'Retention', 'Consistency', 'Remediation', 'Spoken English', 'Spoken practice', 'Mock interviews'];
+      // `english`'s label changed with #141 (epic #59 / E10): the component
+      // is scored from `english_attempts` — sentences read aloud and typed —
+      // not from civics answers spoken in English, and the label a learner's
+      // narrative is grounded in has to say which.
+      const order = ['Coverage', 'Recall', 'Retention', 'Consistency', 'Remediation', 'English reading and writing', 'Spoken practice', 'Mock interviews'];
       const positions = order.map((label) => user.content.indexOf(label));
 
       for (const position of positions) {

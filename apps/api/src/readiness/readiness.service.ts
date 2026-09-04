@@ -8,6 +8,8 @@ import { PrismaService } from '../prisma/prisma.service';
 import { buildProgressGuidePrompt } from './progress-guide-prompt';
 import {
   computeReadiness,
+  type EnglishSegment,
+  type EnglishSegmentOutcome,
   type ReadinessEvidence,
   type ReadinessResult,
 } from './readiness-engine';
@@ -46,20 +48,35 @@ import type { ReadinessSnapshotResponse } from './dto/readiness-snapshot.dto';
 // derived from `this.clock.now()`, never a bare `new Date()`.
 //
 // -----------------------------------------------------------------------------
-// THE EVIDENCE SOURCES THE SCHEMA DOES NOT YET SUPPORT (§10's honesty rule)
+// THE EVIDENCE SOURCES THE SCHEMA DID NOT YET SUPPORT (§10's honesty rule)
 // -----------------------------------------------------------------------------
 //
-// `distinctQuestionsCorrectSpokenInEnglish` (english, §2.6) is always `0`
-// today — see {@link assembleEvidence}'s own comment for exactly why, and
-// which future epic (E11) is expected to add the column that would let this
-// service compute a real value. Never faked, never inferred from a proxy.
+// THIS SECTION IS NOW EMPTY, AND THAT IS THE POINT — every one of the eight
+// components is computed from rows that actually exist. It is kept, rather
+// than deleted, as the record of how the two literal zeros left here by E6
+// were discharged, because the discipline that produced them is the reusable
+// part: a component with no evidence source reads a hardcoded `0` with a
+// comment naming what would have to exist to change that, and is NEVER faked
+// or inferred from a proxy in the meantime.
 //
-// `mockInterviewsPassed` (interview, §2.8) WAS the second of these and is not
-// any more: #133 (epic #57 / E8) shipped `mock_interviews`, the grouping key
-// its own literal-zero comment was waiting for, and it is now a real count of
-// completed, passed interviews. `computeInterview` did not change — it always
-// read whatever number it was handed; this epic only stopped that number being
-// hardcoded.
+// `mockInterviewsPassed` (interview, §2.8) was the first: #133 (epic #57 /
+// E8) shipped `mock_interviews`, the grouping key its literal-zero comment
+// was waiting for, and it became a real count of completed, passed
+// interviews. `computeInterview` did not change — it always read whatever
+// number it was handed; that epic only stopped the number being hardcoded.
+//
+// `english` (§2.6) was the second, and it discharged differently, in a way
+// worth recording: its comment said `practice_attempts` had no language
+// column, so there was no honest way to say a spoken-correct attempt was in
+// English, and named a future epic as the one that would add it. #141 (epic
+// #59 / E10) did not add that column. It shipped `english_attempts`, a table
+// measuring a DIFFERENT quantity — sentences read aloud and sentences typed
+// from dictation — and `english-test.md` §6.2 rescored the component around
+// that evidence instead of bending the evidence to fit the old
+// `min(distinctQuestionsCorrectSpokenInEnglish / 20, 1)` formula. So the
+// evidence field this service assembles changed shape too; see
+// {@link assembleEvidence}. The honest-zero discipline is what made that
+// possible: nothing downstream had ever been told a proxy was the real thing.
 // =============================================================================
 
 /** Milliseconds in a calendar day. Pure arithmetic on an already-resolved instant, never a clock read of its own. */
@@ -67,6 +84,50 @@ const MS_PER_DAY = 86_400_000;
 
 /** How many calendar days back `consistency`'s (§2.4) rolling window looks, inclusive of today. */
 const CONSISTENCY_WINDOW_DAYS = 14;
+
+/**
+ * `english`'s trailing window (`english-test.md` §6.1). THE WINDOW IS THE
+ * DECAY: there is no half-life curve, no stored freshness value, and no
+ * "ever" fallback — an attempt older than this simply stops counting, exactly
+ * as a practice day ages out of `consistency`'s 14.
+ *
+ * WHY 30 AND NOT `consistency`'s 14, since the two sit three lines apart and
+ * the difference will otherwise look arbitrary: a Quick 5 touches five civics
+ * questions in one sitting, while a reading or writing segment is a much
+ * smaller, more occasional slice of a learner's routine. At 14 days this
+ * would zero out a learner who did solid English practice three weeks ago and
+ * has been on civics review since — a claim that they cannot currently
+ * produce this evidence, which would be false; the evidence exists, it is
+ * merely outside an unnecessarily tight window. 30 is still ROLLING, not
+ * "ever": one English session six months ago earns nothing today.
+ *
+ * MEASURED IN INSTANTS, NOT CALENDAR DAYS, unlike `consistency` — and that is
+ * a real difference, not an inconsistency to tidy up. `consistency` COUNTS
+ * DISTINCT DAYS, so it must know which local day an instant fell on and needs
+ * the learner's timezone to say. `english` counts distinct SENTENCES and
+ * never buckets anything by day, so a plain 30×24h boundary off `Clock.now()`
+ * is the whole of the window arithmetic it needs; introducing a timezone here
+ * would add a moving part with nothing to move.
+ */
+const ENGLISH_WINDOW_DAYS = 30;
+
+/**
+ * "Best" for §6.2's best-in-window reduction, as an explicit total order.
+ *
+ * Ordinal rather than a chain of comparisons so the rule is one line to read
+ * and one line to change: `correct` beats `partial` beats `incorrect`, which
+ * is the same ordering the credit table in `computeEnglish` assigns values to
+ * — but this is a ranking, not a copy of those values, and must not be
+ * "simplified" into reusing them. Credit is what an outcome is worth to the
+ * score; rank is only which of two outcomes is the better one. They agree
+ * today and are free to stop agreeing (a fourth outcome, a re-weighted
+ * partial) without either one silently changing the other.
+ */
+const ENGLISH_OUTCOME_RANK: Record<EnglishSegmentOutcome, number> = {
+  incorrect: 0,
+  partial: 1,
+  correct: 2,
+};
 
 /**
  * The role the Progress Guide narrative (issue #134, §9) spends the
@@ -624,14 +685,18 @@ export class ReadinessService {
     });
     const distinctQuestionsCorrectSpoken = spokenCorrectRows.length;
 
-    // `english` (§2.6) — LITERAL 0, always, for now. `practice_attempts` has
-    // no language column at all today (only `inputMode`/`promptMode`), so
-    // there is no honest way to say a spoken-correct attempt was IN
-    // ENGLISH specifically. E11 is the epic that will need to add whatever
-    // column carries that fact; inventing a proxy for it here (e.g.
-    // treating every spoken-correct row as English) would be exactly the
-    // faked evidence §5/§10 rule out.
-    const distinctQuestionsCorrectSpokenInEnglish = 0;
+    // `english` — REAL, since #141 (epic #59 / E10). This was a literal `0`
+    // with a comment saying `practice_attempts` had no language column, so
+    // there was no honest way to say a spoken-correct attempt had been IN
+    // ENGLISH specifically, and naming a later epic as the one that would add
+    // that column.
+    //
+    // E10 did not add it. It shipped `english_attempts` — sentences read
+    // aloud and sentences typed from dictation — which measures a different
+    // quantity, so `english-test.md` §6.2 rescored the component around the
+    // evidence that now exists rather than bending that evidence into the old
+    // formula's shape. This is the query the old comment was waiting for.
+    const englishBestOutcomesInWindow = await this.collectEnglishBestOutcomesInWindow(userId);
 
     // `interview` (§2.8) — REAL, since #133 (epic #57 / E8). This was a
     // literal `0` with a comment saying `practice_attempts` rows carrying
@@ -670,11 +735,74 @@ export class ReadinessService {
       totalQuestionsInVersion,
       masteryRows,
       recentQualifyingAttempts,
+      englishBestOutcomesInWindow,
       distinctPracticeDaysInLast14,
       distinctQuestionsCorrectSpoken,
-      distinctQuestionsCorrectSpokenInEnglish,
       mockInterviewsPassed,
     };
+  }
+
+  /**
+   * `english`'s evidence (`english-test.md` §6.1-§6.2): one entry per
+   * DISTINCT sentence attempted in the trailing 30 days, carrying that
+   * sentence's BEST in-window outcome.
+   *
+   * THE BEST-OF REDUCTION IS THE WHOLE REASON THIS IS NOT A `count`. §6.2
+   * credits a sentence once, at its best in-window outcome — "twice
+   * `incorrect` and once `correct` counts once, at `correct`'s credit" — so a
+   * learner cannot inflate the component by re-attempting one sentence they
+   * already got right, and equally is not held down by the failed tries that
+   * preceded a success. Doing it in JS over a small per-user row set (rather
+   * than a `DISTINCT ON` or a `groupBy` with a max) keeps the rule readable
+   * beside the sentence of spec it implements, and the volume is bounded by
+   * how many sentences one person can attempt in a month.
+   *
+   * NO NEGATIVE FILTER ON A NULLABLE COLUMN ANYWHERE IN THIS QUERY, and that
+   * is deliberate rather than incidental — see `assembleEvidence`'s own
+   * `failureCause` comment for the full account of why `{ not: x }` on a
+   * nullable column silently drops every null row. All four columns touched
+   * here (`userId`, `answeredAt`, `sentenceId`, `kind`, `outcome`) are NOT
+   * NULL in the schema, and every clause is a positive one; the only nullable
+   * column on `english_attempts` is `asrConfidence`, which this query neither
+   * selects nor filters on.
+   */
+  private async collectEnglishBestOutcomesInWindow(
+    userId: string,
+  ): Promise<ReadinessEvidence['englishBestOutcomesInWindow']> {
+    // `Clock`, never a bare `new Date()` — CLAUDE.md's "Using the Clock"
+    // rule, and what lets an integration test pin the window boundary with
+    // `X-Test-Clock` instead of writing rows dated relative to the real wall
+    // clock and hoping.
+    const windowFloor = new Date(this.clock.now().getTime() - ENGLISH_WINDOW_DAYS * MS_PER_DAY);
+
+    const rows = await this.prisma.englishAttempt.findMany({
+      where: { userId, answeredAt: { gte: windowFloor } },
+      select: { sentenceId: true, kind: true, outcome: true },
+    });
+
+    // Keyed by sentence id alone would be enough — a sentence belongs to
+    // exactly one segment (`english-test.md` §1.4: a reading sentence draws
+    // only from the reading vocabulary) — but the kind is in the key anyway
+    // so that this reduction stays correct on its own terms rather than on a
+    // content invariant enforced somewhere else entirely.
+    const bestBySentence = new Map<
+      string,
+      { kind: EnglishSegment; outcome: EnglishSegmentOutcome }
+    >();
+
+    for (const row of rows) {
+      const key = `${row.kind}:${row.sentenceId}`;
+      const current = bestBySentence.get(key);
+      const isBetter =
+        current === undefined ||
+        ENGLISH_OUTCOME_RANK[row.outcome] > ENGLISH_OUTCOME_RANK[current.outcome];
+
+      if (isBetter) {
+        bestBySentence.set(key, { kind: row.kind, outcome: row.outcome });
+      }
+    }
+
+    return [...bestBySentence.values()];
   }
 
   /**

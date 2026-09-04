@@ -22,7 +22,7 @@ function baseEvidence(overrides: Partial<ReadinessEvidence> = {}): ReadinessEvid
     recentQualifyingAttempts: [],
     distinctPracticeDaysInLast14: 0,
     distinctQuestionsCorrectSpoken: 0,
-    distinctQuestionsCorrectSpokenInEnglish: 0,
+    englishBestOutcomesInWindow: [],
     mockInterviewsPassed: 0,
     ...overrides,
   };
@@ -230,21 +230,141 @@ describe('computeReadiness', () => {
   });
 
   // ---------------------------------------------------------------------------
-  // english / spoken / interview (§2.6-§2.8) — declared, unwired
+  // english (english-test.md §6.2) — REAL EVIDENCE SINCE #141
   // ---------------------------------------------------------------------------
+  //
+  // No database anywhere in this block: `englishBestOutcomesInWindow` arrives
+  // already windowed, already grouped by sentence and already reduced to a
+  // best outcome, exactly as the engine's own contract says it does, so every
+  // number below is `computeEnglish`'s arithmetic and nothing else's.
 
-  describe('english, spoken, interview', () => {
-    it('english is min(distinctQuestionsCorrectSpokenInEnglish / 20, 1)', () => {
-      expect(
-        computeReadiness(baseEvidence({ distinctQuestionsCorrectSpokenInEnglish: 10 })).components
-          .english.value,
-      ).toBeCloseTo(0.5, 10);
-      expect(
-        computeReadiness(baseEvidence({ distinctQuestionsCorrectSpokenInEnglish: 40 })).components
-          .english.value,
-      ).toBe(1);
+  describe('english', () => {
+    /** `n` distinct sentences of one segment, all at `outcome`. */
+    function sentences(
+      kind: 'reading' | 'writing',
+      outcome: 'correct' | 'partial' | 'incorrect',
+      n: number,
+    ): ReadinessEvidence['englishBestOutcomesInWindow'] {
+      return Array.from({ length: n }, () => ({ kind, outcome }));
+    }
+
+    it('is 0, and reports zero sentences of both kinds, with no attempts at all', () => {
+      const result = computeReadiness(baseEvidence({ englishBestOutcomesInWindow: [] }));
+
+      expect(result.components.english.value).toBe(0);
+      expect(result.evidenceCounts.english).toEqual({
+        readingSentences: 0,
+        writingSentences: 0,
+        readingCredit: 0,
+        writingCredit: 0,
+      });
     });
 
+    it('separates "no practice" from "practiced and missed" — both score 0, the counts differ', () => {
+      // The whole reason `evidenceCounts.english` carries sentence counts and
+      // not credit alone: these two learners are not the same person, and
+      // §6.2 requires the explanation to name the missing evidence.
+      const none = computeReadiness(baseEvidence({ englishBestOutcomesInWindow: [] }));
+      const missed = computeReadiness(
+        baseEvidence({
+          englishBestOutcomesInWindow: [
+            ...sentences('reading', 'incorrect', 3),
+            ...sentences('writing', 'incorrect', 2),
+          ],
+        }),
+      );
+
+      expect(none.components.english.value).toBe(0);
+      expect(missed.components.english.value).toBe(0);
+
+      expect(none.evidenceCounts.english.readingSentences).toBe(0);
+      expect(missed.evidenceCounts.english).toEqual({
+        readingSentences: 3,
+        writingSentences: 2,
+        readingCredit: 0,
+        writingCredit: 0,
+      });
+    });
+
+    it('credits a partial at half a correct — the same 0.5 recall uses (§6.2)', () => {
+      // 2 correct + 2 partial = 3.0 reading credit -> min(3/6, 1) = 0.5
+      const result = computeReadiness(
+        baseEvidence({
+          englishBestOutcomesInWindow: [
+            ...sentences('reading', 'correct', 2),
+            ...sentences('reading', 'partial', 2),
+          ],
+        }),
+      );
+
+      expect(result.evidenceCounts.english.readingCredit).toBeCloseTo(3, 10);
+      expect(result.components.english.value).toBeCloseTo(0.5 * 0.5, 10);
+    });
+
+    it('reading-only and writing-only evidence differ at equal counts — §6.2\'s worked arithmetic', () => {
+      // THE HEADLINE ASSERTION OF THE TWO DENOMINATORS. Three all-correct
+      // passes each: reading is min(3/6, 1) = 0.5 -> 0.25 of the component;
+      // writing is min(3/4, 1) = 0.75 -> 0.375. Same raw count, different
+      // contribution, because a reading pass is scored through a recognizer
+      // and a writing pass is scored against the typed characters themselves.
+      const readingOnly = computeReadiness(
+        baseEvidence({ englishBestOutcomesInWindow: sentences('reading', 'correct', 3) }),
+      );
+      const writingOnly = computeReadiness(
+        baseEvidence({ englishBestOutcomesInWindow: sentences('writing', 'correct', 3) }),
+      );
+
+      expect(readingOnly.components.english.value).toBeCloseTo(0.25, 10);
+      expect(writingOnly.components.english.value).toBeCloseTo(0.375, 10);
+      expect(writingOnly.components.english.value).toBeGreaterThan(
+        readingOnly.components.english.value,
+      );
+    });
+
+    it('caps each segment at its own target, so one segment alone never exceeds half the component', () => {
+      const result = computeReadiness(
+        baseEvidence({ englishBestOutcomesInWindow: sentences('reading', 'correct', 50) }),
+      );
+
+      expect(result.components.english.value).toBe(0.5);
+      expect(result.evidenceCounts.english.readingCredit).toBe(50);
+    });
+
+    it('is 1 only when both segments reach their target', () => {
+      const result = computeReadiness(
+        baseEvidence({
+          englishBestOutcomesInWindow: [
+            ...sentences('reading', 'correct', 6),
+            ...sentences('writing', 'correct', 4),
+          ],
+        }),
+      );
+
+      expect(result.components.english.value).toBe(1);
+      expect(result.components.english.weight).toBe(0.05);
+      expect(result.components.english.contribution).toBeCloseTo(0.05, 10);
+    });
+
+    it('weights the two segments evenly', () => {
+      // reading 6/6 = 1, writing 2/4 = 0.5 -> 0.5*1 + 0.5*0.5 = 0.75
+      const result = computeReadiness(
+        baseEvidence({
+          englishBestOutcomesInWindow: [
+            ...sentences('reading', 'correct', 6),
+            ...sentences('writing', 'correct', 2),
+          ],
+        }),
+      );
+
+      expect(result.components.english.value).toBeCloseTo(0.75, 10);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // spoken / interview (§2.7-§2.8)
+  // ---------------------------------------------------------------------------
+
+  describe('spoken, interview', () => {
     it('spoken is min(distinctQuestionsCorrectSpoken / 20, 1)', () => {
       expect(
         computeReadiness(baseEvidence({ distinctQuestionsCorrectSpoken: 5 })).components.spoken
@@ -292,7 +412,7 @@ describe('computeReadiness', () => {
       expect(result.capReason).toBeNull();
     });
 
-    it('the 75-point structural cap: score never exceeds 75 while capped', () => {
+    it('the 75-point structural cap: score never exceeds 75 with none of the three', () => {
       const result = computeReadiness(
         baseEvidence({
           totalQuestionsInVersion: 10,
@@ -300,13 +420,98 @@ describe('computeReadiness', () => {
           recentQualifyingAttempts: Array(20).fill({ outcome: 'correct' as const }),
           distinctPracticeDaysInLast14: 14,
           distinctQuestionsCorrectSpoken: 0,
-          distinctQuestionsCorrectSpokenInEnglish: 0,
+          englishBestOutcomesInWindow: [],
           mockInterviewsPassed: 0,
         }),
       );
 
       expect(result.capReason).toBe('typed_only');
       expect(result.score).toBe(75);
+    });
+
+    // -------------------------------------------------------------------------
+    // english-test.md §6.3 — THE INVARIANT E10 MOST ENDANGERS
+    // -------------------------------------------------------------------------
+    //
+    // A learner can now earn a real, non-zero `english` value without ever
+    // having spoken a civics answer or sat a mock interview. These three
+    // assertions are what stop that from being mistaken for the evidence the
+    // cap is about. If any of them ever fails, the product is telling someone
+    // they are close to ready on the strength of typing sentences.
+
+    it('perfect English evidence does NOT lift the cap', () => {
+      const result = computeReadiness(
+        baseEvidence({
+          englishBestOutcomesInWindow: [
+            ...Array.from({ length: 20 }, () => ({
+              kind: 'reading' as const,
+              outcome: 'correct' as const,
+            })),
+            ...Array.from({ length: 20 }, () => ({
+              kind: 'writing' as const,
+              outcome: 'correct' as const,
+            })),
+          ],
+          distinctQuestionsCorrectSpoken: 0,
+          mockInterviewsPassed: 0,
+        }),
+      );
+
+      expect(result.components.english.value).toBe(1);
+      expect(result.capReason).toBe('typed_only');
+    });
+
+    it('a learner perfect at everything except speaking still cannot exceed 75', () => {
+      const result = computeReadiness(
+        baseEvidence({
+          totalQuestionsInVersion: 10,
+          masteryRows: Array.from({ length: 10 }, () => ({ state: 'mastered' as const, lapses: 0 })),
+          recentQualifyingAttempts: Array(20).fill({ outcome: 'correct' as const }),
+          distinctPracticeDaysInLast14: 14,
+          englishBestOutcomesInWindow: [
+            ...Array.from({ length: 6 }, () => ({
+              kind: 'reading' as const,
+              outcome: 'correct' as const,
+            })),
+            ...Array.from({ length: 4 }, () => ({
+              kind: 'writing' as const,
+              outcome: 'correct' as const,
+            })),
+          ],
+          distinctQuestionsCorrectSpoken: 0,
+          mockInterviewsPassed: 0,
+        }),
+      );
+
+      // 75 (everything else perfect) + 5 (english at its full 0.05 weight) —
+      // English moves the score by its own weight and by exactly nothing
+      // else. The 75 ceiling belongs to `spoken` + `interview`'s 0.20, which
+      // is still unearned here.
+      expect(result.capReason).toBe('typed_only');
+      expect(result.score).toBe(80);
+      expect(result.components.spoken.value).toBe(0);
+      expect(result.components.interview.value).toBe(0);
+    });
+
+    it('English evidence changes nothing about capReason in either direction', () => {
+      const withEnglish = { kind: 'writing' as const, outcome: 'correct' as const };
+
+      expect(
+        computeReadiness(baseEvidence({ englishBestOutcomesInWindow: [withEnglish] })).capReason,
+      ).toBe('typed_only');
+      expect(
+        computeReadiness(
+          baseEvidence({ englishBestOutcomesInWindow: [], distinctQuestionsCorrectSpoken: 1 }),
+        ).capReason,
+      ).toBeNull();
+      expect(
+        computeReadiness(
+          baseEvidence({
+            englishBestOutcomesInWindow: [withEnglish],
+            distinctQuestionsCorrectSpoken: 1,
+          }),
+        ).capReason,
+      ).toBeNull();
     });
   });
 
@@ -346,7 +551,7 @@ describe('computeReadiness', () => {
         ],
         distinctPracticeDaysInLast14: 3,
         distinctQuestionsCorrectSpoken: 0,
-        distinctQuestionsCorrectSpokenInEnglish: 0,
+        englishBestOutcomesInWindow: [],
         mockInterviewsPassed: 0,
       };
 
@@ -393,7 +598,7 @@ describe('computeReadiness', () => {
         ],
         distinctPracticeDaysInLast14: 7,
         distinctQuestionsCorrectSpoken: 0,
-        distinctQuestionsCorrectSpokenInEnglish: 0,
+        englishBestOutcomesInWindow: [],
         mockInterviewsPassed: 0,
       };
 
@@ -433,7 +638,7 @@ describe('computeReadiness', () => {
         ],
         distinctPracticeDaysInLast14: 7,
         distinctQuestionsCorrectSpoken: 0,
-        distinctQuestionsCorrectSpokenInEnglish: 0,
+        englishBestOutcomesInWindow: [],
         mockInterviewsPassed: 1,
       };
 
