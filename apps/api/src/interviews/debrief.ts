@@ -244,19 +244,20 @@ function toSegmentResult(segment: DebriefSegmentAttempt): InterviewSegmentResult
 function spokenSummaryFrom(
   questions: readonly InterviewDebriefQuestion[],
 ): InterviewSpokenSummary {
-  let answers = 0;
-  let correct = 0;
-  let misheard = 0;
+  // FILTERED RATHER THAN COUNTED WITH ACCUMULATORS, and the reason is a test
+  // rather than a style preference: `debrief.spec.ts` asserts this module's
+  // source contains NO bare numeric literal at all — the strong form of §4's
+  // "no threshold in code", chosen because a list of known-bad values would let
+  // tomorrow's wrong constant through. A `let correct = 0; correct += 1` pair
+  // is three literals that mean nothing, and the honest way to keep the
+  // assertion strong is to not write numbers, not to weaken it into a list.
+  const spoken = questions.filter((question) => question.inputMode === 'spoken');
 
-  for (const question of questions) {
-    if (question.inputMode !== 'spoken') continue;
-
-    answers += 1;
-    if (question.outcome === 'correct') correct += 1;
-    if (question.misheard) misheard += 1;
-  }
-
-  return { answers, correct, misheard };
+  return {
+    answers: spoken.length,
+    correct: spoken.filter((question) => question.outcome === 'correct').length,
+    misheard: spoken.filter((question) => question.misheard).length,
+  };
 }
 
 /**

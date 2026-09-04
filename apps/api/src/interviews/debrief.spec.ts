@@ -265,6 +265,335 @@ describe('buildInterviewDebrief', () => {
   });
 });
 
+// -----------------------------------------------------------------------------
+// The spoken dimension (issue #160, epic #60 / E11)
+// -----------------------------------------------------------------------------
+//
+// `realtime-interview.md` §5, §6, §8. Every property below is one a debrief
+// could plausibly get wrong in a way a learner would believe:
+//
+//   * A mishearing rendered as a wrong answer is the same unearned penalty
+//     `voice.md` §3 keeps out of `question_mastery`, arriving as advice.
+//   * A segment reported `completed` from the interview's MODE rather than
+//     from a scored attempt tells a learner they have already rehearsed the
+//     reading test when the connection dropped before it.
+//   * A `spoken` summary counted from anything other than the questions the
+//     same response lists gives the page two answers to one question.
+
+describe('buildInterviewDebrief — the spoken dimension (§6, §8)', () => {
+  const SPOKEN = { inputMode: 'spoken' as const };
+
+  describe('§6 — every claim comes off a row', () => {
+    it('echoes each attempt’s input mode, mishearing and confidence', () => {
+      const debrief = buildInterviewDebrief(
+        debriefInput({
+          attempts: [
+            attempt({ ...SPOKEN, asrConfidence: 0.91 }),
+            attempt({ number: 2, inputMode: 'typed' }),
+          ],
+        }),
+      );
+
+      expect(debrief.questions[0].inputMode).toBe('spoken');
+      expect(debrief.questions[0].asrConfidence).toBe(0.91);
+      expect(debrief.questions[1].inputMode).toBe('typed');
+      expect(debrief.questions[1].asrConfidence).toBeNull();
+    });
+
+    it('reports ONE interview carrying both transports honestly', () => {
+      // §7's fallback: a dropped connection finishes over the text transport
+      // with the same interview id. The rows say which answers were spoken and
+      // which were typed, so the debrief does too — there is no interview-level
+      // flag here to round it to one or the other.
+      const debrief = buildInterviewDebrief(
+        debriefInput({
+          attempts: [
+            attempt({ ...SPOKEN, outcome: 'correct' }),
+            attempt({ number: 2, ...SPOKEN, outcome: 'incorrect' }),
+            attempt({ number: 3, inputMode: 'typed', outcome: 'correct' }),
+          ],
+        }),
+      );
+
+      expect(debrief.questions.map((q) => q.inputMode)).toEqual([
+        'spoken',
+        'spoken',
+        'typed',
+      ]);
+      expect(debrief.spoken).toEqual({ answers: 2, correct: 1, misheard: 0 });
+    });
+
+    it('counts the spoken correct answers readiness’s own `spoken` reads', () => {
+      // `computeSpoken` counts `input_mode: 'spoken' AND outcome: 'correct'`.
+      // This count is that, over this interview — which is what lets the
+      // readiness band on the same page be explainable rather than asserted.
+      const debrief = buildInterviewDebrief(
+        debriefInput({
+          attempts: [
+            attempt({ ...SPOKEN, outcome: 'correct' }),
+            attempt({ number: 2, ...SPOKEN, outcome: 'partial' }),
+            attempt({ number: 3, ...SPOKEN, outcome: 'skipped' }),
+            attempt({ number: 4, inputMode: 'typed', outcome: 'correct' }),
+          ],
+        }),
+      );
+
+      expect(debrief.spoken.answers).toBe(3);
+      expect(debrief.spoken.correct).toBe(1);
+    });
+
+    it('reports zeros, not an absence, for a wholly typed interview', () => {
+      const debrief = buildInterviewDebrief(debriefInput());
+
+      expect(debrief.spoken).toEqual({ answers: 0, correct: 0, misheard: 0 });
+      expect(debrief.segments).toEqual([]);
+    });
+  });
+
+  describe('a misheard answer is shown as such and never counted as incorrect', () => {
+    it('marks the question misheard from its failure cause, and keeps the outcome', () => {
+      // BOTH FACTS SURVIVE. `outcome` is what the ladder concluded about the
+      // words it was handed; `misheard` is whether we believe those were the
+      // learner's words. Collapsing either into the other loses a distinction
+      // `voice.md` §3 spends a worked example on.
+      const debrief = buildInterviewDebrief(
+        debriefInput({
+          attempts: [
+            attempt({
+              ...SPOKEN,
+              outcome: 'incorrect',
+              failureCause: 'misheard',
+              asrConfidence: 0.31,
+            }),
+          ],
+        }),
+      );
+
+      expect(debrief.questions[0].misheard).toBe(true);
+      expect(debrief.questions[0].outcome).toBe('incorrect');
+      expect(debrief.spoken.misheard).toBe(1);
+    });
+
+    it('does NOT send a misheard question’s category to focus areas', () => {
+      // The whole point: a learner is not told to go and study a topic on the
+      // strength of a noisy connection.
+      const debrief = buildInterviewDebrief(
+        debriefInput({
+          attempts: [
+            attempt({
+              ...SPOKEN,
+              categoryName: 'Integrated Civics',
+              outcome: 'incorrect',
+              failureCause: 'misheard',
+            }),
+          ],
+        }),
+      );
+
+      expect(debrief.focusAreas).toEqual([]);
+    });
+
+    it('still names a category missed for any OTHER reason on the same spoken run', () => {
+      // The exclusion is narrow. A confidently-heard wrong answer is a miss,
+      // and a debrief that swallowed those too would be useless.
+      const debrief = buildInterviewDebrief(
+        debriefInput({
+          attempts: [
+            attempt({
+              ...SPOKEN,
+              categoryName: 'Integrated Civics',
+              outcome: 'incorrect',
+              failureCause: 'misheard',
+            }),
+            attempt({
+              number: 2,
+              ...SPOKEN,
+              categoryName: 'American History',
+              outcome: 'incorrect',
+              failureCause: 'wrong_answer',
+            }),
+          ],
+        }),
+      );
+
+      expect(debrief.focusAreas).toEqual(['American History']);
+    });
+
+    it('treats every other failure cause as an ordinary miss', () => {
+      // `failure_cause` is a closed six-value enum and only ONE of its members
+      // means "we do not believe these were the learner's words". A boolean
+      // computed from truthiness rather than from the value would fail here.
+      const debrief = buildInterviewDebrief(
+        debriefInput({
+          attempts: [
+            attempt({ ...SPOKEN, outcome: 'incorrect', failureCause: 'unknown' }),
+          ],
+        }),
+      );
+
+      expect(debrief.questions[0].misheard).toBe(false);
+      expect(debrief.spoken.misheard).toBe(0);
+      expect(debrief.focusAreas).toEqual(['American Government']);
+    });
+
+    it('never marks a correct answer misheard, whatever the confidence', () => {
+      // `isMisheardAttempt`'s third condition: a right answer is right however
+      // it was heard, so no `failure_cause` is written at all.
+      const debrief = buildInterviewDebrief(
+        debriefInput({
+          attempts: [
+            attempt({ ...SPOKEN, outcome: 'correct', asrConfidence: 0.2 }),
+          ],
+        }),
+      );
+
+      expect(debrief.questions[0].misheard).toBe(false);
+      expect(debrief.spoken.correct).toBe(1);
+      expect(debrief.spoken.misheard).toBe(0);
+    });
+  });
+
+  describe('§5 — the reading and writing segments', () => {
+    it('reports each conducted segment with its sentence, outcome and word error rate', () => {
+      const debrief = buildInterviewDebrief(
+        debriefInput({
+          segments: [
+            segment(),
+            segment({
+              kind: 'writing',
+              outcome: 'partial',
+              sentence: 'Washington was the first President.',
+              wer: 0.2,
+            }),
+          ],
+        }),
+      );
+
+      expect(debrief.segments).toEqual([
+        {
+          kind: 'reading',
+          outcome: 'correct',
+          sentence: 'Who was the first President?',
+          wer: 0,
+        },
+        {
+          kind: 'writing',
+          outcome: 'partial',
+          sentence: 'Washington was the first President.',
+          wer: 0.2,
+        },
+      ]);
+    });
+
+    it('reveals the writing sentence, which the interview screen never showed', () => {
+      // `english.service.ts`: the post-attempt sentence is "the REVEAL — the
+      // first time the learner sees the sentence they were dictated". A debrief
+      // that withheld it would leave a learner who missed the writing test with
+      // no way to find out what they were asked to write.
+      const debrief = buildInterviewDebrief(
+        debriefInput({
+          segments: [
+            segment({ kind: 'writing', outcome: 'incorrect', sentence: 'We elect a President for four years.', wer: 1 }),
+          ],
+        }),
+      );
+
+      expect(debrief.segments[0].sentence).toBe(
+        'We elect a President for four years.',
+      );
+    });
+
+    it('reports civics, spoken performance and both segments in ONE debrief', () => {
+      // The acceptance criterion, stated as one assertion: a learner reads all
+      // three in one view rather than three.
+      const debrief = buildInterviewDebrief(
+        debriefInput({
+          attempts: [attempt({ ...SPOKEN, outcome: 'correct' })],
+          segments: [segment(), segment({ kind: 'writing' })],
+        }),
+      );
+
+      expect(debrief.civics.correct).toBe(6);
+      expect(debrief.spoken.answers).toBe(1);
+      expect(debrief.segments.map((s) => s.kind)).toEqual(['reading', 'writing']);
+    });
+  });
+
+  describe('§5 — a phase is `completed` only when it produced a scored attempt', () => {
+    it('reports reading and writing as completed once both were scored', () => {
+      const debrief = buildInterviewDebrief(
+        debriefInput({ segments: [segment(), segment({ kind: 'writing' })] }),
+      );
+
+      const status = Object.fromEntries(
+        debrief.phases.map((phase) => [phase.kind, phase.status]),
+      );
+      expect(status.reading).toBe('completed');
+      expect(status.writing).toBe('completed');
+    });
+
+    it('reports the segment that was NOT reached as skipped, in the same interview', () => {
+      // A voice interview whose connection dropped after the reading test.
+      // §2.4's harm with the sign flipped is what this prevents: a learner told
+      // they rehearsed a segment they never sat.
+      const debrief = buildInterviewDebrief(
+        debriefInput({ segments: [segment()] }),
+      );
+
+      const status = Object.fromEntries(
+        debrief.phases.map((phase) => [phase.kind, phase.status]),
+      );
+      expect(status.reading).toBe('completed');
+      expect(status.writing).toBe('skipped');
+    });
+
+    it('still names both as skipped for a text interview, in order (§2.4)', () => {
+      const debrief = buildInterviewDebrief(debriefInput());
+
+      expect(debrief.phases.map((phase) => phase.kind)).toEqual([
+        'smalltalk',
+        'n400',
+        'civics',
+        'reading',
+        'writing',
+        'closing',
+      ]);
+      expect(
+        debrief.phases.filter((phase) => phase.status === 'skipped').map((p) => p.kind),
+      ).toEqual(['reading', 'writing']);
+    });
+  });
+
+  describe('§8 / PRD.md — the score is explainable and paired with an action', () => {
+    it('carries the `spoken` component beside the `interview` one', () => {
+      const debrief = buildInterviewDebrief(debriefInput());
+
+      expect(debrief.readiness.spokenComponent).toEqual({
+        value: 0.4,
+        evidenceCount: 8,
+      });
+      expect(debrief.readiness.interviewComponent).toEqual({
+        value: 0.5,
+        evidenceCount: 1,
+      });
+    });
+
+    it('ends on the engine’s own recommendation, whole', () => {
+      // Not a subset of its fields and not a substitute chosen here: `path`
+      // travels with the copy, so the action a learner taps is the destination
+      // the sentence names.
+      const debrief = buildInterviewDebrief(debriefInput());
+
+      expect(debrief.readiness.recommendation).toEqual({
+        componentKey: 'coverage',
+        title: 'Cover more of the question bank',
+        reason: 'You have seen 40 of the 100 questions.',
+        path: '/practice',
+      });
+    });
+  });
+});
+
 describe('focusAreasFrom', () => {
   function question(
     overrides: Partial<InterviewDebriefQuestion> = {},
@@ -314,6 +643,15 @@ describe('focusAreasFrom', () => {
       ]);
     },
   );
+
+  it('never counts a misheard answer as a miss (issue #160)', () => {
+    // The one exclusion, asserted where the function lives as well as through
+    // the builder: a category reaching this list on the strength of a noisy
+    // connection is advice a learner did not earn.
+    expect(
+      focusAreasFrom([question({ outcome: 'incorrect', misheard: true })]),
+    ).toEqual([]);
+  });
 
   it('carries no counts — it names the questions, not the person (§11.1)', () => {
     // A count per category would invite a screen to render "you missed 3 of 4
