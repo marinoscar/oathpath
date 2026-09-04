@@ -70,8 +70,9 @@ function seedProfile(
   });
 }
 
-function seedAttempt(overrides: Partial<Record<string, unknown>> = {}): void {
-  const id = randomUUID();
+/** Returns the seeded row's id — needed to point a later retry's `retryOfAttemptId` at it (issue #244). */
+function seedAttempt(overrides: Partial<Record<string, unknown>> = {}): string {
+  const id = (overrides.id as string | undefined) ?? randomUUID();
   attempts.set(id, {
     id,
     userId: overrides.userId,
@@ -83,12 +84,18 @@ function seedAttempt(overrides: Partial<Record<string, unknown>> = {}): void {
     responseText: 'an answer',
     outcome: 'correct',
     gradingMethod: 'exact',
+    // Explicit, rather than left absent, so a test that mixes null and
+    // non-null `failureCause` rows (issue #244) can rely on this default
+    // rather than each call site spelling it out.
+    failureCause: null,
+    retryOfAttemptId: null,
     revealed: false,
     hintUsed: false,
     durationMs: null,
     answeredAt: new Date('2026-04-01T12:00:00.000Z'),
     ...overrides,
   });
+  return id;
 }
 
 /**
@@ -150,16 +157,116 @@ function setupReadinessMocks(): void {
     },
   );
 
+  // ---------------------------------------------------------------------------
+  // Three-valued (NULL-aware) `where` evaluation — issue #244
+  // ---------------------------------------------------------------------------
+  //
+  // Real SQL — and therefore real Postgres via Prisma — uses THREE-valued
+  // logic: comparing a column against NULL evaluates to NULL/UNKNOWN, not to
+  // `true` or `false`, and a `WHERE` clause keeps only rows where the whole
+  // expression is TRUE (UNKNOWN drops the row, exactly like FALSE does). A
+  // naive mock built from plain `===`/`!==` comparisons has no such
+  // distinction, so it can "pass" a `where` clause that is subtly wrong
+  // under real SQL — which is exactly the class of bug issue #244 fixed in
+  // `readiness.service.ts`'s recall query (see that file's "WHY (1) IS AN
+  // EXPLICIT `OR ... IS NULL`" comment). `evalAttemptWhere` exists so this
+  // mock can tell the two spellings apart the same way a real database
+  // would, rather than merely echoing back whatever `where` object the
+  // production code happened to build.
+  //
+  // This is what makes `readiness.service.spec.ts`'s "recall NULL trap"
+  // test (issue #244) a level below this one: that unit test can only pin
+  // the *shape* of the `where` object Prisma is called with. This
+  // evaluator, applied over a real HTTP round trip through the actual
+  // `AppModule`, additionally proves what ROWS that clause would keep —
+  // catching a regression that swaps in a differently-shaped but equally
+  // plausible-looking (and equally wrong) `where` object.
+  type Tri = true | false | null;
+
+  const triAnd = (a: Tri, b: Tri): Tri =>
+    a === false || b === false ? false : a === null || b === null ? null : true;
+  const triOr = (a: Tri, b: Tri): Tri =>
+    a === true || b === true ? true : a === null || b === null ? null : false;
+  const triNot = (a: Tri): Tri => (a === null ? null : !a);
+
+  /** `column = target`, NULL-aware: NULL compared to anything is UNKNOWN, never TRUE or FALSE. */
+  function triEquals(columnValue: unknown, target: unknown): Tri {
+    if (columnValue === null || columnValue === undefined) return null;
+    return columnValue === target;
+  }
+
+  function evalAttemptWhereField(row: any, key: string, cond: unknown): Tri {
+    if (cond === undefined) return true;
+
+    switch (key) {
+      case 'userId':
+      case 'sessionId':
+      case 'hintUsed':
+      case 'revealed':
+      case 'inputMode':
+      case 'outcome':
+        return row[key] === cond;
+      case 'answeredAt': {
+        const gte = (cond as any)?.gte as Date | undefined;
+        return gte ? row.answeredAt.getTime() >= gte.getTime() : true;
+      }
+      case 'failureCause': {
+        // `failure_cause` is NULLABLE, and NULL is its overwhelmingly common
+        // value (every deterministically-graded attempt has one) — the same
+        // fact `readiness.service.ts`'s own comment states. `{ not: x }`
+        // reproduces Postgres's `<> `: NULL stays NULL/UNKNOWN, never TRUE.
+        const value = row.failureCause ?? null;
+        if (cond === null) return value === null;
+        if (typeof cond === 'object' && cond !== null && 'not' in (cond as any)) {
+          return triNot(triEquals(value, (cond as any).not));
+        }
+        return triEquals(value, cond);
+      }
+      case 'retries': {
+        // `{ none: {} }` — no OTHER attempt's `retryOfAttemptId` names this
+        // row. An existence check, not a nullable-column comparison, so it
+        // carries no three-valued ambiguity of its own.
+        if ((cond as any)?.none !== undefined) {
+          const isSuperseded = Array.from(attempts.values()).some(
+            (candidate) => candidate.retryOfAttemptId === row.id,
+          );
+          return !isSuperseded;
+        }
+        return true;
+      }
+      case 'OR': {
+        const clauses = cond as Record<string, unknown>[];
+        return clauses.reduce<Tri>((acc, sub) => triOr(acc, evalAttemptWhere(row, sub)), false);
+      }
+      case 'AND': {
+        const clauses = Array.isArray(cond)
+          ? (cond as Record<string, unknown>[])
+          : [cond as Record<string, unknown>];
+        return clauses.reduce<Tri>((acc, sub) => triAnd(acc, evalAttemptWhere(row, sub)), true);
+      }
+      case 'NOT': {
+        const clauses = Array.isArray(cond)
+          ? (cond as Record<string, unknown>[])
+          : [cond as Record<string, unknown>];
+        return clauses.reduce<Tri>((acc, sub) => triAnd(acc, triNot(evalAttemptWhere(row, sub))), true);
+      }
+      default:
+        // Unrecognized key: not filtered on — the same permissive default
+        // this mock has always had for a field none of these suites read.
+        return true;
+    }
+  }
+
+  function evalAttemptWhere(row: any, where: Record<string, unknown>): Tri {
+    return Object.entries(where).reduce<Tri>(
+      (acc, [key, cond]) => triAnd(acc, evalAttemptWhereField(row, key, cond)),
+      true,
+    );
+  }
+
+  /** A row is kept only when the whole clause is TRUE — UNKNOWN (null) excludes it, exactly like Postgres. */
   function matchesAttemptWhere(row: any, where: Record<string, unknown>): boolean {
-    if (where.userId !== undefined && row.userId !== where.userId) return false;
-    if (where.sessionId !== undefined && row.sessionId !== where.sessionId) return false;
-    if (where.hintUsed !== undefined && row.hintUsed !== where.hintUsed) return false;
-    if (where.revealed !== undefined && row.revealed !== where.revealed) return false;
-    if (where.inputMode !== undefined && row.inputMode !== where.inputMode) return false;
-    if (where.outcome !== undefined && row.outcome !== where.outcome) return false;
-    const answeredAtGte = (where.answeredAt as any)?.gte as Date | undefined;
-    if (answeredAtGte && row.answeredAt.getTime() < answeredAtGte.getTime()) return false;
-    return true;
+    return evalAttemptWhere(row, where) === true;
   }
 
   (prismaMock.practiceAttempt.findMany as jest.Mock).mockImplementation(
@@ -470,6 +577,118 @@ describe('Readiness (Integration)', () => {
       const idsA = new Set(historyA.body.data.items.map((item: any) => item.id));
       const idsB = new Set(historyB.body.data.items.map((item: any) => item.id));
       expect([...idsA].some((id) => idsB.has(id))).toBe(false);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // recall's two exclusions beyond hintUsed/revealed — issue #244, epic #58 / E9
+  // ---------------------------------------------------------------------------
+  //
+  // `readiness.service.ts`'s own comment names these "THE TWO PLACES A
+  // MISHEARING COULD BE CHARGED TO THE LEARNER" (recall is one; the other is
+  // `PracticeService`'s mastery-scheduling guard, covered by
+  // `practice.service.spec.ts`). These two tests exercise the recall half,
+  // over a real HTTP round trip through the actual `AppModule`, using the
+  // three-valued `evalAttemptWhere` evaluator defined above — see its own
+  // header comment for exactly what that buys over a plain mocked-Prisma
+  // assertion, and what it still does not prove (no real Postgres is
+  // involved; see this task's report for that honesty note in full).
+  describe('recall exclusions (issue #244)', () => {
+    it('is the NULL trap: counts null-failureCause rows as qualifying, and drops ONLY the misheard ones', async () => {
+      // THE REGRESSION THIS PINS. `failureCause: { not: 'misheard' }` (or the
+      // equally wrong `NOT: { failureCause: 'misheard' }`) compiles to a bare
+      // SQL `<>` / negated `=`, and `NULL <> 'misheard'` is NULL, not TRUE —
+      // so that spelling silently drops EVERY null-failureCause row, which is
+      // every deterministically-graded attempt (the overwhelming majority in
+      // practice). A test built only from non-null-failureCause rows cannot
+      // see this regression at all: it passes identically under the correct
+      // spelling and the buggy one. This test deliberately MIXES null and
+      // non-null rows so the two spellings diverge, and relies on
+      // `evalAttemptWhere` above to apply REAL three-valued SQL semantics to
+      // whatever `where` object `readiness.service.ts` actually builds.
+      //
+      // Four ordinary, deterministically-graded rows: failureCause is
+      // OMITTED (seedAttempt's default is null), exactly like a real
+      // `practice_attempts` row that no grader ever touched.
+      for (let i = 0; i < 4; i += 1) {
+        seedAttempt({ userId: learnerA.id, questionId: [Q1, Q2, Q3, Q1][i], outcome: 'correct' });
+      }
+
+      // One non-null, NON-misheard cause — included so the "mix" is not
+      // merely null vs 'misheard'. This row alone would survive even the
+      // buggy `{ not: 'misheard' }` spelling (a non-null value compares
+      // cleanly), so it cannot by itself distinguish the two spellings.
+      seedAttempt({
+        userId: learnerA.id,
+        questionId: Q2,
+        outcome: 'incorrect',
+        failureCause: 'not_known',
+      });
+
+      // Two misheard rows — the ones a correct implementation excludes.
+      for (let i = 0; i < 2; i += 1) {
+        seedAttempt({
+          userId: learnerA.id,
+          questionId: [Q3, Q1][i],
+          outcome: 'incorrect',
+          failureCause: 'misheard',
+        });
+      }
+
+      const response = await getReadiness(learnerA).expect(200);
+      const recall = response.body.data.evidenceCounts.recall;
+
+      // Correct spelling: 4 null-cause + 1 not_known-cause = 5 qualifying;
+      // only the 2 misheard rows are dropped.
+      //
+      // Under the buggy spelling this assertion FAILS: the 4 null-cause rows
+      // would ALSO be dropped (NULL <> x is UNKNOWN, not TRUE), leaving only
+      // 1 qualifying attempt.
+      expect(recall.qualifyingAttempts).toBe(5);
+      expect(recall.correctCount).toBe(4);
+      expect(recall.incorrectCount).toBe(1);
+    });
+
+    it('excludes a SUPERSEDED attempt even when it was never misheard', async () => {
+      // `requireRetryTarget` (`practice.service.ts`) admits a retry on FOUR
+      // conditions, and "the target was misheard" is not one of them —
+      // `record-attempt.dto.ts` says so outright ("NOT restricted to a
+      // spoken attempt"). So an ORDINARY wrong answer can be superseded, and
+      // `retries: { none: {} }` is what keeps the recall window from
+      // counting both the original and its correction as two attempts at
+      // one question. The original row here has `failureCause: null` — this
+      // proves exclusion (2) independently of exclusion (1).
+      for (let i = 0; i < 4; i += 1) {
+        seedAttempt({ userId: learnerA.id, questionId: [Q1, Q2, Q3, Q1][i], outcome: 'correct' });
+      }
+
+      const originalId = seedAttempt({
+        userId: learnerA.id,
+        questionId: Q3,
+        outcome: 'incorrect',
+        failureCause: null,
+        answeredAt: new Date('2026-04-01T12:00:00.000Z'),
+      });
+
+      // The correction. Superseding is what removes the ORIGINAL from the
+      // window, not the retry — the retry itself is ordinary qualifying
+      // evidence.
+      seedAttempt({
+        userId: learnerA.id,
+        questionId: Q3,
+        outcome: 'correct',
+        retryOfAttemptId: originalId,
+        answeredAt: new Date('2026-04-01T12:05:00.000Z'),
+      });
+
+      const response = await getReadiness(learnerA).expect(200);
+      const recall = response.body.data.evidenceCounts.recall;
+
+      // 4 base + 1 retry = 5 qualifying. The superseded original is neither
+      // double-counted nor counted as a wrong answer.
+      expect(recall.qualifyingAttempts).toBe(5);
+      expect(recall.correctCount).toBe(5);
+      expect(recall.incorrectCount).toBe(0);
     });
   });
 });
