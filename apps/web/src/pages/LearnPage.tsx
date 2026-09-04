@@ -60,6 +60,7 @@
 import { Alert, Box, Button, Container, Divider, Stack, Typography } from '@mui/material';
 import StyleOutlinedIcon from '@mui/icons-material/StyleOutlined';
 import RecordVoiceOverOutlinedIcon from '@mui/icons-material/RecordVoiceOverOutlined';
+import EditNoteOutlinedIcon from '@mui/icons-material/EditNoteOutlined';
 import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import { Link as RouterLink, useSearchParams } from 'react-router-dom';
 
@@ -77,7 +78,10 @@ import { QuestionList } from '../components/civics/QuestionList';
 // rather than re-spelled: two literals for one destination is how one of them
 // survives a route rename.
 import { SET_STATE_PATH as PLAN_PATH } from '../components/civics/StateRequiredNotice';
-import { READING_PRACTICE_PATH } from '../components/english/paths';
+import {
+  READING_PRACTICE_PATH,
+  WRITING_PRACTICE_PATH,
+} from '../components/english/paths';
 
 /** The one place `/learn`'s query parameters are spelled. */
 const PARAM = {
@@ -301,6 +305,23 @@ export default function LearnPage() {
                     sx={{ width: { xs: '100%', sm: 'auto' } }}
                   >
                     Practise reading aloud
+                  </Button>
+
+                  {/* Writing practice (#147, same epic), beside its sibling for
+                      the same reason and with the same weight: `outlined`, so
+                      the flashcard entry stays the single action of this
+                      screen. Both English links sit together because they are
+                      one test with two halves — offering only one of them here
+                      would leave a learner believing the English segment is
+                      just the reading. */}
+                  <Button
+                    component={RouterLink}
+                    to={WRITING_PRACTICE_PATH}
+                    variant="outlined"
+                    startIcon={<EditNoteOutlinedIcon />}
+                    sx={{ width: { xs: '100%', sm: 'auto' } }}
+                  >
+                    Practise writing from dictation
                   </Button>
                 </Stack>
 
