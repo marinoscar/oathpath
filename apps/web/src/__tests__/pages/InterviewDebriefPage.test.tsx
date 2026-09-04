@@ -41,6 +41,7 @@ import { server } from '../mocks/server';
 import { setViewportWidth } from '../setup';
 import { mockUser } from '../utils/test-utils';
 import { AuthContext } from '../../contexts/AuthContext';
+import { TRUST_FOOTER_TEXT } from '../../components/journey/TrustFooter';
 import InterviewDebriefPage from '../../pages/InterviewDebriefPage';
 import type {
   Interview,
@@ -49,6 +50,7 @@ import type {
   InterviewDebriefQuestion,
   InterviewDetail,
   InterviewReadinessSummary,
+  InterviewSegmentResult,
 } from '../../types';
 
 const API_BASE = '*/api';
@@ -97,6 +99,11 @@ const QUESTIONS: InterviewDebriefQuestion[] = [
     categoryName: 'American Government',
     outcome: 'correct',
     acceptedAnswers: ['the Constitution'],
+    // E8's own transport, so every assertion written before #160 keeps the
+    // fixture it was written against.
+    inputMode: 'typed',
+    misheard: false,
+    asrConfidence: null,
   },
   {
     questionId: 'question-2',
@@ -107,6 +114,9 @@ const QUESTIONS: InterviewDebriefQuestion[] = [
     // More than one accepted answer, so the "any one of these" label has to
     // appear — several civics questions genuinely have several.
     acceptedAnswers: ['Mike Johnson', 'Johnson'],
+    inputMode: 'typed',
+    misheard: false,
+    asrConfidence: null,
   },
   {
     questionId: 'question-3',
@@ -115,23 +125,74 @@ const QUESTIONS: InterviewDebriefQuestion[] = [
     categoryName: 'American History',
     outcome: 'skipped',
     acceptedAnswers: ['freedom', 'political liberty', 'religious freedom'],
+    inputMode: 'typed',
+    misheard: false,
+    asrConfidence: null,
   },
 ];
+
+/** The same three questions, answered aloud — one of them misheard. */
+const SPOKEN_QUESTIONS: InterviewDebriefQuestion[] = [
+  { ...QUESTIONS[0], inputMode: 'spoken', asrConfidence: 0.94 },
+  {
+    ...QUESTIONS[1],
+    inputMode: 'spoken',
+    // The row the API read this off carries `failure_cause: 'misheard'` beside
+    // an `outcome` of `incorrect`. BOTH facts are on the wire, deliberately.
+    misheard: true,
+    asrConfidence: 0.31,
+  },
+  { ...QUESTIONS[2], inputMode: 'spoken', asrConfidence: 0.88 },
+];
+
+const SEGMENTS: InterviewSegmentResult[] = [
+  {
+    kind: 'reading',
+    outcome: 'correct',
+    sentence: 'Who was the first President?',
+    wer: 0,
+  },
+  {
+    kind: 'writing',
+    outcome: 'incorrect',
+    // The REVEAL — the interview screen never showed this string.
+    sentence: 'Washington was the first President.',
+    wer: 0.4,
+  },
+];
+
+/** The server's fixed cap sentence, quoted from `PRD.md` by way of §3. */
+const CAP_MESSAGE =
+  'Your score is limited until you practise out loud and complete mock interviews.';
 
 const READINESS: InterviewReadinessSummary = {
   score: 61,
   previousScore: 54,
   delta: 7,
   capReason: 'typed_only',
-  capMessage:
-    'Your score is limited until you practise out loud and complete mock interviews.',
+  capMessage: CAP_MESSAGE,
   interviewComponent: { value: 0.5, evidenceCount: 1 },
+  spokenComponent: { value: 0, evidenceCount: 0 },
+  // WHAT THE SERVER ACTUALLY SENDS A CAPPED LEARNER: `cappedRecommendation()`
+  // returns the fixed cap copy as its own `reason`, and the API sends the same
+  // string as `capMessage`, so neither field is a second literal of the
+  // product's own words. The page must therefore not print it twice.
+  recommendation: {
+    componentKey: null,
+    title: 'Complete a mock interview',
+    reason: CAP_MESSAGE,
+    path: '/practice/interviews',
+  },
 };
 
 function debrief(overrides: Partial<InterviewDebrief> = {}): InterviewDebrief {
   return {
     civics: FAILED_CIVICS,
     questions: QUESTIONS,
+    // A text interview: nothing spoken, no segment conducted. Present as zeros
+    // rather than absent, exactly as the API sends them.
+    spoken: { answers: 0, correct: 0, misheard: 0 },
+    segments: [],
     phases: [
       { kind: 'smalltalk', status: 'completed' },
       { kind: 'n400', status: 'completed' },
@@ -160,9 +221,18 @@ function detail(overrides: Partial<InterviewDetail> = {}): InterviewDetail {
 interface RenderOptions {
   detail?: InterviewDetail;
   status?: number;
+  /**
+   * Which palette to render in.
+   *
+   * Both are exercised at 360px below: every colour on this page comes from
+   * the theme (`color="text.secondary"`, a `Chip`'s `color`, an `Alert`'s
+   * `severity`) and none is a hex literal, so a band that rendered legibly in
+   * one mode and not the other would be a band that had reached for one.
+   */
+  mode?: 'light' | 'dark';
 }
 
-function renderDebrief({ detail: body, status }: RenderOptions = {}) {
+function renderDebrief({ detail: body, status, mode = 'light' }: RenderOptions = {}) {
   server.use(
     http.get(`${API_BASE}/interviews/${INTERVIEW_ID}`, () => {
       if (status && status >= 400) {
@@ -186,7 +256,7 @@ function renderDebrief({ detail: body, status }: RenderOptions = {}) {
   };
 
   return render(
-    <ThemeProvider theme={createTheme()}>
+    <ThemeProvider theme={createTheme({ palette: { mode } })}>
       <CssBaseline />
       <AuthContext.Provider value={auth as never}>
         <MemoryRouter
@@ -300,6 +370,13 @@ describe('InterviewDebriefPage — it renders what it was given', () => {
             capReason: null,
             capMessage: null,
             interviewComponent: { value: 1, evidenceCount: 3 },
+            spokenComponent: { value: 0.1, evidenceCount: 2 },
+            recommendation: {
+              componentKey: 'coverage',
+              title: 'Cover more of the question bank',
+              reason: 'Twenty of the hundred questions have been seen.',
+              path: '/practice',
+            },
           },
         }),
       }),
@@ -338,11 +415,26 @@ describe('InterviewDebriefPage — it renders what it was given', () => {
     expect(screen.getByText(READINESS.capMessage as string)).toBeInTheDocument();
 
     // And not at all when the cap has lifted — which is exactly what passing a
-    // mock interview does (§13).
+    // mock interview does (§13). The RECOMMENDATION changes with it: the server
+    // sends the cap copy as the recommendation's own `reason` only while
+    // `capReason` is set, and picks a component by headroom once it is not, so
+    // a fixture that lifted the cap and kept the capped recommendation would be
+    // asserting against a response the API cannot produce.
     const lifted = await mounted({
       detail: detail({
         debrief: debrief({
-          readiness: { ...READINESS, capReason: null, capMessage: null },
+          readiness: {
+            ...READINESS,
+            capReason: null,
+            capMessage: null,
+            spokenComponent: { value: 0.2, evidenceCount: 4 },
+            recommendation: {
+              componentKey: 'retention',
+              title: 'Review what you have already seen',
+              reason: 'Sixteen questions are due for review.',
+              path: '/practice',
+            },
+          },
         }),
       }),
     });
@@ -572,6 +664,278 @@ describe('InterviewDebriefPage — what was asked and what was covered', () => {
 });
 
 // -----------------------------------------------------------------------------
+// 5b. The spoken dimension (issue #160, epic #60 / E11)
+// -----------------------------------------------------------------------------
+//
+// `docs/specs/realtime-interview.md` §5, §6, §8. What these protect:
+//
+//   * **A mishearing is not rendered as a wrong answer.** A red "Not a match"
+//     chip on an answer the recogniser could not make out is the unearned
+//     penalty `voice.md` §3 keeps out of `question_mastery`, arriving as a
+//     colour instead.
+//   * **The three parts read in one view.** Civics, spoken, and the two English
+//     segments, on one page, from one response.
+//   * **The writing sentence is revealed here** — the interview screen never
+//     showed it, so this is the only place a learner can find out what they
+//     were asked to write.
+//   * **The cap sentence changes** once spoken and interview evidence exist,
+//     rather than simply disappearing.
+//   * **The page ends on the engine's recommendation**, not on a fixed pair of
+//     buttons this bundle chose.
+
+/** A voice interview: every answer spoken, one misheard, both segments run. */
+function spokenDebrief(overrides: Partial<InterviewDebrief> = {}): InterviewDebrief {
+  return debrief({
+    questions: SPOKEN_QUESTIONS,
+    spoken: { answers: 3, correct: 1, misheard: 1 },
+    segments: SEGMENTS,
+    phases: [
+      { kind: 'smalltalk', status: 'completed' },
+      { kind: 'n400', status: 'completed' },
+      { kind: 'civics', status: 'completed' },
+      { kind: 'reading', status: 'completed' },
+      { kind: 'writing', status: 'completed' },
+      { kind: 'closing', status: 'completed' },
+    ],
+    // A misheard question's category is excluded server-side, so the only
+    // focus area left is the one missed for another reason.
+    focusAreas: ['American History'],
+    readiness: {
+      ...READINESS,
+      capReason: null,
+      capMessage: null,
+      spokenComponent: { value: 0.4, evidenceCount: 8 },
+      recommendation: {
+        componentKey: 'coverage',
+        title: 'See more of the question bank',
+        reason: 'Twenty-five of the hundred questions have been seen.',
+        path: '/practice',
+      },
+    },
+    ...overrides,
+  });
+}
+
+describe('InterviewDebriefPage — the spoken dimension (§6)', () => {
+  it('reports civics, spoken performance and both segments in ONE view', async () => {
+    await mounted({ detail: detail({ debrief: spokenDebrief() }) });
+
+    // Civics.
+    expect(screen.getByText('Civics section not passed')).toBeInTheDocument();
+    // Spoken.
+    expect(
+      screen.getByRole('region', { name: /answered aloud/i }),
+    ).toBeInTheDocument();
+    // Both segments, in one band.
+    const segments = within(
+      screen.getByRole('region', { name: /reading and writing/i }),
+    );
+    expect(segments.getByText('Reading test')).toBeInTheDocument();
+    expect(segments.getByText('Writing test')).toBeInTheDocument();
+  });
+
+  it('renders the spoken counts the server sent, and derives none of them', async () => {
+    await mounted({ detail: detail({ debrief: spokenDebrief() }) });
+
+    const band = within(screen.getByRole('region', { name: /answered aloud/i }));
+    expect(band.getByText('3 answers spoken aloud, 1 accepted.')).toBeInTheDocument();
+  });
+
+  it('shows nothing about speech at all for a text interview', async () => {
+    // Zeros are sent, not an absence — and a band reading "0 answers spoken
+    // aloud" on a rehearsal never meant to be spoken is noise.
+    await mounted();
+
+    expect(screen.queryByRole('region', { name: /answered aloud/i })).toBeNull();
+    expect(screen.queryByRole('region', { name: /reading and writing/i })).toBeNull();
+  });
+
+  it('shows a misheard answer as misheard, never as a wrong answer', async () => {
+    await mounted({ detail: detail({ debrief: spokenDebrief() }) });
+
+    expect(screen.getByText('Not heard clearly')).toBeInTheDocument();
+    expect(
+      screen.getByText(/the recogniser was not confident it heard this answer/i),
+    ).toBeInTheDocument();
+
+    // The two remaining questions keep their real verdicts, so the neutral chip
+    // above is a narrow substitution rather than the page going quiet. Scoped
+    // to the question list: the reading segment's own chip also reads
+    // "Correct", and one shared vocabulary across both bands is the point of
+    // `outcomeDisplay` owning it.
+    const questions = within(
+      screen.getByRole('region', { name: /question by question/i }),
+    );
+    expect(questions.getByText('Correct')).toBeInTheDocument();
+    expect(questions.getByText('Skipped')).toBeInTheDocument();
+  });
+
+  it('does not count the misheard answer among the sections to look at again', async () => {
+    await mounted({ detail: detail({ debrief: spokenDebrief() }) });
+
+    const focus = within(
+      screen.getByRole('region', { name: /where to focus/i }),
+    );
+    // The misheard question was an American Government one; only the category
+    // missed for another reason is listed.
+    expect(focus.getByText('American History')).toBeInTheDocument();
+    expect(focus.queryByText('American Government')).toBeNull();
+    expect(
+      screen.getByText(/1 answer was not heard clearly/i),
+    ).toBeInTheDocument();
+  });
+
+  it('names how each answer was given only when the interview carried both', async () => {
+    // §7's fallback: a dropped realtime connection finishes over the text
+    // transport with the same interview id. On an all-spoken run the same label
+    // on every card is noise the summary band has already carried.
+    await mounted({ detail: detail({ debrief: spokenDebrief() }) });
+    expect(screen.queryByText('Answered aloud', { selector: 'p' })).toBeNull();
+
+    const mixed = await mounted({
+      detail: detail({
+        debrief: spokenDebrief({
+          questions: [SPOKEN_QUESTIONS[0], QUESTIONS[1], QUESTIONS[2]],
+          spoken: { answers: 1, correct: 1, misheard: 0 },
+        }),
+      }),
+    });
+    expect(within(mixed.container).getAllByText('Typed')).toHaveLength(2);
+  });
+
+  it('reveals the writing sentence the interview screen never showed', async () => {
+    await mounted({ detail: detail({ debrief: spokenDebrief() }) });
+
+    const segments = within(
+      screen.getByRole('region', { name: /reading and writing/i }),
+    );
+    expect(
+      segments.getByText('The sentence that was dictated'),
+    ).toBeInTheDocument();
+    expect(
+      segments.getByText('Washington was the first President.'),
+    ).toBeInTheDocument();
+    // The server's own measurement, on the server's own scale — never rescaled
+    // into a percentage or a grade.
+    expect(segments.getByText('Word error rate: 0.4')).toBeInTheDocument();
+  });
+
+  it('reports a conducted segment as covered, and one not reached as not', async () => {
+    await mounted({
+      detail: detail({
+        debrief: spokenDebrief({
+          segments: [SEGMENTS[0]],
+          phases: [
+            { kind: 'smalltalk', status: 'completed' },
+            { kind: 'n400', status: 'completed' },
+            { kind: 'civics', status: 'completed' },
+            { kind: 'reading', status: 'completed' },
+            { kind: 'writing', status: 'skipped' },
+            { kind: 'closing', status: 'completed' },
+          ],
+        }),
+      }),
+    });
+
+    const covered = within(
+      screen.getByRole('region', { name: /what this rehearsal covered/i }),
+    );
+    expect(covered.getAllByText('Not part of this rehearsal yet')).toHaveLength(1);
+  });
+});
+
+describe('InterviewDebriefPage — the score is explainable and paired (§8, PRD.md)', () => {
+  it('shows the spoken component beside the interview one, on its own scale', async () => {
+    await mounted({ detail: detail({ debrief: spokenDebrief() }) });
+
+    expect(screen.getByText('Questions answered aloud: 8')).toBeInTheDocument();
+    // `0.4 of 1`, never `40%`: a percentage would be this page rescaling a
+    // measurement it did not take.
+    expect(screen.getByText('Spoken component: 0.4 of 1')).toBeInTheDocument();
+  });
+
+  it('changes the cap sentence once spoken and interview evidence exist', async () => {
+    // Capped: the server's own fixed sentence, verbatim.
+    await mounted();
+    expect(screen.getByText(CAP_MESSAGE)).toBeInTheDocument();
+
+    // Lifted: a sentence naming the evidence that lifted it, rather than
+    // silence where the capped one used to be.
+    const lifted = await mounted({ detail: detail({ debrief: spokenDebrief() }) });
+    const text = within(lifted.container);
+    expect(text.queryByText(CAP_MESSAGE)).toBeNull();
+    expect(
+      text.getByText(
+        'The score cap no longer applies: 8 civics questions answered aloud and 1 mock interview passed.',
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it('ends on the engine’s own recommendation, linking where the copy points', async () => {
+    await mounted({ detail: detail({ debrief: spokenDebrief() }) });
+
+    const next = within(screen.getByRole('region', { name: /what to do next/i }));
+    expect(
+      next.getByRole('heading', { level: 3, name: 'See more of the question bank' }),
+    ).toBeInTheDocument();
+    expect(
+      next.getByText('Twenty-five of the hundred questions have been seen.'),
+    ).toBeInTheDocument();
+    // A RECOMMENDATION MUST POINT AT THE DESTINATION IT NAMES — the server sent
+    // the path beside the copy, and the page uses it rather than mapping the
+    // component key to a route of its own.
+    expect(
+      next.getByRole('link', { name: /see more of the question bank/i }),
+    ).toHaveAttribute('href', '/practice');
+  });
+
+  it('does not print the capped sentence twice', async () => {
+    // For a capped learner the server sends the SAME string as `capMessage` and
+    // as the recommendation's `reason`, deliberately — neither is a second
+    // literal of the product's own words. Rendering both would show a learner
+    // the identical sentence in two panels.
+    const { container } = await mounted();
+
+    const occurrences = (container.textContent ?? '').split(CAP_MESSAGE).length - 1;
+    expect(occurrences).toBe(1);
+    // The action still renders: only the duplicated sentence is suppressed.
+    expect(
+      screen.getByRole('link', { name: /complete a mock interview/i }),
+    ).toHaveAttribute('href', '/practice/interviews');
+  });
+
+  it('holds the §11.1 copy rules over the spoken bands too', async () => {
+    // The vocabulary check above runs against the TEXT debrief, which does not
+    // render a word of the spoken, segment, cap-lifted or recommendation copy.
+    // Being misheard, missing a dictated sentence and reading a ceiling lift
+    // are three more places a kinder-sounding characterisation is tempting, so
+    // the same list is applied to the render that actually contains them.
+    const { container } = await mounted({
+      detail: detail({ debrief: spokenDebrief() }),
+    });
+
+    const text = (container.textContent ?? '').toLowerCase();
+    for (const word of FORBIDDEN_JUDGMENT_VOCABULARY) {
+      expect(text, `the debrief uses the judgment word "${word}"`).not.toContain(
+        word.toLowerCase(),
+      );
+    }
+    expect(container.textContent).not.toContain('!');
+  });
+
+  it('carries the standing "not USCIS" disclaimer, verbatim', async () => {
+    // `VISION.md`: "Trust is not legal copy buried in settings. It is part of
+    // the user experience." This page hands a learner a pass/fail verdict AND a
+    // readiness score in one view, which is exactly where it belongs — and it
+    // is the SAME component and sentence `HomePage` and `ProgressPage` use,
+    // never a second wording of it.
+    await mounted({ detail: detail({ debrief: spokenDebrief() }) });
+
+    expect(screen.getByText(TRUST_FOOTER_TEXT)).toBeInTheDocument();
+  });
+});
+
+// -----------------------------------------------------------------------------
 // 6. A null debrief is not an error
 // -----------------------------------------------------------------------------
 
@@ -632,7 +996,13 @@ describe('InterviewDebriefPage — accessibility and width', () => {
     expect(h2s).toContain('Question by question');
     expect(h2s).toContain('What this rehearsal covered');
     expect(h2s).toContain('Readiness');
-    expect(screen.getAllByRole('heading', { level: 3 })).toHaveLength(QUESTIONS.length);
+    // The debrief ends on the engine's own next action (#160), so this band is
+    // always present — a capped learner and an uncapped one both get one.
+    expect(h2s).toContain('What to do next');
+    // One `h3` per question, plus the recommendation's own title.
+    expect(screen.getAllByRole('heading', { level: 3 })).toHaveLength(
+      QUESTIONS.length + 1,
+    );
     expect(screen.getAllByRole('heading', { level: 4 })).toHaveLength(QUESTIONS.length);
   });
 
@@ -647,5 +1017,72 @@ describe('InterviewDebriefPage — accessibility and width', () => {
     ).toBeVisible();
 
     setViewportWidth(1440);
+  });
+
+  it.each(['light', 'dark'] as const)(
+    'renders the whole spoken debrief at 360px in the %s theme',
+    async (mode) => {
+      // EVERY BAND, on the narrowest supported viewport, in both palettes
+      // (issue #160). The spoken debrief is the widest this page ever gets —
+      // two extra sections, a chip row with three items on it, and a sentence
+      // in an `Alert` — and 360px is where a fixed width or an unwrapped row
+      // would show up first.
+      setViewportWidth(PHONE);
+      await mounted({ detail: detail({ debrief: spokenDebrief() }), mode });
+
+      expect(screen.getByRole('heading', { level: 1 })).toBeVisible();
+      expect(screen.getByText('Civics section not passed')).toBeVisible();
+      expect(screen.getByText('Not heard clearly')).toBeVisible();
+      expect(
+        within(screen.getByRole('region', { name: /answered aloud/i })).getByText(
+          /3 answers spoken aloud/i,
+        ),
+      ).toBeVisible();
+      expect(
+        within(
+          screen.getByRole('region', { name: /reading and writing/i }),
+        ).getByText('Washington was the first President.'),
+      ).toBeVisible();
+      expect(screen.getByText(/the score cap no longer applies/i)).toBeVisible();
+      expect(
+        within(screen.getByRole('region', { name: /what to do next/i })).getByRole(
+          'link',
+        ),
+      ).toBeVisible();
+      // The standing disclaimer, in both themes — it is the one sentence on
+      // this page a learner must never have to go looking for.
+      expect(screen.getByText(TRUST_FOOTER_TEXT)).toBeVisible();
+
+      setViewportWidth(1440);
+    },
+  );
+
+  it('keeps one h1 and a sensible heading order on a spoken debrief too', async () => {
+    await mounted({ detail: detail({ debrief: spokenDebrief() }) });
+
+    expect(screen.getAllByRole('heading', { level: 1 })).toHaveLength(1);
+
+    const h2s = screen.getAllByRole('heading', { level: 2 }).map((h) => h.textContent);
+    expect(h2s).toEqual([
+      'How the civics section went',
+      'Answered aloud',
+      'Where to focus',
+      'Question by question',
+      'Reading and writing',
+      'What this rehearsal covered',
+      'Readiness',
+      'What to do next',
+    ]);
+
+    // One `h3` per question, one per conducted segment, and the
+    // recommendation's own title.
+    expect(screen.getAllByRole('heading', { level: 3 })).toHaveLength(
+      SPOKEN_QUESTIONS.length + SEGMENTS.length + 1,
+    );
+    // One `h4` per question (its accepted-answers label) and one per segment
+    // (its sentence label).
+    expect(screen.getAllByRole('heading', { level: 4 })).toHaveLength(
+      SPOKEN_QUESTIONS.length + SEGMENTS.length,
+    );
   });
 });

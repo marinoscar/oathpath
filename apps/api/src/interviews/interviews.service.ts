@@ -33,6 +33,7 @@ import {
   fallbackOfficerLine,
   nextPrompt,
   selectPassRule,
+  SKIPPED_PHASES,
   startState,
   passedCivics as passedCivicsFor,
   type CivicsStopReason,
@@ -50,7 +51,11 @@ import {
   type OfficerAcknowledgedOutcome,
   type OfficerTurnBody,
 } from './officer-prompt';
-import { buildInterviewDebrief, type DebriefAttempt } from './debrief';
+import {
+  buildInterviewDebrief,
+  type DebriefAttempt,
+  type DebriefSegmentAttempt,
+} from './debrief';
 import {
   buildRealtimeOfficerInstructions,
   realtimePhaseLabel,
@@ -766,6 +771,14 @@ export class InterviewsService {
       stopReason,
       passedCivics: passed,
       attempts: await this.loadDebriefAttempts(userId, interview.id),
+      // THIS INTERVIEW'S OWN WINDOW, from the same `Clock` as the attempts
+      // inside it: `startedAt` is the row's, and `completedAt` is the instant
+      // written by the update above, not a second `clock.now()` read that could
+      // fall a tick either side of it.
+      segments: await this.loadDebriefSegments(userId, interview.id, {
+        from: interview.startedAt,
+        to: completedAt,
+      }),
       readiness: {
         score: snapshot.score,
         previousScore: previous?.score ?? null,
@@ -779,6 +792,21 @@ export class InterviewsService {
           value: snapshot.components.interview.value,
           evidenceCount: snapshot.evidenceCounts.interview.attempts,
         },
+        // THE OTHER HALF OF §8, and the reason a spoken interview's debrief can
+        // explain a movement a typed one cannot: `interview` above counts a
+        // pass whatever the transport, this counts distinct questions answered
+        // correctly ALOUD. A realtime interview moves both.
+        spokenComponent: {
+          value: snapshot.components.spoken.value,
+          evidenceCount: snapshot.evidenceCounts.spoken.attempts,
+        },
+        // THE ENGINE'S OWN NEXT ACTION, whole — never a subset of its fields
+        // and never a substitute chosen here. `PRD.md` requires the score to be
+        // paired with one, and `top-recommendation.ts` is what decides it from
+        // this learner's weighted headroom; picking a different action on this
+        // screen would be the debrief disagreeing with the Progress page about
+        // what the same snapshot recommends.
+        recommendation: snapshot.topRecommendation,
       },
     });
 
@@ -2601,7 +2629,106 @@ export class InterviewsService {
       categoryName: attempt.question?.category?.name ?? '',
       outcome: attempt.outcome,
       acceptedAnswers: snapshotAnswerTexts(attempt.answerSnapshot),
+      // THE THREE SPOKEN COLUMNS, VERBATIM (issue #160, E11 §6). None of them
+      // is interpreted here: `failure_cause` travels as the whole enum value
+      // and `buildInterviewDebrief` is the one place that decides what a
+      // debrief calls a mishearing, exactly as `outcome` travels raw and
+      // `debriefCopy` decides what it is called on screen.
+      inputMode: attempt.inputMode,
+      failureCause: attempt.failureCause,
+      asrConfidence: attempt.asrConfidence,
     }));
+  }
+
+  /**
+   * The reading and writing attempts THIS interview conducted — issue #160,
+   * `realtime-interview.md` §5.
+   *
+   * ---------------------------------------------------------------------------
+   * TWO INDEPENDENT TRACES PER SEGMENT, BECAUSE THERE IS NO FOREIGN KEY
+   * ---------------------------------------------------------------------------
+   *
+   * `english_attempts` carries no `mock_interview_id` column and gains none
+   * here — a schema change is out of this issue's scope, and E10 gave that
+   * table one owner (the learner) on purpose. So the join is reconstructed from
+   * two rows that each independently place the attempt inside this interview:
+   *
+   *   1. **An applicant turn in that phase.** `realtimeGradeEnglish` writes one
+   *      `mock_interview_turns` row per scored segment answer and writes none
+   *      at all for a misheard reading attempt, so the presence of the turn is
+   *      this interview's own record that the learner answered that segment.
+   *   2. **An `english_attempts` row inside this interview's own window.**
+   *      `answeredAt` between `started_at` and the completion instant, both
+   *      read from the same injected `Clock` the attempt's own `answeredAt`
+   *      came from — so a pinned `X-Test-Clock` moves all three together
+   *      instead of putting the attempt outside a window derived from the real
+   *      wall clock.
+   *
+   * Requiring BOTH is what keeps this from claiming evidence it does not have.
+   * The turn alone cannot name the sentence or the score; the window alone
+   * would attribute a reading drill the learner ran in another tab to the
+   * interview that happened to be open. Neither trace is a model's impression
+   * of how the segment went, which is the property the whole debrief is held
+   * to.
+   *
+   * A segment with a turn but no row in the window is reported as NOT
+   * conducted, deliberately: `buildInterviewDebrief` marks the phase
+   * `completed` only from a scored attempt, and a rehearsal we cannot show the
+   * result of is not one we should tell a learner they have already done.
+   */
+  private async loadDebriefSegments(
+    userId: string,
+    interviewId: string,
+    window: { from: Date; to: Date },
+  ): Promise<DebriefSegmentAttempt[]> {
+    const answeredPhases = await this.prisma.mockInterviewTurn.findMany({
+      where: {
+        mockInterviewId: interviewId,
+        role: 'applicant',
+        phase: { in: [...SKIPPED_PHASES] },
+      },
+      select: { phase: true },
+    });
+
+    const answered = new Set<string>(answeredPhases.map((turn) => turn.phase));
+    const segments: DebriefSegmentAttempt[] = [];
+
+    // In `INTERVIEW_PHASES` order — reading before writing — so the response
+    // reads in the order the interview conducted them rather than in whatever
+    // order two independent queries happened to resolve.
+    for (const segment of SKIPPED_PHASES) {
+      if (!answered.has(segment)) continue;
+
+      const attempt = await this.prisma.englishAttempt.findFirst({
+        where: {
+          userId,
+          kind: segment,
+          answeredAt: { gte: window.from, lte: window.to },
+        },
+        // Newest first: a segment is conducted at most once per interview, so
+        // this ordinarily has exactly one row to choose from. When it does not,
+        // the most recent one inside the window is the one the officer's last
+        // ask produced.
+        orderBy: [{ answeredAt: 'desc' }, { id: 'desc' }],
+        select: {
+          kind: true,
+          outcome: true,
+          wer: true,
+          sentence: { select: { text: true } },
+        },
+      });
+
+      if (!attempt) continue;
+
+      segments.push({
+        kind: attempt.kind,
+        outcome: attempt.outcome,
+        sentence: attempt.sentence.text,
+        wer: attempt.wer,
+      });
+    }
+
+    return segments;
   }
 
   /**
