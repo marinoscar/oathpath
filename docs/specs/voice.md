@@ -329,37 +329,66 @@ mishearing, with the transcript pre-filled and editable, matching
 Two branches from there:
 
 - **The learner edits it to "the President" and confirms.** The corrected
-  text is what reaches grading. `practice_attempts.responseText` stores "the
-  President" (the CONFIRMED text — see §8), `transcript` stores "the head of
-  the executive ranch" (the raw ASR output, kept for exactly this
-  auditability), `asr_confidence` stores `0.41`, `inputMode` is `spoken`. The
-  grading ladder runs on the corrected text like any other spoken answer;
-  since it matches an accepted answer, it grades `correct` — the mishearing
-  cost the learner nothing.
+  text is what reaches grading, and it is also the only text this attempt
+  ever stores: `practice_attempts.responseText` **and** `transcript` both
+  store "the President" (the CONFIRMED text — see §8), `asr_confidence`
+  stores `0.41`, `inputMode` is `spoken`. The raw recogniser guess — "the
+  head of the executive ranch" — is never written to any column. It existed
+  only in `POST /api/ai/speech/transcribe`'s response, held in memory on the
+  confirm-transcript screen until the learner edited it, and is gone the
+  instant they submit. **`transcript` holds what the learner CONFIRMED,
+  never the raw recogniser output** — storing the unedited guess there
+  instead would record words the learner never agreed they said, which
+  turns the one column meant to prove a mishearing was corrected into the
+  column that disproves it. The grading ladder runs on the corrected text
+  like any other spoken answer; since it matches an accepted answer, it
+  grades `correct` — the mishearing cost the learner nothing.
 - **The learner does not notice, or the recogniser's guess happens to look
-  plausible, and confirms "the head of the executive ranch" as-is.** This
-  text does not match any accepted answer. **This is where the confidence
-  threshold acts, and this is the rule that must never be violated: a
-  low-confidence transcription never on its own records an `incorrect`
-  outcome.** Because `asr_confidence < ASR_CONFIDENCE_THRESHOLD`, the
-  practice flow routes this attempt to a forced retry rather than letting it
-  fall through the grading ladder to `incorrect` — the learner is told
-  (again, in `VISION.md`'s own words) that the system may have misheard them
-  and is prompted to answer again, this time with the low-confidence
+  plausible, and confirms "the head of the executive ranch" as-is.** Nothing
+  was edited, so `transcript` and `responseText` both hold that string — the
+  confirmed text and the raw guess are identical here, which is the ordinary
+  case for every attempt that needed no correction. This text does not match
+  any accepted answer, so grading runs exactly as it would for any other
+  spoken response and reaches whatever verdict the deterministic match (or
+  the AI grader, on a miss) actually produces — ordinarily `incorrect`.
+  **This is where the confidence threshold acts, and this is the rule that
+  must never be violated: a low-confidence transcription never on its own
+  gets the LAST WORD on why an answer missed.** The attempt is written with
+  the outcome grading produced — `outcome` is not touched — but because
+  `asr_confidence < ASR_CONFIDENCE_THRESHOLD` and that outcome is not
+  `correct`, `failureCause` is set to `misheard` **on the server, after
+  grading, overriding whatever cause the AI grader supplied**: the
+  recogniser's own uncertainty about the TEXT is better evidence about WHY
+  an answer missed than a grader's guess from the text it produced. **A
+  `null` confidence never triggers this** — unknown is not low, and
+  collapsing the two would grade every attempt whose confidence could not be
+  read (a provider outage, a field a model did not return) as if the
+  recogniser had actively struggled, when it may not have run at all. The
+  learner is told (again, in `VISION.md`'s own words) that the system may
+  have misheard them and is offered a retry, with the low-confidence
   transcript shown so they can see what went wrong.
 
   If the learner answers again and it is now transcribed correctly (or they
   type it), that second attempt is written as a **new** `practice_attempts`
-  row with `retryOfAttemptId` pointing at the first row's `id` (§8). The
-  first row is written too — `outcome: incorrect` is never assigned to it;
-  instead `outcome` is a new, retry-specific state the practice service
-  writes for a low-confidence attempt that was routed to retry rather than
-  graded normally (the exact `outcome` value is a `PracticeOutcome` enum
-  concern for the migration issue to settle against the existing `correct`/
-  `partial`/`incorrect`/`skipped` set — this document's contract is only that
-  it is **not** `incorrect`), `failureCause: misheard`, `transcript` holding
-  the raw "the head of the executive ranch", and `aiUsageEventId` pointing at
-  the transcription call's usage row.
+  row with `retryOfAttemptId` pointing at the first row's `id` (§8), and the
+  first row is left exactly as graded: its `outcome` is whatever the ladder
+  produced (ordinarily `incorrect`), never a new or different value — only
+  `failureCause` was overridden, as above. **No `PracticeOutcome` enum
+  change was needed, or made.** The existing `correct`/`partial`/
+  `incorrect`/`skipped` set is unchanged; an earlier draft of this document
+  anticipated a retry-specific outcome value, and that turned out to be
+  unnecessary — what makes the first row legible as a corrected mishearing
+  rather than a second, unrelated failure is `failureCause: 'misheard'` plus
+  the `retryOfAttemptId` link on the row that supersedes it (§3.2), not a
+  new state on `outcome` itself.
+
+  **A skip can never be `misheard`.** `skipped` together with a `transcript`
+  or an `asr_confidence` is rejected by the request schema outright — a 400,
+  never silently dropped or silently accepted. A skip is never `correct`, so
+  a skipped attempt carrying a low confidence would otherwise satisfy the
+  exact condition above and record `misheard` — telling a learner who
+  declined to answer that they were misheard, a claim about an answer that
+  was never given.
 
 **Why the retry, and not merely relabeling the outcome:** a mishearing
 recorded as one attempt with `failureCause: misheard` and left there is
@@ -379,13 +408,15 @@ An attempt that another attempt points at through `retryOfAttemptId` is
 **superseded**. Two rules follow, and both matter for a different reason:
 
 - **A superseded attempt is never deleted.** It stays in `practice_attempts`
-  exactly as written — `outcome` not `incorrect`, `failureCause: misheard`,
-  `transcript` holding the raw mis-recognition. It is real evidence that a
-  mishearing happened, and deleting evidence to make a number look better is
-  precisely what this product's evidence-ledger design
-  (`schema.prisma`'s own header on this table: "readiness has to be
-  reconstructed from repeated, timestamped evidence") does not do anywhere
-  else, and does not start doing here.
+  exactly as written — `outcome` whatever grading produced (ordinarily
+  `incorrect`), `failureCause: misheard` (overriding the grader, per §3.1),
+  `transcript` holding the confirmed text (which, in the branch that leads
+  to a retry, is the unedited recogniser guess the learner confirmed as-is —
+  see §3.1). It is real evidence that a mishearing happened, and deleting
+  evidence to make a number look better is precisely what this product's
+  evidence-ledger design (`schema.prisma`'s own header on this table:
+  "readiness has to be reconstructed from repeated, timestamped evidence")
+  does not do anywhere else, and does not start doing here.
 - **A superseded attempt is excluded from the practice session's summary
   counts.** `PracticeSession.summary` (score, per-category breakdown,
   timing — `docs/specs/practice-sessions.md`) is computed once at session
@@ -399,11 +430,14 @@ An attempt that another attempt points at through `retryOfAttemptId` is
 rather than assuming.** `ReadinessService`'s `spoken` component
 (`apps/api/src/readiness/readiness.service.ts`, ~lines 531–540) counts
 distinct `questionId` among rows matching `inputMode: 'spoken'` **and**
-`outcome: 'correct'` — a superseded attempt, by construction, never has
-`outcome: 'correct'` (§3.1's rule: a low-confidence transcription never on
-its own records `incorrect`, but it is equally never recorded as `correct`
-— it is routed to retry instead), so it was never counted in `spoken` to
-begin with. No filter or exclusion needs to be added to
+`outcome: 'correct'`. A superseded attempt reaches `outcome: 'correct'` only
+in the branch where the learner's confirmed text actually matched — the
+first branch in §3.1's worked example — and a row that is `correct` is
+never the one a retry supersedes in the first place: nothing offers a retry
+for an attempt that already graded `correct`. The row that *can* be
+superseded is the low-confidence, `failureCause: 'misheard'` one, which by
+construction is not `correct` (§3.1), so it was never counted in `spoken`
+to begin with. No filter or exclusion needs to be added to
 `readiness.service.ts` for §3.2's supersession rule to hold there; it
 already only reads the kind of row a superseded attempt never is.
 
@@ -617,19 +651,27 @@ synthesize(userId: string, apiKey: string, request: AiSynthesisRequest): Promise
 ```
 
 ```ts
-// apps/api/src/ai/base-ai.provider.ts additions
-protected abstract transcribeAudio(
+// apps/api/src/ai/base-ai.provider.ts additions — as shipped
+protected abstract runTranscription(
   apiKey: string,
   request: AiTranscriptionRequest,
   redact: SecretRedactor,
-): Promise<{ text: string | null; confidence: number | null; usage: AiUsage }>;
+): Promise<AiTranscriptionResult>;
 
-protected abstract synthesizeSpeech(
+protected abstract runSynthesis(
   apiKey: string,
   request: AiSynthesisRequest,
   redact: SecretRedactor,
-): Promise<{ audio: Buffer | null; contentType: string | null; usage: AiUsage }>;
+): Promise<AiSynthesisResult>;
 ```
+
+The hooks are named `run*` rather than after the public methods they serve,
+matching `runCompletion` and `runStructuredCompletion` beside them: the
+prefix is what tells a subclass author at a glance that they are looking at
+the throwing inner half, not the never-throw outer one. They return the
+full result type rather than a structural subset, so a provider that
+already has an `AiTranscriptionResult` in hand — the fake does — hands it
+straight back instead of destructuring and rebuilding it.
 
 `transcribe` and `synthesize` (the public methods) are gated the same way
 `AiDispatchService` gates role resolution: called only when
@@ -701,13 +743,13 @@ Three columns on `practice_attempts`, none of them holding audio (§4):
 model PracticeAttempt {
   // ...existing columns
 
-  // The CONFIRMED text the learner submitted, after the confirm-before-grade
-  // step (§3) — NOT the raw recogniser output. For a typed attempt this is
-  // identical to `responseText` and `transcript` is null; for a spoken
-  // attempt `responseText` holds what the learner confirmed (possibly
-  // edited) and `transcript` holds what the recogniser actually returned,
-  // so the two can be compared after the fact. Null for a typed attempt —
-  // there was no recognition step to record.
+  // The text the learner CONFIRMED they said, after the confirm-before-grade
+  // step (§3) — NOT the raw recogniser output, which this schema does not
+  // store at all (§4). Null for a typed attempt — there was no recognition
+  // step to record. For a spoken attempt this holds the same string as
+  // `responseText` today; the two are still separate columns because they
+  // answer different questions that merely happen to share an answer right
+  // now — see the prose below the schema block.
   transcript String? @map("transcript") @db.Text
 
   // The recogniser's own confidence for `transcript`, 0-1. NULL means
@@ -720,9 +762,10 @@ model PracticeAttempt {
   asrConfidence Float? @map("asr_confidence")
 
   // Set when this attempt is a RETRY of a prior attempt this same learner
-  // made on the same question, after that attempt was routed to retry by a
-  // low-confidence transcription (docs/specs/voice.md §3.1) rather than
-  // graded normally. Self-referential FK, onDelete: SetNull — NOT Cascade —
+  // made on the same question, offered after that attempt graded normally
+  // but was flagged `failureCause: misheard` because of a low-confidence
+  // transcription (docs/specs/voice.md §3.1). Self-referential FK,
+  // onDelete: SetNull — NOT Cascade —
   // matching `sessionId`/`mockInterviewId`/`aiUsageEventId` above: Cascade
   // would delete the RETRY the moment the ORIGINAL attempt it points at is
   // removed, which destroys the better of the two pieces of evidence (the
@@ -736,12 +779,17 @@ model PracticeAttempt {
 ```
 
 `transcript` is deliberately a separate column from `responseText`, not a
-flag on it, for the same reason `inputMode`/`promptMode` are separate
-columns from `outcome` rather than encoded into it (`schema.prisma`'s "FOUR
-COLUMNS THIS EPIC WRITES ONLY ONE VALUE OF" comment on `PracticeAttempt`):
-a later reader asking "how often does the confirmed text differ from the raw
-transcript" needs both values on the same row, not a diff reconstructed from
-an edit history this table does not keep.
+flag on it, even though the two hold the same string on every spoken attempt
+today: they answer two different questions that merely happen to share an
+answer right now. `responseText` is "what was graded" — read by grading and
+by every existing reader of this column, unchanged since before this epic.
+`transcript` is "what came back from the recogniser and was confirmed by
+the learner" — the CONFIRMED text, never the raw, unedited guess (§3.1),
+which this schema does not store at all. A future epic that grades
+something other than the confirmed transcript — for example, scoring the
+raw recognition separately from the edited answer — must not have to guess
+which of the two a historical row meant, which it could not do if the two
+facts were collapsed into one column now.
 
 ## 9. The endpoints
 
@@ -752,13 +800,17 @@ POST /api/ai/speech/synthesize   @Auth(), no permissions
 
 **`POST /api/ai/speech/transcribe`** — multipart (Fastify's multipart
 plugin, the same mechanism `POST /api/storage/objects`'s `simpleUpload`
-already uses via `req.file()`). Request: one audio file field. Response:
-`{ text: string, confidence: number | null }` and **nothing else** — no
-usage event id, no model id, no raw provider metadata. The response is
-narrow on purpose: the caller (the web client's confirm-transcript screen)
-needs exactly these two fields to do its job, and every additional field
-returned is one more thing a future change to this endpoint has to keep
-compatible or treat as a breaking change.
+already uses via `req.file()`). Request: one audio file field. **Response:
+a discriminated union on `status`, always HTTP 200.** On success,
+`{ status: 'ok', text: string, confidence: number | null }` and **nothing
+else** — no usage event id, no model id, no raw provider metadata. The
+success shape is narrow on purpose: the caller (the web client's
+confirm-transcript screen) needs exactly those two fields to do its job, and
+every additional field returned is one more thing a future change to this
+endpoint has to keep compatible or treat as a breaking change. Otherwise,
+`{ status: 'unavailable', cause, role }` or `{ status: 'failed', errorCode,
+error }` — see the note under `synthesize`, directly below, for why these
+are 200s rather than a 404 or a 503.
 
 **The byte cap and the duration cap are both enforced BEFORE dispatching to
 `AiDispatchService.transcribe`**, so an oversized file is a 400, not a
@@ -789,11 +841,20 @@ authorization model, and inventing one here would be the first exception to
 a rule every other learner-facing surface in this codebase follows without
 exception.
 
-**`POST /api/ai/speech/synthesize`** takes `{ text: string }` and streams
-back audio bytes (`contentType` from the result, e.g. `audio/mpeg`) or a
-404-shaped "not available" response when `speak` is unbound — never a
-generic 500, matching `docs/specs/ai-evaluation.md` §4's "a value, never an
-exception" posture for every `unavailable` cause.
+**`POST /api/ai/speech/synthesize`** takes `{ text: string }` and, on
+success, streams back audio bytes with the provider's own `Content-Type`
+(e.g. `audio/mpeg`). **When there is no audio, the response is
+`application/json` — `{ status: 'unavailable', cause, role }` or
+`{ status: 'failed', errorCode, error }` — at HTTP 200**, told apart from
+the audio case by `Content-Type` alone. An earlier draft of this section
+called for a 404-shaped "not available" response instead; what shipped is
+`AiDispatchService`'s existing `AiUnavailableCause`, delivered as a value
+rather than a status code, for the identical reason `docs/specs/ai-evaluation.md`
+§4 already gives for `AiRunResult`'s `unavailable` branch: a non-2xx here is
+exactly what `HttpExceptionFilter` (which suppresses detail in production)
+and the web client's generic non-2xx handling would discard, and the cause
+is the one fact this response exists to carry. The same reasoning applies to
+`transcribe`'s `unavailable`/`failed` branches above.
 
 ## 10. RBAC
 
@@ -896,5 +957,13 @@ the modules impose:
    unbound-role degraded state (§1's table), reading `unboundRoles`.
 10. `voice.spec.ts` (Playwright), against the fake provider and a fake media
     stream, per issue #58's end-to-end acceptance criteria.
-11. Documentation: `CLAUDE.md` gains a note alongside "Adding a New AI Model
-    Role" pointing here, and `docs/API.md` documents both new endpoints.
+11. Documentation (issue #118): `CLAUDE.md` gains a note alongside "Adding a
+    New AI Model Role" pointing here, `docs/API.md` documents both new
+    endpoints, `docs/specs/ai-settings.md` is corrected wherever it still
+    described `transcribe`/`speak` as inert, and this document's own §3.1
+    and §9 are corrected against what actually shipped. Two audiences this
+    document does not serve get their own pages:
+    [`docs/runbooks/configuring-voice.md`](../runbooks/configuring-voice.md)
+    (an administrator deciding whether to bind either role) and
+    [`docs/spoken-practice.md`](../spoken-practice.md) (a learner, in
+    `VISION.md`'s tone, on what happens to their voice).

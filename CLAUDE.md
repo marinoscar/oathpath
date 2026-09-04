@@ -553,6 +553,25 @@ their own readiness snapshots. Another learner's interview id is a **404,
 not a 403**. See [`docs/specs/mock-interview.md`](docs/specs/mock-interview.md)
 §12 and [`docs/API.md`](docs/API.md#interviews).
 
+### Voice (Per User)
+- `POST /api/ai/speech/transcribe` - Turn one recording into text on the caller's own AI key; nothing is graded and nothing is stored (multipart, capped at 10 MB / 120 seconds, both enforced before any provider call)
+- `POST /api/ai/speech/synthesize` - Read one short piece of text aloud on the caller's own AI key; an optional premium upgrade over the browser's free `speechSynthesis`, never the only way to hear a question
+
+Both are `@Auth()` with no permissions, and no route accepts a user id —
+every authenticated learner practises with their own voice on their own
+key, exactly as they own their own practice attempts and their own AI
+credentials, and gating either route would leave a Viewer unable to
+practise at all. Both responses are typed `ok`/`unavailable`/`failed`
+discriminated unions, always HTTP 200 — never a 4xx/5xx for an AI reason,
+the same posture every other AI surface in this codebase takes. Binding
+either role is optional and never affects `systemReady`, which is a
+statement about the `tutor`/`grader` text roles only; see
+[`docs/specs/voice.md`](docs/specs/voice.md) §1 for the degradation rule and
+[`docs/runbooks/configuring-voice.md`](docs/runbooks/configuring-voice.md)
+for the operator-facing walkthrough. See
+[`docs/specs/voice.md`](docs/specs/voice.md) §9-§10 and
+[`docs/API.md`](docs/API.md#ai-speech).
+
 ### Health
 - `GET /api/health/live` - Liveness check
 - `GET /api/health/ready` - Readiness check (includes DB)
@@ -661,6 +680,15 @@ route accepts a user id — `@CurrentUser('id')` is the only source of one,
 so there is no "read another learner's interview" permission to add in the
 first place. See [`docs/specs/mock-interview.md`](docs/specs/mock-interview.md) §12.
 
+**Voice adds no permission strings either, for the same reason.** Both
+`/api/ai/speech/*` routes are `@Auth()` with no permissions: every
+authenticated learner practises with their own voice on their own key,
+exactly as they own their own AI credentials and their own practice
+attempts, and no route accepts a user id — gating either route would leave
+a Viewer, the default role, unable to practise at all. There is no "use
+voice" privilege in this product's authorization model. See
+[`docs/specs/voice.md`](docs/specs/voice.md) §10.
+
 ## Database Tables
 
 - `users` - User accounts with profile info
@@ -683,7 +711,7 @@ first place. See [`docs/specs/mock-interview.md`](docs/specs/mock-interview.md) 
 - `civics_questions` - One version's questions: number, category, prompt, `senior_eligible`, `dynamic_scope` (`none`/`national`/`state`)
 - `civics_answers` - Accepted answers per question/state/slot; `effective_to IS NULL` means currently correct (no `is_current` flag — see `docs/specs/civics-content.md` §3)
 - `practice_sessions` - One row per practice run (Quick 5 or by-category): kind, status, planned count, cached completion `summary`
-- `practice_attempts` - One row per question ever answered, from a session or (from E8) a mock interview — the single evidence table E5/E6/E7 read and E8 writes into. `mock_interview_id` (nullable, E8, epic #57) is set only when `source: mock_interview`, and `response_text` is `null` for either a skip or a `mock_interview` attempt whose interview declined transcript retention — two distinct meanings for the same null, both documented on the column itself. Three columns record the AI grading rung (E4, epic #53), null together on every deterministically-graded attempt: `failure_cause` (why it missed, from a closed six-value enum — `null` means no grader ran, `unknown` means one ran and honestly couldn't tell), `ai_feedback` (the grader's structured verdict, verbatim; omitted entirely, not merely null, for a `mock_interview` attempt with retention off), `ai_usage_event_id` (the `ai_usage_events` row that call wrote)
+- `practice_attempts` - One row per question ever answered, from a session or (from E8) a mock interview — the single evidence table E5/E6/E7 read and E8 writes into. `mock_interview_id` (nullable, E8, epic #57) is set only when `source: mock_interview`, and `response_text` is `null` for either a skip or a `mock_interview` attempt whose interview declined transcript retention — two distinct meanings for the same null, both documented on the column itself. Three columns record the AI grading rung (E4, epic #53), null together on every deterministically-graded attempt: `failure_cause` (why it missed, from a closed six-value enum — `null` means no grader ran, `unknown` means one ran and honestly couldn't tell), `ai_feedback` (the grader's structured verdict, verbatim; omitted entirely, not merely null, for a `mock_interview` attempt with retention off), `ai_usage_event_id` (the `ai_usage_events` row that call wrote). Three more columns (E9, epic #58) hold no audio and never will: `transcript` (the text the learner CONFIRMED after the recogniser's guess — never the raw, unedited output; identical to `response_text` on a spoken attempt today, kept as a separate column because a later epic grading something other than the confirmed transcript must not have to guess which one a historical row meant), `asr_confidence` (the recogniser's own confidence, 0-1; `null` means unknown and never triggers the `misheard` mapping below — unknown is not low), `retry_of_attempt_id` (self-referential FK, `onDelete: SetNull`; set when this attempt is a spoken retry that supersedes an earlier attempt at the same question — the superseding row is excluded from a practice session's summary counts, so a mishearing and its correction read as one answered question). A low-confidence, non-`correct` outcome gets `failure_cause: 'misheard'` set server-side, overriding any cause the AI grader supplied — `outcome` itself is untouched and no `PracticeOutcome` enum value was added for this. See [`docs/specs/voice.md`](docs/specs/voice.md) §3, §8.
 - `question_mastery` - One row per `(user, question)` pair once that question first produces a schedulable outcome (E5, epic #54): `state` (`new`/`learning`/`review`/`lapsed`/`mastered`), `due_at`, `interval_days`, `ease`, `correct_streak`, `lapses`, `total_attempts`, `distinct_correct_days` (the column that makes "correct on ≥3 distinct days" enforceable), `last_outcome`, `last_attempt_at`. No row means `new` — never a row that says so. Updated synchronously, inside the same transaction as the `practice_attempts` write that triggers it, by `nextSchedule` (`apps/api/src/practice/mastery/scheduler.ts`); see `docs/specs/memory-model.md` §2-§3
 - `readiness_snapshots` - One row per computed readiness score (E6, epic #55): `score` (0-100, structurally capped at 75 for a typed-only learner — `english`/`spoken`/`interview` sum to 0.25 weight and are 0 with no such evidence), the full `components`/`evidenceCounts` breakdown for all eight components, `cap_reason` (`'typed_only'`/`null`), `top_recommendation`, and the learner's `stage` at computation time, all frozen so a past snapshot stays self-explaining after the mastery rows it summarized move on. `narrative`/`narrative_generated_at` are nullable and filled in lazily, on the caller's own AI key, only from the request path (never the nightly cron). See `docs/specs/readiness-model.md` §4-§5
 - `daily_activity` - One row per `(user, local calendar day)` (E7, epic #56): `activity_date` (`@db.Date`, the learner's LOCAL day, not an instant), `tz_used` (the IANA zone that day was actually computed in, frozen at write time rather than re-derived from the learner's possibly-since-changed profile), `practice_seconds`/`attempts`/`correct`, `goal_met` (monotonic — once true, never flips back for the same row), `freeze_used` (true only when this row exists to record that a streak freeze covered a day with no practice at all). `@@unique([userId, activityDate])` is both the ordinary-accrual upsert key and the freeze-settlement idempotency key. Has no foreign key, relation, or column reachable from `readiness_snapshots` or the readiness engine — not an input to readiness, structurally, never merely by convention; see `docs/ARCHITECTURE.md` §5.6. See `docs/specs/habit-streaks.md` §2-§4
@@ -764,7 +792,7 @@ Note: `DATABASE_URL` is constructed automatically from these variables at runtim
 - `SECRETS_ENCRYPTION_KEY` - Base64-encoded 32-byte AES-256 key (generate with `openssl rand -base64 32`) that encrypts runtime-configured credentials (e.g. an SMTP password an admin enters through the app) before they are stored in the `credentials` table. Optional until a credential is stored; see `docs/runbooks/rotate-secrets-encryption-key.md`. Note: credentials configured at runtime through the UI/API live encrypted in the database, not in the environment — unlike every other secret in this section.
 
 **AI (development/test only):**
-- `AI_PROVIDER_FAKE` - Set to exactly `true` to substitute a built-in `FakeAiProvider` for `OpenAiProvider` at the DI layer (`AiModule`'s `resolveAiProvider`), so the grading ladder, the tutor's stream, the admin model dropdowns and the usage table can be exercised with no OpenAI account, no API key, and no outbound network call. It does not add a new provider *kind* — `AI_PROVIDER_KINDS` stays `['openai']`, a test settings row still stores `provider: 'openai'`, and the substitution is invisible to every consumer that reads that value. **Inert under `NODE_ENV=production`** — the flag is ignored entirely there, so an inherited or copied `.env` cannot make a real deployment grade learners against a fixture while reporting itself healthy. See `docs/specs/ai-evaluation.md` §10.
+- `AI_PROVIDER_FAKE` - Set to exactly `true` to substitute a built-in `FakeAiProvider` for `OpenAiProvider` at the DI layer (`AiModule`'s `resolveAiProvider`), so the grading ladder, the tutor's stream, the admin model dropdowns, the usage table, and (E9, epic #58) transcription/synthesis can all be exercised with no OpenAI account, no API key, and no outbound network call. It does not add a new provider *kind* — `AI_PROVIDER_KINDS` stays `['openai']`, a test settings row still stores `provider: 'openai'`, and the substitution is invisible to every consumer that reads that value. **Inert under `NODE_ENV=production`** — the flag is ignored entirely there, so an inherited or copied `.env` cannot make a real deployment grade learners against a fixture while reporting itself healthy. See `docs/specs/ai-evaluation.md` §10.
 
 **Observability:**
 - `OTEL_ENABLED` - Enable OpenTelemetry (default: true)
@@ -893,9 +921,12 @@ Three steps and no migration, the same "one registry entry" promise the
 notification registry makes on its own axis (epic #25, `docs/specs/ai-settings.md`).
 
 A **model role** is one job this application asks a model to do. Six are
-declared; `tutor` and `grader` are wired, the other four are declared and inert
-so that adding voice work later is not a settings-schema change and a migration
-over live admin configuration.
+declared; `tutor`, `grader`, `transcribe` and `speak` are wired (the last two
+since E9, epic #58 — see [`docs/specs/voice.md`](docs/specs/voice.md) §1),
+and `realtime`/`embed` are still declared and inert, so that wiring voice
+work did not need a settings-schema change or a migration over live admin
+configuration, and wiring the next role (realtime interviews, E11) will not
+either.
 
 1. **Declare the role** in `apps/api/src/ai/ai-model-roles.ts`
    (`AI_MODEL_ROLES`): a stable `key`, a `label` and `description` written as
@@ -916,10 +947,18 @@ over live admin configuration.
    explain why. Add a new key and migrate the row.
 
 2. **Set `wired: true` only when something actually dispatches to it.**
-   `systemReady` (`GET /api/ai/status`) is computed over the wired roles alone,
-   and both test endpoints probe only wired roles that have a binding. Wiring a
-   role nothing uses makes every deployment report itself unready until an admin
-   binds a model for a feature that does not exist.
+   `GET /api/ai/status`'s `unboundRoles` is computed over the wired roles
+   alone, and both test endpoints probe only wired roles that have a binding.
+   Wiring a role nothing uses makes every deployment report the new role
+   unbound until an admin binds a model for a feature that does not exist —
+   which is informational, not a block, **unless the role is also a `text`
+   capability**: `systemReady` (the hard-blocking flag) is computed only over
+   the wired roles whose `capability` is `'text'` (`tutor`, `grader` today),
+   precisely so that wiring a non-text role like `transcribe`/`speak` cannot
+   flip an already-deployed installation's `systemReady` to `false` for a
+   capability nobody asked for. See
+   [`docs/specs/voice.md`](docs/specs/voice.md) §1 for the mechanism, spelled
+   out in full there rather than here.
 
    An unwired role still renders on `/admin/settings/ai`, inert, using the
    registry's `disabled` card idiom — an admin can see what is coming without

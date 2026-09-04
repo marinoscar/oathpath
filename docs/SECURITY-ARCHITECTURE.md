@@ -2111,6 +2111,62 @@ graded `practice_attempts` row and the interview's running tally:
 There is no second call site that could disagree with these three — one
 method, one transaction, one flag read three times.
 
+## 17. Voice: Audio Is Never Stored
+
+Issue #95/#118, epic #58 (E9 "Voice foundation"). Full design rationale —
+the confirm-before-grade mechanism, the `misheard` failure cause, why the
+guarantee below is enforced structurally rather than by policy — lives in
+[`docs/specs/voice.md`](specs/voice.md) §4; the claim is reproduced here for
+the same reason §16 above gives: a security document that says "see the
+spec" for its own core claim is not a security document.
+
+### Nothing reaches object storage, disk, or a log
+
+`POST /api/ai/speech/transcribe` (`apps/api/src/ai/ai-speech.controller.ts`)
+reads a multipart upload into a buffer, hands it to `AiSpeechService`, and
+drops it when the request completes. It **never calls
+`StorageObjectsService`** and has no import path into the storage module at
+all — there is no upload-init flow, no `storage_objects` row, and no
+temporary file. `POST /api/ai/speech/synthesize` is the mirror case: the
+audio it returns is generated per-request and streamed straight back with
+`Cache-Control: no-store`, never written anywhere first.
+
+Neither route logs or traces the audio or the transcript. `BaseAiProvider`'s
+spans (used identically here as for every other AI call) carry model id,
+role key, and token counts — never content — and the one diagnostic message
+these routes can emit ("the provider returned no transcription") describes
+the *shape* of the failure, never quotes it.
+
+### No column in the schema can hold audio or a reference to it
+
+The three columns E9 adds to `practice_attempts` — `transcript` (text),
+`asr_confidence` (a float), `retry_of_attempt_id` (a self-referential FK to
+another `practice_attempts` row) — hold no `bytea`, no file path, and no
+foreign key to `storage_objects`. `transcript` holds the text the learner
+**confirmed**, never a stored recording of them saying it; see
+`docs/specs/voice.md` §8 for why that column exists at all rather than being
+folded into `response_text`.
+
+### Nothing is persisted client-side either
+
+The web client holds the recorded audio in memory only for the span between
+"stop recording" and "receive the transcript," using a `MediaRecorder` blob
+discarded the moment the transcription response arrives or the request
+fails — no `IndexedDB` entry, no `localStorage` entry, and no download or
+playback affordance for it anywhere in the product. There is no "listen back
+to your answer" feature: the confirm-the-transcript step is what serves
+`VISION.md`'s "patient human coach" framing, not an audio-replay feature that
+would itself be the retained recording this section rules out.
+
+### Where this is enforced
+
+There is no single flag to audit here, unlike §16's `transcript_retained` —
+the guarantee is the **absence** of a code path, which a later reviewer
+confirms by grepping `apps/api/src/ai/ai-speech.controller.ts` and
+`ai-speech.service.ts` for any import of the storage module, or
+`schema.prisma` for any new column referencing `storage_objects` from
+`practice_attempts`, and finding none.
+
 ---
 
 ## Conclusion

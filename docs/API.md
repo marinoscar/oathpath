@@ -1203,7 +1203,7 @@ Returns 200 on failure, as the admin test does.
 | Field | Meaning |
 |-------|---------|
 | `userKeyConfigured` | You have a key saved. `false` **hard-blocks** you into the key setup screen |
-| `systemReady` | Provider configured, wired roles bound, master switch on. `false` does **not** block you |
+| `systemReady` | Provider configured, master switch on, and every wired **text** role (`tutor`, `grader`) bound. `false` does **not** block you. `transcribe`/`speak` unbound never affects this flag — see [`docs/specs/voice.md`](specs/voice.md#1-the-degradation-rule) §1 |
 | `enabled` | The master switch, so a message can name the control that is off |
 | `providerConfigured` | Whether a provider has been chosen |
 | `unboundRoles` | Wired roles with no model bound, by key. Names only |
@@ -1227,6 +1227,62 @@ your own OpenAI dashboard.
 | `days` | Window size. Defaults to 30, clamped to 1–365. An unparseable value falls back to the default rather than erroring |
 
 Returns totals plus breakdowns by model and by the role each call served.
+
+---
+
+### AI Speech
+
+Issue #95, epic #58 (E9 "Voice foundation"). Two routes, both `@Auth()` with
+**no permissions and no user-id parameter** — the caller is always resolved
+from `@CurrentUser('id')`, exactly like every other route in this section:
+every authenticated learner speaks with their own voice on their own key, and
+gating either route would leave a Viewer unable to practice at all.
+
+**Binding `transcribe` or `speak` is entirely optional and never affects
+`systemReady`.** See
+[`docs/specs/voice.md`](specs/voice.md#1-the-degradation-rule) §1 for why, and
+[`docs/runbooks/configuring-voice.md`](runbooks/configuring-voice.md) for what
+each role costs and controls. Both routes run inference on the **caller's**
+own key, so usage lands on that learner's own `GET /ai/usage`, under
+`roleKey: 'transcribe'` / `roleKey: 'speak'` — never on the server credential.
+
+**Both responses are discriminated unions on `status`, and both are always
+HTTP 200** — `ok` (transcribe only), `unavailable` (`{ cause, role }`), or
+`failed` (`{ errorCode, error }`). A non-2xx here would discard the one fact
+either response exists to carry: *why* no answer or no audio was produced,
+which a caller (`AiNotReady`-style UI) needs to render correctly. `cause` is
+one of `no_user_key` / `ai_disabled` / `role_unbound` /
+`capability_unsupported` — the same four values every other AI feature in
+this application uses (`docs/specs/ai-evaluation.md` §4).
+
+#### POST /ai/speech/transcribe
+Multipart upload, one audio file in the `audio` field (optional
+`languageHint`, ISO-639-1, and `durationSeconds` fields). Turns the
+recording into text **on your own key** and returns
+`{ status: 'ok', text, confidence }` — confidence is `null` when the
+recogniser did not report one, and that means *unknown*, never zero.
+
+**Nothing is graded here, and nothing is stored.** No practice attempt is
+written, and the recording is never persisted anywhere — not in object
+storage, not on disk, not in a log — it exists for the length of the
+provider call and is then dropped. The transcript is meant to be shown to
+the learner to confirm or correct **before** it is submitted as a practice
+answer.
+
+Capped at **10 MB and 120 seconds**, both enforced before any provider call
+is made — an oversized or overlong upload is a 400 and costs nothing.
+
+#### POST /ai/speech/synthesize
+`{ text: string, voice?: string, format?: string }`, `text` capped at 1000
+characters. On success, streams back audio bytes with the provider's own
+`Content-Type` (e.g. `audio/mpeg`). When there is no audio, the response is
+`application/json` carrying `unavailable`/`failed` as above — **told apart
+from the audio case by `Content-Type`, not by status code**, since both are
+HTTP 200.
+
+This is an upgrade over the browser's built-in `speechSynthesis`, which is
+the default everywhere and needs no configuration — an unbound `speak` is
+not a degraded state and nothing renders a warning for it.
 
 ---
 
