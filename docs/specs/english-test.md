@@ -955,28 +955,52 @@ already argues against for the cap itself.
 ### 6.4 `EARNABLE_COMPONENT_KEYS` gains `english`
 
 `apps/api/src/readiness/top-recommendation.ts`'s `EARNABLE_COMPONENT_KEYS`
-(verified directly, lines 91–98) gained a sixth entry, `english`, when this
-epic shipped — it was a five-entry, module-private `const` before this epic
-(`coverage`, `recall`, `retention`, `consistency`, `remediation`). This is
-that file's own stated precondition for adding a key, quoted rather than
-re-derived: `english`/`spoken`/`interview` were excluded before this epic
-specifically because "recommending 'go do more spoken/interview practice'
-would be recommending a feature that does not exist yet." This epic makes
+gained a sixth entry, `english`, when this epic shipped — it was a
+five-entry, module-private `const` before this epic (`coverage`, `recall`,
+`retention`, `consistency`, `remediation`). This is that file's own stated
+precondition for adding a key, quoted rather than re-derived:
+`english`/`spoken`/`interview` were excluded before this epic specifically
+because "recommending 'go do more spoken/interview practice' would be
+recommending a feature that does not exist yet." This epic makes
 `/api/english/*` (§7) a real, routed API feature, so the precondition that
 file's header sets for adding a component key is met for `english`
 specifically — `spoken` and `interview` remain excluded, because neither
-has a practice surface of its own yet either. **The reading and writing
-screens themselves do not exist yet** (issues #144/#147, later in this same
-epic; `apps/web/src/App.tsx` mounts no `/practice/english`, `/practice/reading`,
-or `/practice/writing` route), so the shipped `copyFor('english', ...)`
-branch points at `/practice` rather than a screen that would 404, with a
-comment on the call site itself saying to re-point it once those issues
-land — the same "a recommendation must point at the destination it names"
-rule this file's own header states, and the same debt pattern
-`readiness-model.md` §8.2 already records for the capped card's own path.
-The top-recommendation logic's weighted-headroom computation
-(`weight * (1 - value)`, already generic over whichever keys are in the
-array) needed no change beyond the one-line array edit and the new
+has a practice surface of its own yet either.
+
+**The reading and writing screens are real, mounted routes** (`/practice/reading`,
+issue #144, and `/practice/writing`, issue #147; `apps/web/src/App.tsx` mounts
+both inside the `RequireOrientation` group), so `copyFor('english', ...)`
+names a screen and links to it — never `/practice`, which serves neither
+segment. It goes one step further than picking a single shared path: it
+picks **which of the two** to send a given learner to, per learner, on
+every card.
+
+The pick is this file's own headroom rule (§8.2's `weight * (1 - value)`)
+applied one level down, not a second heuristic. `english` is
+`ENGLISH_SEGMENT_SHARE * readingValue + ENGLISH_SEGMENT_SHARE * writingValue`
+with the two shares **equal** (`readiness-engine.ts`), so "the segment with
+the greater headroom" collapses to "the segment with the lower value" — a
+single comparison, both values already recomputable from
+`evidenceCounts.english`. Two details of that comparison are worth stating
+because they are the non-obvious part:
+
+- **The comparison is credit against each segment's own target
+  (`ENGLISH_READING_TARGET` = 6, `ENGLISH_WRITING_TARGET` = 4, §6.2), never
+  raw sentence counts.** The two targets differ on purpose, and counts
+  diverge from credit: six reading sentences all missed is
+  `readingValue = 0` even though the raw count says reading is the
+  well-practiced half. Counting sentences instead would send that learner
+  to the writing screen under a sentence claiming they had done less
+  writing, which is false about that person.
+- **A tie keeps `reading`**, the first-declared segment, matching the
+  strict-`>` first-declared-wins discipline `buildTopRecommendation`'s own
+  component loop already uses for the same reason: two calls on identical
+  input must produce identical cards. A learner with no English evidence at
+  all is exactly such a tie — the common case this rule resolves, not an
+  edge case.
+
+The top-recommendation logic's weighted-headroom computation across
+components needed no change beyond the one-line array edit and the new
 `copyFor('english', ...)` branch, grounded in `evidenceCounts.english` —
 never a hand-templated count that could drift from the object the engine
 already produced.
