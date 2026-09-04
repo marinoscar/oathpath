@@ -25,6 +25,7 @@ import PaletteIcon from '@mui/icons-material/Palette';
 import NotificationsIcon from '@mui/icons-material/Notifications';
 import VpnKeyIcon from '@mui/icons-material/VpnKey';
 import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome';
+import WarningAmberIcon from '@mui/icons-material/WarningAmber';
 import type { SettingsSectionDef } from './adminSections';
 
 /**
@@ -138,6 +139,45 @@ export const USER_SETTINGS_SECTIONS: SettingsSectionDef[] = [
         description: 'Create and revoke personal access tokens for API and CLI access.',
         Icon: VpnKeyIcon,
         path: '/settings/tokens',
+      },
+    ],
+  },
+  {
+    // Issue #270. Its OWN group, after `Security`, not a third member of it:
+    // `Security` is reserved for long-lived CREDENTIALS (see that group's own
+    // note above) — an OpenAI key and a personal access token are things you
+    // HOLD. A data reset is not a credential at all, so filing it under
+    // `Security` would stretch that group's meaning to cover an unrelated
+    // kind of danger (irreversible data loss) rather than share its actual
+    // one. A dedicated `Danger zone` group names what the card is honestly
+    // about and gives a second one (were this ever to grow, e.g. an eventual
+    // account-deletion card) a home that does not first require redefining
+    // what `Security` means.
+    label: 'Danger zone',
+    cards: [
+      {
+        // A REGISTRY CARD PLUS A ROUTE, never a tab on an existing settings
+        // page (CLAUDE.md's Settings UI Pattern, rule 2): this is a
+        // reachability question — its own destination — not a second view of
+        // Profile's or AI key's content. It also cannot be folded into
+        // either: Profile edits who you are, AI key edits a credential, and
+        // this ERASES what both of those pages describe. Three different
+        // questions, three different destinations.
+        //
+        // NO `permission`, like every card in this file.
+        // `POST /api/account/reset` and `GET /api/account/data-summary` are
+        // both `@Auth()` with no permissions and resolve the account from
+        // `@CurrentUser('id')` only (see `account.controller.ts`'s own
+        // header) — every authenticated user owns their own data, and
+        // erasing it is a choice only its owner can make about themselves.
+        // There is no permission string on the API to mirror here, and
+        // inventing one would gate a user out of a choice that is
+        // structurally theirs alone: not even an admin can reset another
+        // user's data through this controller.
+        title: 'Reset your data',
+        description: 'Erase your progress and start over. This cannot be undone.',
+        Icon: WarningAmberIcon,
+        path: '/settings/reset',
       },
     ],
   },
