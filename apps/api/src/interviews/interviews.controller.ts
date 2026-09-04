@@ -54,6 +54,16 @@ import {
   RealtimeSessionUnavailableDto,
   type RealtimeSessionResponse,
 } from './dto/interview-realtime-session.dto';
+import {
+  DOCUMENTED_ASR_CONFIDENCE_THRESHOLD,
+  InterviewToolCallDto,
+  narrowToolCall,
+  RealtimeEndPhaseResultDto,
+  RealtimeGradeAnswerResultDto,
+  RealtimeNextQuestionResultDto,
+  RealtimeToolCallRejectedDto,
+  type RealtimeToolCallResponse,
+} from './dto/interview-tool-call.dto';
 import { REALTIME_SESSION_TTL_SECONDS } from './realtime/realtime-tools';
 
 // =============================================================================
@@ -66,6 +76,7 @@ import { REALTIME_SESSION_TTL_SECONDS } from './realtime/realtime-tools';
 //   POST /api/interviews/:id/turns      @Auth(), none  (text/event-stream)
 //   POST /api/interviews/:id/complete   @Auth(), none
 //   POST /api/interviews/:id/realtime-session   @Auth(), none  (#157, E11)
+//   POST /api/interviews/:id/realtime/tool-calls @Auth(), none (#158, E11)
 //
 // -----------------------------------------------------------------------------
 // NO ROUTE ACCEPTS A USER ID. THAT IS THE SECURITY BOUNDARY.
@@ -157,6 +168,10 @@ function envelopedOneOf(
   RealtimeSessionOkDto,
   RealtimeSessionUnavailableDto,
   RealtimeSessionFailedDto,
+  RealtimeNextQuestionResultDto,
+  RealtimeGradeAnswerResultDto,
+  RealtimeEndPhaseResultDto,
+  RealtimeToolCallRejectedDto,
 )
 @Controller('interviews')
 export class InterviewsController {
@@ -421,6 +436,117 @@ export class InterviewsController {
     @Param('id', ParseUUIDPipe) id: string,
   ): Promise<RealtimeSessionResponse> {
     return this.interviews.createRealtimeSession(userId, id);
+  }
+
+  /**
+   * Handle one tool call from a realtime session.
+   *
+   * ---------------------------------------------------------------------------
+   * THIS ROUTE IS WHERE THE MODEL MEETS THE ENGINE, AND IT IS THE NARROW POINT
+   * ---------------------------------------------------------------------------
+   *
+   * Issue #155 states the risk this whole epic is organised around: "a
+   * speech-to-speech model asked to conduct a civics interview will happily
+   * invent a civics question from memory and declare an answer correct."
+   * `realtime-tools.ts` closed the first half by giving the model no field to
+   * put a question or a verdict in; this route closes the second half by
+   * deciding, server-side, what each call is allowed to do — and refusing the
+   * ones the interview's own state does not permit.
+   *
+   * ---------------------------------------------------------------------------
+   * ONE ROUTE, THREE TOOLS
+   * ---------------------------------------------------------------------------
+   *
+   * `docs/specs/realtime-interview.md` §4 prescribes no HTTP shape, so this is
+   * a choice; `InterviewsService.handleRealtimeToolCall`'s doc comment carries
+   * the reasoning in full. The short version is that the browser is a RELAY —
+   * it forwards whatever tool call the model emitted and hands the result back
+   * over the same data channel — and a single endpoint means the relay needs no
+   * per-tool knowledge and cannot route a call to the wrong handler.
+   *
+   * ---------------------------------------------------------------------------
+   * A REFUSAL IS A 200
+   * ---------------------------------------------------------------------------
+   *
+   * A rejected tool call is an expected outcome of the contract, not an error:
+   * the model must be told what to do instead, and a non-2xx would be flattened
+   * into generic failure handling by the relay with the `instruction` field —
+   * the one thing that gets the interview moving again — never reaching the
+   * model. The same posture the mint route above takes toward `unavailable`.
+   *
+   * The 404 stays a 404: an unknown interview, or one belonging to another
+   * learner, is a fact about the interview rather than about the contract, and
+   * there is no model-facing recovery from it.
+   */
+  @Post(':id/realtime/tool-calls')
+  @Auth()
+  // 200, not the 201 a POST defaults to. A tool call is a question about the
+  // interview's own state; the writes it may cause are turns and attempts, not
+  // a resource this route could hand back a location for.
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Handle a realtime tool call',
+    description:
+      'Relays one tool call from a realtime voice session to the interview engine and ' +
+      'returns what the officer should do next.\n\n' +
+      '**The engine decides; the model only speaks.** Three tools, and each is checked ' +
+      'against the interview’s own server-side state before anything happens:\n\n' +
+      '- `next_question` — returns the exact words to say. **Refused** while the ' +
+      'applicant’s previous answer has not been reported, so a second question cannot ' +
+      'be asked before the first is graded.\n' +
+      '- `grade_answer` — reports what you HEARD. There is no `verdict` field and there ' +
+      'never will be: the application grades the answer with the same ladder a typed ' +
+      'practice answer goes through, and the result tells you only that it was ' +
+      'recorded. **Refused** when `questionId` is not the item the applicant was ' +
+      'actually asked.\n' +
+      '- `end_phase` — **honoured only when the engine independently agrees that phase ' +
+      'is over.** For the civics section that means its own stop rule has fired, ' +
+      'computed from the caller’s test version row; there is no pass mark in this ' +
+      'request or in the response.\n\n' +
+      '**Read `status`.** `ok` carries the tool’s result. `rejected` carries a `reason`, ' +
+      'an `error` and an `instruction` — say nothing about it to the applicant and do ' +
+      'what the `instruction` says. **Both are HTTP 200**; a non-2xx would discard the ' +
+      'instruction, which is the field that gets the interview moving again.\n\n' +
+      '**`speakOnly: true` on a `next_question` result means SAY IT, NEVER RENDER IT.** ' +
+      'It is set for the writing test’s sentence, which is dictated — printing it on ' +
+      'screen would show the learner the answer. It is never written into the interview ' +
+      'transcript either, so `GET /interviews/{id}` cannot leak it.\n\n' +
+      `**\`confidence\` is optional and absent means UNKNOWN, never low.** Below ` +
+      `${DOCUMENTED_ASR_CONFIDENCE_THRESHOLD} a non-correct civics answer is recorded ` +
+      'as misheard rather than as a failure, and does not count against the learner’s ' +
+      'mastery; a reading attempt below it is not recorded at all and the officer asks ' +
+      'again. Omit the field rather than guessing a value.',
+  })
+  @ApiParam({ name: 'id', type: String, format: 'uuid' })
+  @ApiBody({
+    type: InterviewToolCallDto,
+    description:
+      'The tool call, discriminated on `tool`. Only that tool’s own arguments are ' +
+      'accepted: a field belonging to a different tool is a 400 naming it, and an ' +
+      'undeclared field is a 400 too. There is no `userId`, no `verdict`, no pass mark ' +
+      'and no test version — the caller is the authenticated session and everything ' +
+      'else is the interview’s.',
+  })
+  @ApiOkResponse({
+    description:
+      'The tool’s result, or a typed refusal. Read `status`, then `tool`.',
+    schema: envelopedOneOf(
+      RealtimeNextQuestionResultDto,
+      RealtimeGradeAnswerResultDto,
+      RealtimeEndPhaseResultDto,
+      RealtimeToolCallRejectedDto,
+    ),
+  })
+  @ApiResponse({ status: 404, description: 'No such interview for this caller' })
+  handleRealtimeToolCall(
+    @CurrentUser('id') userId: string,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() body: InterviewToolCallDto,
+  ): Promise<RealtimeToolCallResponse> {
+    // `narrowToolCall` turns the validated flat body into the discriminated
+    // shape the engine's rules take, and its return type is the compiler's
+    // proof the two agree — see the DTO.
+    return this.interviews.handleRealtimeToolCall(userId, id, narrowToolCall(body));
   }
 
   /**

@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 
 import { AiModule } from '../ai/ai.module';
+import { EnglishModule } from '../english/english.module';
 import { EngagementModule } from '../engagement/engagement.module';
 import { PracticeModule } from '../practice/practice.module';
 import { PrismaModule } from '../prisma/prisma.module';
@@ -101,15 +102,38 @@ import { InterviewsService } from './interviews.service';
  * posture it already takes toward `practice_attempts` — so importing back would
  * be a cycle for a dependency it does not have.
  *
+ * ---------------------------------------------------------------------------
+ * `EnglishModule` (issue #158, epic #60 / E11)
+ * ---------------------------------------------------------------------------
+ *
+ * What it buys is `EnglishService`, and it is the exact analogue of the
+ * `PracticeModule` import above one segment over. The realtime transport
+ * conducts the reading and writing tests for real
+ * (`docs/specs/realtime-interview.md` §5) rather than announcing them as
+ * skipped, so an interview needs the same sentence selector and the same
+ * word-error-rate scorer `/practice/reading` and `/practice/writing` already
+ * use — not a second pair that could disagree with them about which sentence
+ * comes next or what counts as a correct reading.
+ *
+ * The text transport is unaffected: with no applicant answer recorded for a
+ * segment, the engine walks past it with the same honest "this rehearsal does
+ * not include the reading test" line it always has.
+ *
+ * One way only. `EnglishModule` does not import this one and must not.
+ *
  * No `NotificationsModule` and no audit write: rehearsing an interview notifies
  * nobody and is not a privileged act. And no new permission string — §12, and
- * the same reason every learner-owned module in this codebase gives.
+ * the same reason every learner-owned module in this codebase gives. The
+ * realtime tool-call route (#158) adds none either: it is one more `@Auth()`
+ * route on the same controller, resolving the caller from
+ * `@CurrentUser('id')` and the interview through `requireInterview`.
  */
 @Module({
   imports: [
     PrismaModule,
     AiModule,
     PracticeModule,
+    EnglishModule,
     ReadinessModule,
     EngagementModule,
   ],
