@@ -84,7 +84,7 @@ a v2.
 | E7 | Habit | Daily goal, streaks with protection, session-end celebrations, three reminder notification events on an hourly cron | E1, E3, E5 | done<sup>‖</sup> | [#56](https://github.com/marinoscar/oathpath/issues/56) |
 | E8 | Mock interview — text mode | Deterministic interview engine (question selection, pass rules from `civics_test_versions`), text-mode interview and debrief — closes Milestone A | #25 (for `tutor`), E4, E6 | done<sup>‖</sup> | [#57](https://github.com/marinoscar/oathpath/issues/57) |
 | E9 | Voice foundation | `transcribe`/`speak` wired, audio capture and playback, spoken practice mode with transcript confirmation, misheard-vs-wrong distinction — opens Milestone B | #25, E4, E6 | done<sup>¶</sup> | [#58](https://github.com/marinoscar/oathpath/issues/58) |
-| E10 | Reading and writing tests | Vocabulary-sourced sentences, word-error-rate reading scoring, dictated writing scoring, the readiness `english` component | E9 | in progress<sup>**</sup> | [#59](https://github.com/marinoscar/oathpath/issues/59) |
+| E10 | Reading and writing tests | Vocabulary-sourced sentences, word-error-rate reading scoring, dictated writing scoring, the readiness `english` component | E9 | done<sup>**</sup> | [#59](https://github.com/marinoscar/oathpath/issues/59) |
 | E11 | Realtime voice interview | `realtime` wired, ephemeral session tokens, the E8 engine driving a realtime model over tool calls — closes Milestone B and the MVP | #25, E8, E9, E10 | not started | [#60](https://github.com/marinoscar/oathpath/issues/60) |
 
 Status legend: `not started` — no child issue in progress; `in progress` —
@@ -250,16 +250,34 @@ them has been executed end to end.
 
 With this, Milestone A (E1–E8) is `done` on paper across every epic in it;
 per [§2](#2-what-the-mvp-is), Milestone B (E9–E11) is still required to
-close the MVP, and E9 already carries its own `done` footnote above.
+close the MVP. E9 already carries its own `done` footnote above, and E10
+now does too (see the `**` footnote below) — E11 (#60) is the only epic
+left before Milestone B, and the MVP, close.
 
-<sup>**</sup> **E10 is `in progress`, not `not started`** — the legend's own
-rule is "at least one child issue has an open PR or merged work", and E10 has
-merged work: #124, the reading and writing design spec
-(`docs/specs/english-test.md`), landed on `main` in #246. Its other seven
-children — #130, #136, #141, #144, #147, #149, #152 — are open, so no code,
-content row or migration for the English test exists yet; the epic has a
-design and nothing else. E11 (#60) has all eight children open and no merged
-work, so it remains `not started`.
+<sup>**</sup> **E10 is marked `done`, on the same convention this table has
+followed since E5**: an epic whose child issues are all merged and whose CI
+is green is `done`, and an unrun Playwright journey spec is a footnoted
+fact, not a status. All eight child issues are merged to `main`: #124
+(`docs/specs/english-test.md`, the design spec, PR #246), #130 (the
+`english_sentences`/`english_attempts` schema and the vocabulary content, PR
+#250), #136 (the `english` module — sentences, attempts, WER scoring, PR
+#251), #141 (the readiness `english` component, PR #253), #144
+(`/practice/reading`, PR #254), #147 (`/practice/writing`, PR #256), #149
+(`tests/e2e/specs/english.spec.ts`, PR #257), and #152 (the runbook, the
+learner page, and the reference updates, PR #259).
+
+One thing a later reader should not assume this footnote settles, on the
+identical terms E5's, E9's, and E6/E7/E8's footnotes above state it:
+**whether a human has actually run `tests/e2e/specs/english.spec.ts`
+against the compose stack** — the §6 check this legend requires. It
+typechecks and `playwright test --list` reports its seven scenarios, but
+Docker is unavailable in the environment it was authored in, so the compose
+stack it targets could not be raised, and the suite has not been executed
+end to end.
+
+E11 (#60) has all eight children open (#155–#162) and no merged work, so it
+remains `not started` — it is now the only epic standing between Milestone
+B and the MVP close; see [§2](#2-what-the-mvp-is).
 
 ## 4. Why this order
 
