@@ -336,6 +336,11 @@ import type {
   InterviewPage,
   InterviewState,
   EngagementSummary,
+  EnglishAttemptResult,
+  EnglishNextResponse,
+  EnglishProgress,
+  EnglishSegmentKind,
+  RecordEnglishAttemptInput,
 } from '../types';
 
 // Allowlist API
@@ -1513,4 +1518,72 @@ export async function getInterviews(params?: {
 
   const query = searchParams.toString();
   return api.get<InterviewPage>(`/interviews${query ? `?${query}` : ''}`);
+}
+
+// =============================================================================
+// English — reading and writing (issue #136, epic #59 / E10)
+// =============================================================================
+
+/**
+ * The next sentence for one segment — `GET /api/english/next?kind=…`.
+ *
+ * `@Auth()` with no permissions and no user id: the same posture
+ * `getPracticeQueue`/`getProgressMastery` already take, for the same reason —
+ * every learner owns their own English history, resolved from the JWT.
+ *
+ * SELECTION IS THE SERVER'S, AND IT IS DETERMINISTIC. Untried sentences first,
+ * then the ones most recently missed, then partials, then passes. A client that
+ * picked its own sentence out of a list would undo that ordering silently, and
+ * there is no endpoint that would let it: this returns ONE sentence.
+ *
+ * `sentence: null` is an honest absence, NOT a 404 — the request was valid and
+ * the answer is that no sentences are loaded for this segment. Render it as
+ * prose; there is nothing for the learner to fix.
+ */
+export async function getNextEnglishSentence(
+  kind: EnglishSegmentKind,
+): Promise<EnglishNextResponse> {
+  return api.get<EnglishNextResponse>(`/english/next?kind=${kind}`);
+}
+
+/**
+ * Submit one reading or writing attempt — `POST /api/english/attempts`.
+ *
+ * THE CALLER NEVER SENDS THE VERDICT. There is no `outcome`, `wer` or `diff`
+ * field on the request; the server normalises both sides, aligns them word by
+ * word, and decides. `kind` is read from the sentence rather than from the
+ * body, so there is nothing here for a client to get wrong about which segment
+ * it is in.
+ *
+ * READ `status`, NOT THE HTTP CODE — both arms are 200.
+ *
+ *   * `scored` wrote exactly one `english_attempts` row. `attemptId` and
+ *     `outcome` are that row's.
+ *   * `misheard` wrote **NOTHING**. The recogniser reported low confidence on a
+ *     reading attempt that did not score `correct`, and
+ *     `docs/specs/english-test.md` §3 requires that this leave no trace: a
+ *     transcript we do not believe is not weak evidence of a reading skill, it
+ *     is none. The diff still comes back so the learner can see what was heard.
+ *     **Never render it as a failure** — offer the retry instead.
+ *
+ * This is a deliberate divergence from practice, where `misheard` is a
+ * `failureCause` on a row that IS written. Both are right for their own table;
+ * a caller that shares code between them must not share this branch.
+ */
+export async function recordEnglishAttempt(
+  input: RecordEnglishAttemptInput,
+): Promise<EnglishAttemptResult> {
+  return api.post<EnglishAttemptResult>('/english/attempts', input);
+}
+
+/**
+ * The caller's own reading and writing history — `GET /api/english/progress`.
+ *
+ * Three grains of one evidence set: per sentence, per USCIS vocabulary
+ * category, and per segment. No parameters — "my English progress" is the one
+ * question it answers, and the query DTO rejects anything else rather than
+ * silently ignoring it.
+ */
+export async function getEnglishProgress(): Promise<EnglishProgress> {
+  return api.get<EnglishProgress>('/english/progress');
 }

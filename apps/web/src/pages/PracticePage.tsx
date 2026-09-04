@@ -153,12 +153,14 @@ import AutorenewOutlinedIcon from '@mui/icons-material/AutorenewOutlined';
 import BoltIcon from '@mui/icons-material/Bolt';
 import ChevronRightIcon from '@mui/icons-material/ChevronRight';
 import HistoryEduOutlinedIcon from '@mui/icons-material/HistoryEduOutlined';
+import RecordVoiceOverOutlinedIcon from '@mui/icons-material/RecordVoiceOverOutlined';
 import { Link as RouterLink, useNavigate } from 'react-router-dom';
 
 import { LoadingSpinner } from '../components/common/LoadingSpinner';
 import { PracticeQueueSummary } from '../components/practice/PracticeQueueSummary';
 import { RecentSessions } from '../components/practice/RecentSessions';
 import { INTERVIEWS_PATH } from '../components/interview/paths';
+import { READING_PRACTICE_PATH } from '../components/english/paths';
 // The same `/settings/journey` page the civics state notice links to. Imported
 // rather than re-spelled: two literals for one destination is how one of them
 // survives a route rename.
@@ -457,7 +459,53 @@ export default function PracticePage() {
             </Box>
 
             {/* -----------------------------------------------------------
-                3. Mock interview — a LINK, not a POST, and copy that says
+                3. Reading aloud (#144, epic #59 / E10) — a LINK, not a POST.
+                   `/practice/reading` has no session resource to create: the
+                   screen asks the server for one sentence at a time, so there
+                   is nothing for a click here to bring into existence and an
+                   `<a href>` is the honest affordance (middle-click and
+                   "open in new tab" both work, which they cannot on the Quick 5
+                   button above).
+
+                   It sits between the civics drills and the mock interview
+                   because that is where it belongs in a learner's day: it is
+                   a different SKILL from the civics questions above, and a
+                   shorter commitment than the interview below.
+                ----------------------------------------------------------- */}
+            <Box
+              component="section"
+              aria-labelledby="practice-reading-heading"
+              sx={{ mt: 4 }}
+            >
+              <Typography
+                id="practice-reading-heading"
+                variant="overline"
+                component="h2"
+                color="text.secondary"
+                sx={{ display: 'block' }}
+              >
+                Reading aloud
+              </Typography>
+              <Typography color="text.secondary" sx={{ mt: 1, maxWidth: '60ch' }}>
+                The English part of the interview, not the civics part. You read
+                one sentence out loud and see exactly which words came through
+                &mdash; not a score on its own. One sentence takes about a
+                minute.
+              </Typography>
+              <Button
+                component={RouterLink}
+                to={READING_PRACTICE_PATH}
+                variant="outlined"
+                size="large"
+                startIcon={<RecordVoiceOverOutlinedIcon />}
+                sx={{ mt: 2, width: { xs: '100%', sm: 'auto' } }}
+              >
+                Practise reading aloud
+              </Button>
+            </Box>
+
+            {/* -----------------------------------------------------------
+                4. Mock interview — a LINK, not a POST, and copy that says
                    what it is before the learner commits to twenty minutes
                    of it. See the header.
                 ----------------------------------------------------------- */}
@@ -499,7 +547,7 @@ export default function PracticePage() {
             </Box>
 
             {/* -----------------------------------------------------------
-                4. Recent sessions.
+                5. Recent sessions.
                 ----------------------------------------------------------- */}
             <Box sx={{ mt: 4 }}>
               {sessionsError ? (

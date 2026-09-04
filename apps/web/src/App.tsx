@@ -34,6 +34,9 @@ const ProgressPage = lazy(() => import("./pages/ProgressPage"));
 // new `DESTINATION_ROUTES` entry is needed or wanted.
 const PracticeSessionPage = lazy(() => import("./pages/PracticeSessionPage"));
 const PracticeSummaryPage = lazy(() => import("./pages/PracticeSummaryPage"));
+const ReadingPracticePage = lazy(
+  () => import("./pages/ReadingPracticePage"),
+);
 // Issue #140 (the first two) and #145 (the debrief), epic #57 / E8 — the mock
 // interview, three more screens UNDER the same Practice destination and owned
 // by the same `/practice` prefix.
@@ -246,6 +249,42 @@ function AppRoutes() {
                         <Route
                           path="/practice/sessions/:id/summary"
                           element={<PracticeSummaryPage />}
+                        />
+                        {/* Reading practice (#144, epic #59 / E10), in this
+                        same `RequireOrientation` group and ungated beyond it
+                        for the identical reason the practice loop above is:
+                        every `/api/english/*` route is `@Auth()` with NO
+                        permission, because a learner's own reading and writing
+                        attempts are exactly as unconditionally theirs as their
+                        own practice attempts, so there is no permission string
+                        a gate here could honestly mirror and one would leave a
+                        Viewer — the default role — unable to practise reading
+                        at all.
+
+                        `/practice/reading`, not `/english/reading` and not a
+                        view in `/practice`'s query string. Under `/practice`
+                        because `owns('/practice', …)` in
+                        `config/destinations.ts` matches on segment boundaries
+                        and already covers this whole subtree — the rail keeps
+                        highlighting Practice here and `DESTINATION_ROUTES`
+                        GAINS NOTHING, exactly as it gained nothing for
+                        `/practice/sessions/:id` and `/practice/interviews`.
+                        This is content WITHIN the Practice destination, never a
+                        destination of its own.
+
+                        A real route rather than a query-string view because it
+                        is a distinct EXERCISE with its own scorer, its own
+                        evidence table and its own entry points from Learn and
+                        Practice — and because it is the destination the
+                        readiness card's `english` recommendation needs to be
+                        able to name. `apps/api/src/readiness/top-recommendation.ts`
+                        still points that recommendation at `/practice`, with a
+                        comment on its own call site saying to re-point it once
+                        this screen lands; that edit belongs to the API and is
+                        deliberately not made from here. */}
+                        <Route
+                          path="/practice/reading"
+                          element={<ReadingPracticePage />}
                         />
                         {/* The mock interview (#140, epic #57 / E8), in this
                         same `RequireOrientation` group and ungated beyond it for
