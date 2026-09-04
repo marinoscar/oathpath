@@ -1935,7 +1935,7 @@ a bank that has one would be a worse lie than a repeat.
       "version": "v1",
       "ordinal": 1,
       "text": "Who was the first President?",
-      "vocabTags": ["PEOPLE", "QUESTION WORDS"],
+      "vocabTags": ["CIVICS", "OTHER_CONTENT", "OTHER_FUNCTION", "QUESTION_WORDS", "VERBS"],
       "wordCount": 5
     }
   }
@@ -2081,8 +2081,8 @@ which sentences exist.
         "sentenceId": "uuid",
         "kind": "writing",
         "text": "We pay taxes.",
-        "ordinal": 1,
-        "vocabTags": ["CIVICS"],
+        "ordinal": 4,
+        "vocabTags": ["OTHER_CONTENT", "OTHER_FUNCTION", "VERBS"],
         "attempts": 2,
         "bestOutcome": "correct",
         "lastOutcome": "partial",

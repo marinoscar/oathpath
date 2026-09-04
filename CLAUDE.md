@@ -507,6 +507,17 @@ there, not a network one — withholding `text` would leave server-side
 synthesis as the only way to hear a writing sentence, which §4 forbids as
 the only way.
 
+`/practice/reading` (#144) and `/practice/writing` (#147) are the two real,
+mounted web routes these endpoints back, inside the `RequireOrientation`
+group in `App.tsx`, ungated beyond it for the same no-permission reason as
+the API routes above. They are content *within* the Practice destination,
+not destinations of their own — `owns('/practice', …)` in
+`config/destinations.ts` already covers the subtree, so nothing was added
+there. `apps/api/src/readiness/top-recommendation.ts` points the `english`
+readiness card at whichever of the two has more headroom for that learner
+(`docs/specs/english-test.md` §6.4) — never at `/practice`, which serves
+neither segment.
+
 `POST /api/english/attempts` returns a discriminated union on `status`,
 **always HTTP 200**: `scored` wrote one `english_attempts` row;
 `misheard` wrote **nothing**. `misheard` is not an outcome value — it is
