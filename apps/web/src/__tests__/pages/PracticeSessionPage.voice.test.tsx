@@ -574,6 +574,25 @@ describe('a low-confidence transcription', () => {
     expect(screen.queryByText(/that may not be what you said/i)).toBeNull();
   });
 
+  it('trusts the transcript at EXACTLY the threshold — 0.6 is not low', async () => {
+    // `confidence.ts`'s own header: "STRICTLY BELOW, never at-or-below,
+    // matching the server exactly: 0.6 is trusted." The API side of this
+    // exact boundary is already covered
+    // (`practice.service.spec.ts`'s `isMisheardAttempt` suite asserts
+    // `isMisheardAttempt(0.6, 'incorrect')` is `false`); this is the web
+    // mirror `isLowConfidence` has to agree with, and nothing before this
+    // test pins the boundary value itself — only comfortably above (0.94)
+    // and comfortably below (0.41) it.
+    const user = userEvent.setup();
+    renderSession({ transcription: { text: 'the Constitution', confidence: 0.6 } });
+
+    await startSpeaking(user);
+    finishRecording();
+
+    expect(await screen.findByText(/is this what you said\?/i)).toBeInTheDocument();
+    expect(screen.queryByText(/that may not be what you said/i)).toBeNull();
+  });
+
   it('sends NO `asrConfidence` at all when the recogniser reported none', async () => {
     const posted: RecordPracticeAttemptInput[] = [];
     const user = userEvent.setup();
