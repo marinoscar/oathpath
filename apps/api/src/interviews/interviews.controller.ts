@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   Get,
+  Header,
   HttpCode,
   HttpStatus,
   Logger,
@@ -13,6 +14,7 @@ import {
 } from '@nestjs/common';
 import {
   ApiBody,
+  ApiExtraModels,
   ApiOkResponse,
   ApiOperation,
   ApiParam,
@@ -20,7 +22,9 @@ import {
   ApiQuery,
   ApiResponse,
   ApiTags,
+  getSchemaPath,
 } from '@nestjs/swagger';
+import type { SchemaObject } from '@nestjs/swagger/dist/interfaces/open-api-spec.interface';
 import type { FastifyReply } from 'fastify';
 
 import { ApiDataResponse } from '../common/decorators/api-data-response.decorator';
@@ -44,6 +48,13 @@ import {
   type InterviewDetail,
   type InterviewState,
 } from './dto/interview.dto';
+import {
+  RealtimeSessionFailedDto,
+  RealtimeSessionOkDto,
+  RealtimeSessionUnavailableDto,
+  type RealtimeSessionResponse,
+} from './dto/interview-realtime-session.dto';
+import { REALTIME_SESSION_TTL_SECONDS } from './realtime/realtime-tools';
 
 // =============================================================================
 // InterviewsController (issue #133, epic #57 / E8 "Mock interview")
@@ -54,6 +65,7 @@ import {
 //   GET  /api/interviews/:id            @Auth(), none
 //   POST /api/interviews/:id/turns      @Auth(), none  (text/event-stream)
 //   POST /api/interviews/:id/complete   @Auth(), none
+//   POST /api/interviews/:id/realtime-session   @Auth(), none  (#157, E11)
 //
 // -----------------------------------------------------------------------------
 // NO ROUTE ACCEPTS A USER ID. THAT IS THE SECURITY BOUNDARY.
@@ -81,6 +93,13 @@ import {
 // `@Auth()` WITH NO PERMISSIONS, AND NO NEW PERMISSION STRING
 // -----------------------------------------------------------------------------
 //
+// §12, and — for the realtime mint added by #157 — `realtime-interview.md` §3,
+// which specifies it `@Auth()`, no permissions, for the identical reason:
+// gating a mint would leave a Viewer, the default role, unable to sit a spoken
+// mock interview at all, and there is no "use voice" privilege in this
+// product's authorization model (`voice.md` §10). This epic adds no permission
+// string.
+//
 // §12, and the identical reason `CLAUDE.md`'s "Journey/Practice/Progress/
 // Readiness/Engagement add no permission strings" all give in turn: no route
 // here accepts a user id from anywhere but the authenticated session, so there
@@ -103,7 +122,42 @@ import {
 // moment any of it exists where the learner can see it.
 // =============================================================================
 
+/**
+ * The `{ data: … }` envelope, written out by hand around a `oneOf`.
+ *
+ * `applyDataEnvelope` (src/openapi/data-envelope.ts) wraps every documented 2xx
+ * JSON body to match what the global `TransformInterceptor` really sends, but
+ * deliberately SKIPS `oneOf`/`allOf`/`anyOf` schemas rather than guessing at
+ * them — so a union response has to declare its own envelope or the document
+ * promises a bare body the server never sends. Identical to
+ * `ai-speech.controller.ts`'s helper of the same name, for the identical
+ * reason; not shared, because a two-line schema literal is a poor thing to
+ * couple two controllers over.
+ */
+function envelopedOneOf(
+  ...models: Parameters<typeof getSchemaPath>[0][]
+): SchemaObject {
+  return {
+    type: 'object',
+    required: ['data'],
+    properties: {
+      data: {
+        oneOf: models.map((model) => ({ $ref: getSchemaPath(model) })),
+        discriminator: { propertyName: 'status' },
+      },
+      meta: { type: 'object', additionalProperties: true },
+    },
+  };
+}
+
 @ApiTags('Interviews')
+// Referenced by `$ref` from the hand-written `oneOf` below, so nothing else in
+// the document would pull them in — without this they are dangling references.
+@ApiExtraModels(
+  RealtimeSessionOkDto,
+  RealtimeSessionUnavailableDto,
+  RealtimeSessionFailedDto,
+)
 @Controller('interviews')
 export class InterviewsController {
   private readonly logger = new Logger(InterviewsController.name);
@@ -253,6 +307,120 @@ export class InterviewsController {
     @Param('id', ParseUUIDPipe) id: string,
   ): Promise<InterviewDebrief> {
     return this.interviews.completeInterview(userId, id);
+  }
+
+  /**
+   * Mint one ephemeral realtime session credential for this interview.
+   *
+   * ---------------------------------------------------------------------------
+   * THE ONLY RESPONSE IN THIS API WHOSE SUCCESS BODY IS A CREDENTIAL
+   * ---------------------------------------------------------------------------
+   *
+   * `docs/specs/realtime-interview.md` §12's second locked decision: "The
+   * browser never sees the learner's API key — only an ephemeral,
+   * interview-scoped secret." A long-lived key handed to browser JavaScript is
+   * a key in the network tab, in browser history, and readable by any script on
+   * the page, and it keeps working until a human revokes it. The secret this
+   * route returns expires in about a minute and is scoped to a session
+   * configuration this application authored for this one interview.
+   *
+   * Three consequences visible in this handler:
+   *
+   *   * `@Header('Cache-Control', 'no-store')`. A cached mint response is a
+   *     bearer credential sitting in a shared cache or a browser's disk cache
+   *     for longer than it is valid — a liability with no matching benefit,
+   *     since it cannot open a second session even while still readable.
+   *   * NO REQUEST BODY. There is nothing for a client to configure: the
+   *     instructions, the tools and the TTL are all the server's, and the model
+   *     comes from the admin's `realtime` binding. A body would be the first
+   *     field through which a caller could ask for a session that is not this
+   *     interview's.
+   *   * The secret is never logged, never a span attribute and never an
+   *     `audit_events` row — see `InterviewsService.createRealtimeSession` and
+   *     `AiRealtimeSessionResult`'s own header.
+   *
+   * ---------------------------------------------------------------------------
+   * `unavailable` IS A 200 WITH A CAUSE, NEVER A 4xx OR A 5xx
+   * ---------------------------------------------------------------------------
+   *
+   * The posture `ai-speech.controller.ts` already takes, for the reason
+   * `ai-speech.dto.ts` states in full: a non-2xx is flattened into generic
+   * failure handling and the cause — the one fact this response exists to
+   * carry — never reaches the screen. An unbound `realtime` role is not an
+   * error; it is a deployment where the voice interview is not configured, and
+   * the client's correct response is to fall back to the text transport
+   * (§7) with the same interview id and no loss of progress.
+   *
+   * The 404 and the 409 below are different in kind and stay exception-shaped:
+   * they are facts about the INTERVIEW, not about AI.
+   */
+  @Post(':id/realtime-session')
+  @Auth()
+  // 200, not the 201 a POST defaults to. Nothing in this application is
+  // created — a credential is minted at the provider — and there is no
+  // resource this route could hand back a location for.
+  @HttpCode(HttpStatus.OK)
+  // See the doc comment. `no-store`, not merely `no-cache`.
+  @Header('Cache-Control', 'no-store')
+  @ApiOperation({
+    summary: 'Mint a realtime session for this interview',
+    description:
+      'Returns a **short-lived, single-session client secret** your browser uses to open ' +
+      'a realtime voice connection directly to the AI provider. The audio never passes ' +
+      'through this API.\n\n' +
+      '**It is never your API key.** Your own key does not leave the server on any code ' +
+      `path. The secret returned here expires in roughly ${REALTIME_SESSION_TTL_SECONDS} ` +
+      'seconds — long enough to open the connection, not to hold a conversation — and a ' +
+      'session already under way is not cut off when it expires. The response is ' +
+      '`Cache-Control: no-store`; do not store it, and do not send it anywhere but the ' +
+      'provider.\n\n' +
+      '**There is no request body.** The officer’s instructions, the tools the model may ' +
+      'call and the session’s lifetime are all decided server-side, from this interview’s ' +
+      'own state. There is no model parameter — the model is the one your administrator ' +
+      'bound to the `realtime` role.\n\n' +
+      '**The engine still decides everything.** The model is given three tools ' +
+      '(`next_question`, `grade_answer`, `end_phase`) and no way to choose a question, ' +
+      'report a grade, or end a section early: `grade_answer` has no `verdict` field at ' +
+      'all, and the question text comes back from `next_question` to be spoken verbatim.\n\n' +
+      '**Re-mint freely while the interview is `in_progress`.** If the secret expires or ' +
+      'the connection drops, call this again — the interview resumes at whatever question ' +
+      'the engine’s own state says comes next, because that state is server-side and was ' +
+      'never held in the expired session. If re-minting fails, fall back to ' +
+      '`POST /interviews/{id}/turns`: both transports drive the identical engine, so no ' +
+      'progress is lost.\n\n' +
+      '**Read `status`.** `ok` carries the secret. `unavailable` means no mint was ' +
+      'attempted — you have stored no AI key, or an administrator has not bound a ' +
+      '`realtime` model — and names the `cause` and the `role`. `failed` means the mint ' +
+      'was attempted and did not produce a usable session. **All three are HTTP 200**; a ' +
+      'non-2xx would discard the cause, which is the one fact this response exists to ' +
+      'carry. On either, conduct the interview in text.\n\n' +
+      '**The first successful mint records this interview as a voice interview** ' +
+      '(`mode: "voice"`), permanently — it is a summary of whether the interview was ever ' +
+      'conducted by voice, not a live transport indicator.',
+  })
+  @ApiParam({ name: 'id', type: String, format: 'uuid' })
+  @ApiOkResponse({
+    description:
+      'The ephemeral secret, or a typed reason there is none. Read `status`. Never ' +
+      'cached — the response is `Cache-Control: no-store`.',
+    schema: envelopedOneOf(
+      RealtimeSessionOkDto,
+      RealtimeSessionUnavailableDto,
+      RealtimeSessionFailedDto,
+    ),
+  })
+  @ApiResponse({ status: 404, description: 'No such interview for this caller' })
+  @ApiResponse({
+    status: 409,
+    description:
+      'The interview is completed or abandoned, or has no turn left to take — there is ' +
+      'nothing left for a realtime session to conduct',
+  })
+  createRealtimeSession(
+    @CurrentUser('id') userId: string,
+    @Param('id', ParseUUIDPipe) id: string,
+  ): Promise<RealtimeSessionResponse> {
+    return this.interviews.createRealtimeSession(userId, id);
   }
 
   /**

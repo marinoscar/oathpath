@@ -47,7 +47,13 @@ import {
   type OfficerTurnBody,
 } from './officer-prompt';
 import { buildInterviewDebrief, type DebriefAttempt } from './debrief';
+import { buildRealtimeOfficerInstructions } from './realtime/realtime-instructions';
+import {
+  INTERVIEW_REALTIME_TOOLS,
+  REALTIME_SESSION_TTL_SECONDS,
+} from './realtime/realtime-tools';
 import type { CreateInterviewInput } from './dto/create-interview.dto';
+import type { RealtimeSessionResponse } from './dto/interview-realtime-session.dto';
 import type { InterviewTurnInput } from './dto/interview-turn.dto';
 import type { InterviewQuery } from './dto/interview-query.dto';
 import type { InterviewDebrief } from './dto/interview-debrief.dto';
@@ -135,6 +141,19 @@ import type {
  * genuinely different job.
  */
 const TUTOR_ROLE: AiModelRole = 'tutor';
+
+/**
+ * The role the realtime transport spends the learner's key on (#157, E11).
+ *
+ * `satisfies` RATHER THAN AN ANNOTATION, unlike {@link TUTOR_ROLE} above, and
+ * the difference is load-bearing: this string is also the `role` field of the
+ * mint response, which `interview-realtime-session.dto.ts` publishes as a
+ * LITERAL so a client can match it against `GET /api/ai/status`'s
+ * `unboundRoles`. Annotating it `AiModelRole` would widen it to the union and
+ * that match would stop compiling; `satisfies` keeps the literal type AND
+ * still fails this file's build if the registry ever stops declaring the key.
+ */
+const REALTIME_ROLE = 'realtime' satisfies AiModelRole;
 
 /** The `civics_questions` columns this module reads. */
 const QUESTION_SELECT = {
@@ -692,6 +711,152 @@ export class InterviewsService {
     );
 
     return debrief;
+  }
+
+  // ---------------------------------------------------------------------------
+  // The realtime transport (issue #157, epic #60 / E11)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Mint one ephemeral realtime session credential for this interview.
+   *
+   * `docs/specs/realtime-interview.md` §3 in full. What comes back is a
+   * short-lived secret the LEARNER'S OWN BROWSER uses to open a realtime
+   * connection directly to the provider; this application is not in that
+   * connection's data path at all, which is why §13 rejected proxying the audio
+   * and why nothing about the recording ever reaches this process.
+   *
+   * ---------------------------------------------------------------------------
+   * THE SAME 404, THE SAME 409, THROUGH THE SAME TWO CHECKS AS A TURN
+   * ---------------------------------------------------------------------------
+   *
+   * {@link requireInterview} filters on `userId` in the `where`, so another
+   * learner's interview is a **404, not a 403** here exactly as it is
+   * everywhere else on this service — a mint route is not a place to start
+   * confirming that an id names a real interview belonging to somebody.
+   *
+   * A completed or abandoned interview mints nothing, and neither does one the
+   * engine says has no turn left to take: a realtime session exists to conduct
+   * the rest of an interview, and there is no rest of it. Both are the 409
+   * `submitTurn` already raises for the identical states, in the identical
+   * shape — the request is well-formed, the interview's own state refuses it.
+   * Minting anyway would spend the learner's key on a session whose first
+   * `next_question` call could only be rejected.
+   *
+   * ---------------------------------------------------------------------------
+   * THE SESSION IS BUILT SERVER-SIDE, FROM THIS INTERVIEW
+   * ---------------------------------------------------------------------------
+   *
+   * The instructions and the tool schemas are this application's, assembled
+   * here (`realtime/`), and the request carries no client-supplied field at
+   * all — there is no body on this route. The prompt is grounded in the
+   * engine's own current phase and in nothing else: no question, no accepted
+   * answer, no pass mark and no question count reaches the model, for the
+   * reasons `realtime-instructions.ts` sets out one by one.
+   *
+   * ---------------------------------------------------------------------------
+   * NOTHING ABOUT THE SECRET IS LOGGED
+   * ---------------------------------------------------------------------------
+   *
+   * The log line below carries the user, the interview, the model and the
+   * status — the same fields every other line in this file carries. The secret
+   * is a bearer credential for the minutes it is valid, and a log aggregator
+   * retains far longer than that; `AiRealtimeSessionResult`'s own header makes
+   * the same argument for spans. No `audit_events` row is written either,
+   * matching `voice.md` §9's posture toward the speech routes: this is an
+   * ordinary, per-user, no-permission action a learner takes on their own
+   * interview, not an administrative one.
+   */
+  async createRealtimeSession(
+    userId: string,
+    interviewId: string,
+  ): Promise<RealtimeSessionResponse> {
+    const interview = await this.requireInterview(userId, interviewId);
+
+    if (interview.status !== 'in_progress') {
+      throw new ConflictException(
+        `Interview "${interviewId}" is ${interview.status} and accepts no further turns`,
+      );
+    }
+
+    const state = await this.rebuildState(interview);
+
+    if (nextPrompt(state).kind === 'completed') {
+      throw new ConflictException(
+        `Interview "${interviewId}" has no further turns; complete it to see the debrief`,
+      );
+    }
+
+    const minted = await this.dispatch.createRealtimeSession(userId, {
+      instructions: buildRealtimeOfficerInstructions({ phase: state.phase }),
+      tools: INTERVIEW_REALTIME_TOOLS,
+      expiresInSeconds: REALTIME_SESSION_TTL_SECONDS,
+    });
+
+    if (minted.status !== 'ok') {
+      this.logger.warn(
+        {
+          userId,
+          interviewId,
+          status: minted.status,
+          // One of the four causes, or a stable provider code. Both are
+          // GROUP-able; neither is a message and neither is a credential.
+          reason: minted.status === 'unavailable' ? minted.cause : minted.errorCode,
+        },
+        'Realtime interview session could not be minted',
+      );
+
+      return minted.status === 'unavailable'
+        ? { status: 'unavailable', cause: minted.cause, role: REALTIME_ROLE }
+        : {
+            status: 'failed',
+            errorCode: minted.errorCode,
+            error: minted.error,
+          };
+    }
+
+    // MODE IS FLIPPED HERE, ON THE FIRST SUCCESSFUL MINT, AND ONLY HERE (§3).
+    // `create-interview.dto.ts`'s `ForbiddenCreateInterviewFieldNames` already
+    // forbids a client from naming `mode` on `POST /api/interviews`, and this
+    // epic adds no exception to it: a `mock_interviews` row moves from `text`
+    // to `voice` through this server-side write or not at all.
+    //
+    // It is a ONE-WAY, COARSE SUMMARY — "was this interview ever conducted by
+    // voice" — and it is deliberately not reverted when a session later falls
+    // back to text (§7). The live, per-turn truth lives one layer down on
+    // `practice_attempts.input_mode`/`prompt_mode`, the same relationship
+    // `civicsAsked`/`civicsCorrect` already have to the rows they summarise.
+    //
+    // Guarded on the current value so a re-mint mid-interview — §3's ordinary
+    // case, not an edge one — is not a second write of a value that is already
+    // there.
+    if (interview.mode !== 'voice') {
+      await this.prisma.mockInterview.update({
+        where: { id: interview.id },
+        data: { mode: 'voice' },
+      });
+    }
+
+    this.logger.log(
+      {
+        userId,
+        interviewId,
+        phase: state.phase,
+        modelId: minted.modelId,
+        // NOT THE SECRET, and not its length either — see the doc comment.
+        expiresAt: minted.expiresAt.toISOString(),
+      },
+      'Realtime interview session minted',
+    );
+
+    return {
+      status: 'ok',
+      clientSecret: minted.clientSecret,
+      // The PROVIDER's own expiry, serialised. Never recomputed from the TTL
+      // this application asked for.
+      expiresAt: minted.expiresAt.toISOString(),
+      modelId: minted.modelId,
+    };
   }
 
   // ---------------------------------------------------------------------------
