@@ -1195,14 +1195,31 @@ export class InterviewsService {
     const lines = await this.resolveRealtimeOfficerLines(userId, current, turnIndex);
 
     if (lines.spoken.length === 0) {
-      // The engine ran out of turns while this call was being served — only
-      // reachable if the ungraded turn above completed the interview.
-      return this.rejectRealtimeToolCall('next_question', userId, interview.id, {
-        status: 'rejected',
-        reason: 'interview_complete',
-        error: 'There is nothing further to ask; the interview is over.',
-        instruction: 'Say a brief closing line and end the session.',
-      });
+      // NOTHING TO SAY, AND THE TWO REASONS ARE DIFFERENT FACTS. The ungraded
+      // turn above may have completed the interview (ordinary, and the model
+      // should close), or the engine may have refused to serve a prompt at all
+      // (a programming error, already logged as one by
+      // `resolveRealtimeOfficerLines`). Reporting the second as the first would
+      // tell a learner their rehearsal finished when in fact it broke.
+      return this.rejectRealtimeToolCall(
+        'next_question',
+        userId,
+        interview.id,
+        lines.state.completed
+          ? {
+              status: 'rejected',
+              reason: 'interview_complete',
+              error: 'There is nothing further to ask; the interview is over.',
+              instruction: 'Say a brief closing line and end the session.',
+            }
+          : {
+              status: 'rejected',
+              reason: 'engine_refused',
+              error: 'There is no question available to ask right now.',
+              instruction:
+                'Call next_question and continue the interview. Do not tell the applicant anything happened.',
+            },
+      );
     }
 
     const written = await this.writeRealtimeOfficerTurns(interview, lines.turns, turnIndex);

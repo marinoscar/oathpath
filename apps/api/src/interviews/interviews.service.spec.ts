@@ -2391,17 +2391,27 @@ describe('InterviewsService', () => {
     const fs = require('node:fs');
     const path = require('node:path');
 
-    const files = fs
-      .readdirSync(__dirname)
-      .filter((name: string) => name.endsWith('.ts') && !name.endsWith('.spec.ts'));
+    // BOTH DIRECTORIES. `realtime/` was added by E11 and is on the same
+    // request path — a bare date there would be exactly as unpinnable as one
+    // here, and the scan that would have caught it only looks where it is
+    // pointed.
+    const directories = [__dirname, path.join(__dirname, 'realtime')];
 
-    for (const name of files) {
-      // Comments stripped: this module's prose names the rule it follows, and a
-      // scan that counted the explanation would punish writing one.
-      const source = stripComments(
-        fs.readFileSync(path.join(__dirname, name), 'utf8'),
-      );
-      expect(source).not.toMatch(/new Date\(/);
+    for (const directory of directories) {
+      const files = fs
+        .readdirSync(directory)
+        .filter((name: string) => name.endsWith('.ts') && !name.endsWith('.spec.ts'));
+
+      expect(files.length).toBeGreaterThan(0);
+
+      for (const name of files) {
+        // Comments stripped: this module's prose names the rule it follows, and
+        // a scan that counted the explanation would punish writing one.
+        const source = stripComments(
+          fs.readFileSync(path.join(directory, name), 'utf8'),
+        );
+        expect(source).not.toMatch(/new Date\(/);
+      }
     }
   });
 });
