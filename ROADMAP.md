@@ -80,9 +80,9 @@ a v2.
 | E3 | Practice sessions | Deterministic (exact-match + normalisation) practice loop and `practice_attempts`, the one evidence table every later epic reads | E1, E2 | done<sup>‡</sup> | [#52](https://github.com/marinoscar/oathpath/issues/52) |
 | E4 | AI Evaluator and Teacher | `AiDispatchService.run`, the `FakeAiProvider`, semantic grading with failure causes, streaming explanations — the first AI feature | #25, E2, E3 | done<sup>‡</sup> | [#53](https://github.com/marinoscar/oathpath/issues/53) |
 | E5 | Memory | Spaced repetition (`question_mastery`), verified mastery (correct on ≥3 distinct days), the deterministic Study Coach recommender, Progress v1 | E1, E3 | done<sup>§</sup> | [#54](https://github.com/marinoscar/oathpath/issues/54) |
-| E6 | Readiness and Progress | The explainable, capped readiness score (`readiness_snapshots`), Progress v2, the readiness-vs-engagement separation | E3, E5 | not started | [#55](https://github.com/marinoscar/oathpath/issues/55) |
-| E7 | Habit | Daily goal, streaks with protection, session-end celebrations, three reminder notification events on an hourly cron | E1, E3, E5 | not started | [#56](https://github.com/marinoscar/oathpath/issues/56) |
-| E8 | Mock interview — text mode | Deterministic interview engine (question selection, pass rules from `civics_test_versions`), text-mode interview and debrief — closes Milestone A | #25 (for `tutor`), E4, E6 | not started | [#57](https://github.com/marinoscar/oathpath/issues/57) |
+| E6 | Readiness and Progress | The explainable, capped readiness score (`readiness_snapshots`), Progress v2, the readiness-vs-engagement separation | E3, E5 | done<sup>‖</sup> | [#55](https://github.com/marinoscar/oathpath/issues/55) |
+| E7 | Habit | Daily goal, streaks with protection, session-end celebrations, three reminder notification events on an hourly cron | E1, E3, E5 | done<sup>‖</sup> | [#56](https://github.com/marinoscar/oathpath/issues/56) |
+| E8 | Mock interview — text mode | Deterministic interview engine (question selection, pass rules from `civics_test_versions`), text-mode interview and debrief — closes Milestone A | #25 (for `tutor`), E4, E6 | done<sup>‖</sup> | [#57](https://github.com/marinoscar/oathpath/issues/57) |
 | E9 | Voice foundation | `transcribe`/`speak` wired, audio capture and playback, spoken practice mode with transcript confirmation, misheard-vs-wrong distinction — opens Milestone B | #25, E4, E6 | done<sup>¶</sup> | [#58](https://github.com/marinoscar/oathpath/issues/58) |
 | E10 | Reading and writing tests | Vocabulary-sourced sentences, word-error-rate reading scoring, dictated writing scoring, the readiness `english` component | E9 | not started | [#59](https://github.com/marinoscar/oathpath/issues/59) |
 | E11 | Realtime voice interview | `realtime` wired, ephemeral session tokens, the E8 engine driving a realtime model over tool calls — closes Milestone B and the MVP | #25, E8, E9, E10 | not started | [#60](https://github.com/marinoscar/oathpath/issues/60) |
@@ -225,6 +225,32 @@ pointer and deletes nothing else; deleting a user still removes every
 attempt, retries included. That is a stronger claim than any earlier epic's
 migration footnote makes, and it is made deliberately, because it was
 actually checked.
+
+<sup>‖</sup> **E6, E7 and E8 are marked `done`, on the same convention this
+table has followed since E5**: an epic whose child issues are all merged and
+whose CI is green is `done`, and an unrun Playwright journey spec is a
+footnoted fact, not a status.
+
+1. **E6 (#55)** — all nine child issues merged to `main`: #108, #113, #122,
+   #127, #134, #139, #142, #146, #150. `apps/api/src/readiness/` and
+   `tests/e2e/specs/readiness.spec.ts` are both on `main`.
+2. **E7 (#56)** — all eight child issues merged to `main`: #103, #112, #119,
+   #128, #138, #143, #148, #153. `apps/api/src/engagement/` and
+   `tests/e2e/specs/habit.spec.ts` are both on `main`.
+3. **E8 (#57)** — all eight child issues merged to `main`: #107, #115, #123,
+   #133, #140, #145, #151, #154. `apps/api/src/interviews/` and
+   `tests/e2e/specs/mock-interview-text.spec.ts` are both on `main`.
+
+One thing a later reader should not assume this footnote settles, on the
+identical terms E5's and E9's footnotes above state it: **whether a human has
+actually run each epic's Playwright journey spec against the compose
+stack** — the §6 check this legend requires. All three specs exist on `main`
+alongside the shipped code they exercise, but nothing here confirms any of
+them has been executed end to end.
+
+With this, Milestone A (E1–E8) is `done` on paper across every epic in it;
+per [§2](#2-what-the-mvp-is), Milestone B (E9–E11) is still required to
+close the MVP, and E9 already carries its own `done` footnote above.
 
 ## 4. Why this order
 
