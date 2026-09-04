@@ -2663,6 +2663,14 @@ stance — lives in
 [`docs/specs/mock-interview.md`](specs/mock-interview.md); this section
 covers only the wire contract.
 
+Issue #157, epic #60 (E11 "Realtime voice interview") adds one more route —
+`POST /interviews/{id}/realtime-session` — which mints the short-lived
+credential a browser uses to conduct the same interview by voice. It changes
+nothing above: the engine still decides the phase, the question, the grade
+and the stop, and both transports drive the identical server-side state.
+Design rationale lives in
+[`docs/specs/realtime-interview.md`](specs/realtime-interview.md).
+
 **Every route below is `@Auth()` with no permissions, and no new permission
 string is added**, for the identical reason the Journey, Practice,
 Progress, Readiness and Engagement sections above all give in turn: no
@@ -2670,7 +2678,10 @@ route accepts a user id from anywhere but the authenticated session, so
 there is no "read another learner's interview" permission to add in the
 first place. Every authenticated learner owns their own interview history
 exactly as they own their own practice attempts, their own learner profile,
-and their own readiness snapshots.
+and their own readiness snapshots. **The realtime mint is no
+exception**: gating it would leave a Viewer, the default role, unable to sit
+a spoken mock interview at all, and there is no "use voice" privilege in
+this product's authorization model.
 
 **An interview belonging to another learner is a 404, not a 403.**
 Confirming that an id names a real interview would itself be the leak —
@@ -2989,6 +3000,108 @@ flag on the header is what tells the two apart.
 
 **Error Cases:**
 - 404 Not Found — unknown interview id, or it belongs to another learner
+
+---
+
+#### POST /interviews/:id/realtime-session
+Mints a **short-lived, single-session client secret** the browser uses to
+open a realtime voice connection directly to the AI provider. Issue #157,
+epic #60 (E11). The audio never passes through this API — see
+[`docs/specs/realtime-interview.md`](specs/realtime-interview.md) §3 and
+§13's rejected "proxying audio through the API" row.
+
+**Parameters:**
+- `id` (uuid) — interview id
+
+**Request Body:** none, deliberately. The officer's instructions, the tools
+the model may call and the session's lifetime are all decided server-side
+from this interview's own state. **There is no model parameter** — the model
+is the one an administrator bound to the `realtime` role — and no voice,
+instruction or tool field a client could supply. A body is ignored.
+
+**Response — `status: "ok"`:**
+```json
+{
+  "data": {
+    "status": "ok",
+    "clientSecret": "ek_…",
+    "expiresAt": "2026-06-01T12:01:00.000Z",
+    "modelId": "gpt-4o-realtime-preview"
+  }
+}
+```
+
+**`clientSecret` is never your API key.** Your own key does not leave the
+server on any code path. What comes back expires in roughly 60 seconds —
+long enough to open the connection, not to hold a conversation — and is
+scoped to the session configuration this interview was minted for. A session
+already under way is **not** cut off when it expires. The response is sent
+`Cache-Control: no-store`; do not store it, and do not send it anywhere but
+the provider.
+
+**Nothing else is returned.** Not the instructions, not the tool list, not
+the interview's phase: a client that needed any of them would be a client
+deciding something the server decides.
+
+**The engine still decides everything.** The session declares three tools —
+`next_question`, `grade_answer`, `end_phase` — and gives the model no way to
+choose a question, report a grade, or end a section early: `grade_answer` has
+no `verdict` field at all, and the question text comes back from
+`next_question` to be spoken verbatim. Handling those calls is issue #158.
+
+**Re-mint freely while the interview is `in_progress`.** If the secret
+expires or the connection drops, call this again: the interview resumes at
+whatever question the engine's own state says comes next, because that state
+is server-side and was never held in the expired session. If re-minting
+fails, fall back to `POST /interviews/{id}/turns` — both transports drive the
+identical engine, so no progress is lost.
+
+**The first successful mint records the interview as a voice interview**
+(`mode: "voice"`), permanently. It is a coarse summary of whether the
+interview was ever conducted by voice, not a live transport indicator, and it
+is not reverted when a session later falls back to text. `mode` is never a
+request field: `POST /interviews` forbids it outright.
+
+**Response — `status: "unavailable"`:**
+```json
+{
+  "data": {
+    "status": "unavailable",
+    "cause": "role_unbound",
+    "role": "realtime"
+  }
+}
+```
+
+No mint was attempted: you have stored no AI key, an administrator has
+switched AI off or has not bound a `realtime` model, or the configured
+provider cannot serve realtime sessions. `cause` is one of `no_user_key`,
+`ai_disabled`, `role_unbound`, `capability_unsupported`. **Conduct the
+interview in text** — that is the designed fallback, not a degraded state.
+
+**Response — `status: "failed"`:**
+```json
+{
+  "data": {
+    "status": "failed",
+    "errorCode": "rate_limited",
+    "error": "Too many requests."
+  }
+}
+```
+
+The mint was attempted and did not produce a usable session. Worth a retry
+before falling back to text.
+
+**All three are HTTP 200.** A non-2xx would discard the cause, which is the
+one fact this response exists to carry — the same posture
+`POST /ai/speech/*` takes.
+
+**Error Cases:**
+- 400 Bad Request — `id` is not a uuid
+- 404 Not Found — unknown interview id, or it belongs to another learner
+- 409 Conflict — the interview is completed or abandoned, or has no turn left
+  to take; there is nothing left for a realtime session to conduct
 
 ---
 
