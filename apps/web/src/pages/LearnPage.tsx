@@ -59,6 +59,7 @@
 
 import { Alert, Box, Button, Container, Divider, Stack, Typography } from '@mui/material';
 import StyleOutlinedIcon from '@mui/icons-material/StyleOutlined';
+import RecordVoiceOverOutlinedIcon from '@mui/icons-material/RecordVoiceOverOutlined';
 import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import { Link as RouterLink, useSearchParams } from 'react-router-dom';
 
@@ -76,6 +77,7 @@ import { QuestionList } from '../components/civics/QuestionList';
 // rather than re-spelled: two literals for one destination is how one of them
 // survives a route rename.
 import { SET_STATE_PATH as PLAN_PATH } from '../components/civics/StateRequiredNotice';
+import { READING_PRACTICE_PATH } from '../components/english/paths';
 
 /** The one place `/learn`'s query parameters are spelled. */
 const PARAM = {
@@ -264,15 +266,43 @@ export default function LearnPage() {
                     entry behind "pick a category first" makes the common case
                     the longer one. `fullWidth` at `xs` because on a phone this
                     IS the primary action of the screen. */}
-                <Button
-                  component={RouterLink}
-                  to={learnHref({ category: ALL_CATEGORIES, study: true })}
-                  variant="contained"
-                  startIcon={<StyleOutlinedIcon />}
-                  sx={{ mb: 3, width: { xs: '100%', sm: 'auto' } }}
+                <Stack
+                  direction={{ xs: 'column', sm: 'row' }}
+                  spacing={1.5}
+                  sx={{ mb: 3, alignItems: { xs: 'stretch', sm: 'center' } }}
                 >
-                  Study all questions with flashcards
-                </Button>
+                  <Button
+                    component={RouterLink}
+                    to={learnHref({ category: ALL_CATEGORIES, study: true })}
+                    variant="contained"
+                    startIcon={<StyleOutlinedIcon />}
+                    sx={{ width: { xs: '100%', sm: 'auto' } }}
+                  >
+                    Study all questions with flashcards
+                  </Button>
+
+                  {/* Reading practice (#144, epic #59 / E10) — the OTHER half
+                      of the interview, reachable from the half a learner is
+                      already looking at. It is `outlined`, never `contained`:
+                      flashcards are the action of this screen, and two filled
+                      buttons would be the page failing to say which.
+
+                      It leaves `/learn` for `/practice/reading` rather than
+                      opening a fifth view in this page's query string, because
+                      it is not another way of looking at the civics question
+                      bank — it is a different exercise against a different
+                      content set, and the four views here are all the same
+                      bank. */}
+                  <Button
+                    component={RouterLink}
+                    to={READING_PRACTICE_PATH}
+                    variant="outlined"
+                    startIcon={<RecordVoiceOverOutlinedIcon />}
+                    sx={{ width: { xs: '100%', sm: 'auto' } }}
+                  >
+                    Practise reading aloud
+                  </Button>
+                </Stack>
 
                 <CategoryList
                   categories={categories}

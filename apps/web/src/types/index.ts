@@ -2465,3 +2465,197 @@ export interface InterviewPage {
   pageSize: number;
   totalPages: number;
 }
+
+// =============================================================================
+// English — `GET /api/english/next`, `POST /api/english/attempts`,
+// `GET /api/english/progress` (issue #136, epic #59 / E10)
+// =============================================================================
+//
+// Hand-written mirrors of `apps/api/src/english/dto/*.ts`, field for field
+// against those Zod schemas rather than approximated — the same discipline the
+// Practice and Interview blocks above already state for themselves.
+//
+// THE ONE PROPERTY OF THIS BLOCK THAT IS LOAD-BEARING
+// ---------------------------------------------------
+//
+// `RecordEnglishAttemptInput` has FOUR fields and none of them is a verdict.
+// There is no `outcome`, no `wer`, no `diff`, no `errors` — scoring happens on
+// the server, against sentence text the client is not trusted to echo back, and
+// `record-english-attempt.dto.ts` carries a compile-time proof that no
+// verdict-shaped field can be added to it. A client that widened this type "so
+// the screen can show the result sooner" would be a client that decides its own
+// grade, and the evidence table E6 reads would record whatever it decided.
+//
+// `EnglishAttemptResult` is DISCRIMINATED ON `status`, and both arms are HTTP
+// 200. `misheard` is NOT an outcome: it is the ABSENCE of a recorded failure —
+// no `english_attempts` row was written at all (`docs/specs/english-test.md`
+// §3). A caller that folded it into the failure branch would be showing a
+// learner a failure the server deliberately declined to record.
+// =============================================================================
+
+/** Which segment of the interview a sentence belongs to. */
+export type EnglishSegmentKind = 'reading' | 'writing';
+
+/**
+ * The three outcomes an `english_attempts` row can hold.
+ *
+ * THREE, not `PracticeOutcome`'s four: there is no `skipped` here. A declined
+ * segment produces no row at all rather than a `skipped` row — see
+ * `docs/specs/english-test.md` §5.1.
+ */
+export type EnglishOutcome = 'correct' | 'partial' | 'incorrect';
+
+/** One step of the word-level alignment. */
+export type EnglishDiffOpKind = 'match' | 'substitute' | 'delete' | 'insert';
+
+/**
+ * One operation of the reference-to-hypothesis alignment.
+ *
+ * `reference` is null on an `insert` (the learner said a word that is not in
+ * the sentence); `hypothesis` is null on a `delete` (a sentence word they did
+ * not say). Both are present on a `match` and a `substitute`.
+ *
+ * These are NORMALISED tokens, not the sentence's original spelling: the
+ * scorer aligns `normalizeAnswer`'s output on both sides, so "first" arrives
+ * here as `1` and "President of the United States" as the single token
+ * `president`. A screen rendering them is showing what was actually compared.
+ */
+export interface EnglishDiffOp {
+  kind: EnglishDiffOpKind;
+  reference: string | null;
+  hypothesis: string | null;
+  /** Position in the normalised reference. Insertions repeat the position. */
+  referenceIndex: number;
+}
+
+/** One sentence from the bank — `GET /api/english/next`. */
+export interface EnglishSentence {
+  id: string;
+  kind: EnglishSegmentKind;
+  /** Which vocabulary revision this bank is. */
+  version: string;
+  ordinal: number;
+  /**
+   * The sentence itself.
+   *
+   * Returned for BOTH segments, writing included, because dictation defaults to
+   * the browser's own speech synthesis and that needs the string client-side.
+   * The WRITING screen must never render it (`docs/specs/english-test.md` §4);
+   * the READING screen must — reading is a test of reading it.
+   */
+  text: string;
+  /** The USCIS vocabulary categories this sentence's own words resolve to. */
+  vocabTags: string[];
+  /** The SCORER's token count, not a naive space split. */
+  wordCount: number;
+}
+
+/** `GET /api/english/next` — `sentence: null` means the bank is empty. */
+export interface EnglishNextResponse {
+  sentence: EnglishSentence | null;
+}
+
+/**
+ * The whole body of `POST /api/english/attempts`.
+ *
+ * `asrConfidence` is READING-ONLY and **absent means unknown — never send 0**.
+ * A `0` is a confident claim that the recogniser was certain it heard nothing,
+ * which the server reads as a mishearing and stamps on a perfectly good answer.
+ *
+ * `replayCount` is WRITING-ONLY; a non-zero count on a reading attempt is a
+ * 400, because a reading sentence is shown rather than dictated.
+ */
+export interface RecordEnglishAttemptInput {
+  sentenceId: string;
+  /** What is actually scored — for reading, the learner-CONFIRMED transcript. */
+  responseText: string;
+  asrConfidence?: number;
+  replayCount?: number;
+}
+
+/** The scoring fields both arms of the attempt response carry. */
+export interface EnglishScoreFields {
+  sentenceId: string;
+  kind: EnglishSegmentKind;
+  /** The sentence as composed — on a writing attempt, this is the reveal. */
+  text: string;
+  responseText: string;
+  wer: number;
+  errors: number;
+  substitutions: number;
+  deletions: number;
+  insertions: number;
+  referenceTokenCount: number;
+  diff: EnglishDiffOp[];
+  normalizedReference: string;
+  normalizedHypothesis: string;
+}
+
+/** A row WAS written. */
+export interface EnglishAttemptScored extends EnglishScoreFields {
+  status: 'scored';
+  attemptId: string;
+  outcome: EnglishOutcome;
+  answeredAt: string;
+  asrConfidence: number | null;
+  replayCount: number;
+}
+
+/**
+ * NOTHING was written.
+ *
+ * The recogniser reported confidence below the threshold on a reading attempt
+ * that did not score `correct`. The diff still comes back — so the learner can
+ * see what was heard — but no `english_attempts` row exists and no failure is
+ * on their record. Offer a retry; never render this as a miss.
+ */
+export interface EnglishAttemptMisheard extends EnglishScoreFields {
+  status: 'misheard';
+  asrConfidence: number;
+  confidenceThreshold: number;
+}
+
+export type EnglishAttemptResult = EnglishAttemptScored | EnglishAttemptMisheard;
+
+/** One sentence's history — `GET /api/english/progress`. */
+export interface EnglishSentenceProgress {
+  sentenceId: string;
+  kind: EnglishSegmentKind;
+  text: string;
+  ordinal: number;
+  vocabTags: string[];
+  attempts: number;
+  bestOutcome: EnglishOutcome | null;
+  lastOutcome: EnglishOutcome | null;
+  lastWer: number | null;
+  lastAnsweredAt: string | null;
+}
+
+/** The same evidence rolled up by USCIS vocabulary category. */
+export interface EnglishVocabTagProgress {
+  tag: string;
+  sentencesTotal: number;
+  sentencesAttempted: number;
+  sentencesPassed: number;
+  attempts: number;
+}
+
+/** Reading and writing totals, always both. */
+export interface EnglishKindProgress {
+  kind: EnglishSegmentKind;
+  sentencesTotal: number;
+  sentencesAttempted: number;
+  sentencesPassed: number;
+  attempts: number;
+  /** `null` — never `0` — when there are no attempts. A mean of zero is a
+   *  perfect record, the opposite of no record. */
+  averageWer: number | null;
+  version: string | null;
+}
+
+/** `GET /api/english/progress` — three grains of the same evidence. */
+export interface EnglishProgress {
+  sentences: EnglishSentenceProgress[];
+  vocabTags: EnglishVocabTagProgress[];
+  byKind: EnglishKindProgress[];
+}
