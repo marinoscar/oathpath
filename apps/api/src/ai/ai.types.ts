@@ -426,3 +426,224 @@ export type AiStreamEvent =
       usage: AiUsage;
       usageEventId: string | null;
     };
+
+// -----------------------------------------------------------------------------
+// Speech (issue #88, epic #58 — E9 "Voice foundation")
+// -----------------------------------------------------------------------------
+//
+// Two more shapes on the same never-throw surface: audio in, text out, and text
+// in, audio out. They are separate from {@link AiCompletionRequest} rather than
+// a `messages` variant of it because nothing about them is a conversation —
+// there is no turn structure, no assistant role, no streamed delta, and the
+// payload is bytes.
+//
+// WHAT THESE TYPES CARRY IS A LEARNER'S RECORDED VOICE AND WHAT THEY SAID, so
+// two rules apply to every field below, and both are enforced in
+// `base-ai.provider.ts` rather than left to a call site:
+//
+//   * NO FIELD HERE MAY REACH A LOG LINE OR A SPAN ATTRIBUTE, with the single
+//     exception of the redacted `error`. Byte length and content type are
+//     diagnosable; the audio and the transcript are the material a trace
+//     backend has no business holding. `ai_usage_events` has no column for
+//     either, and that is not an oversight to work around.
+//
+//   * THE TRANSCRIBE PATH DOES NOT CARRY THE AUDIO BACK. The caller handed the
+//     buffer in and still holds it; echoing it into the result would only
+//     create a second reference for something downstream to persist by
+//     accident. `AiTranscriptionResult` has no `audio` field for that reason,
+//     and adding one is a decision, not a convenience.
+
+/**
+ * A request to turn one recording into text, on one caller's key.
+ *
+ * `roleKey` is carried for the same reason {@link AiCompletionRequest} carries
+ * it: the `ai_usage_events` row records WHICH JOB the call served, so an admin
+ * who rebinds `transcribe` later can still read last month's rows correctly.
+ */
+export interface AiTranscriptionRequest {
+  /** The model role this call serves: `'transcribe'`. */
+  roleKey: string;
+
+  /** The bound model id. Resolved by the caller from the settings row. */
+  modelId: string;
+
+  /**
+   * The recording itself.
+   *
+   * IN MEMORY, NEVER A PATH OR A STREAM. A recording of a learner's answer is
+   * transient by design: it exists to be turned into text and then to be
+   * dropped, and a temporary file is a copy that outlives the request and that
+   * somebody has to remember to delete. Practice answers are minutes of speech
+   * at most, so holding one buffer is affordable; if that ever stops being
+   * true, the fix is a size limit at the edge, not a file on disk.
+   */
+  audio: Buffer;
+
+  /** The recording's MIME type, e.g. `'audio/webm'`. */
+  contentType: string;
+
+  /**
+   * A file name for the upload.
+   *
+   * REQUIRED BECAUSE THE PROVIDER SDK INFERS THE AUDIO FORMAT FROM IT. A
+   * buffer with no name is uploaded as an unnamed blob and rejected as an
+   * unsupported format, which presents as "transcription is broken" rather
+   * than as the missing metadata it is. It is a wire detail, not a stored
+   * filename — nothing writes it anywhere.
+   */
+  fileName: string;
+
+  /**
+   * An optional ISO-639-1 hint, e.g. `'en'`.
+   *
+   * A HINT, NOT A CONSTRAINT: a learner practising for a US civics interview
+   * speaks English with an accent the recogniser may or may not place, and
+   * pinning the language improves accuracy without forbidding anything.
+   * Omitted means "let the provider decide".
+   */
+  languageHint?: string;
+}
+
+/**
+ * The outcome of one transcription.
+ *
+ * NEVER THROWN, always returned — the same never-throw contract every result
+ * type on this surface carries.
+ */
+export interface AiTranscriptionResult {
+  success: boolean;
+
+  /**
+   * What was heard, on success. `null` on failure.
+   *
+   * NEVER `''` STANDING IN FOR A FAILURE. An empty string is a legitimate
+   * result — a recording of silence, a learner who pressed record and said
+   * nothing — and a caller must be able to tell that apart from "the provider
+   * refused". `success` and `errorCode` are what distinguish them, and they
+   * only can if the failure path does not also produce `''`.
+   */
+  text: string | null;
+
+  /**
+   * How sure the recogniser was, in `[0, 1]`.
+   *
+   * -------------------------------------------------------------------------
+   * `null` MEANS UNKNOWN. IT IS NEVER DEFAULTED TO 0.
+   * -------------------------------------------------------------------------
+   *
+   * The identical rule every {@link AiUsage} field carries, for the identical
+   * reason — a stored zero is a false claim — but the false claim here is
+   * worse than a wrong token count. `confidence: 0` asserts "the recogniser
+   * was certain it heard nothing". Downstream, that is exactly the signal a
+   * caller uses to decide an answer was MISHEARD rather than wrong, so a
+   * defaulted zero turns "we do not know how well this was heard" into "this
+   * learner said nothing intelligible" — on an answer they may well have got
+   * right, and with the transcript sitting right there saying otherwise.
+   *
+   * `null` is a normal, expected value: not every model reports a confidence
+   * signal at all (see `OpenAiProvider.runTranscription`, where the
+   * `gpt-4o-transcribe` family cannot). A caller that needs a number must
+   * decide what to do when there is none — it must not read one that was
+   * invented for it.
+   */
+  confidence: number | null;
+
+  /**
+   * Token counts as the provider reported them.
+   *
+   * ALL-NULL IS THE ORDINARY CASE HERE, not a failure: the speech APIs bill by
+   * audio duration and report no token usage at all for most models. See
+   * {@link AiUsage} — `null` is the honest reading of "we were not told".
+   */
+  usage: AiUsage;
+
+  /**
+   * A short, stable classification of the failure, for the usage row. Null on
+   * success. A CODE, NOT A MESSAGE — see {@link AiCompletionResult.errorCode}.
+   */
+  errorCode: string | null;
+
+  /**
+   * The provider's verbatim message, redacted and truncated. Null on success.
+   *
+   * THE ONLY FIELD ON THIS TYPE THAT MAY REACH A LOG. It never contains the
+   * transcript or the audio — see the section header above.
+   */
+  error: string | null;
+}
+
+/**
+ * A request to read one piece of text aloud, on one caller's key.
+ *
+ * The text is ours, not a learner's: a civics question, an explanation, an
+ * officer's interview turn. That is why there is no confidence analogue on the
+ * way back — synthesis either produced audio or it did not.
+ */
+export interface AiSynthesisRequest {
+  /** The model role this call serves: `'speak'`. */
+  roleKey: string;
+
+  /** The bound model id. Resolved by the caller from the settings row. */
+  modelId: string;
+
+  /** What to say. */
+  text: string;
+
+  /**
+   * The provider's voice id, e.g. `'alloy'`.
+   *
+   * OPTIONAL, WITH THE DEFAULT CHOSEN BY THE PROVIDER IMPLEMENTATION rather
+   * than by each caller. A voice is a product decision made once; letting
+   * every call site pick one is how the same application ends up reading
+   * questions in one voice and explanations in another.
+   */
+  voice?: string;
+
+  /**
+   * The container to synthesise into. `'mp3'` when omitted.
+   *
+   * A string rather than a union: the accepted set is the PROVIDER's, and
+   * hard-coding OpenAI's list into this provider-independent type is the kind
+   * of coupling this file exists without.
+   */
+  format?: string;
+}
+
+/**
+ * The outcome of one synthesis.
+ *
+ * NEVER THROWN, always returned.
+ */
+export interface AiSynthesisResult {
+  success: boolean;
+
+  /**
+   * The synthesised audio, on success. `null` on failure.
+   *
+   * A `Buffer`, in memory, for the same reason {@link AiTranscriptionRequest}
+   * takes one: this is a response body on its way to a caller, not a file.
+   */
+  audio: Buffer | null;
+
+  /**
+   * The MIME type of {@link audio}, e.g. `'audio/mpeg'`. `null` on failure.
+   *
+   * RETURNED RATHER THAN ASSUMED. A caller streaming this to a browser must
+   * set a `Content-Type`, and deriving it from the requested `format` at that
+   * call site means the derivation is written once per caller and can disagree
+   * with what the provider actually sent back.
+   */
+  contentType: string | null;
+
+  /**
+   * Token counts as the provider reported them. All-null is ordinary here too
+   * — see {@link AiTranscriptionResult.usage}.
+   */
+  usage: AiUsage;
+
+  /** A short, stable classification of the failure. Null on success. */
+  errorCode: string | null;
+
+  /** The provider's verbatim message, redacted. Null on success. */
+  error: string | null;
+}

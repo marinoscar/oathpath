@@ -22,6 +22,10 @@ import type {
   AiReachabilityRequest,
   AiReachabilityResult,
   AiStructuredCompletionRequest,
+  AiSynthesisRequest,
+  AiSynthesisResult,
+  AiTranscriptionRequest,
+  AiTranscriptionResult,
   AiUsage,
 } from '../ai.types';
 import type { AiCapabilitySet } from './ai-provider.interface';
@@ -122,6 +126,48 @@ const OPENAI_CAPABILITIES: AiCapabilitySet = new Set<AiCapabilityFamily>([
   'embedding',
   'other',
 ]);
+
+/**
+ * The voice used when a caller names none.
+ *
+ * `alloy` is OpenAI's neutral default. The choice lives here rather than at
+ * each call site so the application does not read questions in one voice and
+ * explanations in another — see `AiSynthesisRequest.voice`.
+ */
+const DEFAULT_SPEECH_VOICE = 'alloy';
+
+/** The container used when a caller names none. Widely playable, small. */
+const DEFAULT_SPEECH_FORMAT = 'mp3';
+
+/**
+ * Container -> MIME type, for the audio this provider returns.
+ *
+ * A LOOKUP, NOT `audio/${format}`. `mp3` is served as `audio/mpeg`, and a
+ * browser handed `audio/mp3` may simply refuse to play it — the failure lands
+ * in an audio element with no error anyone can see. Unknown formats fall back
+ * to the octet-stream default rather than to a guess.
+ */
+const SPEECH_CONTENT_TYPES: Readonly<Record<string, string>> = {
+  mp3: 'audio/mpeg',
+  opus: 'audio/ogg',
+  aac: 'audio/aac',
+  flac: 'audio/flac',
+  wav: 'audio/wav',
+  pcm: 'audio/L16',
+};
+
+/**
+ * Usage for a speech call.
+ *
+ * ALL NULL, AND NOT BECAUSE ANYTHING FAILED: the speech endpoints report no
+ * token counts at all. `null` means "we were not told", which is exactly the
+ * truth here, and `0` would claim the call consumed nothing — see `AiUsage`.
+ */
+const EMPTY_SPEECH_USAGE: AiUsage = {
+  promptTokens: null,
+  completionTokens: null,
+  totalTokens: null,
+};
 
 /** A cached catalog, together with the key it was fetched under. */
 interface CachedCatalog {
@@ -545,6 +591,169 @@ export class OpenAiProvider extends BaseAiProvider {
     }
   }
 
+  /**
+   * Transcribe one recording on the caller's key (#88, epic #58).
+   *
+   * -------------------------------------------------------------------------
+   * THE BUFFER IS UPLOADED AS A NAMED `File`, AND THE NAME IS LOAD-BEARING
+   * -------------------------------------------------------------------------
+   *
+   * OpenAI infers the container format from the upload's filename extension.
+   * An unnamed blob is rejected as an unsupported format — which presents as
+   * "transcription is broken for everyone" rather than as the missing piece of
+   * metadata it is. `AiTranscriptionRequest.fileName` exists for this and
+   * nothing else; it is never written anywhere.
+   *
+   * -------------------------------------------------------------------------
+   * `verbose_json` IS REQUESTED BECAUSE IT IS THE ONLY CONFIDENCE SIGNAL THERE
+   * IS
+   * -------------------------------------------------------------------------
+   *
+   * The plain `json` response carries the text and nothing else. `verbose_json`
+   * adds per-segment `avg_logprob`, which {@link deriveConfidence} turns into
+   * the 0..1 number this application actually needs — "was this answer wrong,
+   * or was it misheard?" is a question a transcript alone cannot answer.
+   *
+   * -------------------------------------------------------------------------
+   * AND THE `gpt-4o-transcribe` FAMILY CANNOT PRODUCE IT
+   * -------------------------------------------------------------------------
+   *
+   * Those models accept only `json` (and `text`). A request pinned to
+   * `verbose_json` against one of them is a 400 — so the model an admin quite
+   * reasonably bound would simply never work. Two mechanisms cover that, and
+   * both are wanted:
+   *
+   *   * {@link wantsVerboseTranscription} skips `verbose_json` for the family
+   *     by name, so the ordinary case costs no failed request. A reactive
+   *     retry alone would burn a rejected upload — a learner's whole
+   *     recording, and the latency of sending it — on EVERY call.
+   *   * a single retry covers everything the name check cannot know about: a
+   *     renamed line, a new one, a third-party OpenAI-compatible endpoint.
+   *     Exactly one retry, for the reason `probeTextModel` gives — a loop here
+   *     spends someone's money re-uploading audio that was already refused.
+   *
+   * Either way the fallback returns `confidence: null`, NEVER a guessed
+   * number. See {@link AiTranscriptionResult.confidence}: an invented
+   * confidence is indistinguishable from a measured one at every call site
+   * that reads it.
+   *
+   * THROWS FREELY. `BaseAiProvider.transcribe` turns a throw into a recorded
+   * failure with null text, null confidence and null token counts.
+   */
+  protected async runTranscription(
+    apiKey: string,
+    request: AiTranscriptionRequest,
+    redact: SecretRedactor,
+  ): Promise<AiTranscriptionResult> {
+    // Re-registered defensively, as the other hooks do. The base class already
+    // did this before calling us.
+    redact.protect(apiKey);
+
+    const client = new OpenAI({ apiKey });
+
+    // A global `File` rather than the SDK's `toFile` helper: the payload is
+    // already fully in memory, so there is nothing to read or stream, and this
+    // keeps the upload path free of an SDK entry point that a test would then
+    // have to stand in for.
+    //
+    // The bytes are copied into a plain `Uint8Array` because a Node `Buffer`
+    // may be backed by a `SharedArrayBuffer` and is therefore not a `BlobPart`
+    // to the compiler. A copy of one recording is affordable; reaching for a
+    // cast instead would silence a real distinction.
+    const file = new File([new Uint8Array(request.audio)], request.fileName, {
+      type: request.contentType,
+    });
+
+    const base = {
+      file,
+      model: request.modelId,
+      ...(request.languageHint ? { language: request.languageHint } : {}),
+    };
+
+    if (!wantsVerboseTranscription(request.modelId)) {
+      const plain = await client.audio.transcriptions.create({
+        ...base,
+        response_format: 'json',
+      });
+
+      return transcriptionResult(readTranscriptText(plain), null);
+    }
+
+    try {
+      const verbose = await client.audio.transcriptions.create({
+        ...base,
+        response_format: 'verbose_json',
+      });
+
+      return transcriptionResult(
+        readTranscriptText(verbose),
+        deriveConfidence(verbose),
+      );
+    } catch (err) {
+      // NOT a never-throw guard — the base class owns that. This catch makes
+      // one decision and rethrows everything else untouched: an expired key, a
+      // quota, a network failure must all stay failures.
+      if (!isUnsupportedResponseFormatError(err)) throw err;
+
+      const plain = await client.audio.transcriptions.create({
+        ...base,
+        response_format: 'json',
+      });
+
+      return transcriptionResult(readTranscriptText(plain), null);
+    }
+  }
+
+  /**
+   * Synthesise speech on the caller's key (#88, epic #58).
+   *
+   * THE RESPONSE IS A `Response`, NOT A JSON BODY. The SDK hands back the raw
+   * fetch response and the bytes come out of `arrayBuffer()`, which is why
+   * this method — unlike every other hook here — has no shape to read fields
+   * off. The content type is derived from the format we ASKED for rather than
+   * read off the response header, because the header is what a proxy or a
+   * mock may or may not set and the format is what we know we requested.
+   *
+   * NO TOKEN USAGE IS REPORTED, AND ALL-NULL IS THE HONEST ANSWER. The speech
+   * endpoints bill by characters and duration and send no usage object at all.
+   * Writing `0` would state that this call consumed nothing — see
+   * `AiUsage`'s own contract, which is the same rule that keeps a failed
+   * completion from recording zero tokens.
+   *
+   * THROWS FREELY; the base class records the failure.
+   */
+  protected async runSynthesis(
+    apiKey: string,
+    request: AiSynthesisRequest,
+    redact: SecretRedactor,
+  ): Promise<AiSynthesisResult> {
+    redact.protect(apiKey);
+
+    const client = new OpenAI({ apiKey });
+
+    const format = request.format ?? DEFAULT_SPEECH_FORMAT;
+
+    const response = await client.audio.speech.create({
+      model: request.modelId,
+      // The default is a product decision made once, here, rather than at each
+      // call site — see `AiSynthesisRequest.voice`.
+      voice: request.voice ?? DEFAULT_SPEECH_VOICE,
+      input: request.text,
+      response_format: format as 'mp3',
+    });
+
+    const audio = Buffer.from(await response.arrayBuffer());
+
+    return {
+      success: true,
+      audio,
+      contentType: speechContentType(format),
+      usage: EMPTY_SPEECH_USAGE,
+      errorCode: null,
+      error: null,
+    };
+  }
+
   // ---------------------------------------------------------------------------
   // Internals
   // ---------------------------------------------------------------------------
@@ -965,4 +1174,138 @@ function readUsage(
 
 function numberOrNull(value: number | null | undefined): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+/**
+ * Can this model produce `verbose_json`, the only response shape that carries a
+ * confidence signal?
+ *
+ * `whisper-1` can. The `gpt-4o-transcribe` / `gpt-4o-mini-transcribe` line
+ * cannot — it accepts `json` and `text` only, and rejects anything else with a
+ * 400. Matched on the name because that is the fact OpenAI publishes; the one
+ * retry in {@link OpenAiProvider.runTranscription} is what covers the model
+ * this rule has not heard of.
+ *
+ * DEFAULTS TO `true`, i.e. to asking for the richer shape. Getting that wrong
+ * costs one retried request; defaulting the other way would silently drop the
+ * confidence signal for every model not named here, including every future
+ * one — a degradation with no symptom, on the exact field this epic exists to
+ * produce.
+ */
+export function wantsVerboseTranscription(modelId: string): boolean {
+  return !/transcribe/i.test(modelId);
+}
+
+/**
+ * Did this failure mean "that response_format is not available on this model"?
+ *
+ * Separate from {@link isUnsupportedParameterError} rather than folded into
+ * it: the parameter itself is perfectly well known, it is the VALUE that this
+ * model will not produce, and OpenAI words that rejection differently
+ * ("is not compatible with", `invalid_value`). Folding the two would make the
+ * probe's retry fire on transcription errors and this one fire on chat errors,
+ * which is how one loosened predicate quietly changes two behaviours.
+ *
+ * Pure and exported so a test can state the real 400 verbatim.
+ */
+export function isUnsupportedResponseFormatError(err: unknown): boolean {
+  if (isUnsupportedParameterError(err)) return true;
+
+  const { text } = errorSignals(err);
+
+  return (
+    text.includes('response_format') &&
+    (text.includes('not compatible') ||
+      text.includes('not supported') ||
+      text.includes('invalid_value') ||
+      text.includes('invalid value'))
+  );
+}
+
+/**
+ * The 0..1 confidence for a verbose transcription, or `null` when there is no
+ * basis for one.
+ *
+ * -----------------------------------------------------------------------------
+ * THIS IS AN APPROXIMATION, AND SAYING SO IS THE POINT
+ * -----------------------------------------------------------------------------
+ *
+ * OpenAI exposes no confidence field. What it exposes is `avg_logprob` per
+ * segment — the mean log-probability of the tokens the model chose there — and
+ * `Math.exp` of that is the corresponding probability. Averaging across
+ * segments and exponentiating gives a number that ORDERS recordings sensibly
+ * (a clear answer scores near 1, a mumbled or half-caught one visibly lower)
+ * without being a calibrated probability that the transcript is correct. It is
+ * the only signal there is, and it is good enough for the one decision this
+ * application makes with it: was an answer wrong, or was it misheard?
+ *
+ * -----------------------------------------------------------------------------
+ * NO SEGMENTS MEANS `null`, NEVER A GUESS
+ * -----------------------------------------------------------------------------
+ *
+ * A model that ignored `verbose_json`, a response shape that changed, an empty
+ * recording: all of them arrive here as "no segments", and all of them mean we
+ * do not know. Substituting a plausible default — 1 for "probably fine", 0.5
+ * for "no opinion" — would be indistinguishable at every call site from a
+ * measured value, and the call site's whole job is to treat a low confidence
+ * as evidence about the LEARNER. Pretending to a precision we do not have is
+ * worse than admitting we have none.
+ *
+ * Clamped to [0, 1] because `Math.exp` of a positive logprob (which should not
+ * happen, and does when a provider sends something unexpected) would otherwise
+ * hand a caller a "confidence" above certainty.
+ */
+export function deriveConfidence(response: unknown): number | null {
+  const segments = (response as { segments?: unknown })?.segments;
+
+  if (!Array.isArray(segments) || segments.length === 0) return null;
+
+  const logprobs = segments
+    .map((segment) => (segment as { avg_logprob?: unknown })?.avg_logprob)
+    .filter(
+      (value): value is number =>
+        typeof value === 'number' && Number.isFinite(value),
+    );
+
+  if (logprobs.length === 0) return null;
+
+  const mean = logprobs.reduce((sum, value) => sum + value, 0) / logprobs.length;
+
+  return Math.min(1, Math.max(0, Math.exp(mean)));
+}
+
+/**
+ * The transcript out of either response shape.
+ *
+ * `text` is the one field `json` and `verbose_json` share, and it is a string
+ * in both. A missing or non-string one is `''` rather than `null`: this helper
+ * is only reached on a SUCCESSFUL call, and `null` on that path would collide
+ * with the meaning `AiTranscriptionResult.text` reserves for a failure.
+ */
+function readTranscriptText(response: unknown): string {
+  const text = (response as { text?: unknown })?.text;
+
+  return typeof text === 'string' ? text : '';
+}
+
+/** A successful transcription result, so the two call paths cannot disagree. */
+function transcriptionResult(
+  text: string,
+  confidence: number | null,
+): AiTranscriptionResult {
+  return {
+    success: true,
+    text,
+    confidence,
+    // The transcription endpoints report no token counts. See
+    // `EMPTY_SPEECH_USAGE` — null is the honest reading, not a failure.
+    usage: EMPTY_SPEECH_USAGE,
+    errorCode: null,
+    error: null,
+  };
+}
+
+/** The MIME type for a synthesised container. See {@link SPEECH_CONTENT_TYPES}. */
+function speechContentType(format: string): string {
+  return SPEECH_CONTENT_TYPES[format] ?? 'application/octet-stream';
 }

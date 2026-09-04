@@ -9,6 +9,10 @@ import type {
   AiStreamEvent,
   AiStructuredCompletionRequest,
   AiStructuredCompletionResult,
+  AiSynthesisRequest,
+  AiSynthesisResult,
+  AiTranscriptionRequest,
+  AiTranscriptionResult,
 } from '../ai.types';
 
 // =============================================================================
@@ -192,4 +196,59 @@ export interface AiProvider {
     request: AiCompletionRequest,
     signal?: AbortSignal,
   ): AsyncIterable<AiStreamEvent>;
+
+  /**
+   * Turn one recording into text on the CALLER's key, and record the call.
+   *
+   * NEVER REJECTS — the same rule every method above carries, and it bites
+   * harder here than anywhere else on this interface. This runs while a
+   * learner is waiting to find out whether their spoken answer was right, and
+   * every ordinary way it fails (a codec the model will not accept, a quota, a
+   * dropped upload) must reach them as a sentence and leave an
+   * `ai_usage_events` row behind. A throw skips the row, so the call the user
+   * was billed for is the one the accounting does not know about.
+   *
+   * A PROVIDER THAT CANNOT TRANSCRIBE RETURNS A FAILURE, NOT AN EXCEPTION. The
+   * base class checks {@link capabilities} first and answers
+   * `errorCode: 'capability_unsupported'` without calling out at all, so a
+   * chat-only provider behaves like a refusing one rather than like a bug.
+   *
+   * @param userId whose `ai_usage_events` row is written. The caller, always —
+   *        there is no path here that runs one user's inference against
+   *        another's accounting.
+   * @param apiKey the caller's own key, PASSED IN for the same reason
+   *        {@link complete} takes one: nothing under `providers/` reads the
+   *        credential store, so no provider method can reach for the server
+   *        key when it should be using a user's. That server key exists for
+   *        the catalog and the admin's connection test; an inference call on
+   *        it silently bills the administrator for a learner's usage.
+   * @returns the transcript and a confidence that MAY BE `null` — see
+   *        {@link AiTranscriptionResult.confidence}, which is never 0 for
+   *        "unknown".
+   */
+  transcribe(
+    userId: string,
+    apiKey: string,
+    request: AiTranscriptionRequest,
+  ): Promise<AiTranscriptionResult>;
+
+  /**
+   * Read one piece of text aloud on the CALLER's key, and record the call.
+   *
+   * NEVER REJECTS, and a provider with no speech API returns
+   * `errorCode: 'capability_unsupported'` rather than throwing — exactly as
+   * {@link transcribe} does, and for the same reason: an admin cannot bind
+   * `speak` to a provider that lacks it (see {@link AiCapabilitySet}), but a
+   * settings row written before a provider was swapped can still name one.
+   *
+   * @param userId whose usage row is written; @param apiKey the caller's own
+   *        key, passed in — see {@link transcribe} for both.
+   * @returns the audio bytes and the content type actually produced. NEVER
+   *        rejects.
+   */
+  synthesize(
+    userId: string,
+    apiKey: string,
+    request: AiSynthesisRequest,
+  ): Promise<AiSynthesisResult>;
 }

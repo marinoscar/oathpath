@@ -6,6 +6,7 @@ import {
   capabilityForRole,
   findModelRole,
   isModelRole,
+  textModelRoles,
   wiredModelRoles,
 } from './ai-model-roles';
 
@@ -21,8 +22,10 @@ import {
 
 describe('AI_MODEL_ROLES', () => {
   it('declares all six slots epic #25 locks in', () => {
-    // Decision 1: six declared, two wired — so voice work is not a settings
-    // schema change and a migration over live admin configuration later.
+    // Decision 1: six declared — so voice work is not a settings schema change
+    // and a migration over live admin configuration later. E9 (#88) is that
+    // promise being cashed: `transcribe` and `speak` were wired by flipping a
+    // boolean, and this length did not move.
     expect(AI_MODEL_ROLES).toHaveLength(6);
   });
 
@@ -62,30 +65,76 @@ describe('AI_MODEL_ROLES', () => {
     }
   });
 
-  it('wires exactly tutor and grader', () => {
-    expect(wiredModelRoles().map((r) => r.key)).toEqual(['tutor', 'grader']);
+  it('wires exactly tutor, grader, transcribe and speak', () => {
+    // E9 (#88) wired the two speech roles. `AiProvider.transcribe` and
+    // `.synthesize` are what dispatch to them; a role nothing dispatches to
+    // must stay unwired.
+    expect(wiredModelRoles().map((r) => r.key)).toEqual([
+      'tutor',
+      'grader',
+      'transcribe',
+      'speak',
+    ]);
+  });
+
+  it('leaves realtime and embed declared and inert', () => {
+    // `realtime` is epic #60 (E11); nothing dispatches to either today, and
+    // wiring a role nothing uses makes every deployment report an unbound
+    // model for a feature that does not exist.
+    expect(findModelRole('realtime')?.wired).toBe(false);
+    expect(findModelRole('embed')?.wired).toBe(false);
   });
 
   it('orders the wired roles first', () => {
-    // So an admin's live decisions are not below four inert ones.
+    // So an admin's live decisions are not below the inert ones.
     const firstUnwired = AI_MODEL_ROLES.findIndex((r) => !r.wired);
     const lastWired = AI_MODEL_ROLES.map((r) => r.wired).lastIndexOf(true);
     expect(lastWired).toBeLessThan(firstUnwired);
   });
 
-  it('binds both wired roles to a text family, which the floor applies to', () => {
-    // The generation floor is meaningful only for text. If a wired role were
-    // ever a non-text family, `minModelGeneration` would silently stop
-    // constraining anything the app actually dispatches to.
-    for (const role of wiredModelRoles()) {
+  it('returns a fresh array from wiredModelRoles', () => {
+    const first = wiredModelRoles();
+    first.pop();
+    expect(wiredModelRoles()).toHaveLength(4);
+  });
+});
+
+describe('textModelRoles', () => {
+  it('is exactly tutor and grader', () => {
+    // `systemReady` is computed over these, NOT over every wired role. Had it
+    // stayed on the wider set, wiring the two speech roles would have flipped
+    // every already-deployed installation to not-ready on deploy — an admin
+    // who changed nothing watching a working system report itself broken.
+    expect(textModelRoles().map((r) => r.key)).toEqual(['tutor', 'grader']);
+  });
+
+  it('holds only roles that are both wired and a text family', () => {
+    for (const role of textModelRoles()) {
+      expect(role.wired).toBe(true);
       expect(TEXT_CAPABILITY_FAMILIES).toContain(role.capability);
     }
   });
 
-  it('returns a fresh array from wiredModelRoles', () => {
-    const first = wiredModelRoles();
+  it('excludes the wired speech roles', () => {
+    // The distinction the whole split exists for: a deployment with no `speak`
+    // binding is a smaller product, not a broken one.
+    expect(textModelRoles().map((r) => r.key)).not.toContain('speak');
+    expect(textModelRoles().map((r) => r.key)).not.toContain('transcribe');
+  });
+
+  it('keeps the generation floor meaningful for everything it contains', () => {
+    // The floor applies only to text families. A text role outside this set
+    // would mean `minModelGeneration` silently stopped constraining a model
+    // the readiness gate depends on.
+    for (const role of textModelRoles()) {
+      expect(TEXT_CAPABILITY_FAMILIES).toContain(role.capability);
+    }
+  });
+
+  it('returns a fresh array', () => {
+    const first = textModelRoles();
     first.pop();
-    expect(wiredModelRoles()).toHaveLength(2);
+    expect(textModelRoles()).toHaveLength(2);
   });
 });
 

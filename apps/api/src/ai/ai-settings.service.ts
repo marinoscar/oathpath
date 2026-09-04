@@ -15,7 +15,11 @@ import {
   AI_SYSTEM_CREDENTIAL_NAME,
   AI_SYSTEM_CREDENTIAL_PURPOSE,
 } from './ai-credential.constants';
-import { AI_MODEL_ROLES, wiredModelRoles } from './ai-model-roles';
+import {
+  AI_MODEL_ROLES,
+  textModelRoles,
+  wiredModelRoles,
+} from './ai-model-roles';
 import { filterCatalog } from './providers/model-classifier';
 import type { AiCapabilityFamily } from './ai-model-roles';
 import type { AiProvider } from './providers/ai-provider.interface';
@@ -234,14 +238,43 @@ export class AiSettingsService {
   }
 
   /**
-   * Is the system ready to serve AI at all?
+   * Is the system ready to serve AI at all, and which wired roles are unbound?
    *
-   * Provider chosen, master switch on, and every WIRED role bound. Read by
-   * `GET /api/ai/status` (#36).
+   * Read by `GET /api/ai/status` (#36). The two answers below are deliberately
+   * computed over DIFFERENT sets of roles, and that is the whole design of
+   * this method.
    *
-   * ONLY THE WIRED ROLES COUNT. Four of the six are declared and inert (#27);
-   * requiring them would mean a fresh install could never become ready no
-   * matter what an admin did.
+   * -------------------------------------------------------------------------
+   * `unboundRoles` — EVERY WIRED ROLE WITH NO BINDING
+   * -------------------------------------------------------------------------
+   *
+   * Including `transcribe` and `speak` since E9 (#88) wired them. This is the
+   * fine-grained fact, and it is what lets a voice surface say WHICH role its
+   * administrator has not finished configuring rather than merely that
+   * something is missing — issue #109's web surfaces name the role. An UNWIRED
+   * role is still never listed: nothing dispatches to it, so an admin has left
+   * nothing undone.
+   *
+   * -------------------------------------------------------------------------
+   * `systemReady` — PROVIDER + SWITCH + THE TEXT ROLES ONLY
+   * -------------------------------------------------------------------------
+   *
+   * NOT `unboundRoles.length === 0`, and the difference matters on every
+   * already-deployed installation. `systemReady` feeds the hard-blocking
+   * navigation gate and `AiNotReady`; those ask "can this learner use the
+   * product at all", and the answer to that is the TEXT roles — `tutor` and
+   * `grader` — because they are what practice and explanation run on. A
+   * learner whose deployment has no `speak` binding reads the question instead
+   * of hearing it: a smaller product, not a broken one.
+   *
+   * Had this stayed "no wired role unbound", wiring two voice roles would have
+   * flipped every existing installation to not-ready on deploy — an admin who
+   * changed nothing, with a working tutor and grader, watching their system
+   * report itself broken with nothing failing to explain why. See
+   * `textModelRoles` in ai-model-roles.ts.
+   *
+   * A VOICE SURFACE MUST THEREFORE GATE ON ITS OWN ROLE'S BINDING, read out of
+   * `unboundRoles`, never on `systemReady`.
    *
    * NEVER THROWS — an invalid stored row reports "not ready" rather than
    * taking down the gate that decides whether anyone can use the app. The
@@ -257,8 +290,11 @@ export class AiSettingsService {
     try {
       settings = await this.get();
     } catch {
-      // A corrupt row is not ready, and every wired role is reported unbound —
-      // which is true, in the sense the caller cares about.
+      // A corrupt row is not ready, and EVERY WIRED ROLE is reported unbound —
+      // which is true, in the sense the caller cares about: nothing in that
+      // row can be read, so no binding can be honoured. The wider set is used
+      // here on purpose, so this branch stays consistent with `unboundRoles`'
+      // meaning below rather than reporting a narrower failure than there is.
       return {
         systemReady: false,
         enabled: false,
@@ -267,15 +303,23 @@ export class AiSettingsService {
       };
     }
 
+    const isBound = (role: { key: string }): boolean =>
+      Boolean(settings.models[role.key]);
+
     const unboundRoles = wiredModelRoles()
-      .filter((role) => !settings.models[role.key])
+      .filter((role) => !isBound(role))
       .map((role) => role.key);
+
+    // THE TEXT ROLES, NOT `unboundRoles.length === 0`. See the doc comment: an
+    // unbound `speak` is a missing capability, not an unusable application,
+    // and conflating the two would hard-block every learner on a deployment
+    // whose admin has simply not configured voice.
+    const textRolesReady = textModelRoles().every(isBound);
 
     const providerConfigured = settings.provider !== null;
 
     return {
-      systemReady:
-        providerConfigured && settings.enabled && unboundRoles.length === 0,
+      systemReady: providerConfigured && settings.enabled && textRolesReady,
       enabled: settings.enabled,
       providerConfigured,
       unboundRoles,

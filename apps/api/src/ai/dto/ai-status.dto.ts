@@ -36,12 +36,19 @@ export const aiStatusResponseSchema = z.object({
   userKeyConfigured: z.boolean(),
 
   /**
-   * Has the administrator finished configuring AI?
+   * Has the administrator finished configuring the AI the PRODUCT ITSELF needs?
    *
-   * Provider chosen, master switch on, and every WIRED role bound. Only the
-   * wired roles count: four of the six are declared and inert, and requiring
-   * them would mean a fresh install could never become ready no matter what an
-   * admin did.
+   * Provider chosen, master switch on, and every wired TEXT role — `tutor` and
+   * `grader` — bound. Deliberately NOT "every wired role": since E9 (#88) the
+   * wired set also holds `transcribe` and `speak`, and a deployment with no
+   * voice bindings is a smaller product, not a broken one. Under the older
+   * "every wired role" rule, wiring those two would have flipped every
+   * existing installation to `false` on deploy — an admin who changed nothing
+   * watching a working system report itself broken.
+   *
+   * So this is a statement about the roles the hard-blocking navigation gate
+   * and `AiNotReady` depend on. A VOICE SURFACE MUST NOT READ IT: it gates on
+   * its own role's binding, which {@link unboundRoles} names.
    *
    * `false` is NOT a block. See the header.
    */
@@ -61,14 +68,23 @@ export const aiStatusResponseSchema = z.object({
   providerConfigured: z.boolean(),
 
   /**
-   * Wired roles with no model bound, by key.
+   * EVERY wired role with no model bound, by key — a wider set than
+   * {@link systemReady} is computed over, on purpose.
+   *
+   * `transcribe` and `speak` appear here when unbound (E9, #88) even though
+   * their absence does not make `systemReady` false. That is what this field
+   * is for: a voice surface needs to know that ITS role is the one the
+   * administrator has not configured, so it can say so and fall back, rather
+   * than reading a single system-wide boolean that is `true` and then failing
+   * at the point of use with no explanation. An UNWIRED role is never listed —
+   * nothing dispatches to it, so nothing has been left undone.
    *
    * NAMES ONLY — no model ids, no provider configuration, no key hint. A
-   * non-admin caller learns that the system is not ready and which of the
-   * app's own capabilities are affected; they learn nothing about the
-   * organisation's credential or its provider settings, which they have no
-   * business seeing. The role keys are already public: the same list is
-   * embedded in the client that renders these features.
+   * non-admin caller learns which of the app's own capabilities are affected;
+   * they learn nothing about the organisation's credential or its provider
+   * settings, which they have no business seeing. The role keys are already
+   * public: the same list is embedded in the client that renders these
+   * features.
    */
   unboundRoles: z.array(z.string()),
 });

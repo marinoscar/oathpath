@@ -3,9 +3,12 @@ import { z } from 'zod';
 
 import {
   OpenAiProvider,
+  deriveConfidence,
   describeModel,
   isOutputLimitOutcome,
   isUnsupportedParameterError,
+  isUnsupportedResponseFormatError,
+  wantsVerboseTranscription,
 } from './openai.provider';
 import {
   AI_SYSTEM_CREDENTIAL_NAME,
@@ -37,6 +40,8 @@ const listMock = jest.fn();
 const chatCreateMock = jest.fn();
 const embeddingsCreateMock = jest.fn();
 const retrieveMock = jest.fn();
+const transcriptionsCreateMock = jest.fn();
+const speechCreateMock = jest.fn();
 const constructedWith: Array<Record<string, unknown>> = [];
 
 jest.mock('openai', () => {
@@ -46,6 +51,10 @@ jest.mock('openai', () => {
       models = { list: listMock, retrieve: retrieveMock };
       chat = { completions: { create: chatCreateMock } };
       embeddings = { create: embeddingsCreateMock };
+      audio = {
+        transcriptions: { create: transcriptionsCreateMock },
+        speech: { create: speechCreateMock },
+      };
       constructor(opts: Record<string, unknown>) {
         constructedWith.push(opts);
       }
@@ -92,6 +101,8 @@ beforeEach(() => {
   chatCreateMock.mockReset();
   embeddingsCreateMock.mockReset();
   retrieveMock.mockReset();
+  transcriptionsCreateMock.mockReset();
+  speechCreateMock.mockReset();
   constructedWith.length = 0;
 });
 
@@ -1267,5 +1278,360 @@ describe('OpenAiProvider.openStream — the streaming request', () => {
 
     expect(credentials.getSecret).not.toHaveBeenCalled();
     expect(constructedWith[0]).toMatchObject({ apiKey: USER_KEY });
+  });
+});
+
+// =============================================================================
+// Speech (issue #88, epic #58 — E9 "Voice foundation")
+// =============================================================================
+//
+// Three things are worth testing here and nothing else is: the CONFIDENCE
+// DERIVATION, because it is the only signal OpenAI exposes and it is arithmetic
+// that can be silently wrong; the `verbose_json` FALLBACK, because the
+// `gpt-4o-transcribe` family cannot produce that shape and a model an admin
+// bound must not simply never work; and that an SDK throw becomes a failure
+// RESULT, because the never-throw contract is what every caller is written
+// against.
+// =============================================================================
+
+const AUDIO = Buffer.from('pretend this is a webm recording');
+
+function transcribeRequest(modelId: string) {
+  return {
+    roleKey: 'transcribe',
+    modelId,
+    audio: AUDIO,
+    contentType: 'audio/webm',
+    fileName: 'answer.webm',
+  };
+}
+
+const USER_KEY = 'sk-user-abcdefghijklmnopqrst';
+const CALLER = '11111111-1111-4111-8111-111111111111';
+
+describe('deriveConfidence', () => {
+  it('maps a mean avg_logprob to a probability with Math.exp', () => {
+    // The whole derivation: mean of the segment log-probabilities,
+    // exponentiated. An approximation, and the only one available — see the
+    // function's own note on why pretending to more precision is worse.
+    const confidence = deriveConfidence({
+      segments: [{ avg_logprob: -0.2 }, { avg_logprob: -0.4 }],
+    });
+
+    expect(confidence).toBeCloseTo(Math.exp(-0.3), 10);
+  });
+
+  it('scores a clear recording near 1 and a poor one visibly lower', () => {
+    // The property callers actually rely on: the numbers ORDER recordings
+    // sensibly, even though they are not calibrated probabilities.
+    const clear = deriveConfidence({ segments: [{ avg_logprob: -0.05 }] });
+    const mumbled = deriveConfidence({ segments: [{ avg_logprob: -1.6 }] });
+
+    expect(clear).toBeGreaterThan(0.9);
+    expect(mumbled).toBeLessThan(0.3);
+    expect(mumbled).toBeGreaterThan(0);
+  });
+
+  it('returns NULL when there are no segments — never a guessed number', () => {
+    // A model that ignored `verbose_json`, a changed response shape, an empty
+    // recording. All of them mean "we do not know", and an invented default
+    // would be indistinguishable from a measured value at every call site.
+    expect(deriveConfidence({ text: 'hello' })).toBeNull();
+    expect(deriveConfidence({ segments: [] })).toBeNull();
+    expect(deriveConfidence(undefined)).toBeNull();
+  });
+
+  it('returns null when segments carry no usable avg_logprob', () => {
+    expect(deriveConfidence({ segments: [{ start: 0, end: 1 }] })).toBeNull();
+  });
+
+  it('clamps to [0, 1] rather than reporting more than certainty', () => {
+    // `Math.exp` of a positive logprob would otherwise hand a caller a
+    // "confidence" above 1.
+    expect(deriveConfidence({ segments: [{ avg_logprob: 0.5 }] })).toBe(1);
+  });
+});
+
+describe('wantsVerboseTranscription', () => {
+  it('asks for verbose_json on whisper, which can produce it', () => {
+    expect(wantsVerboseTranscription('whisper-1')).toBe(true);
+  });
+
+  it('skips it for the gpt-4o-transcribe family, which cannot', () => {
+    // Requesting it there is a guaranteed 400, so the ordinary case must not
+    // pay for a rejected upload of a learner's whole recording.
+    expect(wantsVerboseTranscription('gpt-4o-transcribe')).toBe(false);
+    expect(wantsVerboseTranscription('gpt-4o-mini-transcribe')).toBe(false);
+  });
+
+  it('defaults to asking for the richer shape on an unknown model', () => {
+    // Getting this wrong costs one retried request. Defaulting the other way
+    // would silently drop the confidence signal for every future model.
+    expect(wantsVerboseTranscription('some-new-speech-model')).toBe(true);
+  });
+});
+
+describe('isUnsupportedResponseFormatError', () => {
+  it('recognises the real rejection verbatim', () => {
+    expect(
+      isUnsupportedResponseFormatError(
+        new Error(
+          "400 response_format 'verbose_json' is not compatible with model 'gpt-4o-transcribe'",
+        ),
+      ),
+    ).toBe(true);
+  });
+
+  it('still recognises an unsupported-parameter phrasing', () => {
+    expect(
+      isUnsupportedResponseFormatError({ code: 'unsupported_value' }),
+    ).toBe(true);
+  });
+
+  it('does NOT swallow an unrelated failure', () => {
+    // A revoked key must stay a failure rather than trigger a retry that
+    // fails the same way and doubles the latency.
+    expect(
+      isUnsupportedResponseFormatError(new Error('401 Incorrect API key')),
+    ).toBe(false);
+  });
+});
+
+describe('OpenAiProvider.transcribe', () => {
+  it('asks for verbose_json and derives the confidence from its segments', async () => {
+    transcriptionsCreateMock.mockResolvedValue({
+      text: 'the president',
+      segments: [{ avg_logprob: -0.1 }, { avg_logprob: -0.3 }],
+    });
+
+    const p = new OpenAiProvider(credentialsReturning(null), usageStub());
+    const result = await p.transcribe(
+      CALLER,
+      USER_KEY,
+      transcribeRequest('whisper-1'),
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.text).toBe('the president');
+    expect(result.confidence).toBeCloseTo(Math.exp(-0.2), 10);
+
+    const body = transcriptionsCreateMock.mock.calls[0][0] as Record<
+      string,
+      unknown
+    >;
+    expect(body.response_format).toBe('verbose_json');
+    expect(body.model).toBe('whisper-1');
+    // The upload is NAMED: OpenAI infers the container format from the
+    // extension, and an unnamed blob is rejected as an unsupported format.
+    expect((body.file as File).name).toBe('answer.webm');
+  });
+
+  it('reports all-null token counts, because the endpoint sends none', async () => {
+    // `null` is the honest reading of "we were not told" — `0` would claim the
+    // call consumed nothing. Same contract as every other usage field.
+    transcriptionsCreateMock.mockResolvedValue({ text: 'x', segments: [] });
+
+    const p = new OpenAiProvider(credentialsReturning(null), usageStub());
+    const result = await p.transcribe(
+      CALLER,
+      USER_KEY,
+      transcribeRequest('whisper-1'),
+    );
+
+    expect(result.usage).toEqual({
+      promptTokens: null,
+      completionTokens: null,
+      totalTokens: null,
+    });
+  });
+
+  it('skips verbose_json entirely for the gpt-4o-transcribe family', async () => {
+    transcriptionsCreateMock.mockResolvedValue({ text: 'the president' });
+
+    const p = new OpenAiProvider(credentialsReturning(null), usageStub());
+    const result = await p.transcribe(
+      CALLER,
+      USER_KEY,
+      transcribeRequest('gpt-4o-transcribe'),
+    );
+
+    expect(transcriptionsCreateMock).toHaveBeenCalledTimes(1);
+    expect(
+      (transcriptionsCreateMock.mock.calls[0][0] as Record<string, unknown>)
+        .response_format,
+    ).toBe('json');
+    expect(result.success).toBe(true);
+    expect(result.text).toBe('the president');
+    // NOT a guessed number. There is no signal in a plain `json` reply.
+    expect(result.confidence).toBeNull();
+  });
+
+  it('falls back to json once when a model rejects verbose_json unexpectedly', async () => {
+    // The case the name check cannot know about: a renamed line, a new one, a
+    // third-party OpenAI-compatible endpoint.
+    transcriptionsCreateMock
+      .mockRejectedValueOnce(
+        new Error(
+          "400 response_format 'verbose_json' is not compatible with this model",
+        ),
+      )
+      .mockResolvedValueOnce({ text: 'the president' });
+
+    const p = new OpenAiProvider(credentialsReturning(null), usageStub());
+    const result = await p.transcribe(
+      CALLER,
+      USER_KEY,
+      transcribeRequest('some-new-speech-model'),
+    );
+
+    expect(transcriptionsCreateMock).toHaveBeenCalledTimes(2);
+    expect(result.success).toBe(true);
+    expect(result.text).toBe('the president');
+    expect(result.confidence).toBeNull();
+  });
+
+  it('retries exactly once — a second rejection is a failure, not a loop', async () => {
+    // A loop here spends someone's money re-uploading audio that was already
+    // refused.
+    transcriptionsCreateMock.mockRejectedValue(
+      new Error("400 response_format 'verbose_json' is not compatible"),
+    );
+
+    const p = new OpenAiProvider(credentialsReturning(null), usageStub());
+    const result = await p.transcribe(
+      CALLER,
+      USER_KEY,
+      transcribeRequest('some-new-speech-model'),
+    );
+
+    expect(transcriptionsCreateMock).toHaveBeenCalledTimes(2);
+    expect(result.success).toBe(false);
+  });
+
+  it('turns an SDK throw into a failure result rather than rejecting', async () => {
+    transcriptionsCreateMock.mockRejectedValue(
+      new Error('429 Rate limit reached'),
+    );
+
+    const p = new OpenAiProvider(credentialsReturning(null), usageStub());
+    const result = await p.transcribe(
+      CALLER,
+      USER_KEY,
+      transcribeRequest('whisper-1'),
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.errorCode).toBe('rate_limit');
+    expect(result.text).toBeNull();
+    // UNKNOWN, not 0: a zero would assert the recogniser was certain it heard
+    // nothing, on an answer the learner may well have got right.
+    expect(result.confidence).toBeNull();
+  });
+
+  it('never lets the key reach the error, and never touches the server credential', async () => {
+    const credentials = credentialsReturning('sk-server-should-not-be-read');
+    transcriptionsCreateMock.mockRejectedValue(
+      new Error(`401 Incorrect API key provided: ${USER_KEY}`),
+    );
+
+    const p = new OpenAiProvider(credentials, usageStub());
+    const result = await p.transcribe(
+      CALLER,
+      USER_KEY,
+      transcribeRequest('whisper-1'),
+    );
+
+    expect(result.error).not.toContain(USER_KEY);
+    // Inference runs on the CALLER's key. A call on the server key would bill
+    // the administrator for a learner's usage, silently.
+    expect(credentials.getSecret).not.toHaveBeenCalled();
+    expect(constructedWith[0]).toEqual({ apiKey: USER_KEY });
+  });
+});
+
+describe('OpenAiProvider.synthesize', () => {
+  /** The SDK hands back a raw fetch `Response`; the bytes come from it. */
+  function audioResponse(bytes: number[]) {
+    return {
+      arrayBuffer: async () => new Uint8Array(bytes).buffer,
+    };
+  }
+
+  it('returns the bytes with the MIME type for the requested container', async () => {
+    speechCreateMock.mockResolvedValue(audioResponse([0xff, 0xfb, 0x90]));
+
+    const p = new OpenAiProvider(credentialsReturning(null), usageStub());
+    const result = await p.synthesize(CALLER, USER_KEY, {
+      roleKey: 'speak',
+      modelId: 'tts-1-hd',
+      text: 'Who was the first President?',
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.audio).toEqual(Buffer.from([0xff, 0xfb, 0x90]));
+    // `audio/mpeg`, never `audio/mp3` — a browser handed the latter may refuse
+    // to play it with no visible error.
+    expect(result.contentType).toBe('audio/mpeg');
+    expect(result.usage).toEqual({
+      promptTokens: null,
+      completionTokens: null,
+      totalTokens: null,
+    });
+  });
+
+  it('defaults the voice and the format so callers cannot drift apart', async () => {
+    speechCreateMock.mockResolvedValue(audioResponse([1, 2, 3]));
+
+    const p = new OpenAiProvider(credentialsReturning(null), usageStub());
+    await p.synthesize(CALLER, USER_KEY, {
+      roleKey: 'speak',
+      modelId: 'tts-1-hd',
+      text: 'hello',
+    });
+
+    expect(speechCreateMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: 'tts-1-hd',
+        voice: 'alloy',
+        input: 'hello',
+        response_format: 'mp3',
+      }),
+    );
+  });
+
+  it('honours an explicit voice and format', async () => {
+    speechCreateMock.mockResolvedValue(audioResponse([1]));
+
+    const p = new OpenAiProvider(credentialsReturning(null), usageStub());
+    const result = await p.synthesize(CALLER, USER_KEY, {
+      roleKey: 'speak',
+      modelId: 'tts-1-hd',
+      text: 'hello',
+      voice: 'nova',
+      format: 'wav',
+    });
+
+    expect(speechCreateMock).toHaveBeenCalledWith(
+      expect.objectContaining({ voice: 'nova', response_format: 'wav' }),
+    );
+    expect(result.contentType).toBe('audio/wav');
+  });
+
+  it('turns an SDK throw into a failure result rather than rejecting', async () => {
+    speechCreateMock.mockRejectedValue(
+      new Error('insufficient_quota: you exceeded your quota'),
+    );
+
+    const p = new OpenAiProvider(credentialsReturning(null), usageStub());
+    const result = await p.synthesize(CALLER, USER_KEY, {
+      roleKey: 'speak',
+      modelId: 'tts-1-hd',
+      text: 'hello',
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.errorCode).toBe('quota_exceeded');
+    expect(result.audio).toBeNull();
+    expect(result.contentType).toBeNull();
   });
 });

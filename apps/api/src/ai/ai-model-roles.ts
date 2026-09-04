@@ -126,11 +126,18 @@ export interface AiModelRoleDef {
    * admin page renders it with the registry's existing `disabled` card
    * treatment, and nothing dispatches to it. Epic #25, decision 1 — declaring
    * all six now means voice work does not need a settings-schema change and a
-   * migration over live admin configuration later.
+   * migration over live admin configuration later. E9 (#88) is that promise
+   * being cashed: `transcribe` and `speak` became wired by flipping this
+   * boolean, with no migration and no settings-schema change.
    *
-   * `systemReady` (#36) considers ONLY the wired roles. An unwired role with
-   * no binding must not report the system as unconfigured, or a fresh install
-   * can never become ready.
+   * `unboundRoles` (#36) is computed over EXACTLY the wired roles: an unwired
+   * role with no binding is the normal state and must never be reported as
+   * something an admin has left undone, or a fresh install could not become
+   * ready no matter what they did.
+   *
+   * `systemReady` IS NARROWER THAN THAT — see {@link textModelRoles}. Wiring a
+   * role is a statement about dispatch, not about whether the application as a
+   * whole can run.
    */
   wired: boolean;
 }
@@ -139,8 +146,8 @@ export interface AiModelRoleDef {
  * The roles this application can bind a model to, in the order the admin page
  * renders them.
  *
- * Order is meaningful: the two wired roles come first so an admin's live
- * decisions are not below four inert ones.
+ * Order is meaningful: the four wired roles come first so an admin's live
+ * decisions are not below two inert ones.
  */
 export const AI_MODEL_ROLES: AiModelRoleDef[] = [
   {
@@ -160,21 +167,13 @@ export const AI_MODEL_ROLES: AiModelRoleDef[] = [
     wired: true,
   },
   {
-    key: 'realtime',
-    label: 'Interview simulator',
-    description:
-      'Runs a spoken mock interview that can interrupt and be interrupted naturally. Needs a speech-to-speech realtime model.',
-    capability: 'realtime',
-    // Declared, not consumed. See `wired` above.
-    wired: false,
-  },
-  {
     key: 'transcribe',
     label: 'Speech recognition',
     description:
       'Turns a spoken answer into text, with a confidence signal that tells the grader whether an answer was wrong or simply misheard.',
     capability: 'transcribe',
-    wired: false,
+    // Wired by E9 (#88): `AiProvider.transcribe` dispatches to it.
+    wired: true,
   },
   {
     key: 'speak',
@@ -182,6 +181,18 @@ export const AI_MODEL_ROLES: AiModelRoleDef[] = [
     description:
       'Reads questions and explanations aloud, for learners who understand spoken English less readily than written.',
     capability: 'tts',
+    // Wired by E9 (#88): `AiProvider.synthesize` dispatches to it.
+    wired: true,
+  },
+  {
+    key: 'realtime',
+    label: 'Interview simulator',
+    description:
+      'Runs a spoken mock interview that can interrupt and be interrupted naturally. Needs a speech-to-speech realtime model.',
+    capability: 'realtime',
+    // Declared, not consumed. See `wired` above. Epic #60 (E11) is what wires
+    // it; until something dispatches to it, wiring it here would only make
+    // every deployment report itself unready for a feature that does not exist.
     wired: false,
   },
   {
@@ -190,6 +201,7 @@ export const AI_MODEL_ROLES: AiModelRoleDef[] = [
     description:
       'Clusters weak areas and retrieves relevant civics content. Batch work, so latency matters far less than cost.',
     capability: 'embedding',
+    // Declared, not consumed. See `wired` above.
     wired: false,
   },
 ];
@@ -249,14 +261,65 @@ export function findModelRole(key: string): AiModelRoleDef | undefined {
 /**
  * The roles something actually dispatches to.
  *
- * `systemReady` (#36) is computed over exactly these: an unwired role with no
- * binding is the normal state and must not report the system as unconfigured,
- * or a fresh install could never become ready no matter what an admin did.
+ * `unboundRoles` (#36) is computed over exactly these: an unwired role with no
+ * binding is the normal state and must not be reported as configuration an
+ * admin has left undone, or a fresh install could never become ready no matter
+ * what they did. The two connection-test endpoints probe over these too — the
+ * wired roles that have a binding.
+ *
+ * THIS IS NO LONGER WHAT `systemReady` IS COMPUTED OVER. It was, until E9
+ * (#88) wired `transcribe` and `speak`; see {@link textModelRoles} for the
+ * failure that would have caused and why the two answers are now different
+ * questions.
  *
  * Returns a fresh array so a caller cannot mutate the registry's own state.
  */
 export function wiredModelRoles(): AiModelRoleDef[] {
   return AI_MODEL_ROLES.filter((role) => role.wired);
+}
+
+/**
+ * The wired roles whose capability is a TEXT family — `tutor` and `grader`
+ * today.
+ *
+ * -----------------------------------------------------------------------------
+ * WHY THIS EXISTS: FLIPPING TWO BOOLEANS WOULD OTHERWISE HAVE BROKEN EVERY
+ * ALREADY-DEPLOYED INSTALLATION
+ * -----------------------------------------------------------------------------
+ *
+ * `systemReady` (#36) used to be "provider chosen, master switch on, and no
+ * WIRED role unbound" — i.e. computed over {@link wiredModelRoles}. E9 (#88)
+ * wires `transcribe` and `speak`, and under the old rule that one edit would
+ * have flipped every existing installation to `systemReady: false` on deploy:
+ * an admin who changed nothing, whose tutor and grader are bound and working,
+ * would find their system reporting itself broken and their learners hitting
+ * `AiNotReady` on features that have nothing to do with voice. Nothing in the
+ * release would have said why, because nothing failed — the definition moved
+ * underneath them.
+ *
+ * So `systemReady` narrows to these roles, and the narrowing is load-bearing
+ * rather than a convenience: it is the set of roles the HARD-BLOCKING gate
+ * depends on. `RequireAiKey`, the navigation gate and `AiNotReady` all
+ * ultimately ask "can this learner use the product at all", and the answer to
+ * that is text — a learner with no `speak` binding reads the question instead
+ * of hearing it, which is a smaller product, not a broken one.
+ *
+ * A VOICE SURFACE THEREFORE MUST NOT READ `systemReady`. It gates on its own
+ * role's binding — `unboundRoles` names the role, which is precisely why that
+ * field kept its wider meaning (#109's web surfaces need to say WHICH role is
+ * missing, not merely that something is).
+ *
+ * Derived from {@link TEXT_CAPABILITY_FAMILIES} rather than hard-coding
+ * `['tutor', 'grader']`, so a third text role added to the registry joins the
+ * readiness rule in the same edit — and a role moved to a non-text family
+ * leaves it in the same edit too.
+ *
+ * Returns a fresh array, as {@link wiredModelRoles} does.
+ */
+export function textModelRoles(): AiModelRoleDef[] {
+  return AI_MODEL_ROLES.filter(
+    (role) => role.wired && TEXT_CAPABILITY_FAMILIES.includes(role.capability),
+  );
 }
 
 /**

@@ -70,6 +70,7 @@ export {
   capabilityForRole,
   findModelRole,
   isModelRole,
+  textModelRoles,
   wiredModelRoles,
 } from './ai-model-roles';
 export {
@@ -126,6 +127,10 @@ export type {
   AiStreamEvent,
   AiStructuredCompletionRequest,
   AiStructuredCompletionResult,
+  AiSynthesisRequest,
+  AiSynthesisResult,
+  AiTranscriptionRequest,
+  AiTranscriptionResult,
   AiUsage,
 } from './ai.types';
 export type {
