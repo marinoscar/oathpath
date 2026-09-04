@@ -285,12 +285,13 @@ function AppRoutes() {
                         is a distinct EXERCISE with its own scorer, its own
                         evidence table and its own entry points from Learn and
                         Practice — and because it is the destination the
-                        readiness card's `english` recommendation needs to be
-                        able to name. `apps/api/src/readiness/top-recommendation.ts`
-                        still points that recommendation at `/practice`, with a
-                        comment on its own call site saying to re-point it once
-                        this screen lands; that edit belongs to the API and is
-                        deliberately not made from here. */}
+                        readiness card's `english` recommendation names.
+                        `apps/api/src/readiness/top-recommendation.ts` points
+                        that recommendation here, and at `/practice/writing`
+                        instead for a learner whose writing is the half with
+                        more room left; the arithmetic behind that pick is in
+                        that file's own header and in
+                        `docs/specs/english-test.md` §6.4. */}
                         <Route
                           path="/practice/reading"
                           element={<ReadingPracticePage />}
