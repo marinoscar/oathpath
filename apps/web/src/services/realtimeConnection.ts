@@ -184,11 +184,17 @@ export interface RealtimeConnection {
   /**
    * Have the officer say one line, word for word.
    *
-   * USED FOR EXACTLY ONE THING: the opening turn, which
-   * `POST /api/interviews` already returned and which the tool-call route
-   * therefore never serves. Without this the interview opens in silence and the
-   * model, having been told to say what `next_question` returns, asks for a
-   * second opening line the engine has no reason to give.
+   * FOR THE LINES NO TOOL RESULT CAN CARRY, of which there are exactly two.
+   *
+   * The OPENING TURN, which `POST /api/interviews` already returned and which
+   * the tool-call route therefore never serves — #158 flagged this explicitly.
+   * Without it the interview opens in silence while the model, told to say what
+   * `next_question` returns, waits for a result the engine has no reason to
+   * produce.
+   *
+   * And the acknowledgement for a TYPED writing answer, which the model never
+   * heard and so never reported: the engine graded it, and this is how the
+   * officer finds out the interview moved.
    */
   speakVerbatim: (text: string) => void;
 
@@ -230,6 +236,17 @@ export async function openRealtimeConnection(
   let closed = false;
 
   /**
+   * Has the handshake finished?
+   *
+   * UNTIL IT HAS, A TEARDOWN REPORTS NOTHING. A handshake that fails already
+   * tells its caller by rejecting, and firing `onClosed` as well would have the
+   * caller handling one failure twice — once as "the connection dropped, re-mint
+   * and resume" and once as "it never opened, fall back" — which is a reconnect
+   * attempt racing a fallback for the same event.
+   */
+  let handshakeDone = false;
+
+  /**
    * Tear everything down exactly once.
    *
    * `reason` reaches the caller only on the FIRST call, so a drop that also
@@ -252,7 +269,7 @@ export async function openRealtimeConnection(
       // Already closed. Nothing to do and nothing to tell anybody.
     }
 
-    handlers.onClosed(reason);
+    if (handshakeDone) handlers.onClosed(reason);
   };
 
   pc.ontrack = (event) => {
@@ -331,6 +348,8 @@ export async function openRealtimeConnection(
     teardown('dropped');
     throw error;
   }
+
+  handshakeDone = true;
 
   // BARGE-IN, ENABLED THE MOMENT THE CHANNEL IS OPEN. Audio fields only — see
   // `TURN_DETECTION` for why this payload may never grow an `instructions` or
