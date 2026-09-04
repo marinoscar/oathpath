@@ -541,6 +541,15 @@ export async function loadAllCivicsContent(
 
   const files = readdirSync(contentDir)
     .filter((name) => name.endsWith('.json'))
+    // `english-*.json` (E10, epic #59 / issue #130) are siblings in this
+    // same directory but belong to `load-english-content.ts`'s own loader,
+    // not this one — they carry no `testVersionCode`/`provenance` in the
+    // shape this file's `ContentFile` expects, so discovering them here
+    // would fail civics validation on content that was never meant to be
+    // civics content. Excluded by name rather than by shape so the failure
+    // mode for a genuinely malformed civics file (wrong shape, same
+    // `civics-*` naming) stays a loud validation error, not a silent skip.
+    .filter((name) => !name.startsWith('english-'))
     .sort()
     .map((name) => join(contentDir, name));
 

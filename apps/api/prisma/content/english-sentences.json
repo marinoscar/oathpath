@@ -1,0 +1,384 @@
+{
+  "version": "v1",
+  "label": "OathPath English practice sentences, v1",
+  "composition": {
+    "status": "HUMAN_COMPOSED_AND_REVIEWED",
+    "reviewedBy": "@marinoscar",
+    "reviewedAt": "2026-09-04",
+    "note": "Composed by hand from the two official USCIS vocabulary lists checked in beside this file, then reviewed word by word against them. NOT model-generated - see docs/specs/english-test.md section 1.2 for why that rule exists and what it protects. USCIS publishes no sentence list to copy: M-1178 (09/17) instructs teachers to \"create as many interrogative sentences (or questions) as you can, using only the words on the list\", which is what these are. Reading sentences are interrogative and drawn only from the reading list; writing sentences are declarative and drawn only from the writing list; the two lists are never merged (M-1178: \"the lists are not the same\"). Every sentence here is re-checked on every test run by english-sentences.spec.ts - a sentence containing a word off its list fails the build rather than reaching a learner."
+  },
+  "vocabulary": {
+    "reading": {
+      "sourceUrl": "https://www.uscis.gov/sites/default/files/document/guides/reading_vocab.pdf",
+      "retrievedAt": "2026-09-04",
+      "sha256": "56be9761b36d44afdbf6efeb825330232bd089d55eb1cf2865d00999a98db04a"
+    },
+    "writing": {
+      "sourceUrl": "https://www.uscis.gov/sites/default/files/document/guides/writing_vocab.pdf",
+      "retrievedAt": "2026-09-04",
+      "sha256": "217244ecfb9ed6c5d79f9c281f9c1f6e4290ea358ced85192522b6218431bc08"
+    }
+  },
+  "sentences": [
+    {
+      "kind": "reading",
+      "ordinal": 1,
+      "text": "Who was the first President?",
+      "provenance": {
+        "sourceUrl": "https://www.uscis.gov/sites/default/files/document/guides/reading_vocab.pdf",
+        "retrievedAt": "2026-09-04",
+        "sha256": "56be9761b36d44afdbf6efeb825330232bd089d55eb1cf2865d00999a98db04a"
+      }
+    },
+    {
+      "kind": "reading",
+      "ordinal": 2,
+      "text": "What is the capital of the United States?",
+      "provenance": {
+        "sourceUrl": "https://www.uscis.gov/sites/default/files/document/guides/reading_vocab.pdf",
+        "retrievedAt": "2026-09-04",
+        "sha256": "56be9761b36d44afdbf6efeb825330232bd089d55eb1cf2865d00999a98db04a"
+      }
+    },
+    {
+      "kind": "reading",
+      "ordinal": 3,
+      "text": "Where is the White House?",
+      "provenance": {
+        "sourceUrl": "https://www.uscis.gov/sites/default/files/document/guides/reading_vocab.pdf",
+        "retrievedAt": "2026-09-04",
+        "sha256": "56be9761b36d44afdbf6efeb825330232bd089d55eb1cf2865d00999a98db04a"
+      }
+    },
+    {
+      "kind": "reading",
+      "ordinal": 4,
+      "text": "When is Presidents' Day?",
+      "provenance": {
+        "sourceUrl": "https://www.uscis.gov/sites/default/files/document/guides/reading_vocab.pdf",
+        "retrievedAt": "2026-09-04",
+        "sha256": "56be9761b36d44afdbf6efeb825330232bd089d55eb1cf2865d00999a98db04a"
+      }
+    },
+    {
+      "kind": "reading",
+      "ordinal": 5,
+      "text": "Who is the Father of Our Country?",
+      "provenance": {
+        "sourceUrl": "https://www.uscis.gov/sites/default/files/document/guides/reading_vocab.pdf",
+        "retrievedAt": "2026-09-04",
+        "sha256": "56be9761b36d44afdbf6efeb825330232bd089d55eb1cf2865d00999a98db04a"
+      }
+    },
+    {
+      "kind": "reading",
+      "ordinal": 6,
+      "text": "How many states do we have?",
+      "provenance": {
+        "sourceUrl": "https://www.uscis.gov/sites/default/files/document/guides/reading_vocab.pdf",
+        "retrievedAt": "2026-09-04",
+        "sha256": "56be9761b36d44afdbf6efeb825330232bd089d55eb1cf2865d00999a98db04a"
+      }
+    },
+    {
+      "kind": "reading",
+      "ordinal": 7,
+      "text": "Who lives in the White House?",
+      "provenance": {
+        "sourceUrl": "https://www.uscis.gov/sites/default/files/document/guides/reading_vocab.pdf",
+        "retrievedAt": "2026-09-04",
+        "sha256": "56be9761b36d44afdbf6efeb825330232bd089d55eb1cf2865d00999a98db04a"
+      }
+    },
+    {
+      "kind": "reading",
+      "ordinal": 8,
+      "text": "What are the colors of the American flag?",
+      "provenance": {
+        "sourceUrl": "https://www.uscis.gov/sites/default/files/document/guides/reading_vocab.pdf",
+        "retrievedAt": "2026-09-04",
+        "sha256": "56be9761b36d44afdbf6efeb825330232bd089d55eb1cf2865d00999a98db04a"
+      }
+    },
+    {
+      "kind": "reading",
+      "ordinal": 9,
+      "text": "Why do we vote?",
+      "provenance": {
+        "sourceUrl": "https://www.uscis.gov/sites/default/files/document/guides/reading_vocab.pdf",
+        "retrievedAt": "2026-09-04",
+        "sha256": "56be9761b36d44afdbf6efeb825330232bd089d55eb1cf2865d00999a98db04a"
+      }
+    },
+    {
+      "kind": "reading",
+      "ordinal": 10,
+      "text": "What is the largest state?",
+      "provenance": {
+        "sourceUrl": "https://www.uscis.gov/sites/default/files/document/guides/reading_vocab.pdf",
+        "retrievedAt": "2026-09-04",
+        "sha256": "56be9761b36d44afdbf6efeb825330232bd089d55eb1cf2865d00999a98db04a"
+      }
+    },
+    {
+      "kind": "reading",
+      "ordinal": 11,
+      "text": "Where do the Senators meet?",
+      "provenance": {
+        "sourceUrl": "https://www.uscis.gov/sites/default/files/document/guides/reading_vocab.pdf",
+        "retrievedAt": "2026-09-04",
+        "sha256": "56be9761b36d44afdbf6efeb825330232bd089d55eb1cf2865d00999a98db04a"
+      }
+    },
+    {
+      "kind": "reading",
+      "ordinal": 12,
+      "text": "Who was Abraham Lincoln?",
+      "provenance": {
+        "sourceUrl": "https://www.uscis.gov/sites/default/files/document/guides/reading_vocab.pdf",
+        "retrievedAt": "2026-09-04",
+        "sha256": "56be9761b36d44afdbf6efeb825330232bd089d55eb1cf2865d00999a98db04a"
+      }
+    },
+    {
+      "kind": "reading",
+      "ordinal": 13,
+      "text": "What is on the dollar bill?",
+      "provenance": {
+        "sourceUrl": "https://www.uscis.gov/sites/default/files/document/guides/reading_vocab.pdf",
+        "retrievedAt": "2026-09-04",
+        "sha256": "56be9761b36d44afdbf6efeb825330232bd089d55eb1cf2865d00999a98db04a"
+      }
+    },
+    {
+      "kind": "reading",
+      "ordinal": 14,
+      "text": "When is Independence Day?",
+      "provenance": {
+        "sourceUrl": "https://www.uscis.gov/sites/default/files/document/guides/reading_vocab.pdf",
+        "retrievedAt": "2026-09-04",
+        "sha256": "56be9761b36d44afdbf6efeb825330232bd089d55eb1cf2865d00999a98db04a"
+      }
+    },
+    {
+      "kind": "reading",
+      "ordinal": 15,
+      "text": "Who can vote for President?",
+      "provenance": {
+        "sourceUrl": "https://www.uscis.gov/sites/default/files/document/guides/reading_vocab.pdf",
+        "retrievedAt": "2026-09-04",
+        "sha256": "56be9761b36d44afdbf6efeb825330232bd089d55eb1cf2865d00999a98db04a"
+      }
+    },
+    {
+      "kind": "reading",
+      "ordinal": 16,
+      "text": "What is the Bill of Rights?",
+      "provenance": {
+        "sourceUrl": "https://www.uscis.gov/sites/default/files/document/guides/reading_vocab.pdf",
+        "retrievedAt": "2026-09-04",
+        "sha256": "56be9761b36d44afdbf6efeb825330232bd089d55eb1cf2865d00999a98db04a"
+      }
+    },
+    {
+      "kind": "writing",
+      "ordinal": 1,
+      "text": "Washington was the first President.",
+      "provenance": {
+        "sourceUrl": "https://www.uscis.gov/sites/default/files/document/guides/writing_vocab.pdf",
+        "retrievedAt": "2026-09-04",
+        "sha256": "217244ecfb9ed6c5d79f9c281f9c1f6e4290ea358ced85192522b6218431bc08"
+      }
+    },
+    {
+      "kind": "writing",
+      "ordinal": 2,
+      "text": "The White House is in Washington, D.C.",
+      "provenance": {
+        "sourceUrl": "https://www.uscis.gov/sites/default/files/document/guides/writing_vocab.pdf",
+        "retrievedAt": "2026-09-04",
+        "sha256": "217244ecfb9ed6c5d79f9c281f9c1f6e4290ea358ced85192522b6218431bc08"
+      }
+    },
+    {
+      "kind": "writing",
+      "ordinal": 3,
+      "text": "Alaska is the largest state.",
+      "provenance": {
+        "sourceUrl": "https://www.uscis.gov/sites/default/files/document/guides/writing_vocab.pdf",
+        "retrievedAt": "2026-09-04",
+        "sha256": "217244ecfb9ed6c5d79f9c281f9c1f6e4290ea358ced85192522b6218431bc08"
+      }
+    },
+    {
+      "kind": "writing",
+      "ordinal": 4,
+      "text": "We pay taxes.",
+      "provenance": {
+        "sourceUrl": "https://www.uscis.gov/sites/default/files/document/guides/writing_vocab.pdf",
+        "retrievedAt": "2026-09-04",
+        "sha256": "217244ecfb9ed6c5d79f9c281f9c1f6e4290ea358ced85192522b6218431bc08"
+      }
+    },
+    {
+      "kind": "writing",
+      "ordinal": 5,
+      "text": "Citizens can vote.",
+      "provenance": {
+        "sourceUrl": "https://www.uscis.gov/sites/default/files/document/guides/writing_vocab.pdf",
+        "retrievedAt": "2026-09-04",
+        "sha256": "217244ecfb9ed6c5d79f9c281f9c1f6e4290ea358ced85192522b6218431bc08"
+      }
+    },
+    {
+      "kind": "writing",
+      "ordinal": 6,
+      "text": "The flag is red, white, and blue.",
+      "provenance": {
+        "sourceUrl": "https://www.uscis.gov/sites/default/files/document/guides/writing_vocab.pdf",
+        "retrievedAt": "2026-09-04",
+        "sha256": "217244ecfb9ed6c5d79f9c281f9c1f6e4290ea358ced85192522b6218431bc08"
+      }
+    },
+    {
+      "kind": "writing",
+      "ordinal": 7,
+      "text": "Congress meets in Washington, D.C.",
+      "provenance": {
+        "sourceUrl": "https://www.uscis.gov/sites/default/files/document/guides/writing_vocab.pdf",
+        "retrievedAt": "2026-09-04",
+        "sha256": "217244ecfb9ed6c5d79f9c281f9c1f6e4290ea358ced85192522b6218431bc08"
+      }
+    },
+    {
+      "kind": "writing",
+      "ordinal": 8,
+      "text": "Adams was the second President.",
+      "provenance": {
+        "sourceUrl": "https://www.uscis.gov/sites/default/files/document/guides/writing_vocab.pdf",
+        "retrievedAt": "2026-09-04",
+        "sha256": "217244ecfb9ed6c5d79f9c281f9c1f6e4290ea358ced85192522b6218431bc08"
+      }
+    },
+    {
+      "kind": "writing",
+      "ordinal": 9,
+      "text": "Independence Day is in July.",
+      "provenance": {
+        "sourceUrl": "https://www.uscis.gov/sites/default/files/document/guides/writing_vocab.pdf",
+        "retrievedAt": "2026-09-04",
+        "sha256": "217244ecfb9ed6c5d79f9c281f9c1f6e4290ea358ced85192522b6218431bc08"
+      }
+    },
+    {
+      "kind": "writing",
+      "ordinal": 10,
+      "text": "Lincoln was President during the Civil War.",
+      "provenance": {
+        "sourceUrl": "https://www.uscis.gov/sites/default/files/document/guides/writing_vocab.pdf",
+        "retrievedAt": "2026-09-04",
+        "sha256": "217244ecfb9ed6c5d79f9c281f9c1f6e4290ea358ced85192522b6218431bc08"
+      }
+    },
+    {
+      "kind": "writing",
+      "ordinal": 11,
+      "text": "California has the most people.",
+      "provenance": {
+        "sourceUrl": "https://www.uscis.gov/sites/default/files/document/guides/writing_vocab.pdf",
+        "retrievedAt": "2026-09-04",
+        "sha256": "217244ecfb9ed6c5d79f9c281f9c1f6e4290ea358ced85192522b6218431bc08"
+      }
+    },
+    {
+      "kind": "writing",
+      "ordinal": 12,
+      "text": "We have fifty states.",
+      "provenance": {
+        "sourceUrl": "https://www.uscis.gov/sites/default/files/document/guides/writing_vocab.pdf",
+        "retrievedAt": "2026-09-04",
+        "sha256": "217244ecfb9ed6c5d79f9c281f9c1f6e4290ea358ced85192522b6218431bc08"
+      }
+    },
+    {
+      "kind": "writing",
+      "ordinal": 13,
+      "text": "Delaware was the first state.",
+      "provenance": {
+        "sourceUrl": "https://www.uscis.gov/sites/default/files/document/guides/writing_vocab.pdf",
+        "retrievedAt": "2026-09-04",
+        "sha256": "217244ecfb9ed6c5d79f9c281f9c1f6e4290ea358ced85192522b6218431bc08"
+      }
+    },
+    {
+      "kind": "writing",
+      "ordinal": 14,
+      "text": "Canada is north of the United States.",
+      "provenance": {
+        "sourceUrl": "https://www.uscis.gov/sites/default/files/document/guides/writing_vocab.pdf",
+        "retrievedAt": "2026-09-04",
+        "sha256": "217244ecfb9ed6c5d79f9c281f9c1f6e4290ea358ced85192522b6218431bc08"
+      }
+    },
+    {
+      "kind": "writing",
+      "ordinal": 15,
+      "text": "Mexico is south of the United States.",
+      "provenance": {
+        "sourceUrl": "https://www.uscis.gov/sites/default/files/document/guides/writing_vocab.pdf",
+        "retrievedAt": "2026-09-04",
+        "sha256": "217244ecfb9ed6c5d79f9c281f9c1f6e4290ea358ced85192522b6218431bc08"
+      }
+    },
+    {
+      "kind": "writing",
+      "ordinal": 16,
+      "text": "The President lives in the White House.",
+      "provenance": {
+        "sourceUrl": "https://www.uscis.gov/sites/default/files/document/guides/writing_vocab.pdf",
+        "retrievedAt": "2026-09-04",
+        "sha256": "217244ecfb9ed6c5d79f9c281f9c1f6e4290ea358ced85192522b6218431bc08"
+      }
+    },
+    {
+      "kind": "writing",
+      "ordinal": 17,
+      "text": "Thanksgiving is in November.",
+      "provenance": {
+        "sourceUrl": "https://www.uscis.gov/sites/default/files/document/guides/writing_vocab.pdf",
+        "retrievedAt": "2026-09-04",
+        "sha256": "217244ecfb9ed6c5d79f9c281f9c1f6e4290ea358ced85192522b6218431bc08"
+      }
+    },
+    {
+      "kind": "writing",
+      "ordinal": 18,
+      "text": "The people elect Congress.",
+      "provenance": {
+        "sourceUrl": "https://www.uscis.gov/sites/default/files/document/guides/writing_vocab.pdf",
+        "retrievedAt": "2026-09-04",
+        "sha256": "217244ecfb9ed6c5d79f9c281f9c1f6e4290ea358ced85192522b6218431bc08"
+      }
+    },
+    {
+      "kind": "writing",
+      "ordinal": 19,
+      "text": "Presidents' Day is in February.",
+      "provenance": {
+        "sourceUrl": "https://www.uscis.gov/sites/default/files/document/guides/writing_vocab.pdf",
+        "retrievedAt": "2026-09-04",
+        "sha256": "217244ecfb9ed6c5d79f9c281f9c1f6e4290ea358ced85192522b6218431bc08"
+      }
+    },
+    {
+      "kind": "writing",
+      "ordinal": 20,
+      "text": "Memorial Day is in May.",
+      "provenance": {
+        "sourceUrl": "https://www.uscis.gov/sites/default/files/document/guides/writing_vocab.pdf",
+        "retrievedAt": "2026-09-04",
+        "sha256": "217244ecfb9ed6c5d79f9c281f9c1f6e4290ea358ced85192522b6218431bc08"
+      }
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "kind": "reading",
+  "version": "rev-08-08",
+  "label": "Reading Vocabulary for the Naturalization Test (rev. 08/08)",
+  "provenance": {
+    "sourceUrl": "https://www.uscis.gov/sites/default/files/document/guides/reading_vocab.pdf",
+    "retrievedAt": "2026-09-04",
+    "sha256": "56be9761b36d44afdbf6efeb825330232bd089d55eb1cf2865d00999a98db04a",
+    "transcription": {
+      "status": "HUMAN_VERIFIED",
+      "warning": "HUMAN_VERIFIED — the word list below was transcribed from the text layer of the official USCIS document \"Reading Vocabulary for the Naturalization Test\" (rev. 08/08), downloaded 2026-09-04 from the sourceUrl above; provenance.sha256 records the exact bytes read (189,179 bytes). The same list appears a second time, byte-identically, on page 2 of USCIS M-1178 (09/17) \"Reading Vocabulary Word Strips\", which was downloaded independently and diffed against this file; the two agree word for word. What was NOT done, stated plainly rather than implied: no page-by-page human re-read of the rendered PDF against the printed original. A later maintainer revising this file should re-download the source, re-hash it, and diff the extracted text rather than trusting this note."
+    }
+  },
+  "categories": [
+    { "tag": "PEOPLE", "words": ["Abraham Lincoln", "George Washington"] },
+    { "tag": "CIVICS", "words": ["American flag", "Bill of Rights", "capital", "citizen", "city", "Congress", "country", "Father of Our Country", "government", "President", "right", "Senators", "state/states", "White House"] },
+    { "tag": "PLACES", "words": ["America", "United States", "U.S."] },
+    { "tag": "HOLIDAYS", "words": ["Presidents' Day", "Memorial Day", "Flag Day", "Independence Day", "Labor Day", "Columbus Day", "Thanksgiving"] },
+    { "tag": "QUESTION_WORDS", "words": ["How", "What", "When", "Where", "Who", "Why"] },
+    { "tag": "VERBS", "words": ["can", "come", "do/does", "elects", "have/has", "is/are/was/be", "lives/lived", "meet", "name", "pay", "vote", "want"] },
+    { "tag": "OTHER_FUNCTION", "words": ["a", "for", "here", "in", "of", "on", "the", "to", "we"] },
+    { "tag": "OTHER_CONTENT", "words": ["colors", "dollar bill", "first", "largest", "many", "most", "north", "one", "people", "second", "south"] }
+  ]
+}

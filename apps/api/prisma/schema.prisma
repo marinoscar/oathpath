@@ -48,6 +48,7 @@ model User {
   readinessSnapshots     ReadinessSnapshot[]    @relation("UserReadinessSnapshots")
   dailyActivity          DailyActivity[]        @relation("UserDailyActivity")
   mockInterviews         MockInterview[]        @relation("UserMockInterviews")
+  englishAttempts        EnglishAttempt[]
 
   @@map("users")
 }
@@ -2307,4 +2308,224 @@ model MockInterviewTurn {
   // identical reverse-lookup shape.
   @@index([attemptId])
   @@map("mock_interview_turns")
+}
+
+// =============================================================================
+// English reading and writing (E10, epic #59 / issue #130) —
+// docs/specs/english-test.md
+// =============================================================================
+//
+// A learner reads one composed sentence aloud, scored by word-error-rate
+// against a learner-CONFIRMED transcript (§2-§3), or types back one dictated
+// sentence (§4). Both reuse `normalizeAnswer` (E3) and the confirm-before-
+// grade discipline (E9) rather than inventing either a second normaliser or
+// a second transcription flow.
+//
+// EnglishSentence/EnglishAttempt are siblings in SHAPE to
+// CivicsQuestion/PracticeAttempt but are genuinely their own tables, not a
+// widened civics table: the two evidence streams measure different things
+// (a civics fact known vs. an English sentence read or written) and would
+// otherwise force every civics row to carry columns (`wer`, `diffOps`,
+// `replayCount`) meaningless to it — the identical "one table forced to
+// serve two unrelated shapes" reasoning docs/specs/civics-content.md §1
+// already gives for keeping categories/questions/answers as three tables
+// instead of one JSON blob (english-test.md §5, §10).
+
+// Which segment a sentence or attempt belongs to. USCIS's own guidance
+// (english-test.md §1.1, quoting M-1178) states the reading and writing
+// vocabulary lists "are not the same" and must be validated SEPARATELY,
+// never merged — this value is what selects which of the two vocabulary
+// lists a sentence's own words were checked against, and (on
+// `EnglishAttempt`) which list an attempt's sentence was drawn from.
+enum EnglishSegmentKind {
+  reading
+  writing
+}
+
+// A CLOSED, three-value set — deliberately NOT `PracticeOutcome` (four
+// values) reused. There is no `skipped` analogue here in the same sense a
+// civics practice question has one: an unsubmitted sentence produces no
+// `english_attempts` row at all, and (§3) a low-confidence reading attempt
+// the learner does not confirm or correct ALSO produces no row —
+// `misheard` is the ABSENCE of a recorded attempt here, never an outcome
+// value. Reusing `PracticeOutcome` would import a `skipped` this table can
+// never legitimately produce, and would tie this table's schema to a
+// civics-specific enum for no shared behavior the two happen to overlap on
+// today by coincidence (§5.1, §10's rejected-alternatives table).
+enum EnglishOutcome {
+  correct
+  partial
+  incorrect
+}
+
+// One row per composed reading/writing sentence (english-test.md §1.2-§1.4).
+// Unlike `CivicsQuestion`, this content has no official document to
+// transcribe FROM — USCIS publishes vocabulary LISTS, never a sentence list
+// (§1.1's own quoted M-1178 instruction to the officers who compose test
+// sentences) — so a sentence here is composed by a human from one of the two
+// vocabulary lists, reviewed by a second human, and validated MECHANICALLY,
+// word by word, against that same list before it can ever reach a learner
+// (§1.4) — never model-generated (§1.4's own reasoning for why: an
+// off-vocabulary word makes a sentence read as fluent, plausible English
+// regardless, so only an exhaustive per-word check catches it).
+model EnglishSentence {
+  id String @id @default(uuid()) @db.Uuid
+
+  kind EnglishSegmentKind
+
+  // The vocabulary list REVISION this sentence was composed against and
+  // validated against — `english-vocabulary-{reading,writing}.json`'s own
+  // "version" field — not a version of this sentence's own text. A new
+  // vocabulary revision is a new `version` row here, never an in-place edit
+  // of an existing sentence, the same append-don't-mutate "content is data,
+  // not code" discipline docs/specs/civics-content.md §7 already
+  // establishes for civics content.
+  version String
+
+  // Display/selection order within (kind, version) — also two-thirds of the
+  // loader's stable upsert key below.
+  ordinal Int
+
+  text String
+
+  // DERIVED, never hand-authored (§1.4): the union of every vocabulary
+  // category (PEOPLE, CIVICS, ...) any of this sentence's own tokens
+  // resolved to, recomputed by the loader from the identical word-by-word
+  // validation pass §1.4 already has to run — so it cannot drift the way a
+  // hand-typed tag set could the moment either vocabulary file is
+  // corrected. Sorted, for a stable diff and a stable API response.
+  vocabTags String[] @map("vocab_tags")
+
+  // ---------------------------------------------------------------------
+  // Provenance — NOT what it means on `CivicsQuestion`/`CivicsAnswer`
+  // (§1.2). A sentence is COMPOSED, not transcribed, so its authority is
+  // the VOCABULARY LIST it was built from: these three columns point at
+  // that list's official USCIS PDF and the exact bytes retrieved for it —
+  // never at a document containing this sentence's own text, because no
+  // such official document exists (§1.1).
+  // ---------------------------------------------------------------------
+
+  sourceUrl String @map("source_url")
+
+  retrievedAt DateTime @map("retrieved_at") @db.Timestamptz
+
+  contentSha256 String @map("content_sha256")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  // Relations
+  attempts EnglishAttempt[]
+
+  // The loader's stable upsert key (§1.3): re-running the loader against
+  // unchanged content must resolve to the same row, never create a
+  // duplicate — the identical idempotency contract `CivicsQuestion`'s own
+  // `[testVersionCode, number]` unique key gives the civics loader.
+  @@unique([kind, version, ordinal])
+  @@index([kind, version])
+  @@map("english_sentences")
+}
+
+// One row per scored reading/writing attempt (§5). Sibling in SHAPE to
+// `PracticeAttempt` but its own table — see this section's header comment
+// above for why. No `sessionId`/`practiceSessionId`: reading/writing
+// practice is stateless per-attempt (§5.2's own closing note), not modeled
+// as a `practice_sessions` row — `userId` + `answeredAt` already lets any
+// future grouping be reconstructed by range query if one is ever needed.
+//
+// -----------------------------------------------------------------------
+// NO STORAGE/AUDIO COLUMN HERE, AND NONE BY PROXY — NOT EVER.
+// -----------------------------------------------------------------------
+// A reading attempt's audio is transcribed and the buffer discarded at the
+// point of capture (docs/specs/voice.md §4's "the sentence is spoken and
+// never rendered" pairs with that spec's own transcribe-then-discard
+// posture) — the identical commitment `PracticeAttempt`'s own "Voice
+// foundation" comment block makes and enforces structurally, not merely by
+// intention, restated here rather than assumed to carry over silently:
+// `responseText` below is the learner-CONFIRMED text, never a recording,
+// and this table has no `bytea`, no `Bytes` column, and no FK or path to
+// `storage_objects` — and never will.
+model EnglishAttempt {
+  id String @id @default(uuid()) @db.Uuid
+
+  // onDelete: Cascade — an attempt has no meaning independent of the
+  // learner who made it, the identical posture `PracticeAttempt.userId`
+  // already takes.
+  userId String @map("user_id") @db.Uuid
+
+  // onDelete: Restrict — the same "evidence must not vanish because
+  // content was reloaded" reason `PracticeAttempt.questionId` gives: a
+  // sentence that has already been answered cannot be deleted out from
+  // under that record.
+  sentenceId String @map("sentence_id") @db.Uuid
+
+  // Redundant with the sentence's own file-of-origin in principle — a
+  // reading sentence is only ever drawn from the reading vocabulary (§1.4)
+  // — but kept as a real, queried column for the same reason
+  // `PracticeAttempt.inputMode`/`.source` are real columns rather than
+  // re-derived on every read: the `english` readiness component (§6)
+  // groups by it directly.
+  kind EnglishSegmentKind
+
+  // The text actually scored — for writing, exactly what the learner
+  // typed; for reading, the learner-CONFIRMED transcript (§3), never the
+  // raw, unedited recognizer guess, the identical "confirmed, not raw"
+  // rule docs/specs/voice.md §3.1 states for `PracticeAttempt.transcript`.
+  // NEVER NULL: per §3, a low-confidence reading attempt that is not
+  // confirmed/corrected produces no row at all, so every row that exists
+  // has real, scored text behind it.
+  responseText String @db.Text @map("response_text")
+
+  // Reading only — the recognizer's own confidence for the transcript that
+  // became `responseText`, 0-1. Null for a writing attempt (there is no
+  // recognition step, §4's own closing paragraph) and null whenever the
+  // provider reported no confidence at all — NEVER defaulted to 0, the
+  // identical "unknown is not low" reasoning `PracticeAttempt.asrConfidence`'s
+  // own column comment gives: a defaulted 0 would be a specific,
+  // confident-sounding lie, not an honest "we don't know."
+  asrConfidence Float? @map("asr_confidence")
+
+  // The exact word-error-rate §2.2 computed, stored rather than only
+  // derivable from `outcome`, so a later reviewer (or a Progress Guide
+  // narrative) can see HOW CLOSE an `incorrect` attempt actually was, not
+  // merely that it missed.
+  wer Float
+
+  // The word-level alignment's own op sequence — match/substitute/delete/
+  // insert, each carrying the reference word, the hypothesis word (or null
+  // for a delete/insert), and position — the same "store the structured
+  // verdict, never a free-text summary" posture `PracticeAttempt.aiFeedback`'s
+  // column comment already states for a different table, reused here
+  // because it is exactly what §2's alignment already computed and lets a
+  // UI render a word-by-word diff with nothing extra derived.
+  diffOps Json @map("diff_ops")
+
+  outcome EnglishOutcome
+
+  // Writing only in practice (§4) — always 0 for a reading row, since
+  // reading has no dictation-replay concept of its own (the learner
+  // controls their own re-recording, which is a retry, not a replay of a
+  // prompt). NEVER gates the outcome (§4): penalizing replay count would
+  // punish exactly the honest, information-seeking behavior (asking to
+  // hear it again rather than guessing) VISION.md line 389 says this
+  // product should never discourage.
+  replayCount Int @default(0) @map("replay_count")
+
+  // Via `Clock.now()`, injected — never a bare `new Date()`, per
+  // CLAUDE.md's "Using the Clock" rule.
+  answeredAt DateTime @map("answered_at") @db.Timestamptz
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz
+
+  // Relations
+  user     User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sentence EnglishSentence @relation(fields: [sentenceId], references: [id], onDelete: Restrict)
+
+  // This user's history with this sentence, in order.
+  @@index([userId, sentenceId, answeredAt])
+  // The `english` readiness component's window query (§6.1): this user's
+  // attempts of a given kind within the trailing 30-day window.
+  @@index([userId, kind, answeredAt])
+  @@map("english_attempts")
 }
