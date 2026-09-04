@@ -64,8 +64,14 @@ import {
  * `phaseLabel` — kept separate rather than exported and shared, because that
  * one names a phase inside a sentence about an answer ("during the application
  * review part") and this one names it as a place the conversation currently is.
+ *
+ * EXPORTED SINCE #158 so `end_phase`'s honoured result can name the phase the
+ * interview has moved into in the SAME words the session's own instructions
+ * used at mint time. A second phrasing would have the model told it is in the
+ * "civics questions" part when it was minted and the "civics" part when it is
+ * confirmed there, which is one more thing for it to reconcile mid-conversation.
  */
-function realtimePhaseLabel(phase: InterviewPhase): string {
+export function realtimePhaseLabel(phase: InterviewPhase): string {
   switch (phase) {
     case 'smalltalk':
       return 'opening small talk';

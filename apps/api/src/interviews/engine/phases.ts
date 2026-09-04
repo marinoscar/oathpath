@@ -45,6 +45,24 @@ export type InterviewPhase = (typeof INTERVIEW_PHASES)[number];
  * yet — E10 supplies the reading and writing sentence banks.
  *
  * -----------------------------------------------------------------------------
+ * STILL SKIPPED IN TEXT MODE. NO LONGER SKIPPED BY VOICE (issue #158, E11)
+ * -----------------------------------------------------------------------------
+ *
+ * The paragraph below ends "when E10 supplies the content, the phases are
+ * already in the sequence... the change is what happens inside the phase, not
+ * whether the phase exists." That moment has arrived for one transport:
+ * `docs/specs/realtime-interview.md` §5 has a realtime interview conduct both
+ * segments for real, against the same `english_sentences` bank
+ * `/practice/reading` and `/practice/writing` use.
+ *
+ * NOTHING IN THIS FILE CHANGED FOR IT, which is the design working as
+ * intended. The engine still emits `skipped_segment` for both phases and this
+ * array still names them; whether the walk STOPS there — awaiting a real
+ * answer — is a decision `InterviewsService`'s own officer driver makes from
+ * the transport and the transcript, one layer up. The text transport still
+ * announces both as skipped, with the same honest line, unchanged.
+ *
+ * -----------------------------------------------------------------------------
  * WHY SKIPPED-AND-NAMED, NEVER SILENTLY OMITTED
  * -----------------------------------------------------------------------------
  *

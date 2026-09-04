@@ -248,8 +248,15 @@ export function startState(input: StartInterviewInput): InterviewState {
  *                                shorter than N; see {@link planCivicsQuestions}.
  *
  * Returns `null` while the interview should continue.
+ *
+ * EXPORTED SINCE #158 (epic #60 / E11), unchanged. The realtime transport's
+ * `end_phase` tool is honoured only when this function agrees the civics
+ * section is over (`realtime-interview.md` §4.3, which names it), and a second
+ * copy of the rule living over there is exactly the drift the rest of this
+ * file's header argues against. It is still a pure read of `state.passRule` and
+ * still knows no numbers.
  */
-function civicsStopReason(state: InterviewState): CivicsStopReason | null {
+export function civicsStopReason(state: InterviewState): CivicsStopReason | null {
   const { questionsAsked, passThreshold } = state.passRule;
 
   if (state.civicsCorrect >= passThreshold) return 'threshold_reached';

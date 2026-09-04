@@ -12,10 +12,12 @@ import { EngagementService } from '../engagement/engagement.service';
 import { ReadinessService } from '../readiness/readiness.service';
 import { AttemptGradingService } from './attempt-grading.service';
 import { GRADING_SCHEMA_NAME } from './grading';
+// MOVED BY ISSUE #245. The rule is shared with `InterviewsService` now, so it
+// lives beside the scheduler that reads it rather than on one of its callers.
+import { isMisheardAttempt } from './mastery/mastery-skip';
 import {
   computeSummary,
   dropSuperseded,
-  isMisheardAttempt,
   PracticeService,
 } from './practice.service';
 import type { CreatePracticeSessionInput } from './dto/create-practice-session.dto';
