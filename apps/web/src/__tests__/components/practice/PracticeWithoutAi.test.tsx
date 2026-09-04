@@ -73,6 +73,11 @@ const RESULT: PracticeAttemptResult = {
     failureCause: null,
     aiFeedback: null,
     aiUsageEventId: null,
+    // The E9 voice columns, at their pre-voice values: every attempt written
+    // before this epic — and every typed one after it — reads exactly this.
+    transcript: null,
+    asrConfidence: null,
+    retryOfAttemptId: null,
     answeredAt: '2026-03-01T12:00:00.000Z',
     answerSnapshot: {
       resolvedAt: '2026-03-01T12:00:00.000Z',

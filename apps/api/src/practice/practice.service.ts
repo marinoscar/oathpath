@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 
+import { ASR_CONFIDENCE_THRESHOLD } from '../ai/ai.types';
 import { type DynamicScope } from '../civics/answer-resolution';
 import { Clock } from '../common/clock/clock';
 import { PrismaService } from '../prisma/prisma.service';
@@ -385,10 +386,23 @@ export class PracticeService {
       attempts.map((attempt: { questionId: string }) => attempt.questionId),
     );
 
+    // Superseded attempts are RETURNED in `attempts` below — the retry link is
+    // what a review screen renders the "this was misheard, here is what you
+    // answered next" pair from, and the row is real evidence either way — but
+    // they are not COUNTED. Same helper, same rule, as the stored summary and
+    // as `recordAttempt`'s own progress.
+    //
+    // `nextQuestionFor` is handed this SAME number rather than `attempts.length`,
+    // and that is not tidiness: it compares against `plannedCount` to decide
+    // whether the session is finished, so counting a superseded row would end a
+    // Quick 5 after four answered questions the first time one of them was
+    // misheard and corrected.
+    const answered = dropSuperseded(attempts).length;
+
     const nextQuestion = await this.nextQuestionFor(
       session,
       userId,
-      attempts.length,
+      answered,
       answeredQuestionIds,
     );
 
@@ -396,7 +410,7 @@ export class PracticeService {
       session: toSessionResponse(session),
       attempts: attempts.map((attempt: any) => toAttemptResponse(attempt)),
       nextQuestion,
-      progress: { answered: attempts.length, planned: session.plannedCount },
+      progress: { answered, planned: session.plannedCount },
     };
   }
 
@@ -444,6 +458,14 @@ export class PracticeService {
     const attempts = await this.prisma.practiceAttempt.findMany({
       where: { sessionId: session.id, userId },
       select: {
+        // `id` and `retryOfAttemptId` are selected for `computeSummary`'s own
+        // supersession filter, not for the summary's fields — see
+        // `dropSuperseded`. Selecting them here rather than filtering in SQL
+        // keeps the rule in ONE pure function that `getSession` and
+        // `recordAttempt` also call, instead of in three `where` clauses that
+        // can drift apart.
+        id: true,
+        retryOfAttemptId: true,
         outcome: true,
         gradingMethod: true,
         revealed: true,
@@ -524,12 +546,20 @@ export class PracticeService {
    * is still `incorrect` there, and it is the grader, holding the question and
    * the accepted answers, that is entitled to overturn that with reasoning.
    *
-   * Three columns are written with one value each, and each is a fact that
-   * cannot be reconstructed later if it is not captured now (§2.2):
-   * `source: 'practice'` (E8 writes `mock_interview` into this same table),
-   * `inputMode: 'typed'` and `promptMode: 'read'` (E9 wires spoken and heard —
-   * nothing can tell after the fact whether an old typed answer was typed or
-   * transcribed).
+   * `source: 'practice'` is still written with one value each time — E8 writes
+   * `mock_interview` into this same table — and is still a fact that cannot be
+   * reconstructed later if it is not captured now (§2.2).
+   *
+   * `inputMode` and `promptMode` USED to be that way too, hardcoded to
+   * `'typed'`/`'read'` with a note that E9 would wire spoken and heard. E9
+   * (issue #104, epic #58) is that wiring: both now come from the request, and
+   * the DTO's defaults are what keep every pre-E9 client writing exactly the
+   * row it always wrote. Three more columns join them — `transcript`,
+   * `asrConfidence` and `retryOfAttemptId` — for the same
+   * cannot-be-reconstructed-later reason, sharpened: the recording itself is
+   * transcribed and discarded at the point of capture (`voice.md` §4), so
+   * there is no artefact anywhere from which a later reader could recover how
+   * an answer was given or how well it was heard.
    *
    * `gradingMethod` is the column that stopped having one value: `'ai'` when
    * the grader ran and answered, `'exact'` for every other attempt — including
@@ -587,20 +617,60 @@ export class PracticeService {
       );
     }
 
-    // One attempt per question per session. A second one would double-count the
-    // question in `progress` and in the summary, and would let a learner grind
-    // the same question five times and call it a Quick 5. Answering it again is
-    // a new session, which is exactly how the product intends repetition to
-    // work.
-    const existing = await this.prisma.practiceAttempt.findFirst({
-      where: { sessionId: session.id, userId, questionId: question.id },
-      select: { id: true },
-    });
-
-    if (existing) {
-      throw new ConflictException(
-        `Question "${question.id}" has already been answered in this session`,
+    // -------------------------------------------------------------------------
+    // ONE ATTEMPT PER QUESTION PER SESSION — PLUS ONE TRACEABLE CORRECTION
+    // -------------------------------------------------------------------------
+    //
+    // The original rule and its reason are unchanged: a second attempt would
+    // double-count the question in `progress` and in the summary, and would
+    // let a learner grind the same question five times and call it a Quick 5.
+    // Answering it again is a new session, which is how the product intends
+    // repetition to work.
+    //
+    // E9 (issue #104, epic #58) adds exactly one exception — the retry a
+    // learner is offered when the recogniser may have misheard them
+    // (`docs/specs/voice.md` §3.3). This is the risky edit in that change, so
+    // the reason it is safe is written out rather than assumed: the guard
+    // does not become "a retry is allowed", it becomes "a retry of THIS
+    // attempt is allowed", and `requireRetryTarget` below is four conditions
+    // that must ALL hold. Every one of them removes a way the exception could
+    // have become a loophole:
+    //
+    //   1. the named attempt exists and belongs to THIS caller — so a retry
+    //      cannot reach across learners;
+    //   2. it belongs to THIS session and THIS question — so a retry cannot
+    //      launder an attempt from elsewhere into this session's counts;
+    //   3. it is not itself a retry — so the chain cannot grow past two;
+    //   4. nothing already supersedes it — so a row can be corrected once.
+    //
+    // (3) and (4) together are what keep the degradation at "one attempt,
+    // plus one traceable correction of it" instead of "unlimited attempts
+    // with a linked list to show for it". Without them a caller could walk
+    // A → B → C → D indefinitely, each hop individually well-formed, and the
+    // grinding loophole the original guard closed would be open again with
+    // better bookkeeping.
+    //
+    // A body with NO `retryOfAttemptId` takes the untouched original path.
+    // That is deliberate: the pre-E9 behaviour is not re-expressed in terms
+    // of the new one, so nothing about it can drift.
+    if (input.retryOfAttemptId) {
+      await this.requireRetryTarget(
+        userId,
+        session.id,
+        question.id,
+        input.retryOfAttemptId,
       );
+    } else {
+      const existing = await this.prisma.practiceAttempt.findFirst({
+        where: { sessionId: session.id, userId, questionId: question.id },
+        select: { id: true },
+      });
+
+      if (existing) {
+        throw new ConflictException(
+          `Question "${question.id}" has already been answered in this session`,
+        );
+      }
     }
 
     const profile = await this.loadProfile(userId);
@@ -646,6 +716,12 @@ export class PracticeService {
     const finalOutcome = aiGrading?.outcome ?? outcome;
     const gradingMethod = aiGrading ? 'ai' : 'exact';
 
+    // MISHEARD IS DECIDED HERE, ON THE SERVER, AFTER GRADING (issue #104,
+    // epic #58 / E9). See {@link isMisheardAttempt} for the three conditions
+    // and why each one is a condition; the override itself is applied in the
+    // `create` below, after the grader's own columns, so that it WINS.
+    const misheard = isMisheardAttempt(input.asrConfidence, finalOutcome);
+
     // SYNCHRONOUS MASTERY SCHEDULING (issue #78, epic #54 / E5), inside the
     // SAME transaction as the attempt write — not a second transaction and
     // not fire-and-forget. `question_mastery` is derived, live state; a
@@ -673,8 +749,16 @@ export class PracticeService {
           questionId: question.id,
           sessionId: session.id,
           source: 'practice',
-          inputMode: 'typed',
-          promptMode: 'read',
+          // CLIENT-REPORTED, no longer hardcoded (issue #104, epic #58 / E9).
+          // Nothing on the server can reconstruct either after the fact: the
+          // recording is transcribed and discarded at the point of capture
+          // (`voice.md` §4), so a row that did not record how the answer was
+          // given and how the prompt was delivered has lost both facts
+          // permanently. The DTO defaults them to the pre-E9 values, so a
+          // client that has never heard of voice still writes exactly the row
+          // it always wrote.
+          inputMode: input.inputMode,
+          promptMode: input.promptMode,
           responseText,
           outcome: finalOutcome,
           gradingMethod,
@@ -698,6 +782,38 @@ export class PracticeService {
                 aiUsageEventId: aiGrading.aiUsageEventId,
               }
             : {}),
+          // ---------------------------------------------------------------
+          // THE `misheard` OVERRIDE, DELIBERATELY SPREAD LAST (issue #104)
+          // ---------------------------------------------------------------
+          //
+          // It overwrites whatever cause the grader supplied, and the order
+          // of these two spreads is the whole mechanism — reversing them
+          // would silently restore the grader's guess. The reasoning is in
+          // {@link isMisheardAttempt}; the short version is that the
+          // recogniser's own uncertainty about the TEXT is better evidence
+          // about why an answer missed than a model's inference from the
+          // text it produced.
+          //
+          // THIS IS THE ONE CASE WHERE `failureCause` IS NON-NULL WITH
+          // `aiFeedback` AND `aiUsageEventId` BOTH NULL. Everywhere else in
+          // this table the three are written together or not at all (the
+          // block comment above, and `practice-attempt.dto.ts`). A reader
+          // hitting such a row is not looking at a half-written grading
+          // call: they are looking at a cause this service concluded from a
+          // measurement no model was involved in, which `gradingMethod`
+          // ('exact' unless a grader also ran) says plainly.
+          ...(misheard ? { failureCause: 'misheard' as const } : {}),
+          // The three voice columns, straight from the request. `?? null`
+          // rather than a conditional spread because all three are plain
+          // scalar columns — there is no `Prisma.DbNull` sentinel to avoid,
+          // and an explicit null reads as what it is.
+          transcript: input.transcript ?? null,
+          asrConfidence: input.asrConfidence ?? null,
+          // The link that makes this row supersede an earlier one. Validated
+          // by `requireRetryTarget` above — by the time it reaches here it
+          // names an attempt of this caller's, in this session, at this
+          // question, not itself a retry and not already superseded.
+          retryOfAttemptId: input.retryOfAttemptId ?? null,
           revealed: input.revealed,
           hintUsed: input.hintUsed,
           // Absent stays absent. `0` would be a claim that the learner answered
@@ -741,16 +857,29 @@ export class PracticeService {
       }),
     );
 
+    const sessionAttempts = await this.prisma.practiceAttempt.findMany({
+      where: { sessionId: session.id, userId },
+      // `id` and `retryOfAttemptId` are read for `dropSuperseded` below, not
+      // for display — see that function, and `getSession`/`completeSession`,
+      // which count the same rows the same way.
+      select: { id: true, questionId: true, retryOfAttemptId: true },
+    });
+
+    // EVERY attempted question, superseded ones INCLUDED. This set is what
+    // stops `nextQuestionFor` from handing back a question the learner has
+    // already been asked, and a question whose first attempt was superseded
+    // by a retry has still been asked — dropping it here would put it back in
+    // the rotation for the same session.
     const answeredQuestionIds = new Set<string>(
-      (
-        await this.prisma.practiceAttempt.findMany({
-          where: { sessionId: session.id, userId },
-          select: { questionId: true },
-        })
-      ).map((row: { questionId: string }) => row.questionId),
+      sessionAttempts.map((row: { questionId: string }) => row.questionId),
     );
 
-    const answered = answeredQuestionIds.size;
+    // The COUNT, however, excludes them: a mishearing and its correction are
+    // one answered question, not two. This is the same rule `completeSession`
+    // applies to the summary, through the same helper, so "3 of 5" on the
+    // progress bar and "answered: 3" in the stored summary can never
+    // disagree.
+    const answered = dropSuperseded(sessionAttempts).length;
 
     return {
       attempt: toAttemptResponse(attempt),
@@ -879,6 +1008,86 @@ export class PracticeService {
   // ---------------------------------------------------------------------------
   // Internals
   // ---------------------------------------------------------------------------
+
+  /**
+   * The attempt a retry claims to supersede, or a refusal.
+   *
+   * ---------------------------------------------------------------------------
+   * THE ONLY DOOR THROUGH THE ONE-ATTEMPT-PER-QUESTION GUARD (issue #104, E9)
+   * ---------------------------------------------------------------------------
+   *
+   * `docs/specs/voice.md` §3.3 relaxes that guard for exactly one case: a
+   * learner whose spoken answer may have been misheard is offered another go,
+   * and the corrected answer is written as a NEW row linked back to the
+   * original rather than as an edit of it (§3.2 — the original is evidence
+   * that a mishearing happened, and this product does not delete evidence to
+   * make a number look better). Everything about how narrow that door is
+   * lives in this method.
+   *
+   * **Somebody else's attempt id is a 404, not a 403** — the identical rule
+   * `requireSession` follows for a session, applied to an attempt, and for the
+   * identical reason: a 403 would confirm that the id names a real attempt,
+   * which is itself the leak. Note what that means for the `where` below —
+   * `userId`, `sessionId` and `questionId` are all FILTERS, not checks applied
+   * after loading a row, so this method cannot read another learner's attempt
+   * even for long enough to decide to reject it.
+   *
+   * The same 404 covers a real attempt of the caller's own that belongs to a
+   * different session or a different question. That is not a weaker answer
+   * than a 400 would be: from this session's position, "the attempt you are
+   * retrying" genuinely does not exist, and a distinct status for each near
+   * miss would hand a caller a probe for which of their own attempts sit
+   * where.
+   *
+   * Two 409s follow, and they are the pair that keeps the relaxation from
+   * becoming an unlimited-attempts loophole:
+   *
+   *   - **the target is itself a retry.** A chain may be two rows long, never
+   *     three. Without this, A → B → C → D is a sequence of individually
+   *     well-formed requests that lets a learner answer one question as many
+   *     times as they like inside a Quick 5 — the exact behaviour the guard
+   *     exists to prevent, with a linked list to show for it.
+   *   - **something already supersedes the target.** One correction per row.
+   *     The practice flow only ever offers a retry immediately after a
+   *     low-confidence transcription (§3.1); there is no path that asks a
+   *     learner to re-retry an attempt the session has already moved past, so
+   *     a second retry of the same row is a request no legitimate client
+   *     makes.
+   */
+  private async requireRetryTarget(
+    userId: string,
+    sessionId: string,
+    questionId: string,
+    retryOfAttemptId: string,
+  ): Promise<void> {
+    const target = await this.prisma.practiceAttempt.findFirst({
+      where: { id: retryOfAttemptId, userId, sessionId, questionId },
+      select: { id: true, retryOfAttemptId: true },
+    });
+
+    if (!target) {
+      throw new NotFoundException(
+        `Practice attempt "${retryOfAttemptId}" not found`,
+      );
+    }
+
+    if (target.retryOfAttemptId) {
+      throw new ConflictException(
+        `Practice attempt "${retryOfAttemptId}" is itself a retry and cannot be retried again`,
+      );
+    }
+
+    const alreadySuperseded = await this.prisma.practiceAttempt.findFirst({
+      where: { retryOfAttemptId: target.id },
+      select: { id: true },
+    });
+
+    if (alreadySuperseded) {
+      throw new ConflictException(
+        `Practice attempt "${retryOfAttemptId}" has already been retried`,
+      );
+    }
+  }
 
   /**
    * The caller's session, or a 404.
@@ -1311,12 +1520,153 @@ function toAttemptResponse(attempt: any): PracticeAttemptResponse {
     failureCause: attempt.failureCause ?? null,
     aiFeedback: (attempt.aiFeedback as GradingVerdict | null) ?? null,
     aiUsageEventId: attempt.aiUsageEventId ?? null,
+    // The voice columns (issue #104, epic #58 / E9). `?? null` for the same
+    // reason the three above carry it: a row selected without them must put
+    // `null` on the wire, not `undefined`, so "this attempt was typed" and
+    // "we did not read that column" never become the same answer to a client.
+    //
+    // All four are on the wire because the web renders decisions from them: a
+    // `spoken` attempt whose `failureCause` is `misheard` is the state that
+    // offers a retry, `transcript` is what it shows the learner so they can
+    // see what went wrong, and `retryOfAttemptId` is the link a review screen
+    // draws between the mishearing and its correction.
+    transcript: attempt.transcript ?? null,
+    asrConfidence: attempt.asrConfidence ?? null,
+    retryOfAttemptId: attempt.retryOfAttemptId ?? null,
     answeredAt: attempt.answeredAt.toISOString(),
     // Read back whole, exactly as frozen. Never re-resolved, never merged with
     // whatever `civics_answers` says today — that is the entire point of the
     // column (§6).
     answerSnapshot: attempt.answerSnapshot as PracticeAnswerSnapshot,
   };
+}
+
+/**
+ * Is this attempt's failure better explained by the recogniser than by the
+ * learner? (issue #104, epic #58 / E9)
+ *
+ * -----------------------------------------------------------------------------
+ * THREE CONDITIONS, AND EACH ONE IS LOAD-BEARING
+ * -----------------------------------------------------------------------------
+ *
+ * 1. **A confidence was reported at all.** `null`/`undefined` NEVER produces
+ *    `misheard`, and this is the condition most likely to be "simplified" away
+ *    by someone reading `< 0.6` and reaching for `(confidence ?? 0)`. Unknown
+ *    is not low. Several transcription models report no confidence whatsoever
+ *    (`OpenAiProvider.runTranscription`: the `gpt-4o-transcribe` family
+ *    cannot), so collapsing the two would stamp `misheard` on every attempt
+ *    whose confidence merely could not be read — telling a learner the system
+ *    struggled to hear them when, as far as anything here knows, it did not.
+ *    `schema.prisma`'s `asrConfidence` comment makes the same point about the
+ *    column; this is the code that has to honour it.
+ *
+ * 2. **The confidence is strictly below {@link ASR_CONFIDENCE_THRESHOLD}.**
+ *    The number lives in one place for the reason its own doc gives; `0.6`
+ *    exactly is trusted, because the boundary has to fall on one side and
+ *    trusting the transcript is the side that cannot invent a mishearing.
+ *
+ * 3. **The outcome is not `correct`.** A right answer is right however it was
+ *    heard. Writing a failure cause beside a correct outcome would manufacture
+ *    a failure to explain where there is none — the same rule
+ *    `persistedFailureCause` already applies to a grader's `correct` verdict.
+ *
+ * -----------------------------------------------------------------------------
+ * WHY THIS OVERRIDES A GRADER-SUPPLIED CAUSE RATHER THAN DEFERRING TO IT
+ * -----------------------------------------------------------------------------
+ *
+ * The grader sees TEXT. It is handed the question, the accepted answers and a
+ * string, and asked what that string means; when it offers a cause it is
+ * inferring, from words alone, why a person got something wrong. The
+ * recogniser's confidence is a MEASUREMENT of how well those words captured
+ * what was said — evidence about the pipeline rather than an inference about
+ * the learner — and when it says the capture was poor, that is the better
+ * explanation of a miss than any reading of its output can be.
+ *
+ * It is also the fairness-preserving direction, which is the reason the
+ * override exists at all. `VISION.md` line 228 promises a learner may
+ * "practice without being unfairly penalized for accent or speech-recognition
+ * errors", and `misheard` is precisely the value `PracticeFailureCause` has
+ * for that. The alternative — recording `not_known` or `not_recalled` on an
+ * answer the recogniser garbled — tells a learner something about themselves
+ * that nothing observed. `docs/specs/ai-evaluation.md` §8 calls that a
+ * manufactured diagnosis and it is the failure the whole taxonomy exists to
+ * avoid.
+ *
+ * Note the direction of the risk if this rule is ever wrong: `misheard` never
+ * makes a wrong answer count as correct, never advances mastery, and never
+ * raises a readiness score. The worst a false `misheard` does is decline to
+ * blame a learner. The worst a false `not_known` does is tell them they do not
+ * know something they do.
+ *
+ * Nothing here consults `inputMode`, and it does not need to: the DTO rejects
+ * an `asrConfidence` on a typed attempt outright, so a confidence only ever
+ * arrives on a spoken one. It rejects one on a SKIPPED attempt too — which is
+ * why "not `correct`" can be stated as plainly as the spec states it, without
+ * a carve-out for the learner who declined to answer at all.
+ */
+export function isMisheardAttempt(
+  asrConfidence: number | null | undefined,
+  outcome: string,
+): boolean {
+  if (asrConfidence === null || asrConfidence === undefined) return false;
+  if (asrConfidence >= ASR_CONFIDENCE_THRESHOLD) return false;
+  return outcome !== 'correct';
+}
+
+/**
+ * The attempts that count, with the superseded ones removed (issue #104, E9).
+ *
+ * An attempt another attempt points at through `retryOfAttemptId` is
+ * SUPERSEDED (`docs/specs/voice.md` §3.2). It is never deleted — it is real
+ * evidence that a mishearing happened, and an evidence ledger whose rows can
+ * be removed to improve a number is not an evidence ledger — but it must not
+ * be COUNTED, or a mishearing and its correction would read as two failures
+ * where the learner answered one question.
+ *
+ * A PURE FUNCTION OVER ROWS ALREADY LOADED, not a `where` clause, and that is
+ * deliberate: three call sites need this rule (`recordAttempt`'s progress
+ * counter, `getSession`'s, and `computeSummary`), and the one property they
+ * must have is that they agree. Three `where` clauses can drift; one function
+ * they all call cannot. Expressing it in SQL would also need a correlated
+ * subquery or a self-join per call site to ask "does anything point at this
+ * row", for a set of rows a session has already loaded in full.
+ *
+ * `retryOfAttemptId` is read from the ROWS THEMSELVES rather than queried,
+ * which is sound because a retry is only ever admitted into the same session
+ * as the attempt it supersedes (`requireRetryTarget`). A row's superseder, if
+ * it exists, is always in the list.
+ *
+ * Both fields are optional in the type so a caller holding a narrower row
+ * shape — a unit test's fixture, a `select` written before E9 — is not a
+ * compile error. Such a row simply has no superseder, which is the correct
+ * reading of "this projection cannot express supersession".
+ *
+ * -----------------------------------------------------------------------------
+ * READINESS NEEDS NO EQUIVALENT, AND THAT IS WORTH STATING RATHER THAN ASSUMING
+ * -----------------------------------------------------------------------------
+ *
+ * `ReadinessService`'s `spoken` component counts distinct `questionId` among
+ * rows matching `inputMode: 'spoken'` AND `outcome: 'correct'`. A superseded
+ * attempt is by construction not correct — a correct answer is never routed to
+ * a retry (see {@link isMisheardAttempt}, condition 3) — so it has never been
+ * inside that query's result set, and no filter needs to be added there for
+ * §3.2's rule to hold. `readiness.service.ts` already only reads the kind of
+ * row a superseded attempt cannot be.
+ */
+export function dropSuperseded<
+  T extends { id?: string; retryOfAttemptId?: string | null },
+>(attempts: readonly T[]): T[] {
+  const supersededIds = new Set<string>(
+    attempts
+      .map((attempt) => attempt.retryOfAttemptId)
+      .filter((id): id is string => typeof id === 'string'),
+  );
+
+  if (supersededIds.size === 0) return [...attempts];
+
+  return attempts.filter(
+    (attempt) => attempt.id === undefined || !supersededIds.has(attempt.id),
+  );
 }
 
 /**
@@ -1333,15 +1683,27 @@ function toAttemptResponse(attempt: any): PracticeAttemptResponse {
  * avoid (§2.2).
  */
 export function computeSummary(
-  attempts: readonly {
+  rows: readonly {
     outcome: string;
     gradingMethod: string;
     revealed: boolean;
     hintUsed: boolean;
     durationMs: number | null;
+    // E9's two, optional so a narrower fixture still type-checks. See
+    // {@link dropSuperseded}.
+    id?: string;
+    retryOfAttemptId?: string | null;
   }[],
   plannedCount: number,
 ): PracticeSessionSummary {
+  // THE SUPERSESSION FILTER IS APPLIED HERE, INSIDE, rather than expected of
+  // every caller (issue #104, epic #58 / E9). `completeSession` is the only
+  // caller that persists the result, and a summary is written once and read
+  // forever — so the filter has to be impossible to forget, not merely
+  // documented. A caller passing rows that were already filtered is
+  // unaffected: dropping superseded rows twice drops the same rows.
+  const attempts = dropSuperseded(rows);
+
   const count = (outcome: string) =>
     attempts.filter((attempt) => attempt.outcome === outcome).length;
 

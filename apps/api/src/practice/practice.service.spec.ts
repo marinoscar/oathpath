@@ -12,7 +12,12 @@ import { EngagementService } from '../engagement/engagement.service';
 import { ReadinessService } from '../readiness/readiness.service';
 import { AttemptGradingService } from './attempt-grading.service';
 import { GRADING_SCHEMA_NAME } from './grading';
-import { computeSummary, PracticeService } from './practice.service';
+import {
+  computeSummary,
+  dropSuperseded,
+  isMisheardAttempt,
+  PracticeService,
+} from './practice.service';
 import type { CreatePracticeSessionInput } from './dto/create-practice-session.dto';
 import type { RecordAttemptInput } from './dto/record-attempt.dto';
 
@@ -121,6 +126,11 @@ function attemptRow(overrides: Record<string, unknown> = {}) {
     revealed: false,
     hintUsed: false,
     durationMs: null,
+    // E9's columns (issue #104, epic #58), at their pre-voice values — the
+    // shape every row written before this epic has.
+    transcript: null,
+    asrConfidence: null,
+    retryOfAttemptId: null,
     answeredAt: NOW,
     answerSnapshot: {
       resolvedAt: NOW.toISOString(),
@@ -146,6 +156,10 @@ function attemptInput(overrides: Partial<RecordAttemptInput> = {}): RecordAttemp
     skipped: false,
     revealed: false,
     hintUsed: false,
+    // The DTO's two defaults, spelled out because these tests call the service
+    // directly and never pass through the Zod pipe that would apply them.
+    inputMode: 'typed',
+    promptMode: 'read',
     ...overrides,
   } as RecordAttemptInput;
 }
@@ -904,6 +918,491 @@ describe('PracticeService', () => {
         ConflictException,
       );
       expect(prisma.practiceSession.update).not.toHaveBeenCalled();
+    });
+  });
+
+  // ===========================================================================
+  // recordAttempt — voice (issue #104, epic #58 / E9)
+  // ===========================================================================
+
+  describe('recordAttempt — voice', () => {
+    beforeEach(() => {
+      mockOwnedSession(sessionRow());
+      prisma.civicsQuestion.findUnique.mockResolvedValue(question());
+      prisma.practiceAttempt.findFirst.mockResolvedValue(null);
+      prisma.practiceAttempt.findMany.mockResolvedValue([]);
+      prisma.civicsAnswer.findMany.mockResolvedValue([answerRow({ text: 'Congress' })]);
+      prisma.practiceAttempt.create.mockImplementation(async ({ data }: any) => ({
+        ...attemptRow(),
+        ...data,
+        id: 'new-attempt',
+        question: question(),
+      }));
+    });
+
+    /** The `data` of the single `practiceAttempt.create` call. */
+    const written = () => prisma.practiceAttempt.create.mock.calls[0][0].data;
+
+    describe('inputMode and promptMode', () => {
+      // All four combinations, because none of the two fields is derivable
+      // from the other and the recording they describe is gone by the time
+      // the request arrives — nothing on the server could reconstruct either.
+      it.each([
+        ['typed', 'read'],
+        ['typed', 'heard'],
+        ['spoken', 'read'],
+        ['spoken', 'heard'],
+      ] as const)('records inputMode: %s / promptMode: %s exactly as reported', async (
+        inputMode,
+        promptMode,
+      ) => {
+        const result = await service.recordAttempt(
+          USER_A,
+          SESSION_ID,
+          attemptInput({
+            responseText: 'Congress',
+            inputMode,
+            promptMode,
+            ...(inputMode === 'spoken' ? { transcript: 'Congress' } : {}),
+          }),
+        );
+
+        expect(written()).toMatchObject({ inputMode, promptMode });
+        expect(result.attempt.inputMode).toBe(inputMode);
+        expect(result.attempt.promptMode).toBe(promptMode);
+      });
+    });
+
+    it('stores the CONFIRMED transcript and the confidence on a spoken attempt', async () => {
+      // `responseText` is what was graded; `transcript` is what the learner
+      // confirmed the recogniser produced. They hold the same string here, and
+      // they are still two columns — see the DTO and schema.prisma.
+      const result = await service.recordAttempt(
+        USER_A,
+        SESSION_ID,
+        attemptInput({
+          responseText: 'Congress',
+          inputMode: 'spoken',
+          promptMode: 'heard',
+          transcript: 'Congress',
+          asrConfidence: 0.93,
+        }),
+      );
+
+      expect(written()).toMatchObject({
+        responseText: 'Congress',
+        transcript: 'Congress',
+        asrConfidence: 0.93,
+      });
+      expect(result.attempt.transcript).toBe('Congress');
+      expect(result.attempt.asrConfidence).toBe(0.93);
+      expect(result.attempt.outcome).toBe('correct');
+    });
+
+    it('writes null — never 0 — for a spoken attempt whose recogniser reported no confidence', async () => {
+      await service.recordAttempt(
+        USER_A,
+        SESSION_ID,
+        attemptInput({
+          responseText: 'Congress',
+          inputMode: 'spoken',
+          transcript: 'Congress',
+        }),
+      );
+
+      expect(written().asrConfidence).toBeNull();
+    });
+
+    // -------------------------------------------------------------------------
+    // The `misheard` mapping — a SERVER decision, made after grading
+    // -------------------------------------------------------------------------
+
+    describe('failureCause: misheard', () => {
+      /** A grader that runs and blames the learner's recall. */
+      function graderSays(failureCause: string, verdict = 'incorrect') {
+        dispatch.runStructured.mockResolvedValue({
+          status: 'ok',
+          data: { verdict, failureCause, feedback: 'Not quite.' },
+          usageEventId: 'usage-1',
+        });
+      }
+
+      it('overrides a grader-supplied cause when the confidence is low and the answer missed', async () => {
+        // THE CENTRAL CASE. The grader saw only text and concluded the learner
+        // did not know the answer; the recogniser MEASURED that it captured
+        // that text poorly. The measurement wins, and it wins in the
+        // fairness-preserving direction VISION.md line 228 requires.
+        graderSays('not_known');
+
+        const result = await service.recordAttempt(
+          USER_A,
+          SESSION_ID,
+          attemptInput({
+            responseText: 'the head of the executive ranch',
+            inputMode: 'spoken',
+            promptMode: 'heard',
+            transcript: 'the head of the executive ranch',
+            asrConfidence: 0.41,
+          }),
+        );
+
+        expect(result.attempt.outcome).toBe('incorrect');
+        expect(written().failureCause).toBe('misheard');
+        expect(result.attempt.failureCause).toBe('misheard');
+        // The grader's own verdict and its usage row are still recorded — the
+        // override replaces the CAUSE, not the fact that a grader ran.
+        expect(written().gradingMethod).toBe('ai');
+        expect(written().aiUsageEventId).toBe('usage-1');
+      });
+
+      it('does NOT override a correct outcome — a right answer is right however it was heard', async () => {
+        const result = await service.recordAttempt(
+          USER_A,
+          SESSION_ID,
+          attemptInput({
+            responseText: 'Congress',
+            inputMode: 'spoken',
+            transcript: 'Congress',
+            asrConfidence: 0.41,
+          }),
+        );
+
+        expect(result.attempt.outcome).toBe('correct');
+        expect(written().failureCause).toBeUndefined();
+        expect(result.attempt.failureCause).toBeNull();
+      });
+
+      it('never fires on a NULL confidence — unknown is not low', async () => {
+        // The condition most likely to be "simplified" into `confidence ?? 0`.
+        // Several transcription models report no confidence at all, so this is
+        // the ordinary spoken attempt, not an edge case.
+        graderSays('not_recalled');
+
+        const result = await service.recordAttempt(
+          USER_A,
+          SESSION_ID,
+          attemptInput({
+            responseText: 'the head of the executive ranch',
+            inputMode: 'spoken',
+            transcript: 'the head of the executive ranch',
+          }),
+        );
+
+        expect(result.attempt.outcome).toBe('incorrect');
+        expect(written().failureCause).toBe('not_recalled');
+      });
+
+      it('leaves a high-confidence miss with the grader’s own cause', async () => {
+        graderSays('not_known');
+
+        const result = await service.recordAttempt(
+          USER_A,
+          SESSION_ID,
+          attemptInput({
+            responseText: 'the Supreme Court of Nonsense',
+            inputMode: 'spoken',
+            transcript: 'the Supreme Court of Nonsense',
+            asrConfidence: 0.9,
+          }),
+        );
+
+        expect(written().failureCause).toBe('not_known');
+        expect(result.attempt.failureCause).toBe('not_known');
+      });
+
+      it('fires with no grader at all — the cause is non-null while aiFeedback and aiUsageEventId stay null', async () => {
+        // The one row shape in this table where `failureCause` is set and the
+        // other two AI columns are not. `gradingMethod: 'exact'` is what says
+        // no model was involved.
+        const result = await service.recordAttempt(
+          USER_A,
+          SESSION_ID,
+          attemptInput({
+            responseText: 'the head of the executive ranch',
+            inputMode: 'spoken',
+            transcript: 'the head of the executive ranch',
+            asrConfidence: 0.41,
+          }),
+        );
+
+        expect(written()).toMatchObject({
+          failureCause: 'misheard',
+          gradingMethod: 'exact',
+        });
+        expect(written().aiFeedback).toBeUndefined();
+        expect(written().aiUsageEventId).toBeUndefined();
+        expect(result.attempt.aiFeedback).toBeNull();
+        expect(result.attempt.aiUsageEventId).toBeNull();
+      });
+    });
+
+    // -------------------------------------------------------------------------
+    // isMisheardAttempt — the rule, directly
+    // -------------------------------------------------------------------------
+
+    describe('isMisheardAttempt', () => {
+      it('is exactly "a known confidence, strictly below the threshold, on a non-correct outcome"', () => {
+        expect(isMisheardAttempt(0.41, 'incorrect')).toBe(true);
+        expect(isMisheardAttempt(0.41, 'partial')).toBe(true);
+        expect(isMisheardAttempt(0.41, 'correct')).toBe(false);
+        expect(isMisheardAttempt(null, 'incorrect')).toBe(false);
+        expect(isMisheardAttempt(undefined, 'incorrect')).toBe(false);
+        // STRICTLY below: 0.6 exactly is trusted, because the boundary has to
+        // fall on one side and trusting the transcript cannot invent a
+        // mishearing that did not happen.
+        expect(isMisheardAttempt(0.6, 'incorrect')).toBe(false);
+        expect(isMisheardAttempt(0.599, 'incorrect')).toBe(true);
+        // And a defaulted zero, the value the DTO exists to keep out, would
+        // have fired — which is why "absent is not zero" is a rule and not a
+        // preference.
+        expect(isMisheardAttempt(0, 'incorrect')).toBe(true);
+      });
+    });
+  });
+
+  // ===========================================================================
+  // recordAttempt — the retry, and the guard it walks through
+  // ===========================================================================
+
+  describe('recordAttempt — retry', () => {
+    const ORIGINAL_ID = 'c1111111-1111-4111-8111-111111111111';
+    const OTHER_ID = 'c2222222-2222-4222-8222-222222222222';
+
+    /** The `practice_attempts` rows this test's `findFirst` searches. */
+    let rows: Record<string, any>[];
+
+    beforeEach(() => {
+      mockOwnedSession(sessionRow());
+      prisma.civicsQuestion.findUnique.mockResolvedValue(question());
+      prisma.civicsAnswer.findMany.mockResolvedValue([answerRow({ text: 'Congress' })]);
+      prisma.practiceAttempt.create.mockImplementation(async ({ data }: any) => ({
+        ...attemptRow(),
+        ...data,
+        id: 'new-attempt',
+        question: question(),
+      }));
+
+      // One prior attempt at Q_NONE in this session, by this user — the row a
+      // legitimate retry names.
+      rows = [
+        attemptRow({
+          id: ORIGINAL_ID,
+          outcome: 'incorrect',
+          failureCause: 'misheard',
+          inputMode: 'spoken',
+          transcript: 'the head of the executive ranch',
+          asrConfidence: 0.41,
+        }),
+      ];
+
+      // A `findFirst` that FILTERS on every key the service sends, so the
+      // assertions below are about the query rather than about a check applied
+      // after loading somebody else's row.
+      prisma.practiceAttempt.findFirst.mockImplementation(async ({ where }: any) => {
+        const hit = rows.find(
+          (row) =>
+            (where.id === undefined || row.id === where.id) &&
+            (where.userId === undefined || row.userId === where.userId) &&
+            (where.sessionId === undefined || row.sessionId === where.sessionId) &&
+            (where.questionId === undefined || row.questionId === where.questionId) &&
+            (where.retryOfAttemptId === undefined ||
+              (row.retryOfAttemptId ?? null) === where.retryOfAttemptId),
+        );
+        return hit ?? null;
+      });
+      prisma.practiceAttempt.findMany.mockImplementation(async () => rows);
+    });
+
+    it('admits a second attempt at the same question when it names that exact attempt', async () => {
+      const result = await service.recordAttempt(
+        USER_A,
+        SESSION_ID,
+        attemptInput({
+          responseText: 'Congress',
+          inputMode: 'spoken',
+          promptMode: 'heard',
+          transcript: 'Congress',
+          asrConfidence: 0.95,
+          retryOfAttemptId: ORIGINAL_ID,
+        }),
+      );
+
+      expect(prisma.practiceAttempt.create).toHaveBeenCalledTimes(1);
+      expect(prisma.practiceAttempt.create.mock.calls[0][0].data).toMatchObject({
+        retryOfAttemptId: ORIGINAL_ID,
+        outcome: 'correct',
+      });
+      expect(result.attempt.retryOfAttemptId).toBe(ORIGINAL_ID);
+    });
+
+    it('409s a second attempt that names NO retry target — the original rule, untouched', async () => {
+      await expect(
+        service.recordAttempt(USER_A, SESSION_ID, attemptInput({ responseText: 'Congress' })),
+      ).rejects.toThrow(ConflictException);
+      expect(prisma.practiceAttempt.create).not.toHaveBeenCalled();
+    });
+
+    it('409s a SECOND retry of the same original — one correction per row', async () => {
+      // Without this the chain could grow indefinitely, one well-formed hop at
+      // a time, and the grinding loophole the guard exists to close would be
+      // open again with better bookkeeping.
+      rows.push(
+        attemptRow({ id: OTHER_ID, retryOfAttemptId: ORIGINAL_ID, outcome: 'correct' }),
+      );
+
+      await expect(
+        service.recordAttempt(
+          USER_A,
+          SESSION_ID,
+          attemptInput({ responseText: 'Congress', retryOfAttemptId: ORIGINAL_ID }),
+        ),
+      ).rejects.toThrow(ConflictException);
+      expect(prisma.practiceAttempt.create).not.toHaveBeenCalled();
+    });
+
+    it('409s a retry of an attempt that is ITSELF a retry — a chain is two rows, never three', async () => {
+      rows.push(
+        attemptRow({ id: OTHER_ID, retryOfAttemptId: ORIGINAL_ID, outcome: 'incorrect' }),
+      );
+
+      await expect(
+        service.recordAttempt(
+          USER_A,
+          SESSION_ID,
+          attemptInput({ responseText: 'Congress', retryOfAttemptId: OTHER_ID }),
+        ),
+      ).rejects.toThrow(ConflictException);
+      expect(prisma.practiceAttempt.create).not.toHaveBeenCalled();
+    });
+
+    it('404s — never 403s — a retry naming ANOTHER learner’s attempt', async () => {
+      // The same rule `requireSession` follows for a session: a 403 would
+      // confirm the id names a real attempt, which is itself the leak.
+      rows.push(attemptRow({ id: OTHER_ID, userId: USER_B }));
+
+      await expect(
+        service.recordAttempt(
+          USER_A,
+          SESSION_ID,
+          attemptInput({ responseText: 'Congress', retryOfAttemptId: OTHER_ID }),
+        ),
+      ).rejects.toThrow(NotFoundException);
+      expect(prisma.practiceAttempt.create).not.toHaveBeenCalled();
+    });
+
+    it('404s a retry naming an attempt at a DIFFERENT question', async () => {
+      rows.push(attemptRow({ id: OTHER_ID, questionId: Q_NONE_2 }));
+
+      await expect(
+        service.recordAttempt(
+          USER_A,
+          SESSION_ID,
+          attemptInput({ responseText: 'Congress', retryOfAttemptId: OTHER_ID }),
+        ),
+      ).rejects.toThrow(NotFoundException);
+    });
+
+    it('404s a retry naming an attempt from a DIFFERENT session', async () => {
+      rows.push(attemptRow({ id: OTHER_ID, sessionId: 'other-session' }));
+
+      await expect(
+        service.recordAttempt(
+          USER_A,
+          SESSION_ID,
+          attemptInput({ responseText: 'Congress', retryOfAttemptId: OTHER_ID }),
+        ),
+      ).rejects.toThrow(NotFoundException);
+    });
+
+    it('404s a retry naming an attempt that does not exist at all', async () => {
+      await expect(
+        service.recordAttempt(
+          USER_A,
+          SESSION_ID,
+          attemptInput({ responseText: 'Congress', retryOfAttemptId: OTHER_ID }),
+        ),
+      ).rejects.toThrow(NotFoundException);
+    });
+
+    it('counts the mishearing and its correction as ONE answered question', async () => {
+      // `progress.answered` after the retry is written. The superseded row is
+      // still in the table — it is evidence that a mishearing happened — it
+      // just stops being counted.
+      prisma.practiceAttempt.findMany.mockImplementation(async () => [
+        ...rows,
+        attemptRow({ id: OTHER_ID, retryOfAttemptId: ORIGINAL_ID, outcome: 'correct' }),
+      ]);
+
+      const result = await service.recordAttempt(
+        USER_A,
+        SESSION_ID,
+        attemptInput({ responseText: 'Congress', retryOfAttemptId: ORIGINAL_ID }),
+      );
+
+      expect(result.progress.answered).toBe(1);
+    });
+  });
+
+  // ===========================================================================
+  // dropSuperseded — the supersession rule, in one place
+  // ===========================================================================
+
+  describe('dropSuperseded', () => {
+    it('drops the attempt a retry points at, and keeps the retry', () => {
+      const kept = dropSuperseded([
+        { id: 'original', retryOfAttemptId: null },
+        { id: 'retry', retryOfAttemptId: 'original' },
+      ]);
+
+      expect(kept.map((row) => row.id)).toEqual(['retry']);
+    });
+
+    it('keeps every row when nothing supersedes anything', () => {
+      const rows = [
+        { id: 'a', retryOfAttemptId: null },
+        { id: 'b', retryOfAttemptId: null },
+      ];
+
+      expect(dropSuperseded(rows)).toHaveLength(2);
+    });
+
+    it('keeps a row from a projection that cannot express supersession', () => {
+      // A narrower `select`, or an older fixture. Such a row simply has no
+      // superseder, which is the correct reading of the missing columns.
+      expect(dropSuperseded([{ outcome: 'correct' } as any])).toHaveLength(1);
+    });
+
+    it('is what makes the summary and progress.answered agree', () => {
+      // The property the two call sites exist to share: one function, so they
+      // cannot drift. A mishearing plus its correction is one answered
+      // question in BOTH.
+      const rows = [
+        {
+          id: 'original',
+          retryOfAttemptId: null,
+          outcome: 'incorrect',
+          gradingMethod: 'exact',
+          revealed: false,
+          hintUsed: false,
+          durationMs: null,
+        },
+        {
+          id: 'retry',
+          retryOfAttemptId: 'original',
+          outcome: 'correct',
+          gradingMethod: 'exact',
+          revealed: false,
+          hintUsed: false,
+          durationMs: null,
+        },
+      ];
+
+      const summary = computeSummary(rows, 5);
+
+      expect(summary.answered).toBe(dropSuperseded(rows).length);
+      expect(summary.answered).toBe(1);
+      expect(summary.correct).toBe(1);
+      expect(summary.incorrect).toBe(0);
     });
   });
 
