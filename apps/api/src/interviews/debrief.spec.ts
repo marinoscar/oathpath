@@ -1,7 +1,12 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { buildInterviewDebrief, focusAreasFrom, type DebriefInput } from './debrief';
+import {
+  buildInterviewDebrief,
+  focusAreasFrom,
+  type DebriefInput,
+  type DebriefSegmentAttempt,
+} from './debrief';
 import { stripComments } from './test-support/strip-comments';
 import type { InterviewDebriefQuestion } from './dto/interview-debrief.dto';
 
@@ -31,6 +36,13 @@ const READINESS: DebriefInput['readiness'] = {
   capReason: null,
   capMessage: null,
   interviewComponent: { value: 0.5, evidenceCount: 1 },
+  spokenComponent: { value: 0.4, evidenceCount: 8 },
+  recommendation: {
+    componentKey: 'coverage',
+    title: 'Cover more of the question bank',
+    reason: 'You have seen 40 of the 100 questions.',
+    path: '/practice',
+  },
 };
 
 function attempt(
@@ -43,6 +55,23 @@ function attempt(
     categoryName: 'American Government',
     outcome: 'correct',
     acceptedAnswers: ['Congress', 'legislative'],
+    // E8's own transport, so the pre-existing cases below keep asserting
+    // exactly what they asserted before E11 touched this builder.
+    inputMode: 'typed',
+    failureCause: null,
+    asrConfidence: null,
+    ...overrides,
+  };
+}
+
+function segment(
+  overrides: Partial<DebriefSegmentAttempt> = {},
+): DebriefSegmentAttempt {
+  return {
+    kind: 'reading',
+    outcome: 'correct',
+    sentence: 'Who was the first President?',
+    wer: 0,
     ...overrides,
   };
 }
@@ -55,6 +84,7 @@ function debriefInput(overrides: Partial<DebriefInput> = {}): DebriefInput {
     stopReason: 'threshold_reached',
     passedCivics: true,
     attempts: [attempt()],
+    segments: [],
     readiness: READINESS,
     ...overrides,
   };
@@ -246,6 +276,9 @@ describe('focusAreasFrom', () => {
       categoryName: 'American Government',
       outcome: 'correct',
       acceptedAnswers: [],
+      inputMode: 'typed',
+      misheard: false,
+      asrConfidence: null,
       ...overrides,
     };
   }
