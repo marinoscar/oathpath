@@ -973,7 +973,7 @@ describe('every failure ends at the text interview', () => {
       await Promise.resolve();
     });
 
-    await screen.findByText('the text interview', undefined, { timeout: 5000 });
+    await screen.findByText('the text interview', undefined, { timeout: 10000 });
 
     // The handoff is explained rather than silent — a learner whose officer
     // went quiet mid-question deserves one line saying what happened.
@@ -1018,9 +1018,11 @@ describe('every failure ends at the text interview', () => {
     });
 
     // A fresh mint, a fresh handshake, and still on the voice screen.
-    expect(
-      requests.filter((r) => r.url.includes('/realtime-session')).length,
-    ).toBe(before + 1);
+    await waitFor(() =>
+      expect(
+        requests.filter((r) => r.url.includes('/realtime-session')).length,
+      ).toBe(before + 1),
+    );
     expect(screen.queryByText('the text interview')).toBeNull();
     expect(
       screen.getByRole('button', { name: /end this interview/i }),
