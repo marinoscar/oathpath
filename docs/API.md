@@ -2905,15 +2905,33 @@ learner can see it.
         "prompt": "Who is the Speaker of the House of Representatives now?",
         "categoryName": "American Government",
         "outcome": "correct",
-        "acceptedAnswers": ["Nancy Pelosi"]
+        "acceptedAnswers": ["Nancy Pelosi"],
+        "inputMode": "spoken",
+        "misheard": false,
+        "asrConfidence": 0.93
+      }
+    ],
+    "spoken": { "answers": 6, "correct": 5, "misheard": 1 },
+    "segments": [
+      {
+        "kind": "reading",
+        "outcome": "correct",
+        "sentence": "Who was the first President?",
+        "wer": 0
+      },
+      {
+        "kind": "writing",
+        "outcome": "incorrect",
+        "sentence": "Washington was the first President.",
+        "wer": 0.4
       }
     ],
     "phases": [
       { "kind": "smalltalk", "status": "completed" },
       { "kind": "n400", "status": "completed" },
       { "kind": "civics", "status": "completed" },
-      { "kind": "reading", "status": "skipped" },
-      { "kind": "writing", "status": "skipped" },
+      { "kind": "reading", "status": "completed" },
+      { "kind": "writing", "status": "completed" },
       { "kind": "closing", "status": "completed" }
     ],
     "focusAreas": [],
@@ -2923,7 +2941,14 @@ learner can see it.
       "delta": 7,
       "capReason": null,
       "capMessage": null,
-      "interviewComponent": { "value": 0.5, "evidenceCount": 1 }
+      "interviewComponent": { "value": 0.5, "evidenceCount": 1 },
+      "spokenComponent": { "value": 0.4, "evidenceCount": 8 },
+      "recommendation": {
+        "componentKey": "coverage",
+        "title": "See more of the question bank",
+        "reason": "Twenty-five of the hundred questions have been seen.",
+        "path": "/practice"
+      }
     }
   }
 }
@@ -2938,6 +2963,44 @@ rather than omitted. `acceptedAnswers` comes from each attempt's frozen
 `answerSnapshot`, never a live re-query, and survives with retention off —
 what retention withholds is the learner's own words, not the evidence of
 what happened.
+
+**The spoken dimension (issue #160, E11).** Every field below is echoed from a
+stored row; none is a model's impression of how the conversation went.
+
+- `inputMode` is `practice_attempts.input_mode` for that answer, so ONE
+  interview can carry both values — a dropped realtime connection finishes over
+  the text transport with the same interview id.
+- `misheard` is `failure_cause: 'misheard'` on the row: the recogniser was not
+  confident it heard what was said. It is a **separate field from `outcome`,
+  never a ninth outcome value** — the outcome is what the grading ladder
+  concluded about the words it was handed, and this is whether those were the
+  learner's words. A misheard answer is excluded from `focusAreas`; it is not
+  removed from the civics tally, which the engine's stop rule already computed
+  from the words it was given.
+- `asrConfidence` is the number `misheard` was concluded from. **`null` means
+  unknown and never low.**
+- `spoken` counts this interview's own spoken answers, its correct ones and its
+  mishearings. `spoken.correct` is exactly the quantity readiness's `spoken`
+  component reads. All three are `0` on a text interview and the object is
+  never omitted.
+- `segments` carries one entry per English segment that produced a **scored
+  attempt** (`realtime-interview.md` §5). A segment the interview did not
+  conduct is absent, and `phases` is where that is reported; a misheard reading
+  attempt is absent too, because `english-test.md` §3 writes no row for one at
+  all. `sentence` is `english_sentences.text`, including for writing — a
+  debrief is read after the fact, and it is the reveal.
+- `phases` reports `reading`/`writing` as `completed` only when a scored
+  attempt for them exists — never from `mock_interviews.mode`, so a voice
+  interview that ended before the reading test is not told it sat one.
+- `spokenComponent` is the readiness `spoken` component, beside
+  `interviewComponent`. Together they are why a voice interview weighs more
+  than a typed one: `interview` counts a pass whatever the transport, `spoken`
+  counts distinct questions answered correctly aloud, and a realtime interview
+  credits both (`realtime-interview.md` §8). `evidenceCount` on both is the
+  learner's LIFETIME count across every source, not this interview's own.
+- `recommendation` is the snapshot's own `topRecommendation`, whole. For a
+  capped learner its `reason` is the same string as `capMessage`, deliberately
+  — neither field is a second literal of the product's own words.
 
 **Error Cases:**
 - 404 Not Found — unknown interview id, or it belongs to another learner
