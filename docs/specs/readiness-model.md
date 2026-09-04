@@ -144,7 +144,7 @@ the entire mechanism by which this score can never overclaim itself (§2.9).
 | 3 | `retention` | 0.20 | `(masteredCount·1.0 + reviewCount·0.6) / totalAttemptedQuestions` | now |
 | 4 | `consistency` | 0.10 | `min(distinctPracticeDaysInLast14, 7) / 7` | now |
 | 5 | `remediation` | 0.10 | `remediatedCount / everWeakCount`, or `1.0` if `everWeakCount === 0` | now |
-| 6 | `english` | 0.05 | `min(distinctQuestionsCorrectSpokenInEnglish / 20, 1)` | E11 |
+| 6 | `english` | 0.05 | `0.5·min(readingCredit/6, 1) + 0.5·min(writingCredit/4, 1)`, credited per distinct sentence at its best outcome in a trailing 30-day window | now |
 | 7 | `spoken` | 0.10 | `min(distinctQuestionsCorrectSpoken / 20, 1)` | E9 |
 | 8 | `interview` | 0.10 | `min(mockInterviewsPassed / 2, 1)` | E8 |
 | | | **1.00** | | |
@@ -291,21 +291,45 @@ measured this," `remediation`'s underlying question — "of everything that
 has ever gone wrong, how much has since been fixed" — has a well-defined,
 true answer when nothing has ever gone wrong: all of it (vacuously) has.
 
-### 2.6 `english` (0.05) — declared now, exactly the unwired-role idiom one layer up
+### 2.6 `english` (0.05) — real, since #141 (epic #59 / E10)
 
-`min(distinctQuestionsCorrectSpokenInEnglish / 20, 1)`. Zero evidence exists
-until E11 ships spoken English-specific scoring. Declaring the formula now,
-rather than adding an `english` component via a migration once E11 exists,
-follows `CLAUDE.md`'s "Adding a New AI Model Role" pattern to the letter:
-"Six [role slots] are declared... so that adding voice work later is not a
-settings-schema change and a migration over live admin configuration" — the
-identical trade this document makes for a component instead of a model role.
-`20` is not independently chosen for this component; it matches `spoken`'s
-own denominator (§2.7) because both measure the same underlying quantity —
-"has this learner correctly spoken this many distinct questions" — filtered
-to a different language scope, and two components measuring related things
-with two different denominators would invite exactly the kind of silent
-disagreement this codebase's registries are built to prevent.
+Fed from `english_attempts` (`english-test.md` §5), not from
+`practice_attempts`: a learner reads one sentence aloud and is scored on
+word accuracy, or hears one sentence and types it back. Within a trailing
+`ENGLISH_WINDOW_DAYS = 30` window (rolling, measured in instants off
+`Clock.now()` — not calendar days, unlike `consistency`'s §2.4 window,
+because this component counts distinct *sentences*, never buckets by day),
+each **distinct** sentence is credited once, at its **best** in-window
+outcome: `correct` = 1.0, `partial` = 0.5 (`recall`'s own partial credit,
+reused rather than reinvented), anything else (incorrect, or no attempt) =
+0. The two segments are scored, and combined, separately:
+
+```
+readingValue = min(readingCredit / 6, 1)
+writingValue = min(writingCredit / 4, 1)
+english = 0.5 · readingValue + 0.5 · writingValue
+```
+
+`ENGLISH_READING_TARGET = 6` and `ENGLISH_WRITING_TARGET = 4` differ on
+purpose, and the difference is the design, not an inconsistency to
+reconcile: a reading pass is scored against a recognizer's transcript — one
+extra, imperfect step between what the learner said and what gets graded —
+while a writing pass is scored against exactly what the learner typed, with
+no intermediate transformation at all. One reading pass is therefore weaker
+evidence than one writing pass, so reaching full credit needs more of them.
+The even `0.5`/`0.5` split between the two formulas means a learner who has
+only ever done one segment tops out at half the component, no matter how
+much of that segment they do — reading and writing are two separate
+requirements of the real test, not two interchangeable ways of clearing
+one. `english-test.md` §6.2 is this formula's full worked arithmetic and
+design record; this section states the shipped result, not a re-derivation
+of it.
+
+A learner with no in-window `english_attempts` rows of either kind reads
+`english = 0` — the ordinary case for most learners, and never a distinct
+"unmeasured" state the way `recall`'s evidence floor (§2.2) needs one:
+`english`'s `0` has had exactly one meaning since before this component had
+any real evidence to read (§2.9 restates why that matters for the cap).
 
 ### 2.7 `spoken` (0.10) — any language, `input_mode = 'spoken'`
 
@@ -339,30 +363,66 @@ that two is the number worth doing — a different constant here would put
 this component's math and the product's own stated advice out of sync with
 each other.
 
-### 2.9 The structural cap: why the score can never exceed 75 for a typed-only learner
+### 2.9 The structural cap: why a `typed_only` learner is held under 80, and English pushes that ceiling to 80, not past it
 
-**`english` (0.05) + `spoken` (0.10) + `interview` (0.10) sum to `0.25` of
-the total weight, and all three are mathematically `0` for every learner
-until E8, E9, and E11 ship respectively. The weighted score can therefore
-never exceed `0.75` — 75 out of 100 — for a learner with no spoken or
-interview evidence. This is the cap, and it falls directly out of the
-weights table above; it is not a second clamp anywhere in this document's
-engine.**
+**`spoken` (0.10) and `interview` (0.10) sum to `0.20` of the total weight,
+and both are mathematically `0` for a learner with no spoken-answer
+evidence and no mock-interview evidence — `spoken` because E9 has not
+shipped, `interview` because a `mockInterviewsPassed` count of `0` reads as
+`0` whether or not a learner has ever attempted one. The weighted score can
+therefore never exceed `0.80` — 80 out of 100 — for a learner with neither
+kind of evidence, regardless of how much `english` credit they have earned.
+This is the cap `capReason: 'typed_only'` (§3) names, and it still falls
+directly out of the weights table above, not a second clamp anywhere in
+this document's engine.**
 
-There is no `min(score, 75)` step in `computeReadiness` (§5), and there
-never should be one. The weights table in §2 is the *only* place the number
-`75` — or any number that could drift from it — needs to appear, which is
-exactly the discipline this codebase already commits to elsewhere for the
-identical reason: `journey-shell.md` and `apps/api/src/ai/ai-model-roles.ts`
-both argue against "two things that must agree but are not derived from
-each other" as a category of bug, not a specific one. A hand-maintained
-second ceiling constant would be exactly that category: correct only until
-someone edits the weights table and forgets the clamp, or edits the clamp
-and forgets the weights table, with nothing in the type system or a test
-catching the drift until a learner's score behaves inexplicably. §11
-records this rejection formally; it is stated here first because the
-absence of a second cap is the single fact about this design most likely to
-look, to an implementer skimming quickly, like a bug to "fix."
+**Before #141 (epic #59 / E10), `english` was also mathematically `0` for
+every learner, which made `0.75` — not `0.80` — the honest ceiling this
+section originally described, because all three of `english`/`spoken`/
+`interview` were structurally zero together. Since #141, `english` (0.05,
+§2.6) is a real, continuously-earnable component fed from
+`english_attempts`, and it is earnable by a learner who has never once
+spoken a civics answer or sat a mock interview — reading and writing
+English sentences requires neither. A `typed_only` learner with full
+English credit therefore reaches `0.75 + 0.05 = 0.80`, and one with only
+the writing segment maxed (reading requires speaking aloud; writing does
+not) reaches `0.75 + 0.025 = 0.775`. `0.75` remains the ceiling only for the
+narrower case this section used to be the only case: a learner with NONE of
+the three components — `english` included — reading `0`.**
+
+This is not a leak in the cap; it is the weights table working exactly as
+designed, for a wider set of learners than it used to need to cover. There
+is no `min(score, 75)` step in `computeReadiness` (§5), and there never
+should be one — nor should a `min(score, 80)` be added now to "fix" the
+fact that a typed-only learner can reach 80. The weights table in §2 is the
+*only* place a ceiling number — `75`, `80`, or any number that could drift
+from either — needs to appear, which is exactly the discipline this
+codebase already commits to elsewhere for the identical reason:
+`journey-shell.md` and `apps/api/src/ai/ai-model-roles.ts` both argue
+against "two things that must agree but are not derived from each other" as
+a category of bug, not a specific one. A hand-maintained ceiling constant
+would be exactly that category: correct only until someone edits the
+weights table and forgets the clamp, or edits the clamp and forgets the
+weights table, with nothing in the type system or a test catching the
+drift until a learner's score behaves inexplicably. §11 records this
+rejection formally; it is stated here first because the absence of a second
+cap is the single fact about this design most likely to look, to an
+implementer skimming quickly, like a bug to "fix" — and, since #141, the
+asymmetry between "English can raise the ceiling" and "English does not
+lift `capReason`" (below) is the second thing most likely to earn that same
+"fix."
+
+**`capReason` deliberately still reads only two paths —
+`evidenceCounts.spoken.attempts` and `evidenceCounts.interview.attempts`
+(§3) — and does not read `english` at all. This is `english-test.md` §6.3's
+own instruction, not a gap this section is flagging.** Reading and writing
+English sentences is not evidence that a learner can answer a **civics**
+question aloud, which is the specific thing the cap exists to require
+before it lifts. A learner who has read and written every English sentence
+in the bank perfectly, and has never once spoken a civics answer or sat a
+mock interview, is still exactly the learner `capReason: 'typed_only'`
+exists to name — full `english` credit raises that learner's *score* to 80,
+and must not also make `capReason` stop naming their status.
 
 This is also `ROADMAP.md`'s own stated reason Milestone B exists inside the
 MVP boundary rather than after it, quoted in full because the framing —
@@ -515,7 +575,7 @@ export interface ReadinessEvidence {
   recentQualifyingAttempts: Array<{ outcome: 'correct' | 'partial' | 'incorrect' | 'skipped' }>; // most recent 20, hintUsed=false, revealed=false
   distinctPracticeDaysInLast14: number;
   distinctQuestionsCorrectSpoken: number;
-  distinctQuestionsCorrectSpokenInEnglish: number;
+  englishBestOutcomesInWindow: Array<{ kind: 'reading' | 'writing'; outcome: 'correct' | 'partial' | 'incorrect' }>; // one per distinct english_sentences row attempted in the trailing 30 days, at its best in-window outcome
   mockInterviewsPassed: number;
 }
 
@@ -539,9 +599,10 @@ export function computeReadiness(evidence: ReadinessEvidence): ReadinessResult;
 assembling `ReadinessEvidence`, exactly as `PracticeService` assembles a
 `MasteryRecord` before ever calling `nextSchedule`.** `computeReadiness`
 itself never sees a `userId`, a Prisma client, or a test-version code — it
-sees eight already-resolved numbers (well, seven numbers and one array of
-mastery rows and one array of attempt outcomes) and returns a result that
-is, by construction, reproducible from those inputs alone.
+sees six already-resolved numbers and three arrays (mastery rows, recent
+attempt outcomes, and — since #141 — one entry per distinct English
+sentence attempted in the trailing window) and returns a result that is, by
+construction, reproducible from those inputs alone.
 
 `masteryRows` is deliberately narrower than a `QuestionMastery` row — only
 `state` and `lapses`, because that is the entirety of what `retention`
@@ -552,7 +613,12 @@ false` filter and the "most recent 20" limit (§2.2) before this function
 ever sees the array, the identical division of labor `matchAnswer`'s own
 `AcceptedAnswer` narrowing already establishes in `practice-sessions.md`
 §7.1: "Whoever calls [the pure function] is responsible for first
-resolving... and passing only [what grading needs] in."
+resolving... and passing only [what grading needs] in." `englishBestOutcomesInWindow`
+takes the same shape for the same reason: the caller owns the 30-day
+window, the distinct-sentence grouping, and the best-of reduction (all
+QUERY concerns); this function owns only the credit table and the two
+denominators (§2.6) — SCORING concerns. Neither half is testable without a
+database if the two are mixed.
 
 `evidenceCounts`' per-key shape, exactly as the engine populates it:
 
@@ -563,14 +629,21 @@ resolving... and passing only [what grading needs] in."
 | `retention` | `{ masteredCount, reviewCount, totalAttemptedQuestions }` |
 | `consistency` | `{ distinctPracticeDaysInLast14 }` |
 | `remediation` | `{ everWeakCount, remediatedCount }` |
-| `english` | `{ distinctQuestionsCorrectSpokenInEnglish }` |
+| `english` | `{ readingSentences, writingSentences, readingCredit, writingCredit }` |
 | `spoken` | `{ attempts: distinctQuestionsCorrectSpoken }` |
 | `interview` | `{ attempts: mockInterviewsPassed }` |
+
+`english`'s two credit fields are not integers — a `partial` sentence
+contributes `0.5`, so a fractional credit total is the ordinary case, not a
+rounding artefact; `readingSentences`/`writingSentences` are the plain
+counts of distinct sentences with any in-window attempt, the figure that
+tells "no practice" apart from "practised and missed."
 
 `spoken.attempts` and `interview.attempts` are named `attempts` specifically
 because §3's `capReason` rule reads those two exact paths — a reader of
 `evidenceCounts` should be able to find the cap's own inputs without also
-knowing which of the eight components they happen to feed.
+knowing which of the eight components they happen to feed. `english` is
+deliberately absent from that list — §2.9/§3 state why.
 
 ---
 
@@ -761,19 +834,20 @@ from §3's fixed cap copy, `path: '/practice'` — the same destination
 (`journey-shell.md`/`memory-model.md` §6's "three kinds naming one
 destination, not a duplicated branch"), with the note that E8 will
 re-point this path once a dedicated mock-interview route exists to send a
-learner to directly. This is not a competing choice against the five
+learner to directly. This is not a competing choice against the
 currently-earnable components below — a capped learner is told about the
 cap **every time**, because the cap is the single most consequential true
 thing this product can say to them, ahead of any smaller headroom
 optimization among components they can already move freely.
 
 **When not capped**, the recommendation picks the component — among the
-five currently-earnable ones (`coverage`, `recall`, `retention`,
-`consistency`, `remediation` — never `english`/`spoken`/`interview`, which
-are declared-but-unwired exactly as §2.6–§2.8 describe, and recommending
-"go do more spoken/interview practice" as a headroom pick rather than as the
-cap message itself would be recommending a feature that does not exist yet)
-— with the greatest `weight * (1 - value)`, the "weighted headroom": how
+six currently-earnable ones (`coverage`, `recall`, `retention`,
+`consistency`, `remediation`, and, since #141 (epic #59 / E10), `english` —
+never `spoken`/`interview`, which are still declared-but-unwired exactly as
+§2.7–§2.8 describe, and recommending "go do more spoken/interview practice"
+as a headroom pick rather than as the cap message itself would be
+recommending a feature that does not exist yet) — with the greatest
+`weight * (1 - value)`, the "weighted headroom": how
 much this component could still add to the score, scaled by how much it's
 worth. Ties are broken by §2's declared component order (`coverage` before
 `recall` before `retention`...) — the same stable-tie-break discipline
