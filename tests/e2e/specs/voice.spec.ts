@@ -410,10 +410,18 @@ async function recordSpokenAnswer(
   page: Page,
   marker: string,
 ): Promise<TranscribeOk> {
+  // Always clicked, never conditionally: MUI's exclusive `ToggleButtonGroup`
+  // reports `next: null` (a no-op — see `PracticeSessionPage.tsx`'s own
+  // comment) when the already-selected button is pressed again, so this is
+  // safe whether this is the first switch to voice or a later question that
+  // is already in voice mode. Waiting for it here (rather than a one-shot
+  // `isVisible()` check) is what makes this safe to call the moment a
+  // question first renders, before `AiStatusProvider`'s own fetch has
+  // necessarily resolved.
   const speakToggle = page.getByRole('button', { name: 'Speak', exact: true });
-  if (await speakToggle.isVisible()) {
-    await speakToggle.click();
-  }
+  await expect(speakToggle).toBeVisible();
+  await speakToggle.click();
+
   const idle = page.getByRole('button', { name: 'Hold to record' });
   await expect(idle).toBeVisible();
 
@@ -518,7 +526,11 @@ test.describe('Voice foundation (issue #114), epic #58 (E9)', () => {
     await expect(
       page.getByText('As an administrator: no model is bound to', { exact: false }),
     ).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Open AI settings' })).toHaveAttribute(
+    // A MUI `Button` rendered `component={RouterLink}` is an `<a>` under the
+    // hood, so its accessible role is `link` — the same pattern
+    // `mock-interview-text.spec.ts`'s own "Start a mock interview" locator
+    // relies on for the identical reason.
+    await expect(page.getByRole('link', { name: 'Open AI settings' })).toHaveAttribute(
       'href',
       '/admin/settings/ai',
     );
