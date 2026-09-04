@@ -133,6 +133,61 @@ export const APPLICANT_RESPONSE_OPEN = '<applicant_response>';
 export const APPLICANT_RESPONSE_CLOSE = '</applicant_response>';
 
 /**
+ * WHO the officer is, in the words both transports use.
+ *
+ * -----------------------------------------------------------------------------
+ * EXTRACTED SO THERE IS EXACTLY ONE OFFICER, NOT ONE PER TRANSPORT
+ * -----------------------------------------------------------------------------
+ *
+ * E11's realtime session (`realtime/realtime-instructions.ts`) needs a persona
+ * too, and writing it a second one is the failure this constant forecloses: two
+ * descriptions drift, and the drift is invisible — a learner who rehearses by
+ * voice and then by text would meet two different officers, each plausible, with
+ * nothing in either file saying which one the real event resembles. `PRD.md`
+ * describes ONE role ("realistic, neutral mock USCIS interview experience"), so
+ * there is one description of it.
+ *
+ * Split in two because the two transports need it in different grammatical
+ * positions — the text prompt writes dialogue FOR the officer, the realtime
+ * session IS the officer — and a single sentence would only fit one of them.
+ *
+ * STILL PROSE, STILL NOT ASSEMBLED FROM SETTINGS. There is no
+ * admin-configurable officer persona and there must not be one: a deployment
+ * that could make the officer chatty, encouraging or harsh would be a
+ * deployment whose rehearsal no longer resembles the event it rehearses.
+ */
+export const OFFICER_ROLE_DESCRIPTION =
+  'a United States immigration officer conducting a naturalization interview ' +
+  'in a practice simulation';
+
+/** How the officer carries themselves. See {@link OFFICER_ROLE_DESCRIPTION}. */
+export const OFFICER_MANNER = 'The officer is formal, courteous and brief.';
+
+/**
+ * The rule that outranks every other instruction the officer is given, in one
+ * paragraph, shared verbatim by both transports.
+ *
+ * §10 at the prompt layer, and — as this file's header says — the one place in
+ * this epic where the rule rests on the model cooperating rather than on a
+ * structure. That makes it exactly the wrong paragraph to have two versions of:
+ * a realtime officer holding a weaker phrasing of it would leak verdicts during
+ * the most realistic rehearsal this product offers, and the text transport's
+ * tests would still pass.
+ *
+ * `realtime-instructions.ts` reuses it unchanged, on a session where the model
+ * is additionally told the same thing by `grade_answer`'s tool description —
+ * belt and braces, because on that transport the model is holding the
+ * conversation rather than writing one line of it.
+ */
+export const OFFICER_VERDICT_PROHIBITION =
+  'Above all: you must NOT say, imply, hint at, or allude to whether what the ' +
+  'applicant said was right, wrong, close, or incomplete. Not with words, ' +
+  'not with tone, not with "good", not with "let\'s try another one", not ' +
+  'with sympathy, and not with congratulation. A real officer gives no ' +
+  'per-question feedback and neither do you. The applicant is told how they ' +
+  'did once, at the end, by a different part of this application.';
+
+/**
  * The generation cap for one acknowledgement.
  *
  * DELIBERATELY SMALL, and unlike `civics-explain.service.ts`'s 700 it is a
@@ -308,9 +363,8 @@ export function buildOfficerPrompt(input: OfficerPromptInput): AiMessage[] {
  */
 function officerSystemMessage(input: OfficerPromptInput): string {
   const paragraphs = [
-    'You are writing one line of dialogue for a United States immigration ' +
-      'officer conducting a naturalization interview in a practice simulation. ' +
-      'The officer is formal, courteous and brief.',
+    `You are writing one line of dialogue for ${OFFICER_ROLE_DESCRIPTION}. ` +
+      OFFICER_MANNER,
 
     // THE JOB, STATED AS A SINGLE DELIVERABLE. "One or two short sentences" is
     // the whole contract, and it is stated before any prohibition so the model
@@ -333,12 +387,7 @@ function officerSystemMessage(input: OfficerPromptInput): string {
 
     // THE VERDICT PROHIBITION, IN ITS OWN PARAGRAPH. See the header: this is
     // the one rule in this epic that rests on the model cooperating.
-    'Above all: you must NOT say, imply, hint at, or allude to whether what the ' +
-      'applicant said was right, wrong, close, or incomplete. Not with words, ' +
-      'not with tone, not with "good", not with "let\'s try another one", not ' +
-      'with sympathy, and not with congratulation. A real officer gives no ' +
-      'per-question feedback and neither do you. The applicant is told how they ' +
-      'did once, at the end, by a different part of this application.',
+    OFFICER_VERDICT_PROHIBITION,
 
     // THE ONE UNTRUSTED INPUT. Always present, so unlike `buildExplainPrompt`'s
     // conditional focus paragraph this one is unconditional.
