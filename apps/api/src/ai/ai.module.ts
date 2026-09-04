@@ -5,6 +5,8 @@ import { PrismaModule } from '../prisma/prisma.module';
 import { CredentialsModule } from '../credentials/credentials.module';
 import { CredentialsService } from '../credentials/credentials.service';
 import { AiSettingsController } from './ai-settings.controller';
+import { AiSpeechController } from './ai-speech.controller';
+import { AiSpeechService } from './ai-speech.service';
 import { AiSettingsService } from './ai-settings.service';
 import { AiConnectionTestService } from './ai-connection-test.service';
 import { AiDispatchService } from './ai-dispatch.service';
@@ -152,6 +154,12 @@ export function resolveAiProvider(
     // history is a controller where a future "usage for user X" route looks
     // like it belongs.
     AiUsageController,
+    // The two speech routes (#95, epic #58). A THIRD controller on /api/ai for
+    // the same reason there is a second: these handlers move a learner's
+    // recorded voice through the process, and keeping them out of the file
+    // that holds credentials is what stops a future "transcribe for user X"
+    // route from looking like it belongs next to one.
+    AiSpeechController,
   ],
   providers: [
     AiSettingsService,
@@ -171,6 +179,12 @@ export function resolveAiProvider(
     // reason AiConnectionTestService is: it is resolution over the settings,
     // credentials and provider this module already owns.
     AiDispatchService,
+    // The speech endpoints' logic (#95): the upload caps, the accepted content
+    // types, and the mapping from a dispatch result to a wire shape. Registered
+    // here rather than in a module of its own because it is resolution over
+    // the dispatcher this module already owns — the same reason
+    // AiConnectionTestService lives here.
+    AiSpeechService,
     // THE SUBSTITUTABLE PROVIDER TOKEN (#105). Still addressed everywhere as
     // `OpenAiProvider` — the class is the injection token, not necessarily the
     // instance — so no consumer changes and no consumer can tell. See

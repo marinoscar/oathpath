@@ -221,6 +221,134 @@ export interface AiStructuredRunRequest<T> extends AiRunRequest {
   schema: z.ZodType<T>;
 }
 
+/**
+ * What a caller supplies to {@link AiDispatchService.transcribe}: one
+ * recording, and what it is.
+ *
+ * NO MODEL, NO PROVIDER, NO KEY, NO ROLE-OVERRIDE FIELD — the header's rule,
+ * restated because this is a second door into the same room. A speech caller
+ * that could name its own model would bind itself to whatever the admin
+ * configured for a more expensive role exactly as a text caller could; the
+ * unit of consumption differs, the failure does not.
+ */
+export interface AiTranscribeRunRequest {
+  /**
+   * The recording itself, IN MEMORY. See `AiTranscriptionRequest.audio`: a
+   * recording exists to become text and then to be dropped, and a temp file is
+   * a copy that outlives the request and that somebody has to remember to
+   * delete. The size limit belongs at the edge — `AiSpeechService` — not here.
+   */
+  audio: Buffer;
+
+  /** The recording's MIME type, e.g. `'audio/webm'`. */
+  contentType: string;
+
+  /**
+   * A file name for the upload.
+   *
+   * A WIRE DETAIL, NOT A STORED FILENAME: provider SDKs infer the container
+   * format from it, and an unnamed blob is rejected as an unsupported format —
+   * which presents as "transcription is broken" rather than as the missing
+   * metadata it is. Nothing writes it anywhere.
+   */
+  fileName: string;
+
+  /** An optional ISO-639-1 hint, e.g. `'en'`. A hint, never a constraint. */
+  languageHint?: string;
+}
+
+/** What a caller supplies to {@link AiDispatchService.synthesize}. */
+export interface AiSynthesizeRunRequest {
+  /** What to say. Ours, not a learner's — a question, an explanation. */
+  text: string;
+
+  /** The provider's voice id. Omitted lets the provider choose. */
+  voice?: string;
+
+  /** The container to synthesise into, e.g. `'mp3'`. Provider-defined. */
+  format?: string;
+}
+
+/**
+ * One recording became text.
+ *
+ * NO `usageEventId`, UNLIKE {@link AiRunOk}, and that is not an oversight.
+ * `BaseAiProvider.transcribe` writes the `ai_usage_events` row and does not
+ * return its id, because no caller stores a foreign key to a speech call
+ * today. Inventing a `usageEventId` here would mean either always-`null` —
+ * indistinguishable from the "the write failed" meaning {@link AiRunOk} gives
+ * that value — or threading a new field through the provider surface for
+ * nobody. Add it when a caller needs the FK.
+ */
+export interface AiTranscribeRunOk {
+  status: 'ok';
+
+  /**
+   * What was heard.
+   *
+   * MAY BE `''`, AND THAT IS A SUCCESS. A recording of silence — a learner who
+   * pressed record and said nothing — really did transcribe to nothing, and
+   * `run` treating an empty completion as a failure does not carry over: an
+   * empty tutor explanation is a bug, an empty transcript is a fact about the
+   * audio. A caller that wants to prompt "we did not hear anything" checks the
+   * length itself, on a result that says the call succeeded.
+   */
+  text: string;
+
+  /**
+   * The recogniser's own confidence in `[0, 1]`, or `null` for "not reported".
+   *
+   * NEVER DEFAULTED TO 0 OR 1 anywhere on the way up. See
+   * `AiTranscriptionResult.confidence`: a defaulted 0 asserts the recogniser
+   * was certain it heard nothing, on the one signal a caller uses to decide an
+   * answer was MISHEARD rather than wrong.
+   */
+  confidence: number | null;
+
+  usage: AiUsage;
+  modelId: string;
+}
+
+/** One piece of text became audio. Same no-`usageEventId` reasoning as above. */
+export interface AiSynthesizeRunOk {
+  status: 'ok';
+
+  /** The audio, in memory: a response body on its way out, not a file. */
+  audio: Buffer;
+
+  /**
+   * The MIME type of {@link audio}, e.g. `'audio/mpeg'`.
+   *
+   * REPORTED BY THE PROVIDER, NOT DERIVED FROM THE REQUESTED `format`. A
+   * caller streaming these bytes has to set a `Content-Type`, and deriving it
+   * at each call site is how the header and the bytes come to disagree.
+   */
+  contentType: string;
+
+  usage: AiUsage;
+  modelId: string;
+}
+
+/**
+ * The outcome of one transcription.
+ *
+ * `AiRunFailed` AND `AiRunUnavailable` ARE REUSED VERBATIM rather than copied
+ * into speech-shaped twins. The four `AiUnavailableCause` members mean exactly
+ * what they mean for `run` — this method resolves through the same five steps
+ * in the same order — and a parallel copy would be a second union every
+ * point-of-use `switch` has to be re-audited against for no new information.
+ */
+export type AiTranscribeRunResult =
+  | AiTranscribeRunOk
+  | AiRunFailed
+  | AiRunUnavailable;
+
+/** The outcome of one synthesis. Same reuse, same reason. */
+export type AiSynthesizeRunResult =
+  | AiSynthesizeRunOk
+  | AiRunFailed
+  | AiRunUnavailable;
+
 /** Everything a run needs, once resolution has succeeded. */
 interface ResolvedTarget {
   apiKey: string;
@@ -250,6 +378,41 @@ const DISPATCH_ERROR_CODE = 'dispatch_error';
  * refused" have different causes.
  */
 const EMPTY_COMPLETION_CODE = 'empty_completion';
+
+/**
+ * The code for a synthesis that succeeded and produced nothing playable.
+ *
+ * ITS OWN CODE, alongside {@link EMPTY_COMPLETION_CODE} rather than folded
+ * into it, because the two are different operator problems: an empty
+ * completion is usually a prompt or a token cap, while empty audio is a voice
+ * id or a container the bound model will not produce. Grouped reporting that
+ * cannot tell them apart sends whoever is on call to read the wrong thing.
+ *
+ * There is deliberately no transcription counterpart for an empty STRING: a
+ * recording of silence transcribes to `''` and that is a success — see
+ * {@link AiTranscribeRunOk.text}.
+ */
+const EMPTY_SYNTHESIS_CODE = 'empty_synthesis';
+
+/**
+ * The code for a transcription that reported success and returned no text at
+ * all — `null`, not `''`. A provider contract violation, not silence.
+ */
+const EMPTY_TRANSCRIPTION_CODE = 'empty_transcription';
+
+/**
+ * The two speech roles, named once.
+ *
+ * CONSTANTS RATHER THAN LITERALS AT FOUR CALL SITES (the `resolve` call, the
+ * provider request's `roleKey`, and both failure paths, per method). These
+ * strings are persisted — they key the admin's `models` map and land in
+ * `ai_usage_events.roleKey` — so a typo in one of the four would resolve one
+ * binding and record usage under a different, invented role, with no error
+ * anywhere. `AI_MODEL_ROLES` is where they are declared; this is where this
+ * file agrees with it exactly once.
+ */
+const TRANSCRIBE_ROLE = 'transcribe';
+const SPEAK_ROLE = 'speak';
 
 /** Usage for a call that never reached a provider. ALL NULL, NEVER ZERO. */
 const EMPTY_USAGE: AiUsage = {
@@ -486,6 +649,185 @@ export class AiDispatchService {
         modelId: NO_MODEL,
         events: singleErrorStream(failure.errorCode, failure.error),
       };
+    }
+  }
+
+  /**
+   * Turn one recording into text for `userId`, in the `transcribe` role.
+   * NEVER THROWS.
+   *
+   * -------------------------------------------------------------------------
+   * A SIBLING OF `run`, NOT AN OVERLOAD OF IT
+   * -------------------------------------------------------------------------
+   *
+   * `AiRunRequest` is `{ messages, maxTokens }` — text in, text out. It cannot
+   * carry a buffer in or bytes out, and widening it with optional `audio` /
+   * `mimeType` fields no text caller ever populates would make every caller of
+   * `run` read a request type that is mostly not about them, with the
+   * compiler unable to say which combination is valid. So speech gets its own
+   * request and result types and its own method, and shares the ONE thing that
+   * must not be duplicated: {@link resolve}.
+   *
+   * -------------------------------------------------------------------------
+   * THE SAME FIVE CHECKS, IN THE SAME ORDER, WITH THE KEY LAST
+   * -------------------------------------------------------------------------
+   *
+   * Master switch, then provider, then capability family, then binding, then
+   * the caller's own credential — because this method calls the same private
+   * {@link resolve} the other three do rather than repeating its checks. The
+   * cause set stays CLOSED at four members: `capability_unsupported` already
+   * covers "the configured provider has no speech API", which is the first
+   * cause in this codebase that a real production deployment can produce, on
+   * the day a second, text-only provider is configured.
+   *
+   * THE CALLER SUPPLIES AUDIO AND NOTHING ELSE — no `modelId` field, ever. See
+   * the file header: a caller able to name its own model can bind itself to
+   * whatever the admin configured for a more expensive role, and the failure
+   * arrives as a bill rather than as an error.
+   *
+   * THE SERVER CREDENTIAL IS NOT REACHABLE FROM HERE either, for the reason
+   * the header gives and which speech makes concrete: the unit billed is
+   * minutes of audio rather than tokens, but a call that silently ran on the
+   * organisation's key still writes `ai_usage_events.userId = <the learner>`
+   * while the money came out of the administrator's account.
+   *
+   * NOTHING ABOUT THE RECORDING OR THE TRANSCRIPT IS LOGGED HERE. The bytes
+   * are a learner's voice and the text is what they said; what this method
+   * emits, through the same {@link providerFailure} and
+   * {@link dispatchFailure} helpers every other path uses, is a user id, a
+   * role, a model id and a stable code.
+   *
+   * @param userId the caller, ALWAYS PASSED EXPLICITLY — see {@link run}.
+   */
+  async transcribe(
+    userId: string,
+    request: AiTranscribeRunRequest,
+  ): Promise<AiTranscribeRunResult> {
+    const redact = new SecretRedactor();
+
+    try {
+      const resolved = await this.resolve(userId, TRANSCRIBE_ROLE, redact);
+      if ('status' in resolved) return resolved;
+
+      const result = await resolved.provider.transcribe(userId, resolved.apiKey, {
+        roleKey: TRANSCRIBE_ROLE,
+        modelId: resolved.modelId,
+        audio: request.audio,
+        contentType: request.contentType,
+        fileName: request.fileName,
+        languageHint: request.languageHint,
+      });
+
+      // `typeof text === 'string'` AND NOT `text.length > 0`, deliberately
+      // unlike `run`. An empty transcript is a real answer about a real
+      // recording (silence), while an empty completion is a tutor bubble with
+      // nothing in it — see {@link AiTranscribeRunOk.text}. `null` is the
+      // failure this check is actually for.
+      if (result.success && typeof result.text === 'string') {
+        return {
+          status: 'ok',
+          text: result.text,
+          // PASSED THROUGH, NEVER COALESCED. `?? 0` here would be the exact
+          // false claim `AiTranscriptionResult.confidence` exists to forbid.
+          confidence: result.confidence,
+          usage: result.usage,
+          modelId: resolved.modelId,
+        };
+      }
+
+      return this.providerFailure(
+        userId,
+        TRANSCRIBE_ROLE,
+        resolved.modelId,
+        result.success ? EMPTY_TRANSCRIPTION_CODE : (result.errorCode ?? 'error'),
+        result.success
+          ? 'The provider reported success and returned no transcription.'
+          : (result.error ?? 'The provider reported a failure with no message.'),
+        // NO ROW ID TO REPORT. The provider wrote the `ai_usage_events` row and
+        // does not hand back its id on this surface — see
+        // {@link AiTranscribeRunOk}. `null` here therefore means "not
+        // surfaced", not "the write failed"; a speech caller has no FK to
+        // store, so nothing reads it.
+        null,
+      );
+    } catch (err) {
+      return this.dispatchFailure(userId, TRANSCRIBE_ROLE, err, redact);
+    }
+  }
+
+  /**
+   * Read one piece of text aloud for `userId`, in the `speak` role. NEVER
+   * THROWS.
+   *
+   * A sibling of {@link run} for the same reason {@link transcribe} is, and
+   * resolved through the same {@link resolve}: same five checks, same order,
+   * the caller's own key last, the same four `unavailable` causes. THE CALLER
+   * SUPPLIES TEXT AND NOTHING ELSE — no `modelId` field, ever, and no reach
+   * for the organisation's credential.
+   *
+   * The text on this surface is ours rather than a learner's, and it is still
+   * not logged: length is diagnosable, content is not.
+   */
+  async synthesize(
+    userId: string,
+    request: AiSynthesizeRunRequest,
+  ): Promise<AiSynthesizeRunResult> {
+    const redact = new SecretRedactor();
+
+    try {
+      const resolved = await this.resolve(userId, SPEAK_ROLE, redact);
+      if ('status' in resolved) return resolved;
+
+      const result = await resolved.provider.synthesize(userId, resolved.apiKey, {
+        roleKey: SPEAK_ROLE,
+        modelId: resolved.modelId,
+        text: request.text,
+        voice: request.voice,
+        format: request.format,
+      });
+
+      // BOTH HALVES CHECKED, because a caller cannot use either without the
+      // other: bytes with no content type reach a browser as a download it
+      // will not play, and a content type with no bytes is silence the client
+      // renders as a working player. Zero-length audio is a failure here even
+      // on a `success` result, unlike an empty transcript above — there is no
+      // recording whose honest synthesis is no sound.
+      if (
+        result.success &&
+        result.audio !== null &&
+        result.audio.length > 0 &&
+        typeof result.contentType === 'string' &&
+        result.contentType.length > 0
+      ) {
+        return {
+          status: 'ok',
+          audio: result.audio,
+          contentType: result.contentType,
+          usage: result.usage,
+          modelId: resolved.modelId,
+        };
+      }
+
+      return this.providerFailure(
+        userId,
+        SPEAK_ROLE,
+        resolved.modelId,
+        result.success ? EMPTY_SYNTHESIS_CODE : (result.errorCode ?? 'error'),
+        result.success
+          ? // THE SHAPE OF THE PROBLEM, NEVER THE CONTENT. Which half was
+            // missing is what an operator needs; the sentence being read is
+            // not.
+            `The provider reported success and returned ${
+              result.audio === null || result.audio.length === 0
+                ? 'no audio'
+                : 'no content type'
+            }.`
+          : (result.error ?? 'The provider reported a failure with no message.'),
+        // Not surfaced on this surface either — see {@link transcribe}.
+        null,
+      );
+    } catch (err) {
+      return this.dispatchFailure(userId, SPEAK_ROLE, err, redact);
     }
   }
 
