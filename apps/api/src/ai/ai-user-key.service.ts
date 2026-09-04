@@ -243,7 +243,23 @@ export class AiUserKeyService {
   }
 
   /**
-   * Remove the key belonging to a user account that is being DELETED.
+   * Remove the key belonging to a user account that is being DELETED, or
+   * whose owner has chosen to erase it themselves.
+   *
+   * -------------------------------------------------------------------------
+   * TWO CALLERS NOW, ONE METHOD (issue #270)
+   * -------------------------------------------------------------------------
+   *
+   * Originally written for a user-DELETION path this application still does
+   * not have (see "NOTHING CALLS THIS TODAY" below, which is now half true
+   * rather than wholly true). `AccountResetService.reset`'s `data_and_key`
+   * scope calls this method too, on a live, still-active account that chose
+   * to erase its own data and key — the mechanics are IDENTICAL either way
+   * (the row lives at the same address, keyed by the string `userId`, and
+   * "gone" means the same thing whether the account survives the call or
+   * not), so this stayed one method with a `reason` rather than growing a
+   * near-duplicate `purgeForResetUser`. Only the AUDIT trail needs to tell
+   * the two apart — see `reason` below.
    *
    * -------------------------------------------------------------------------
    * WHY THIS EXISTS, AND WHY IT IS NOT MERELY HOUSEKEEPING (#38)
@@ -278,13 +294,14 @@ export class AiUserKeyService {
    * neither reads as an oversight. See docs/specs/ai-settings.md §4.1.
    *
    * -------------------------------------------------------------------------
-   * NOTHING CALLS THIS TODAY, AND THAT IS THE POINT
+   * NOTHING CALLED THIS FOR A LONG TIME, AND THAT WAS THE POINT
    * -------------------------------------------------------------------------
    *
-   * This application has no user-deletion endpoint: `UsersService` offers
-   * deactivation (`isActive: false`) and role changes, and nothing else. So
-   * there is no site to hook, and a hook alone would be an unenforced promise
-   * that the FIRST deletion path anyone adds remembers to call it.
+   * This application still has no user-DELETION endpoint: `UsersService`
+   * offers deactivation (`isActive: false`) and role changes, and nothing
+   * else. So there was no site to hook when this method was written, and a
+   * hook alone would have been an unenforced promise that the FIRST deletion
+   * path anyone added remembered to call it.
    *
    * `AiUserCredentialCleanupTask` is the enforcement: it sweeps for rows whose
    * `name` matches no existing user and removes them, so a deletion path that
@@ -292,9 +309,23 @@ export class AiUserKeyService {
    * method is the immediate, correct action; the sweep is the backstop that
    * does not depend on anyone remembering.
    *
+   * `AccountResetService.reset` (#270) is the FIRST real caller — a live
+   * account erasing its own key, not a deletion path — and it is a
+   * deliberate, reviewed call site rather than the sweep quietly picking up
+   * the slack, which is exactly what "reviewed call site, not a convenient
+   * default" means in practice.
+   *
    * Idempotent: purging a user with no key stored is not an error.
+   *
+   * @param reason - Which caller this is, for the audit row's `meta` only —
+   *   it changes nothing about what is deleted or how. Defaults to
+   *   `'account_deleted'` so the one pre-existing (if still theoretical)
+   *   caller's behavior is unchanged by this parameter's addition.
    */
-  async purgeForDeletedUser(userId: string): Promise<void> {
+  async purgeForDeletedUser(
+    userId: string,
+    reason: 'account_deleted' | 'account_reset' = 'account_deleted',
+  ): Promise<void> {
     await this.credentials.deleteSecret(
       AI_USER_CREDENTIAL_PURPOSE,
       aiUserCredentialName(userId),
@@ -308,9 +339,9 @@ export class AiUserKeyService {
     // NOTE THE ORDER: the credential is removed BEFORE the audit row is
     // written, so a failure to audit cannot leave the key in place. An
     // unaudited deletion is a smaller problem than a retained credential.
-    await this.audit(userId, 'ai_key:delete', { reason: 'account_deleted' });
+    await this.audit(userId, 'ai_key:delete', { reason });
 
-    this.logger.log(`AI key purged for deleted user ${userId}`);
+    this.logger.log(`AI key purged for user ${userId} (${reason})`);
   }
 
   // ---------------------------------------------------------------------------

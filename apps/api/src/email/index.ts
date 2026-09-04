@@ -71,6 +71,8 @@ export {
   practiceDailyReminderEmail,
   practiceReviewDueEmail,
   streakAtRiskEmail,
+  // Self-service account data reset (issue #270).
+  accountDataResetEmail,
 } from './templates';
 export {
   SmtpEmailProvider,
@@ -98,6 +100,8 @@ export type {
   PracticeDailyReminderEmailData,
   PracticeReviewDueEmailData,
   StreakAtRiskEmailData,
+  // `AccountResetService.reset`'s payload, for the same reason (issue #270).
+  AccountDataResetEmailData,
 } from './templates';
 export type { EmailProvider } from './providers/email-provider.interface';
 export type {

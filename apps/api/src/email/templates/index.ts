@@ -1,5 +1,9 @@
 import type { EmailTemplate, RenderedEmail } from './email-template.types';
 import {
+  type AccountDataResetEmailData,
+  accountDataResetEmail,
+} from './account-data-reset.email';
+import {
   type AllowlistInvitationEmailData,
   allowlistInvitationEmail,
 } from './allowlist-invitation.email';
@@ -82,6 +86,10 @@ export interface EmailTemplateDataMap {
   'practice-daily-reminder': PracticeDailyReminderEmailData;
   'practice-review-due': PracticeReviewDueEmailData;
   'streak-at-risk': StreakAtRiskEmailData;
+  // Self-service account data reset (issue #270). Mandatory, like
+  // `role-changed`, and modeled on it directly — see
+  // `account-data-reset.email.ts`'s own header for how the two differ.
+  'account-data-reset': AccountDataResetEmailData;
 }
 
 /**
@@ -116,6 +124,7 @@ export const EMAIL_TEMPLATES: {
   'practice-daily-reminder': practiceDailyReminderEmail,
   'practice-review-due': practiceReviewDueEmail,
   'streak-at-risk': streakAtRiskEmail,
+  'account-data-reset': accountDataResetEmail,
 };
 
 /**
@@ -224,6 +233,8 @@ export { roleChangedEmail } from './role-changed.email';
 export { practiceDailyReminderEmail } from './practice-daily-reminder.email';
 export { practiceReviewDueEmail } from './practice-review-due.email';
 export { streakAtRiskEmail } from './streak-at-risk.email';
+// Self-service account data reset (issue #270).
+export { accountDataResetEmail } from './account-data-reset.email';
 
 export type { PlainTextOptions, RenderLayoutOptions } from './layout';
 export type { EmailTemplate, RenderedEmail } from './email-template.types';
@@ -244,3 +255,6 @@ export type { RoleChangedEmailData } from './role-changed.email';
 export type { PracticeDailyReminderEmailData } from './practice-daily-reminder.email';
 export type { PracticeReviewDueEmailData } from './practice-review-due.email';
 export type { StreakAtRiskEmailData } from './streak-at-risk.email';
+// `AccountResetService.reset` annotates its payload with this for the same
+// reason (issue #270).
+export type { AccountDataResetEmailData } from './account-data-reset.email';
