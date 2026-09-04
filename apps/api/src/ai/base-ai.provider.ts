@@ -18,6 +18,10 @@ import type {
   AiStreamEvent,
   AiStructuredCompletionRequest,
   AiStructuredCompletionResult,
+  AiSynthesisRequest,
+  AiSynthesisResult,
+  AiTranscriptionRequest,
+  AiTranscriptionResult,
   AiUsage,
 } from './ai.types';
 import type { AiUsageService } from './ai-usage.service';
@@ -38,9 +42,15 @@ import type {
 //
 // So the public methods are implemented HERE, once, `final` by convention, and
 // subclasses implement `fetchModels` / `probeConnection` / `runCompletion` /
-// `runStructuredCompletion` / `openStream` instead. A provider subclass
-// contains no try/catch at all and has no public method to get wrong; the
+// `runStructuredCompletion` / `openStream` / `runTranscription` /
+// `runSynthesis` instead. A subclass has no public method to get wrong; the
 // entire never-throw contract is this file.
+//
+// A hook may still contain a `try` — `OpenAiProvider.probeTextModel` and
+// `runTranscription` both do — but never as a never-throw guard: each catches
+// one recognised rejection to retry a differently-shaped request, and rethrows
+// everything else untouched. A `catch` in a hook that swallows generally is a
+// `catch` that turns a revoked key into a silently degraded result.
 //
 // -----------------------------------------------------------------------------
 // `stream` IS THE HARD ONE, AND IT IS WHY THE PATTERN WAS WORTH KEEPING (#96)
@@ -290,6 +300,40 @@ export abstract class BaseAiProvider implements AiProvider {
     redact: SecretRedactor,
     signal?: AbortSignal,
   ): AsyncIterable<{ delta?: string; usage?: AiUsage }>;
+
+  /**
+   * Turn one recording into text, on the caller's key.
+   *
+   * MAY THROW FREELY, as every hook above may. {@link transcribe} turns a
+   * throw into a recorded failure with a NULL confidence and NULL token
+   * counts — never a `confidence` of 0, which would assert the recogniser was
+   * certain it heard nothing.
+   *
+   * ONLY CALLED WHEN THE PROVIDER DECLARES `'transcribe'`. The public method
+   * checks {@link capabilities} first, so a subclass need not — and must not
+   * answer the question a second time, differently.
+   *
+   * @param redact the key is already registered by {@link transcribe}.
+   */
+  protected abstract runTranscription(
+    apiKey: string,
+    request: AiTranscriptionRequest,
+    redact: SecretRedactor,
+  ): Promise<AiTranscriptionResult>;
+
+  /**
+   * Read one piece of text aloud, on the caller's key.
+   *
+   * MAY THROW FREELY. Only called when the provider declares `'tts'` — see
+   * {@link runTranscription}.
+   *
+   * @param redact the key is already registered by {@link synthesize}.
+   */
+  protected abstract runSynthesis(
+    apiKey: string,
+    request: AiSynthesisRequest,
+    redact: SecretRedactor,
+  ): Promise<AiSynthesisResult>;
 
   // ---------------------------------------------------------------------------
   // Public surface — NEVER THROWS. Do not override.
@@ -851,6 +895,266 @@ export abstract class BaseAiProvider implements AiProvider {
     }
   }
 
+  /**
+   * Turn one recording into text, and record it. NEVER throws.
+   *
+   * Built exactly as {@link complete} is, deliberately and line for line: the
+   * key registered before anything that can throw, the `await` INSIDE the
+   * `try`, the span's status taken from the RESULT rather than from reaching
+   * the end of the method, every error string through {@link formatError}, and
+   * one `ai_usage_events` row on success and on failure alike. A second,
+   * hand-rolled version of that shape here would be a second place for the
+   * never-throw guarantee to be narrowed by a later refactor.
+   *
+   * -------------------------------------------------------------------------
+   * THE CAPABILITY GATE COMES FIRST, AND IT DOES NOT CALL OUT
+   * -------------------------------------------------------------------------
+   *
+   * A provider that does not declare `'transcribe'` returns a failure carrying
+   * `'capability_unsupported'` without a network call and WITHOUT a usage row:
+   * nothing was attempted, and `ai_usage_events` records calls that happened.
+   * An admin cannot normally bind `transcribe` to such a provider — the
+   * settings write consults `supports()` — but a settings row written before a
+   * deployment swapped providers still names one, and that must read as a
+   * refusal rather than as a crash inside an SDK that has no such method.
+   *
+   * -------------------------------------------------------------------------
+   * NOTHING HERE LOGS THE AUDIO OR THE TRANSCRIPT
+   * -------------------------------------------------------------------------
+   *
+   * The span carries the model, the role, the byte length and the content
+   * type — enough to diagnose "uploads are being rejected" or "the recordings
+   * are all 44 bytes" — and nothing else. The recording is a learner's voice
+   * and the transcript is what they said; neither has a column in
+   * `ai_usage_events`, and neither belongs in a trace backend or a log line.
+   * The only text this method emits is the redacted `error`.
+   */
+  async transcribe(
+    userId: string,
+    apiKey: string,
+    request: AiTranscriptionRequest,
+  ): Promise<AiTranscriptionResult> {
+    const redact = new SecretRedactor();
+
+    // REGISTERED BEFORE ANYTHING THAT CAN THROW WHILE HOLDING IT.
+    redact.protect(apiKey);
+
+    const span = tracer.startSpan(`${this.providerName}.transcribe`);
+    span.setAttribute('ai.model', request.modelId);
+    span.setAttribute('ai.role', request.roleKey);
+    // SHAPE ONLY, NEVER CONTENT. See the doc comment.
+    span.setAttribute('ai.audio_bytes', byteLength(request.audio));
+    span.setAttribute('ai.audio_content_type', request.contentType ?? '');
+
+    if (!this.supports('transcribe')) {
+      span.setStatus({
+        code: SpanStatusCode.ERROR,
+        message: 'capability unsupported',
+      });
+      span.end();
+
+      return {
+        ...this.unsupported('speech recognition'),
+        text: null,
+        confidence: null,
+      };
+    }
+
+    const startedAt = Date.now();
+    let result: AiTranscriptionResult;
+
+    try {
+      // `await` INSIDE the try. Returning the promise would resolve this block
+      // before it settled and let a rejection escape the catch entirely.
+      result = await this.runTranscription(apiKey, request, redact);
+
+      if (typeof result !== 'object' || result === null) {
+        // A subclass that falls off the end of a branch yields `undefined`,
+        // and a caller reading `.usage` off it throws one frame outside this
+        // try — a never-throw violation with this class's name on it.
+        this.logger.error(
+          `${this.providerName} provider returned no transcription result; treating as a failure`,
+        );
+        result = {
+          success: false,
+          text: null,
+          confidence: null,
+          usage: EMPTY_USAGE,
+          errorCode: 'malformed_result',
+          error: `${this.providerName} returned no result.`,
+        };
+      } else if (!result.success) {
+        // A subclass-authored failure still goes through the single exit path
+        // for error text, and is forced back onto the null-not-zero contract:
+        // a failed call knows nothing about what was heard.
+        result = {
+          ...result,
+          text: null,
+          confidence: null,
+          error: this.formatError(result.error ?? 'Unknown error.', redact),
+        };
+      }
+    } catch (err) {
+      result = {
+        success: false,
+        text: null,
+        // UNKNOWN, not 0. A confidence of 0 asserts the recogniser was certain
+        // it heard nothing — see `AiTranscriptionResult.confidence`.
+        confidence: null,
+        usage: EMPTY_USAGE,
+        errorCode: classifyThrow(err),
+        error: this.formatCaught(err, redact),
+      };
+    }
+
+    const latencyMs = Date.now() - startedAt;
+
+    if (result.success) {
+      span.setStatus({ code: SpanStatusCode.OK });
+    } else {
+      span.setStatus({
+        code: SpanStatusCode.ERROR,
+        message: 'transcription failed',
+      });
+      // THE ERROR, NEVER THE TRANSCRIPT. `result.error` is already redacted
+      // and truncated — it is the only kind of text this class emits.
+      this.logger.warn(
+        `${this.providerName} transcription failed for user ${userId} (${request.roleKey}/${request.modelId}): ${result.error}`,
+      );
+    }
+
+    if (result.usage.totalTokens !== null) {
+      span.setAttribute('ai.total_tokens', result.usage.totalTokens);
+    }
+    span.end();
+
+    // THE ROW IS WRITTEN, THE ID IS NOT SURFACED. `recordUsage` returns it
+    // because `complete` needs it for `practice_attempts.ai_usage_event_id`;
+    // no caller stores a foreign key to a speech call today, so
+    // `AiTranscriptionResult` carries no `usageEventId` field to put it in.
+    // Add one when a caller needs the FK — not before, because a nullable id
+    // nobody reads is a field every future caller has to decide about.
+    await this.recordUsage(
+      userId,
+      request,
+      result.usage,
+      latencyMs,
+      result.success,
+      result.errorCode,
+    );
+
+    return result;
+  }
+
+  /**
+   * Read one piece of text aloud, and record it. NEVER throws.
+   *
+   * The same construction as {@link transcribe}, with the same capability gate
+   * (on `'tts'`) and the same usage-row obligation. The span carries the model,
+   * the role and the produced byte count; it does not carry the text, which on
+   * this surface is ours rather than a learner's but is still content with no
+   * diagnostic value.
+   */
+  async synthesize(
+    userId: string,
+    apiKey: string,
+    request: AiSynthesisRequest,
+  ): Promise<AiSynthesisResult> {
+    const redact = new SecretRedactor();
+
+    // REGISTERED BEFORE ANYTHING THAT CAN THROW WHILE HOLDING IT.
+    redact.protect(apiKey);
+
+    const span = tracer.startSpan(`${this.providerName}.synthesize`);
+    span.setAttribute('ai.model', request.modelId);
+    span.setAttribute('ai.role', request.roleKey);
+    // LENGTH, NOT THE TEXT.
+    span.setAttribute('ai.text_length', request.text?.length ?? 0);
+
+    if (!this.supports('tts')) {
+      span.setStatus({
+        code: SpanStatusCode.ERROR,
+        message: 'capability unsupported',
+      });
+      span.end();
+
+      return {
+        ...this.unsupported('speech synthesis'),
+        audio: null,
+        contentType: null,
+      };
+    }
+
+    const startedAt = Date.now();
+    let result: AiSynthesisResult;
+
+    try {
+      result = await this.runSynthesis(apiKey, request, redact);
+
+      if (typeof result !== 'object' || result === null) {
+        this.logger.error(
+          `${this.providerName} provider returned no synthesis result; treating as a failure`,
+        );
+        result = {
+          success: false,
+          audio: null,
+          contentType: null,
+          usage: EMPTY_USAGE,
+          errorCode: 'malformed_result',
+          error: `${this.providerName} returned no result.`,
+        };
+      } else if (!result.success) {
+        result = {
+          ...result,
+          audio: null,
+          contentType: null,
+          error: this.formatError(result.error ?? 'Unknown error.', redact),
+        };
+      }
+    } catch (err) {
+      result = {
+        success: false,
+        audio: null,
+        contentType: null,
+        usage: EMPTY_USAGE,
+        errorCode: classifyThrow(err),
+        error: this.formatCaught(err, redact),
+      };
+    }
+
+    const latencyMs = Date.now() - startedAt;
+
+    if (result.success) {
+      span.setAttribute('ai.audio_bytes', byteLength(result.audio));
+      span.setStatus({ code: SpanStatusCode.OK });
+    } else {
+      span.setStatus({
+        code: SpanStatusCode.ERROR,
+        message: 'synthesis failed',
+      });
+      this.logger.warn(
+        `${this.providerName} synthesis failed for user ${userId} (${request.roleKey}/${request.modelId}): ${result.error}`,
+      );
+    }
+
+    if (result.usage.totalTokens !== null) {
+      span.setAttribute('ai.total_tokens', result.usage.totalTokens);
+    }
+    span.end();
+
+    // As in `transcribe`: the row is written, the id is not surfaced.
+    await this.recordUsage(
+      userId,
+      request,
+      result.usage,
+      latencyMs,
+      result.success,
+      result.errorCode,
+    );
+
+    return result;
+  }
+
   // ---------------------------------------------------------------------------
   // Internals
   // ---------------------------------------------------------------------------
@@ -881,7 +1185,12 @@ export abstract class BaseAiProvider implements AiProvider {
    */
   private async recordUsage(
     userId: string,
-    request: AiCompletionRequest,
+    // STRUCTURAL, NOT `AiCompletionRequest`. The row is built from exactly two
+    // of its fields, and the speech surfaces (#88) carry those two while
+    // carrying no `messages` at all — a chat-shaped parameter here would have
+    // forced a speech request to invent an empty message list to satisfy a
+    // type that never reads it.
+    request: { roleKey: string; modelId: string },
     usage: AiUsage,
     latencyMs: number,
     success: boolean,
@@ -909,6 +1218,36 @@ export abstract class BaseAiProvider implements AiProvider {
 
       return null;
     }
+  }
+
+  /**
+   * The common half of a "this provider cannot do that" failure.
+   *
+   * SHARED BY BOTH SPEECH METHODS so the code, the usage shape and the wording
+   * cannot drift apart into two subtly different refusals. Each caller spreads
+   * it and adds its own null payload fields, because those differ by surface.
+   *
+   * ALL-NULL USAGE, and here that is not the usual "we were not told" — it is
+   * "there was nothing to tell": no request left this process. No row is
+   * written for it either; see {@link transcribe}.
+   *
+   * @param capability the human name of the missing capability, so the message
+   *        an admin reads names the thing to fix.
+   */
+  private unsupported(capability: string): {
+    success: false;
+    usage: AiUsage;
+    errorCode: string;
+    error: string;
+  } {
+    return {
+      success: false,
+      usage: EMPTY_USAGE,
+      errorCode: 'capability_unsupported',
+      // Not run through `formatError`: this sentence is authored here, holds
+      // nothing to redact, and already names the provider.
+      error: `${this.providerName} does not support ${capability}.`,
+    };
   }
 
   /**
@@ -1026,4 +1365,16 @@ function describeIssues(error: z.ZodError): string {
   const count = error.issues.length;
 
   return `${count} ${count === 1 ? 'issue' : 'issues'}: ${kinds.join(', ')}`;
+}
+
+/**
+ * The size of a buffer that may not be one.
+ *
+ * A span attribute is the ONE thing derived from audio on these paths (see
+ * `BaseAiProvider.transcribe`), and a caller handing in `undefined` — or a
+ * subclass returning a malformed result — must not turn that attribute into a
+ * TypeError inside the class whose entire promise is that it does not throw.
+ */
+function byteLength(buffer: Buffer | null | undefined): number {
+  return Buffer.isBuffer(buffer) ? buffer.length : 0;
 }

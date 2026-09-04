@@ -13,6 +13,10 @@ import type {
   AiModelDescriptor,
   AiReachabilityRequest,
   AiStructuredCompletionRequest,
+  AiSynthesisRequest,
+  AiSynthesisResult,
+  AiTranscriptionRequest,
+  AiTranscriptionResult,
   AiUsage,
 } from '../ai.types';
 import type { AiCapabilitySet } from './ai-provider.interface';
@@ -27,8 +31,9 @@ import { classifyModel, parseGeneration } from './model-classifier';
 // admin settings page, `GET /api/ai-settings/models`, the usage table — needs
 // to be exercised end to end without an OpenAI account, an API key, or a
 // network. This class is that provider: it extends `BaseAiProvider` exactly as
-// `OpenAiProvider` does, implements the same five `protected` hooks, inherits
-// the same never-throw wrappers and the same `SecretRedactor` path, and takes
+// `OpenAiProvider` does, implements the same `protected` hooks — the five from
+// #105 plus the two speech hooks E9 (#88) added — inherits the same
+// never-throw wrappers and the same `SecretRedactor` path, and takes
 // the same `AiUsageService` so `ai_usage_events` rows are written FOR REAL. A
 // test that asserts a row was recorded is asserting about the same code that
 // records one in production.
@@ -313,8 +318,94 @@ interface FakeJudgement {
   feedback: string;
 }
 
-/** The role whose structured replies are graded rather than synthesised. */
+/**
+ * The role whose structured replies are graded rather than synthesised.
+ */
 const GRADER_ROLE_KEY = 'grader';
+
+// -----------------------------------------------------------------------------
+// THE AUDIO MARKER CONVENTION (issue #88, epic #58) — READ THIS BEFORE WRITING
+// A VOICE TEST
+// -----------------------------------------------------------------------------
+//
+// This provider has no recogniser, so a transcription has to come from
+// somewhere, and the only thing a caller can vary is THE BYTES IT UPLOADS. So
+// the "recording" is read as UTF-8 and searched for two markers. A test — or
+// the #114 e2e spec, which drives this from a real HTTP request — builds an
+// audio buffer out of ASCII and gets a transcript and a confidence it chose:
+//
+//   Buffer.from('TRANSCRIPT:the president')  -> text 'the president',   0.97
+//   Buffer.from('LOWCONF')                   -> the misheard fixture,   0.41
+//   Buffer.from('TRANSCRIPT:x LOWCONF')      -> text 'x',               0.41
+//   anything else (real audio bytes included) -> DEFAULT_TRANSCRIPT,    0.97
+//
+// WHY MARKERS RATHER THAN A SETTER OR AN ENV VAR: the caller under test is
+// usually several layers away — an HTTP request, a controller, a dispatcher —
+// and reaching past all of them to poke this instance would test a wiring that
+// production does not have. The bytes, by contrast, travel the ENTIRE real
+// path: multipart parsing, the size limit, the buffer handed to the provider.
+// A test that steers the transcript this way has proved that path works.
+//
+// THE LOW-CONFIDENCE PATH IS NOT AN AFTERTHOUGHT. "Was that answer wrong, or
+// did we mishear it?" is the whole reason `AiTranscriptionResult.confidence`
+// exists, and a fake that only ever returned a confident transcript would make
+// the misheard branch untestable without a network — which is to say,
+// untested.
+
+/** The marker that forces the low-confidence, plausibly-misheard fixture. */
+const LOW_CONFIDENCE_MARKER = 'LOWCONF';
+
+/** The marker that dictates the transcript: `TRANSCRIPT:<text>` to end of line. */
+const TRANSCRIPT_MARKER = /TRANSCRIPT:([^\r\n]*)/;
+
+/**
+ * The confidence a clear recording gets.
+ *
+ * NOT 1. A recogniser is never certain, and a fixture that said so would let a
+ * caller written against `=== 1` pass here and fail on every real call.
+ */
+const CONFIDENT_SCORE = 0.97;
+
+/**
+ * The confidence the `LOWCONF` marker produces.
+ *
+ * Comfortably below any plausible "this was heard well" threshold, and
+ * comfortably above 0 — because 0 is reserved for nothing at all, and this
+ * fixture is a recording that WAS heard, just badly.
+ */
+const LOW_CONFIDENCE_SCORE = 0.41;
+
+/**
+ * What a marker-free recording transcribes to.
+ *
+ * A real civics answer rather than "hello world", so a test that feeds the
+ * transcript onward into the grading ladder gets a gradeable string instead of
+ * an automatic miss for a reason that has nothing to do with what it is
+ * testing.
+ */
+const DEFAULT_TRANSCRIPT = 'the president';
+
+/**
+ * The transcript the `LOWCONF` marker produces when no `TRANSCRIPT:` is given.
+ *
+ * DELIBERATELY A NEAR-MISS OF `DEFAULT_TRANSCRIPT`'s meaning — the shape of a
+ * real mishearing, close enough to be plausibly what the learner said and
+ * wrong enough that a grader would mark it. That is exactly the situation the
+ * confidence signal exists to disambiguate.
+ */
+const MISHEARD_TRANSCRIPT = 'the head of the executive ranch';
+
+/**
+ * The bytes {@link FakeAiProvider.runSynthesis} returns.
+ *
+ * A REAL MP3 FRAME HEADER (`0xFF 0xFB`) followed by filler, not random bytes:
+ * a consumer that sniffs the container gets something coherent, and a test
+ * asserting on a byte length gets a stable one. Deterministic and tiny — this
+ * is a fixture, not an encoder.
+ */
+const FAKE_SPEECH_BYTES: readonly number[] = [
+  0xff, 0xfb, 0x90, 0x64, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+];
 
 @Injectable()
 export class FakeAiProvider extends BaseAiProvider {
@@ -570,6 +661,84 @@ export class FakeAiProvider extends BaseAiProvider {
     // and the honest number is the one describing what was produced.
     yield { usage: usageFor(request, emitted) };
   }
+
+  /**
+   * A transcript read out of the uploaded bytes themselves.
+   *
+   * NO NETWORK, NO CLOCK, NO RANDOMNESS — the same recording always
+   * transcribes to the same text with the same confidence, exactly as
+   * {@link runCompletion} always returns the same explanation. The steering
+   * markers, and why they are markers rather than a setter, are documented at
+   * {@link LOW_CONFIDENCE_MARKER} above; read that before writing a voice test.
+   *
+   * USAGE IS ALL-NULL, matching `OpenAiProvider.runTranscription`: the real
+   * speech endpoints report no token counts, and a fake that invented some
+   * would let a caller be written against numbers production never sends. This
+   * is the one place the fake deliberately does NOT report plausible counts —
+   * see `usageFor`, whose reason for reporting them does not apply to a
+   * surface the provider itself leaves blank.
+   */
+  protected async runTranscription(
+    apiKey: string,
+    request: AiTranscriptionRequest,
+    redact: SecretRedactor,
+  ): Promise<AiTranscriptionResult> {
+    redact.protect(apiKey);
+
+    // `latin1`, not `utf8`: real audio bytes are not valid UTF-8 and decoding
+    // them as such produces replacement characters, which could in principle
+    // eat a marker sitting next to one. Every byte maps to a character here,
+    // so an ASCII marker survives being embedded in anything.
+    const probe = request.audio?.toString('latin1') ?? '';
+
+    const dictated = TRANSCRIPT_MARKER.exec(probe)?.[1]?.trim();
+    const lowConfidence = probe.includes(LOW_CONFIDENCE_MARKER);
+
+    const text =
+      dictated !== undefined && dictated.length > 0
+        ? dictated
+        : lowConfidence
+          ? MISHEARD_TRANSCRIPT
+          : DEFAULT_TRANSCRIPT;
+
+    return {
+      success: true,
+      text,
+      confidence: lowConfidence ? LOW_CONFIDENCE_SCORE : CONFIDENT_SCORE,
+      usage: SPEECH_USAGE,
+      errorCode: null,
+      error: null,
+    };
+  }
+
+  /**
+   * A small, constant audio payload.
+   *
+   * The bytes do not depend on the text: a fake encoder that varied its output
+   * would invite a test to assert on something it cannot predict, and the
+   * property worth exercising here is the PATH — a buffer and a content type
+   * reaching a caller that has to stream them — not the encoding.
+   */
+  protected async runSynthesis(
+    apiKey: string,
+    request: AiSynthesisRequest,
+    redact: SecretRedactor,
+  ): Promise<AiSynthesisResult> {
+    redact.protect(apiKey);
+    void request;
+
+    return {
+      success: true,
+      audio: Buffer.from(FAKE_SPEECH_BYTES),
+      // `audio/mpeg`, matching what `OpenAiProvider` returns for the default
+      // `mp3` container — never `audio/mp3`, which a browser may refuse to
+      // play with no visible error.
+      contentType: 'audio/mpeg',
+      usage: SPEECH_USAGE,
+      errorCode: null,
+      error: null,
+    };
+  }
 }
 
 // -----------------------------------------------------------------------------
@@ -639,6 +808,21 @@ function usageFor(request: AiCompletionRequest, completion: string): AiUsage {
     totalTokens: promptTokens + completionTokens,
   };
 }
+
+/**
+ * Usage for a speech call: all null.
+ *
+ * DELIBERATELY UNLIKE {@link usageFor}. That helper reports plausible counts
+ * because the `ai_usage_events` path is only exercised end to end if a
+ * successful fake call reports some; the speech endpoints report NONE, on
+ * either provider, so inventing counts here would fake a field production
+ * always leaves blank and let a caller be written against it.
+ */
+const SPEECH_USAGE: AiUsage = {
+  promptTokens: null,
+  completionTokens: null,
+  totalTokens: null,
+};
 
 /** Characters to tokens, with a floor of 1 for anything non-empty. */
 function estimateTokens(characters: number): number {

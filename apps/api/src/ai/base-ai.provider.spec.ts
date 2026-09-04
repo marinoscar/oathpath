@@ -15,6 +15,10 @@ import type {
   AiReachabilityRequest,
   AiStreamEvent,
   AiStructuredCompletionRequest,
+  AiSynthesisRequest,
+  AiSynthesisResult,
+  AiTranscriptionRequest,
+  AiTranscriptionResult,
   AiUsage,
 } from './ai.types';
 import type { AiUsageService } from './ai-usage.service';
@@ -63,6 +67,19 @@ interface InferenceHooks {
     redact: SecretRedactor,
     signal?: AbortSignal,
   ) => AsyncIterable<{ delta?: string; usage?: AiUsage }>;
+
+  /** The speech hooks (#88, epic #58). */
+  onTranscribe?: (
+    apiKey: string,
+    request: AiTranscriptionRequest,
+    redact: SecretRedactor,
+  ) => Promise<AiTranscriptionResult>;
+
+  onSynthesize?: (
+    apiKey: string,
+    request: AiSynthesisRequest,
+    redact: SecretRedactor,
+  ) => Promise<AiSynthesisResult>;
 }
 
 /** A stub whose subclass hooks are supplied per test. */
@@ -137,6 +154,42 @@ class StubProvider extends BaseAiProvider {
     }
     return this.hooks.onStream(apiKey, request, redact, signal);
   }
+
+  /**
+   * How many times each speech hook was entered.
+   *
+   * Counted rather than inferred from a result, because the capability tests
+   * below assert that the hook was NOT REACHED AT ALL — a failure result on
+   * its own cannot tell "refused before calling out" from "called out and
+   * failed", and those are the two things that gate has to distinguish.
+   */
+  readonly speechHookCalls = { transcribe: 0, synthesize: 0 };
+
+  protected runTranscription(
+    apiKey: string,
+    request: AiTranscriptionRequest,
+    redact: SecretRedactor,
+  ): Promise<AiTranscriptionResult> {
+    this.speechHookCalls.transcribe += 1;
+
+    if (!this.hooks.onTranscribe) {
+      throw new Error('this test did not supply a transcription hook');
+    }
+    return this.hooks.onTranscribe(apiKey, request, redact);
+  }
+
+  protected runSynthesis(
+    apiKey: string,
+    request: AiSynthesisRequest,
+    redact: SecretRedactor,
+  ): Promise<AiSynthesisResult> {
+    this.speechHookCalls.synthesize += 1;
+
+    if (!this.hooks.onSynthesize) {
+      throw new Error('this test did not supply a synthesis hook');
+    }
+    return this.hooks.onSynthesize(apiKey, request, redact);
+  }
 }
 
 const ALL: AiCapabilitySet = new Set<AiCapabilityFamily>([
@@ -176,6 +229,26 @@ function structuredProvider(onStructured: InferenceHooks['onStructured']) {
 /** A provider whose only interesting hook is the streaming one. */
 function streamProvider(onStream: InferenceHooks['onStream']) {
   return provider(async () => OK_CATALOG, undefined, ALL, { onStream });
+}
+
+/** A provider whose only interesting hook is the transcription one (#88). */
+function transcribeProvider(
+  onTranscribe: InferenceHooks['onTranscribe'],
+  capabilities: AiCapabilitySet = ALL,
+) {
+  return provider(async () => OK_CATALOG, undefined, capabilities, {
+    onTranscribe,
+  });
+}
+
+/** A provider whose only interesting hook is the synthesis one (#88). */
+function synthesizeProvider(
+  onSynthesize: InferenceHooks['onSynthesize'],
+  capabilities: AiCapabilitySet = ALL,
+) {
+  return provider(async () => OK_CATALOG, undefined, capabilities, {
+    onSynthesize,
+  });
 }
 
 const OK_CATALOG: AiModelCatalogResult = {
@@ -1048,5 +1121,310 @@ describe('BaseAiProvider.stream — an abandoned stream still records (#120)', (
         }
       })(),
     ).resolves.toBeUndefined();
+  });
+});
+
+// =============================================================================
+// transcribe / synthesize (issue #88, epic #58 — E9 "Voice foundation")
+// =============================================================================
+//
+// Two more public methods carrying the same never-throw guarantee, and the
+// tests below are the same three subclass failures the rest of this file covers
+// — a hook that throws, one that returns nothing, one that returns a hand-built
+// failure — plus the one thing that is new here: a CAPABILITY GATE that must
+// answer without calling out at all.
+//
+// The gate matters because a settings row written before a deployment swapped
+// providers can still name a `speak` binding on a provider with no speech API.
+// The right outcome is a refusal a caller can render, not a TypeError from
+// inside an SDK that has no such method.
+// =============================================================================
+
+const TRANSCRIBE_REQUEST: AiTranscriptionRequest = {
+  roleKey: 'transcribe',
+  modelId: 'whisper-1',
+  audio: Buffer.from('not really audio'),
+  contentType: 'audio/webm',
+  fileName: 'answer.webm',
+};
+
+const SYNTHESIZE_REQUEST: AiSynthesisRequest = {
+  roleKey: 'speak',
+  modelId: 'tts-1-hd',
+  text: 'Who is the President of the United States?',
+};
+
+/** Every family EXCEPT the speech ones, i.e. a chat-only provider. */
+const NO_SPEECH: AiCapabilitySet = new Set<AiCapabilityFamily>([
+  'text',
+  'embedding',
+]);
+
+describe('BaseAiProvider.transcribe — never-throw', () => {
+  it('turns a thrown hook into a well-formed failure result', async () => {
+    const p = transcribeProvider(async () => {
+      throw new Error('the upload was refused');
+    });
+
+    const result = await p.transcribe(ALICE, USER_KEY, TRANSCRIBE_REQUEST);
+
+    expect(result).toEqual({
+      success: false,
+      text: null,
+      // UNKNOWN, not 0. A zero here asserts the recogniser was certain it
+      // heard nothing, which downstream becomes "misheard" on an answer the
+      // learner may have got right.
+      confidence: null,
+      usage: { promptTokens: null, completionTokens: null, totalTokens: null },
+      errorCode: 'error',
+      error: 'Stub: the upload was refused',
+    });
+  });
+
+  it('turns a hook that returns undefined into a failure rather than a TypeError', async () => {
+    // A subclass that falls off the end of a branch yields `undefined`, and a
+    // caller reading `.usage` off it throws one frame outside the try.
+    const p = transcribeProvider(
+      async () => undefined as unknown as AiTranscriptionResult,
+    );
+
+    await expect(
+      p.transcribe(ALICE, USER_KEY, TRANSCRIBE_REQUEST),
+    ).resolves.toMatchObject({
+      success: false,
+      text: null,
+      confidence: null,
+      errorCode: 'malformed_result',
+      error: 'Stub returned no result.',
+    });
+  });
+
+  it('routes a hook-authored failure through redaction, and nulls its payload', async () => {
+    const p = transcribeProvider(async () => ({
+      success: false,
+      // A subclass that filled these in anyway must not have them believed: a
+      // failed call knows nothing about what was heard.
+      text: 'something it should not claim to have heard',
+      confidence: 0.9,
+      usage: { promptTokens: null, completionTokens: null, totalTokens: null },
+      errorCode: 'quota_exceeded',
+      error: `the key ${USER_KEY} is out of quota`,
+    }));
+
+    const result = await p.transcribe(ALICE, USER_KEY, TRANSCRIBE_REQUEST);
+
+    expect(result.success).toBe(false);
+    expect(result.text).toBeNull();
+    expect(result.confidence).toBeNull();
+    expect(result.errorCode).toBe('quota_exceeded');
+    expect(result.error).not.toContain(USER_KEY);
+    expect(result.error).toContain('Stub:');
+  });
+
+  it('never lets the API key reach the error string when the SDK echoes it', async () => {
+    const p = transcribeProvider(async () => {
+      throw new Error(`401 Incorrect API key provided: ${USER_KEY}`);
+    });
+
+    const result = await p.transcribe(ALICE, USER_KEY, TRANSCRIBE_REQUEST);
+
+    expect(result.error).not.toContain(USER_KEY);
+    expect(result.errorCode).toBe('invalid_key');
+  });
+
+  it('records a usage row on success AND on failure', async () => {
+    const ok = transcribeProvider(async () => ({
+      success: true,
+      text: 'the president',
+      confidence: 0.9,
+      usage: { promptTokens: null, completionTokens: null, totalTokens: null },
+      errorCode: null,
+      error: null,
+    }));
+
+    await ok.transcribe(ALICE, USER_KEY, TRANSCRIBE_REQUEST);
+
+    expect(ok.record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: ALICE,
+        // The ROLE, not merely the model: an admin who rebinds `transcribe`
+        // later must still be able to read last month's rows correctly.
+        roleKey: 'transcribe',
+        model: 'whisper-1',
+        success: true,
+      }),
+    );
+
+    const failed = transcribeProvider(async () => {
+      throw new Error('boom');
+    });
+
+    await failed.transcribe(ALICE, USER_KEY, TRANSCRIBE_REQUEST);
+
+    expect(failed.record).toHaveBeenCalledWith(
+      expect.objectContaining({ roleKey: 'transcribe', success: false }),
+    );
+  });
+
+  it('passes a successful transcript through unchanged', async () => {
+    const p = transcribeProvider(async () => ({
+      success: true,
+      text: 'the president',
+      confidence: 0.83,
+      usage: { promptTokens: null, completionTokens: null, totalTokens: null },
+      errorCode: null,
+      error: null,
+    }));
+
+    await expect(
+      p.transcribe(ALICE, USER_KEY, TRANSCRIBE_REQUEST),
+    ).resolves.toMatchObject({
+      success: true,
+      text: 'the president',
+      confidence: 0.83,
+    });
+  });
+});
+
+describe('BaseAiProvider.transcribe — the capability gate', () => {
+  it('refuses without calling the hook when the provider cannot transcribe', async () => {
+    const hook = jest.fn();
+    const p = transcribeProvider(hook, NO_SPEECH);
+
+    const result = await p.transcribe(ALICE, USER_KEY, TRANSCRIBE_REQUEST);
+
+    expect(result).toMatchObject({
+      success: false,
+      text: null,
+      confidence: null,
+      errorCode: 'capability_unsupported',
+    });
+    // Names the provider AND the capability, because this message is read by
+    // an admin deciding what to fix.
+    expect(result.error).toBe('Stub does not support speech recognition.');
+
+    expect(hook).not.toHaveBeenCalled();
+    expect(p.speechHookCalls.transcribe).toBe(0);
+  });
+
+  it('writes no usage row for a call that never happened', async () => {
+    // `ai_usage_events` records calls that were made. Nothing left the process
+    // here, so a row would be a phantom entry in a learner's usage table.
+    const p = transcribeProvider(jest.fn(), NO_SPEECH);
+
+    await p.transcribe(ALICE, USER_KEY, TRANSCRIBE_REQUEST);
+
+    expect(p.record).not.toHaveBeenCalled();
+  });
+});
+
+describe('BaseAiProvider.synthesize — never-throw', () => {
+  it('turns a thrown hook into a well-formed failure result', async () => {
+    const p = synthesizeProvider(async () => {
+      throw new Error('the voice is not available');
+    });
+
+    const result = await p.synthesize(ALICE, USER_KEY, SYNTHESIZE_REQUEST);
+
+    expect(result).toEqual({
+      success: false,
+      audio: null,
+      contentType: null,
+      usage: { promptTokens: null, completionTokens: null, totalTokens: null },
+      errorCode: 'error',
+      error: 'Stub: the voice is not available',
+    });
+  });
+
+  it('turns a hook that returns undefined into a failure rather than a TypeError', async () => {
+    const p = synthesizeProvider(
+      async () => undefined as unknown as AiSynthesisResult,
+    );
+
+    await expect(
+      p.synthesize(ALICE, USER_KEY, SYNTHESIZE_REQUEST),
+    ).resolves.toMatchObject({
+      success: false,
+      audio: null,
+      contentType: null,
+      errorCode: 'malformed_result',
+      error: 'Stub returned no result.',
+    });
+  });
+
+  it('routes a hook-authored failure through redaction, and drops its payload', async () => {
+    const p = synthesizeProvider(async () => ({
+      success: false,
+      audio: Buffer.from('half an mp3'),
+      contentType: 'audio/mpeg',
+      usage: { promptTokens: null, completionTokens: null, totalTokens: null },
+      errorCode: 'rate_limit',
+      error: `slow down, ${USER_KEY}`,
+    }));
+
+    const result = await p.synthesize(ALICE, USER_KEY, SYNTHESIZE_REQUEST);
+
+    expect(result.success).toBe(false);
+    // Partial audio is not an early draft of a spoken sentence.
+    expect(result.audio).toBeNull();
+    expect(result.contentType).toBeNull();
+    expect(result.error).not.toContain(USER_KEY);
+    expect(result.error).toContain('Stub:');
+  });
+
+  it('never lets the API key reach the error string', async () => {
+    const p = synthesizeProvider(async () => {
+      throw new Error(`401 Incorrect API key provided: ${USER_KEY}`);
+    });
+
+    const result = await p.synthesize(ALICE, USER_KEY, SYNTHESIZE_REQUEST);
+
+    expect(result.error).not.toContain(USER_KEY);
+  });
+
+  it('records a usage row against the speak role', async () => {
+    const p = synthesizeProvider(async () => ({
+      success: true,
+      audio: Buffer.from([0xff, 0xfb]),
+      contentType: 'audio/mpeg',
+      usage: { promptTokens: null, completionTokens: null, totalTokens: null },
+      errorCode: null,
+      error: null,
+    }));
+
+    const result = await p.synthesize(ALICE, USER_KEY, SYNTHESIZE_REQUEST);
+
+    expect(result.success).toBe(true);
+    expect(result.contentType).toBe('audio/mpeg');
+    expect(p.record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        roleKey: 'speak',
+        model: 'tts-1-hd',
+        success: true,
+      }),
+    );
+  });
+});
+
+describe('BaseAiProvider.synthesize — the capability gate', () => {
+  it('refuses without calling the hook when the provider has no speech API', async () => {
+    // The concrete case: a chat-only provider an admin swapped to, with a
+    // `speak` binding still in the settings row.
+    const hook = jest.fn();
+    const p = synthesizeProvider(hook, NO_SPEECH);
+
+    const result = await p.synthesize(ALICE, USER_KEY, SYNTHESIZE_REQUEST);
+
+    expect(result).toMatchObject({
+      success: false,
+      audio: null,
+      contentType: null,
+      errorCode: 'capability_unsupported',
+    });
+    expect(result.error).toBe('Stub does not support speech synthesis.');
+
+    expect(hook).not.toHaveBeenCalled();
+    expect(p.speechHookCalls.synthesize).toBe(0);
+    expect(p.record).not.toHaveBeenCalled();
   });
 });

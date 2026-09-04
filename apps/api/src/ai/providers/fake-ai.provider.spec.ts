@@ -536,3 +536,179 @@ describe('FakeAiProvider.stream', () => {
     );
   });
 });
+
+// =============================================================================
+// Speech (issue #88, epic #58 — E9 "Voice foundation")
+// =============================================================================
+//
+// The same promise as everything above: deterministic, offline, and STEERABLE
+// from the only thing a distant caller controls — the bytes it uploads. The
+// e2e spec (#114) drives both markers through a real HTTP request, so the
+// convention documented on `LOW_CONFIDENCE_MARKER` is a contract, not an
+// implementation detail: changing it silently breaks a suite in another
+// package.
+// =============================================================================
+
+/** A "recording" carrying whatever markers a test wants to steer with. */
+function recording(contents: string) {
+  return {
+    roleKey: 'transcribe',
+    modelId: 'gpt-4o-transcribe',
+    audio: Buffer.from(contents, 'latin1'),
+    contentType: 'audio/webm',
+    fileName: 'answer.webm',
+  };
+}
+
+describe('FakeAiProvider.transcribe', () => {
+  it('returns a confident, stable transcript for a marker-free recording', async () => {
+    const p = provider();
+
+    const result = await p.transcribe(ALICE, KEY, recording('\x00\x01binary'));
+
+    expect(result.success).toBe(true);
+    expect(result.text).toBe('the president');
+    expect(result.confidence).toBe(0.97);
+  });
+
+  it('is deterministic — the same bytes twice give byte-identical results', async () => {
+    // Every later suite asserts about voice while TRUSTING this. A clock, a
+    // counter or a random draw here would make those suites flaky somewhere
+    // confusing.
+    const p = provider();
+
+    const first = await p.transcribe(ALICE, KEY, recording('same bytes'));
+    const second = await p.transcribe(ALICE, KEY, recording('same bytes'));
+
+    expect(first).toEqual(second);
+  });
+
+  it('dictates the transcript from a TRANSCRIPT: marker', async () => {
+    const p = provider();
+
+    const result = await p.transcribe(
+      ALICE,
+      KEY,
+      recording('TRANSCRIPT:the head of the executive branch'),
+    );
+
+    expect(result.text).toBe('the head of the executive branch');
+    expect(result.confidence).toBe(0.97);
+  });
+
+  it('drops to the low-confidence fixture on a LOWCONF marker', async () => {
+    // The misheard path. Without a way to reach it offline, "was that answer
+    // wrong or did we mishear it?" — the entire reason `confidence` exists —
+    // would be untestable without a network, which is to say untested.
+    const p = provider();
+
+    const result = await p.transcribe(ALICE, KEY, recording('LOWCONF'));
+
+    expect(result.text).toBe('the head of the executive ranch');
+    expect(result.confidence).toBe(0.41);
+  });
+
+  it('honours both markers together: dictated text at low confidence', async () => {
+    const p = provider();
+
+    const result = await p.transcribe(
+      ALICE,
+      KEY,
+      recording('TRANSCRIPT:george washington\nLOWCONF'),
+    );
+
+    expect(result.text).toBe('george washington');
+    expect(result.confidence).toBe(0.41);
+  });
+
+  it('finds a marker embedded in bytes that are not valid UTF-8', async () => {
+    // Decoded as `latin1` for exactly this: a caller building a realistic
+    // payload should not have to keep its markers away from high bytes.
+    const p = provider();
+
+    const result = await p.transcribe(
+      ALICE,
+      KEY,
+      // The dictated text runs to the END OF THE LINE, so the trailing binary
+      // goes on the next one — the marker is a line, not a token.
+      recording('\xff\xfe\x00TRANSCRIPT:the constitution\n\xff\xfe'),
+    );
+
+    expect(result.text).toBe('the constitution');
+  });
+
+  it('reports NULL token counts, matching what the real speech API sends', async () => {
+    // Not `usageFor`'s plausible numbers: OpenAI's transcription endpoints
+    // report no token usage at all, and inventing some would let a caller be
+    // written against a field production always leaves blank.
+    const p = provider();
+
+    const result = await p.transcribe(ALICE, KEY, recording('anything'));
+
+    expect(result.usage).toEqual({
+      promptTokens: null,
+      completionTokens: null,
+      totalTokens: null,
+    });
+  });
+
+  it('still writes an ai_usage_events row through the real recording path', async () => {
+    const usage = usageStub();
+    const p = provider(usage);
+
+    await p.transcribe(ALICE, KEY, recording('anything'));
+
+    expect(usage.record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: ALICE,
+        provider: 'openai',
+        roleKey: 'transcribe',
+        model: 'gpt-4o-transcribe',
+        success: true,
+      }),
+    );
+  });
+});
+
+describe('FakeAiProvider.synthesize', () => {
+  it('returns deterministic bytes with an mp3 content type', async () => {
+    const p = provider();
+
+    const first = await p.synthesize(ALICE, KEY, {
+      roleKey: 'speak',
+      modelId: 'tts-1-hd',
+      text: 'Who was the first President?',
+    });
+    const second = await p.synthesize(ALICE, KEY, {
+      roleKey: 'speak',
+      modelId: 'tts-1-hd',
+      text: 'A completely different sentence.',
+    });
+
+    expect(first.success).toBe(true);
+    expect(first.audio).toBeInstanceOf(Buffer);
+    expect(first.audio?.length).toBeGreaterThan(0);
+    // `audio/mpeg`, never `audio/mp3` — a browser handed the latter may simply
+    // refuse to play it, with no error anyone can see.
+    expect(first.contentType).toBe('audio/mpeg');
+
+    // The bytes do not vary with the text: the property worth exercising is
+    // the path a buffer and a content type take to a caller, not the encoding.
+    expect(second.audio).toEqual(first.audio);
+  });
+
+  it('records the call against the speak role', async () => {
+    const usage = usageStub();
+    const p = provider(usage);
+
+    await p.synthesize(ALICE, KEY, {
+      roleKey: 'speak',
+      modelId: 'tts-1-hd',
+      text: 'hello',
+    });
+
+    expect(usage.record).toHaveBeenCalledWith(
+      expect.objectContaining({ roleKey: 'speak', success: true }),
+    );
+  });
+});

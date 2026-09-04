@@ -141,9 +141,16 @@ describe('AiSettingsService', () => {
   // ---------------------------------------------------------------------------
 
   describe('describeReadiness', () => {
-    it('is ready when a provider is chosen, AI is on, and both wired roles are bound', async () => {
+    it('is ready with nothing left unbound when every wired role has a model', async () => {
       prisma.systemSettings.findUnique.mockResolvedValue({
-        value: storedSettings(),
+        value: storedSettings({
+          models: {
+            tutor: 'gpt-5.4',
+            grader: 'gpt-5.4-mini',
+            transcribe: 'whisper-1',
+            speak: 'tts-1-hd',
+          },
+        }),
       } as never);
 
       await expect(service.describeReadiness()).resolves.toMatchObject({
@@ -163,20 +170,21 @@ describe('AiSettingsService', () => {
       });
     });
 
-    it('names the unbound wired roles', async () => {
+    it('names EVERY unbound wired role, in registry order', async () => {
       prisma.systemSettings.findUnique.mockResolvedValue({
         value: storedSettings({ models: { tutor: 'gpt-5.4' } }),
       } as never);
 
       await expect(service.describeReadiness()).resolves.toMatchObject({
         systemReady: false,
-        unboundRoles: ['grader'],
+        unboundRoles: ['grader', 'transcribe', 'speak'],
       });
     });
 
     it('IGNORES the unwired roles', async () => {
-      // Four of the six are declared and inert. Requiring them would mean a
-      // fresh install could never become ready no matter what an admin did.
+      // `realtime` and `embed` are declared and inert. Requiring them would
+      // mean a fresh install could never become ready no matter what an admin
+      // did.
       prisma.systemSettings.findUnique.mockResolvedValue({
         value: storedSettings(),
       } as never);
@@ -184,8 +192,81 @@ describe('AiSettingsService', () => {
       const result = await service.describeReadiness();
 
       expect(result.unboundRoles).not.toContain('realtime');
-      expect(result.unboundRoles).not.toContain('speak');
-      expect(result.systemReady).toBe(true);
+      expect(result.unboundRoles).not.toContain('embed');
+    });
+
+    // -------------------------------------------------------------------------
+    // The E9 split (#88): `unboundRoles` widened, `systemReady` narrowed
+    // -------------------------------------------------------------------------
+
+    it('is STILL ready with only tutor and grader bound, after the speech roles were wired', async () => {
+      // THE REGRESSION THIS PAIR EXISTS FOR. Every installation deployed
+      // before E9 has exactly these two bindings. Had `systemReady` stayed
+      // "no wired role unbound", wiring `transcribe` and `speak` would have
+      // flipped all of them to not-ready on deploy — an admin who changed
+      // nothing, with a working tutor and grader, finding their system
+      // reporting itself broken and their learners hitting `AiNotReady` on
+      // features that have nothing to do with voice.
+      prisma.systemSettings.findUnique.mockResolvedValue({
+        value: storedSettings(),
+      } as never);
+
+      await expect(service.describeReadiness()).resolves.toMatchObject({
+        systemReady: true,
+      });
+    });
+
+    it('still NAMES the unbound speech roles on that same installation', async () => {
+      // The other half: `unboundRoles` keeps meaning "every wired role with no
+      // binding", so a voice surface can say WHICH role its administrator has
+      // not configured (#109) rather than reading a system-wide boolean that
+      // is `true` and then failing at the point of use with no explanation.
+      prisma.systemSettings.findUnique.mockResolvedValue({
+        value: storedSettings(),
+      } as never);
+
+      const result = await service.describeReadiness();
+
+      expect(result.unboundRoles).toEqual(['transcribe', 'speak']);
+    });
+
+    it('is NOT ready when a text role is unbound, even with speech bound', async () => {
+      // The narrowing cuts one way only: `tutor` and `grader` are what the
+      // hard-blocking gate depends on, so an unbound one is still not ready no
+      // matter what else is configured.
+      prisma.systemSettings.findUnique.mockResolvedValue({
+        value: storedSettings({
+          models: {
+            grader: 'gpt-5.4-mini',
+            transcribe: 'whisper-1',
+            speak: 'tts-1-hd',
+          },
+        }),
+      } as never);
+
+      const result = await service.describeReadiness();
+
+      expect(result.systemReady).toBe(false);
+      expect(result.unboundRoles).toEqual(['tutor']);
+    });
+
+    it('reports every wired role unbound on a corrupt row, speech included', async () => {
+      // The catch branch stays consistent with `unboundRoles`' meaning: an
+      // unreadable row means no binding can be honoured, so reporting a
+      // narrower failure than there is would be a lie in the caller's favour.
+      prisma.systemSettings.findUnique.mockResolvedValue({
+        value: { provider: 42 },
+      } as never);
+
+      const result = await service.describeReadiness();
+
+      expect(result.systemReady).toBe(false);
+      expect(result.unboundRoles).toEqual([
+        'tutor',
+        'grader',
+        'transcribe',
+        'speak',
+      ]);
     });
 
     it('reports not-ready rather than throwing on a corrupt row', async () => {
