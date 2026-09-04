@@ -146,7 +146,7 @@ the entire mechanism by which this score can never overclaim itself (§2.9).
 | 5 | `remediation` | 0.10 | `remediatedCount / everWeakCount`, or `1.0` if `everWeakCount === 0` | now |
 | 6 | `english` | 0.05 | `0.5·min(readingCredit/6, 1) + 0.5·min(writingCredit/4, 1)`, credited per distinct sentence at its best outcome in a trailing 30-day window | now |
 | 7 | `spoken` | 0.10 | `min(distinctQuestionsCorrectSpoken / 20, 1)` | now |
-| 8 | `interview` | 0.10 | `min(mockInterviewsPassed / 2, 1)` | E8 |
+| 8 | `interview` | 0.10 | `min(mockInterviewsPassed / 2, 1)` | now |
 | | | **1.00** | | |
 
 `ReadinessComponentKey` is this table's `key` column, in this order, and the
@@ -346,14 +346,22 @@ credit well before a learner has spoken every question in a
 "has demonstrated real spoken fluency across a meaningful slice of the
 material," not "has spoken the entire bank."
 
-### 2.8 `interview` (0.10) — the constant PRD.md already chose
+### 2.8 `interview` (0.10) — real, since #133 (epic #57 / E8)
 
-`min(mockInterviewsPassed / 2, 1)` — `practice_attempts` rows with
-`source = 'mock_interview'` (declared in `practice-sessions.md` §2.2,
-unwired until E8), grouped into completed interview sessions, "passed"
-meaning the interview cleared the caller's `civics_test_versions` row's own
-`passThreshold` (reusing that column, never a second constant). Zero
-evidence until E8. **The `2` is not this document's own choice — it is
+`min(mockInterviewsPassed / 2, 1)` — `mock_interviews` rows, read directly,
+with `status = 'completed'` AND `passedCivics = true`: whole interviews the
+learner finished and passed the civics section of, wired by #133. Not a
+count of `practice_attempts` rows and not a grouping inferred from them —
+`practice_attempts.source = 'mock_interview'` (`practice-sessions.md` §2.2)
+tags an individual civics question answered inside an interview, but
+`mock_interviews` is the real grouping key #133 shipped, so this component
+reads that table directly rather than reconstructing "one interview" out of
+a set of attempt rows by elapsed time or any other proxy. "Passed" means
+the interview cleared the caller's `civics_test_versions` row's own
+`passThreshold` (reusing that column, never a second constant). A learner
+with no passed interviews reads `interview = 0` — because they have not yet
+passed one, the ordinary empty-evidence case, not a placeholder for an
+unshipped epic. **The `2` is not this document's own choice — it is
 `PRD.md`'s own worked example, quoted here verbatim because a later reader
 should see the product's own words, not this document's summary of them:**
 
@@ -834,12 +842,15 @@ export interface ReadinessTopRecommendation {
 
 **When `capReason === 'typed_only'`, the recommendation is always the
 capped-evidence requirement — `componentKey: null`**, title and reason drawn
-from §3's fixed cap copy, `path: '/practice'` — the same destination
-`interview_countdown`/`review`/`practice` already share
-(`journey-shell.md`/`memory-model.md` §6's "three kinds naming one
-destination, not a duplicated branch"), with the note that E8 will
-re-point this path once a dedicated mock-interview route exists to send a
-learner to directly. This is not a competing choice against the
+from §3's fixed cap copy, `path: '/practice/interviews'` — the real, mounted
+mock-interview route #133 (epic #57 / E8) added. This path used to be
+`/practice`, the same destination `interview_countdown`/`review`/`practice`
+share (`journey-shell.md`/`memory-model.md` §6's "three kinds naming one
+destination, not a duplicated branch"), with a note that E8 would re-point
+it once a dedicated mock-interview route existed to send a learner to
+directly — E8 shipped that route, and this is the re-point: A RECOMMENDATION
+MUST POINT AT THE DESTINATION IT NAMES, and this card's copy names mock
+interviews specifically. This is not a competing choice against the
 currently-earnable components below — a capped learner is told about the
 cap **every time**, because the cap is the single most consequential true
 thing this product can say to them, ahead of any smaller headroom
