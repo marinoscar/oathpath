@@ -22,10 +22,24 @@
  * a learner is reading aloud, the AppBar title resolver already has an answer,
  * and no `DESTINATION_ROUTES` key is added or wanted.
  *
- * The writing screen (#147) gets its sibling constant here when it lands. It is
- * deliberately NOT declared ahead of the route existing: a path constant for an
- * unmounted route is a link that lands on the catch-all redirect to `/`.
+ * Both constants below are declared only because `App.tsx` mounts both routes.
+ * A path constant for an unmounted route is a link that lands on the catch-all
+ * redirect to `/`, so neither is ever added ahead of its `<Route>`.
  */
 
 /** Reading practice — read one sentence aloud and be scored word by word. */
 export const READING_PRACTICE_PATH = '/practice/reading';
+
+/**
+ * Writing practice — hear one sentence dictated and write down what you heard.
+ *
+ * A SIBLING OF THE ROUTE ABOVE, NOT A MODE OF IT (issue #147). The two screens
+ * share a scorer, an endpoint and a diff renderer, and share almost nothing
+ * else: reading SHOWS the sentence (it is the prompt), writing must NEVER show
+ * it before submission (`docs/specs/english-test.md` §4 — a visible sentence
+ * silently converts the exercise into copying practice). Folding them into one
+ * route with a `?kind=` switch would put those two opposite rules inside one
+ * component, one render tree and one set of conditionals, which is the shape in
+ * which "never render the sentence" eventually gets rendered by accident.
+ */
+export const WRITING_PRACTICE_PATH = '/practice/writing';

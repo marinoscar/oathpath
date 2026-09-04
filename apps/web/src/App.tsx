@@ -37,6 +37,15 @@ const PracticeSummaryPage = lazy(() => import("./pages/PracticeSummaryPage"));
 const ReadingPracticePage = lazy(
   () => import("./pages/ReadingPracticePage"),
 );
+// Issue #147, epic #59 / E10 — the writing half of the same English segment,
+// under the same `/practice` prefix. A SEPARATE PAGE from the reading screen
+// rather than a mode of it: the two share a scorer and an endpoint but hold
+// opposite rules about the sentence (reading shows it; writing must never show
+// it before submission), and one component holding both is the shape in which
+// "never render the sentence" eventually gets rendered by accident.
+const WritingPracticePage = lazy(
+  () => import("./pages/WritingPracticePage"),
+);
 // Issue #140 (the first two) and #145 (the debrief), epic #57 / E8 — the mock
 // interview, three more screens UNDER the same Practice destination and owned
 // by the same `/practice` prefix.
@@ -285,6 +294,23 @@ function AppRoutes() {
                         <Route
                           path="/practice/reading"
                           element={<ReadingPracticePage />}
+                        />
+                        {/* Writing practice (#147, same epic), in the same
+                        `RequireOrientation` group and ungated beyond it for the
+                        identical reason: `POST /api/english/attempts` is the
+                        same `@Auth()`-with-no-permission route the reading
+                        screen already posts to, so there is no permission
+                        string a gate here could honestly mirror.
+
+                        `config/destinations.ts` GAINS NOTHING here either —
+                        `owns('/practice', …)` matches on segment boundaries and
+                        already covers this whole subtree, so the rail keeps
+                        highlighting Practice while a learner takes dictation.
+                        Content WITHIN the Practice destination, never a
+                        destination of its own. */}
+                        <Route
+                          path="/practice/writing"
+                          element={<WritingPracticePage />}
                         />
                         {/* The mock interview (#140, epic #57 / E8), in this
                         same `RequireOrientation` group and ungated beyond it for
