@@ -372,15 +372,23 @@ Two branches from there:
   type it), that second attempt is written as a **new** `practice_attempts`
   row with `retryOfAttemptId` pointing at the first row's `id` (§8), and the
   first row is left exactly as graded: its `outcome` is whatever the ladder
-  produced (ordinarily `incorrect`), never a new or different value — only
-  `failureCause` was overridden, as above. **No `PracticeOutcome` enum
-  change was needed, or made.** The existing `correct`/`partial`/
-  `incorrect`/`skipped` set is unchanged; an earlier draft of this document
-  anticipated a retry-specific outcome value, and that turned out to be
-  unnecessary — what makes the first row legible as a corrected mishearing
-  rather than a second, unrelated failure is `failureCause: 'misheard'` plus
-  the `retryOfAttemptId` link on the row that supersedes it (§3.2), not a
-  new state on `outcome` itself.
+  produced — ordinarily `incorrect`, and honestly so: the transcript genuinely
+  did not match an accepted answer. **No `PracticeOutcome` enum change was
+  made, deliberately.** The existing `correct`/`partial`/`incorrect`/
+  `skipped` set is unchanged — a fifth, retry-specific value was considered
+  and rejected, because it would ripple a migration through every reader of
+  `outcome` (readiness's `spoken` component, progress, mock interviews) for a
+  fact `failureCause` already records with no schema change at all. What
+  makes the first row legible as a corrected mishearing rather than a second,
+  unrelated failure is `failureCause: 'misheard'` plus the `retryOfAttemptId`
+  link on the row that supersedes it (§3.2) — and, more precisely still, the
+  guarantee this whole mechanism exists to give is enforced one layer down
+  from `outcome` entirely: a `misheard` attempt is excluded from
+  `scheduleMastery`'s call (`apps/api/src/practice/practice.service.ts`,
+  `recordAttempt`), so `correctStreak`, `lapses`, `state` and `dueAt` never
+  see it. `outcome` stays a truthful record of what the grader found;
+  `failureCause` says why it's not damning; the scheduler guard is where the
+  "never penalised" promise actually lives.
 
   **A skip can never be `misheard`.** `skipped` together with a `transcript`
   or an `asr_confidence` is rejected by the request schema outright — a 400,
@@ -409,14 +417,16 @@ An attempt that another attempt points at through `retryOfAttemptId` is
 
 - **A superseded attempt is never deleted.** It stays in `practice_attempts`
   exactly as written — `outcome` whatever grading produced (ordinarily
-  `incorrect`), `failureCause: misheard` (overriding the grader, per §3.1),
-  `transcript` holding the confirmed text (which, in the branch that leads
-  to a retry, is the unedited recogniser guess the learner confirmed as-is —
-  see §3.1). It is real evidence that a mishearing happened, and deleting
-  evidence to make a number look better is precisely what this product's
-  evidence-ledger design (`schema.prisma`'s own header on this table:
-  "readiness has to be reconstructed from repeated, timestamped evidence")
-  does not do anywhere else, and does not start doing here.
+  `incorrect`, and left that way: it is the honest record that the
+  transcript did not match), `failureCause: misheard` (overriding the
+  grader, per §3.1), `transcript` holding the confirmed text (which, in the
+  branch that leads to a retry, is the unedited recogniser guess the learner
+  confirmed as-is — see §3.1). It is real evidence that a mishearing
+  happened, and deleting evidence to make a number look better is precisely
+  what this product's evidence-ledger design (`schema.prisma`'s own header
+  on this table: "readiness has to be reconstructed from repeated,
+  timestamped evidence") does not do anywhere else, and does not start doing
+  here.
 - **A superseded attempt is excluded from the practice session's summary
   counts.** `PracticeSession.summary` (score, per-category breakdown,
   timing — `docs/specs/practice-sessions.md`) is computed once at session
@@ -435,11 +445,14 @@ in the branch where the learner's confirmed text actually matched — the
 first branch in §3.1's worked example — and a row that is `correct` is
 never the one a retry supersedes in the first place: nothing offers a retry
 for an attempt that already graded `correct`. The row that *can* be
-superseded is the low-confidence, `failureCause: 'misheard'` one, which by
-construction is not `correct` (§3.1), so it was never counted in `spoken`
-to begin with. No filter or exclusion needs to be added to
-`readiness.service.ts` for §3.2's supersession rule to hold there; it
-already only reads the kind of row a superseded attempt never is.
+superseded is the low-confidence, `failureCause: 'misheard'` one, which
+grades `outcome: 'incorrect'` like any other non-match (§3.1's rule protects
+`question_mastery`, at the scheduler guard, not `outcome` itself — a
+`misheard` row is `correct` only by coincidence, never by construction), so
+it was never counted in `spoken` to begin with regardless. No filter or
+exclusion needs to be added to `readiness.service.ts` for §3.2's
+supersession rule to hold there; it already only reads the kind of row a
+superseded attempt never is.
 
 ### 3.3 The one-attempt-per-question rule, relaxed for exactly one case
 
