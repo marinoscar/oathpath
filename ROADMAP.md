@@ -84,7 +84,7 @@ a v2.
 | E7 | Habit | Daily goal, streaks with protection, session-end celebrations, three reminder notification events on an hourly cron | E1, E3, E5 | done<sup>‖</sup> | [#56](https://github.com/marinoscar/oathpath/issues/56) |
 | E8 | Mock interview — text mode | Deterministic interview engine (question selection, pass rules from `civics_test_versions`), text-mode interview and debrief — closes Milestone A | #25 (for `tutor`), E4, E6 | done<sup>‖</sup> | [#57](https://github.com/marinoscar/oathpath/issues/57) |
 | E9 | Voice foundation | `transcribe`/`speak` wired, audio capture and playback, spoken practice mode with transcript confirmation, misheard-vs-wrong distinction — opens Milestone B | #25, E4, E6 | done<sup>¶</sup> | [#58](https://github.com/marinoscar/oathpath/issues/58) |
-| E10 | Reading and writing tests | Vocabulary-sourced sentences, word-error-rate reading scoring, dictated writing scoring, the readiness `english` component | E9 | not started | [#59](https://github.com/marinoscar/oathpath/issues/59) |
+| E10 | Reading and writing tests | Vocabulary-sourced sentences, word-error-rate reading scoring, dictated writing scoring, the readiness `english` component | E9 | in progress<sup>**</sup> | [#59](https://github.com/marinoscar/oathpath/issues/59) |
 | E11 | Realtime voice interview | `realtime` wired, ephemeral session tokens, the E8 engine driving a realtime model over tool calls — closes Milestone B and the MVP | #25, E8, E9, E10 | not started | [#60](https://github.com/marinoscar/oathpath/issues/60) |
 
 Status legend: `not started` — no child issue in progress; `in progress` —
@@ -251,6 +251,15 @@ them has been executed end to end.
 With this, Milestone A (E1–E8) is `done` on paper across every epic in it;
 per [§2](#2-what-the-mvp-is), Milestone B (E9–E11) is still required to
 close the MVP, and E9 already carries its own `done` footnote above.
+
+<sup>**</sup> **E10 is `in progress`, not `not started`** — the legend's own
+rule is "at least one child issue has an open PR or merged work", and E10 has
+merged work: #124, the reading and writing design spec
+(`docs/specs/english-test.md`), landed on `main` in #246. Its other seven
+children — #130, #136, #141, #144, #147, #149, #152 — are open, so no code,
+content row or migration for the English test exists yet; the epic has a
+design and nothing else. E11 (#60) has all eight children open and no merged
+work, so it remains `not started`.
 
 ## 4. Why this order
 
