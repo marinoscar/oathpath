@@ -1,6 +1,7 @@
 import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { loadAllCivicsContent } from './content/load-content';
+import { loadEnglishContent } from './content/load-english-content';
 
 // Prisma 7 requires a driver adapter — PrismaClient can no longer be
 // instantiated with no options. The seed script is invoked as a standalone
@@ -272,6 +273,12 @@ async function main() {
   // a sibling step, idempotently, on every seed run.
   console.log('Loading civics content...');
   await loadAllCivicsContent(prisma);
+
+  // A second, sibling content-loading step (docs/specs/english-test.md
+  // §1.3) — its own file, its own validator, its own idempotency contract,
+  // not folded into loadAllCivicsContent's function.
+  console.log('Loading English content...');
+  await loadEnglishContent(prisma);
 
   console.log('\n✓ Database seeding completed successfully');
 }

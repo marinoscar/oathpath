@@ -1,0 +1,24 @@
+{
+  "kind": "writing",
+  "version": "rev-08-08",
+  "label": "Writing Vocabulary for the Naturalization Test (rev. 08/08)",
+  "provenance": {
+    "sourceUrl": "https://www.uscis.gov/sites/default/files/document/guides/writing_vocab.pdf",
+    "retrievedAt": "2026-09-04",
+    "sha256": "217244ecfb9ed6c5d79f9c281f9c1f6e4290ea358ced85192522b6218431bc08",
+    "transcription": {
+      "status": "HUMAN_VERIFIED",
+      "warning": "HUMAN_VERIFIED — the word list below was transcribed from the text layer of the official USCIS document \"Writing Vocabulary for the Naturalization Test\" (rev. 08/08), downloaded 2026-09-04 from the sourceUrl above; provenance.sha256 records the exact bytes read (185,852 bytes). What was NOT done, stated plainly rather than implied: no page-by-page human re-read of the rendered PDF against the printed original, and — unlike the reading list — no second official document reproduces this list for an independent diff. A later maintainer revising this file should re-download the source, re-hash it, and diff the extracted text rather than trusting this note. USCIS M-1178 (09/17) warns explicitly that the reading and writing lists overlap but ARE NOT THE SAME: \"When creating your sentences, keep the lists and activities separate.\" Do not merge them."
+    }
+  },
+  "categories": [
+    { "tag": "PEOPLE", "words": ["Adams", "Lincoln", "Washington"] },
+    { "tag": "CIVICS", "words": ["American Indians", "capital", "citizens", "Civil War", "Congress", "Father of Our Country", "flag", "free", "freedom of speech", "President", "right", "Senators", "state/states", "White House"] },
+    { "tag": "PLACES", "words": ["Alaska", "California", "Canada", "Delaware", "Mexico", "New York City", "United States", "Washington", "Washington, D.C."] },
+    { "tag": "MONTHS", "words": ["February", "May", "June", "July", "September", "October", "November"] },
+    { "tag": "HOLIDAYS", "words": ["Presidents' Day", "Memorial Day", "Flag Day", "Independence Day", "Labor Day", "Columbus Day", "Thanksgiving"] },
+    { "tag": "VERBS", "words": ["can", "come", "elect", "have/has", "is/was/be", "lives/lived", "meets", "pay", "vote", "want"] },
+    { "tag": "OTHER_FUNCTION", "words": ["and", "during", "for", "here", "in", "of", "on", "the", "to", "we"] },
+    { "tag": "OTHER_CONTENT", "words": ["blue", "dollar bill", "fifty/50", "first", "largest", "most", "north", "one", "one hundred/100", "people", "red", "second", "south", "taxes", "white"] }
+  ]
+}
