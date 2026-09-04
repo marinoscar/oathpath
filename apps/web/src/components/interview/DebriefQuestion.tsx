@@ -57,6 +57,32 @@
  * evidence of what happened. There is nowhere on this card for the learner's
  * response text to appear, which is why it can be rendered identically for a
  * retained and a non-retained interview.
+ *
+ * =============================================================================
+ * A MISHEARD ANSWER SHOWS AS MISHEARD, NOT AS A WRONG ANSWER (issue #160)
+ * =============================================================================
+ *
+ * `misheard` is a separate field from `outcome` on the wire and stays separate
+ * in the API's stored row, precisely so that both facts survive: the outcome is
+ * what the grading ladder concluded about the words it was handed, and
+ * `misheard` is whether we believe those were the learner's words. But a CARD
+ * can only lead with one of them, and leading with the outcome would put a red
+ * "Not a match" chip on an answer we have already decided we did not hear —
+ * which is the unearned penalty `voice.md` §3 spends a worked example keeping
+ * out of `question_mastery`, arriving instead as a colour.
+ *
+ * So the chip is neutral and says what actually happened, and the note under it
+ * makes the one narrow claim that is checkable: the question is left off the
+ * "Where to focus" list, because `buildInterviewDebrief` genuinely excludes it
+ * there. It deliberately does not claim the answer was excluded from the civics
+ * tally — the engine graded the words it was given, so it was not, and a
+ * comforting sentence a learner can check and find wrong is worse than a
+ * narrower true one.
+ *
+ * `showInputMode` is presentation, not a measurement: the page turns it on only
+ * for an interview that carried BOTH transports, which is §7's dropped-
+ * connection fallback. On an all-spoken run the same label on every card is
+ * noise, and `SpokenSummary` has already said it once.
  */
 
 import { Box, Chip, Paper, Stack, Typography } from '@mui/material';
@@ -66,9 +92,19 @@ import { outcomeDisplay } from '../practice/outcome';
 
 export interface DebriefQuestionProps {
   question: InterviewDebriefQuestion;
+  /**
+   * Whether to name how this answer was given.
+   *
+   * The page decides, from whether this interview carried both transports —
+   * see this file's header on why it is not always on.
+   */
+  showInputMode?: boolean;
 }
 
-export function DebriefQuestion({ question }: DebriefQuestionProps) {
+export function DebriefQuestion({
+  question,
+  showInputMode = false,
+}: DebriefQuestionProps) {
   const verdict = outcomeDisplay(question.outcome);
   const many = question.acceptedAnswers.length > 1;
 
@@ -88,11 +124,29 @@ export function DebriefQuestion({ question }: DebriefQuestionProps) {
         </Typography>
         {/* Text as well as colour — a red chip and a green chip are the same
             chip to a learner who cannot tell them apart. */}
-        <Chip label={verdict.label} color={verdict.color} size="small" />
+        {question.misheard ? (
+          <Chip label="Not heard clearly" color="default" size="small" />
+        ) : (
+          <Chip label={verdict.label} color={verdict.color} size="small" />
+        )}
         <Typography variant="body2" color="text.secondary">
           {question.categoryName}
         </Typography>
+        {showInputMode && (
+          <Typography variant="body2" color="text.secondary">
+            {question.inputMode === 'spoken' ? 'Answered aloud' : 'Typed'}
+          </Typography>
+        )}
       </Stack>
+
+      {/* The narrow, checkable claim. See this file's header on the sentence
+          this deliberately does NOT make. */}
+      {question.misheard && (
+        <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+          The recogniser was not confident it heard this answer, so it is left
+          off the list of sections to look at again.
+        </Typography>
+      )}
 
       {/* `h3` under the page's `h2` section heading — the page owns the single
           `h1`. The size is design; the level is semantics. */}
