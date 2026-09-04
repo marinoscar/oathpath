@@ -215,6 +215,20 @@ export const TAG_GROUPS: OpenApiTagGroup[] = [
           'interview is a **404**, not a 403. No permission gates any of it.',
       },
       {
+        name: 'English',
+        description:
+          'The reading and writing segments of the interview: one sentence read aloud and ' +
+          'scored on word accuracy, one sentence heard and typed back. Both are scored by ' +
+          'the same **deterministic** word-level comparison — one word wrong is not a ' +
+          'failure, two words wrong is not reading the sentence — and every sentence is ' +
+          'composed from the official USCIS vocabulary lists and checked word by word ' +
+          'against them. A reading attempt whose transcript the recogniser was unsure of ' +
+          'records **nothing at all** rather than a failure: a transcript we do not ' +
+          'believe is not weak evidence of a reading skill, it is none. Every route ' +
+          "resolves the learner from the authenticated session and takes no user id. No " +
+          'permission gates any of it — every signed-in learner owns their own attempts.',
+      },
+      {
         name: 'Readiness',
         description:
           'The eight-component readiness score: how ready the caller actually is for the ' +
