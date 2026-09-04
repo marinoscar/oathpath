@@ -65,23 +65,24 @@ describe('AI_MODEL_ROLES', () => {
     }
   });
 
-  it('wires exactly tutor, grader, transcribe and speak', () => {
-    // E9 (#88) wired the two speech roles. `AiProvider.transcribe` and
-    // `.synthesize` are what dispatch to them; a role nothing dispatches to
-    // must stay unwired.
+  it('wires every role something dispatches to, in registry order', () => {
+    // E9 (#88) wired the two speech roles; E11 (#156) wired `realtime`, whose
+    // dispatch is `AiProvider.createRealtimeSession`. A role nothing
+    // dispatches to must stay unwired — wiring one makes every deployment
+    // report an unbound model for a feature that does not exist.
     expect(wiredModelRoles().map((r) => r.key)).toEqual([
       'tutor',
       'grader',
       'transcribe',
       'speak',
+      'realtime',
     ]);
   });
 
-  it('leaves realtime and embed declared and inert', () => {
-    // `realtime` is epic #60 (E11); nothing dispatches to either today, and
-    // wiring a role nothing uses makes every deployment report an unbound
-    // model for a feature that does not exist.
-    expect(findModelRole('realtime')?.wired).toBe(false);
+  it('leaves embed declared and inert', () => {
+    // The last of the six with nothing behind it. Its slot exists so the epic
+    // that wires it needs no settings-schema change and no migration over live
+    // admin configuration — the same promise `realtime` has now cashed.
     expect(findModelRole('embed')?.wired).toBe(false);
   });
 
@@ -95,7 +96,7 @@ describe('AI_MODEL_ROLES', () => {
   it('returns a fresh array from wiredModelRoles', () => {
     const first = wiredModelRoles();
     first.pop();
-    expect(wiredModelRoles()).toHaveLength(4);
+    expect(wiredModelRoles()).toHaveLength(5);
   });
 });
 
@@ -120,6 +121,17 @@ describe('textModelRoles', () => {
     // binding is a smaller product, not a broken one.
     expect(textModelRoles().map((r) => r.key)).not.toContain('speak');
     expect(textModelRoles().map((r) => r.key)).not.toContain('transcribe');
+  });
+
+  it('excludes the wired realtime role too', () => {
+    // E11 (#156) wiring `realtime` is the E9 shape a second time, and it cost
+    // no edit to this function: a realtime capability is not a text one, so
+    // the role joined `unboundRoles` and left the hard-blocking gate alone by
+    // construction. Had `systemReady` still been "no wired role unbound",
+    // wiring it would have flipped every installation that has never
+    // configured an interview model to not-ready on deploy.
+    expect(findModelRole('realtime')?.wired).toBe(true);
+    expect(textModelRoles().map((r) => r.key)).not.toContain('realtime');
   });
 
   it('keeps the generation floor meaningful for everything it contains', () => {

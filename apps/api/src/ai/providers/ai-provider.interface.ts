@@ -5,6 +5,8 @@ import type {
   AiConnectionTestResult,
   AiModelCatalogResult,
   AiReachabilityRequest,
+  AiRealtimeSessionRequest,
+  AiRealtimeSessionResult,
   AiRecordedCompletionResult,
   AiStreamEvent,
   AiStructuredCompletionRequest,
@@ -251,4 +253,45 @@ export interface AiProvider {
     apiKey: string,
     request: AiSynthesisRequest,
   ): Promise<AiSynthesisResult>;
+
+  /**
+   * Mint one EPHEMERAL realtime session credential on the CALLER's key, and
+   * record the call (#156, epic #60).
+   *
+   * NEVER REJECTS, for the same reason {@link synthesize} does not: this runs
+   * while a learner is waiting for a mock interview to start, and every
+   * ordinary way it fails — a quota, a key the account revoked, a realtime
+   * model the organisation has no access to — must reach them as a sentence
+   * and leave an `ai_usage_events` row behind.
+   *
+   * A PROVIDER THAT DOES NOT `supports('realtime')` RETURNS
+   * `errorCode: 'capability_unsupported'` WITHOUT CALLING OUT AT ALL. The base
+   * class checks {@link capabilities} first, exactly as it does for the two
+   * speech methods and for the identical reason: an admin cannot normally bind
+   * `realtime` to a chat-only provider (the settings write consults
+   * `supports()`), but a settings row written before a deployment swapped
+   * providers still names one, and that must read as a refusal rather than as
+   * a crash inside an SDK that has no such method.
+   *
+   * WHAT COMES BACK IS DESTINED FOR A BROWSER, WHICH IS WHY IT IS NOT THE KEY
+   * THIS METHOD WAS HANDED. The learner's own machine opens the realtime
+   * connection; this call only asks the provider for a short-lived credential
+   * scoped to the session configuration in `request`. See
+   * {@link AiRealtimeSessionResult}, whose shape is where that boundary is
+   * enforced — there is no field on it a long-lived key could travel in.
+   *
+   * @param userId whose usage row is written; @param apiKey the caller's own
+   *        key, passed in — see {@link transcribe} for both, and note that the
+   *        server key would be worse here than anywhere else on this
+   *        interface: a session minted on it spends the administrator's quota
+   *        for the duration of a learner's conversation, with no per-user
+   *        record of it having happened at all.
+   * @returns the ephemeral secret, the instant it expires, and the model the
+   *        session was minted for. NEVER rejects.
+   */
+  createRealtimeSession(
+    userId: string,
+    apiKey: string,
+    request: AiRealtimeSessionRequest,
+  ): Promise<AiRealtimeSessionResult>;
 }

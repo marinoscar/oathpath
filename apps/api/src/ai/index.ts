@@ -89,6 +89,12 @@ export {
   textModelRoles,
   wiredModelRoles,
 } from './ai-model-roles';
+// The compile-time proof that the realtime surface cannot carry a long-lived
+// credential (#156). Exported so a spec can assert on the value, which is what
+// makes the proof a test failure as well as a build failure — the constant is
+// `true` only while the type resolves, so importing it IS the assertion.
+export { AI_REALTIME_CARRIES_NO_LONG_LIVED_KEY } from './ai.types';
+export type { AiRealtimeCarriesNoLongLivedKey } from './ai.types';
 export {
   AI_PROVIDER_KINDS,
   AI_SETTINGS_KEY,
@@ -165,6 +171,9 @@ export type {
   AiReachabilityRequest,
   AiMessage,
   AiReachabilityResult,
+  AiRealtimeSessionRequest,
+  AiRealtimeSessionResult,
+  AiRealtimeTool,
   AiRecordedCompletionResult,
   AiStreamEvent,
   AiStructuredCompletionRequest,

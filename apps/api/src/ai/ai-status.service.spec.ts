@@ -111,6 +111,27 @@ describe('AiStatusService', () => {
       });
     });
 
+    it('reports a wired-but-unbound realtime role WITHOUT saying the system is unready', async () => {
+      // The E11 shape (#156) as a learner's client sees it. `realtime` is
+      // wired, so an admin who has not chosen an interview model is told which
+      // role is missing; it is not a text role, so `systemReady` stays true
+      // and nothing hard-blocks the learner from practising by text.
+      //
+      // Asserted here as well as on `describeReadiness` because this endpoint
+      // is what every navigation reads: a filter added between the two — "only
+      // show roles that matter" — would silently take the one signal an
+      // interview surface has to gate on.
+      aiSettings.describeReadiness.mockResolvedValue({
+        ...READY,
+        unboundRoles: ['realtime'],
+      });
+
+      const status = await service.describe(ALICE);
+
+      expect(status.systemReady).toBe(true);
+      expect(status.unboundRoles).toEqual(['realtime']);
+    });
+
     it('returns NO combined flag', () => {
       // A merged `ready` would tell a user blocked by missing admin
       // configuration to add a key they already have.

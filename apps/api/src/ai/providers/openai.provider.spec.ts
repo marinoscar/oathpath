@@ -8,6 +8,8 @@ import {
   isOutputLimitOutcome,
   isUnsupportedParameterError,
   isUnsupportedResponseFormatError,
+  readSessionModel,
+  realtimeExpiry,
   wantsVerboseTranscription,
 } from './openai.provider';
 import {
@@ -42,6 +44,7 @@ const embeddingsCreateMock = jest.fn();
 const retrieveMock = jest.fn();
 const transcriptionsCreateMock = jest.fn();
 const speechCreateMock = jest.fn();
+const clientSecretsCreateMock = jest.fn();
 const constructedWith: Array<Record<string, unknown>> = [];
 
 jest.mock('openai', () => {
@@ -55,6 +58,7 @@ jest.mock('openai', () => {
         transcriptions: { create: transcriptionsCreateMock },
         speech: { create: speechCreateMock },
       };
+      realtime = { clientSecrets: { create: clientSecretsCreateMock } };
       constructor(opts: Record<string, unknown>) {
         constructedWith.push(opts);
       }
@@ -103,6 +107,7 @@ beforeEach(() => {
   retrieveMock.mockReset();
   transcriptionsCreateMock.mockReset();
   speechCreateMock.mockReset();
+  clientSecretsCreateMock.mockReset();
   constructedWith.length = 0;
 });
 
@@ -1633,5 +1638,269 @@ describe('OpenAiProvider.synthesize', () => {
     expect(result.errorCode).toBe('quota_exceeded');
     expect(result.audio).toBeNull();
     expect(result.contentType).toBeNull();
+  });
+});
+
+// =============================================================================
+// Realtime sessions (issue #156, epic #60 — E11)
+// =============================================================================
+//
+// What is worth testing here is what this class DECIDES, not what the SDK
+// does with it: that the session configuration sent is ours (our instructions,
+// our tools, our voice default), that the expiry is read back rather than
+// computed, and that an SDK throw becomes a failure RESULT — the never-throw
+// contract every caller is written against.
+// =============================================================================
+
+const REALTIME_MODEL = 'gpt-4o-realtime-preview';
+
+/** `POST /v1/realtime/client_secrets`'s shape, as the SDK returns it. */
+function mintedSecret(overrides: Record<string, unknown> = {}) {
+  return {
+    value: 'ek_live_abcdefghijklmnop',
+    // Unix SECONDS, which is the whole reason `realtimeExpiry` exists.
+    expires_at: Math.floor(Date.UTC(2099, 0, 1) / 1000),
+    session: { type: 'realtime', model: REALTIME_MODEL },
+    ...overrides,
+  };
+}
+
+function sessionRequest(overrides: Record<string, unknown> = {}) {
+  return {
+    roleKey: 'realtime',
+    modelId: REALTIME_MODEL,
+    instructions: 'You are a USCIS officer conducting an interview.',
+    tools: [
+      {
+        name: 'record_civics_answer',
+        description: 'Record the answer the applicant gave.',
+        parameters: { type: 'object', properties: {} },
+      },
+    ],
+    ...overrides,
+  } as Parameters<OpenAiProvider['createRealtimeSession']>[2];
+}
+
+describe('realtimeExpiry', () => {
+  it('reads the provider\'s unix SECONDS as milliseconds', () => {
+    // `new Date(seconds)` is a date in January 1970, which every comparison
+    // downstream reads as "already expired" — a bug that presents as a feature
+    // that never works rather than as an error.
+    expect(realtimeExpiry(1_800_000_000)).toEqual(
+      new Date(1_800_000_000_000),
+    );
+  });
+
+  it('refuses anything that is not a finite, positive number', () => {
+    // A mock, a proxy, or a future API version can all produce these, and a
+    // caller handed `null` turns it into a refusal rather than into a session
+    // with an unknown deadline.
+    expect(realtimeExpiry(undefined)).toBeNull();
+    expect(realtimeExpiry(0)).toBeNull();
+    expect(realtimeExpiry(-1)).toBeNull();
+    expect(realtimeExpiry(Number.NaN)).toBeNull();
+    expect(realtimeExpiry('1800000000')).toBeNull();
+  });
+});
+
+describe('readSessionModel', () => {
+  it('reads the model off a realtime session response', () => {
+    expect(readSessionModel({ model: REALTIME_MODEL })).toBe(REALTIME_MODEL);
+  });
+
+  it('returns null for the arm of the union that carries none', () => {
+    // The response's `session` is a union — realtime or transcription — and
+    // only one arm has a model. A narrowing cast would compile and then be
+    // `undefined` at runtime on the other.
+    expect(readSessionModel({ type: 'transcription' })).toBeNull();
+    expect(readSessionModel(undefined)).toBeNull();
+    expect(readSessionModel({ model: '' })).toBeNull();
+  });
+});
+
+describe('OpenAiProvider.createRealtimeSession', () => {
+  it('returns the ephemeral secret, its expiry and the minted model', async () => {
+    clientSecretsCreateMock.mockResolvedValue(mintedSecret());
+
+    const p = new OpenAiProvider(credentialsReturning(null), usageStub());
+    const result = await p.createRealtimeSession(
+      CALLER,
+      USER_KEY,
+      sessionRequest(),
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.clientSecret).toBe('ek_live_abcdefghijklmnop');
+    expect(result.expiresAt).toEqual(new Date('2099-01-01T00:00:00.000Z'));
+    expect(result.modelId).toBe(REALTIME_MODEL);
+    // Minting runs no inference — see `EMPTY_REALTIME_USAGE`.
+    expect(result.usage).toEqual({
+      promptTokens: null,
+      completionTokens: null,
+      totalTokens: null,
+    });
+  });
+
+  it('sends OUR session configuration: model, instructions, tools and a default voice', async () => {
+    clientSecretsCreateMock.mockResolvedValue(mintedSecret());
+
+    const p = new OpenAiProvider(credentialsReturning(null), usageStub());
+    await p.createRealtimeSession(CALLER, USER_KEY, sessionRequest());
+
+    expect(clientSecretsCreateMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        session: expect.objectContaining({
+          type: 'realtime',
+          model: REALTIME_MODEL,
+          instructions: 'You are a USCIS officer conducting an interview.',
+          audio: { output: { voice: 'alloy' } },
+          tools: [
+            {
+              type: 'function',
+              name: 'record_civics_answer',
+              description: 'Record the answer the applicant gave.',
+              parameters: { type: 'object', properties: {} },
+            },
+          ],
+        }),
+      }),
+    );
+  });
+
+  it('omits the expiry request entirely when the caller asked for no lifetime', async () => {
+    // So an omitted lifetime means the PROVIDER's own short default, rather
+    // than a number this file invented on the caller's behalf.
+    clientSecretsCreateMock.mockResolvedValue(mintedSecret());
+
+    const p = new OpenAiProvider(credentialsReturning(null), usageStub());
+    await p.createRealtimeSession(CALLER, USER_KEY, sessionRequest());
+
+    expect(clientSecretsCreateMock.mock.calls[0][0]).not.toHaveProperty(
+      'expires_after',
+    );
+  });
+
+  it('asks for the requested lifetime, anchored to the mint', async () => {
+    clientSecretsCreateMock.mockResolvedValue(mintedSecret());
+
+    const p = new OpenAiProvider(credentialsReturning(null), usageStub());
+    await p.createRealtimeSession(
+      CALLER,
+      USER_KEY,
+      sessionRequest({ expiresInSeconds: 120 }),
+    );
+
+    expect(clientSecretsCreateMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        expires_after: { anchor: 'created_at', seconds: 120 },
+      }),
+    );
+  });
+
+  it('honours an explicit voice', async () => {
+    clientSecretsCreateMock.mockResolvedValue(mintedSecret());
+
+    const p = new OpenAiProvider(credentialsReturning(null), usageStub());
+    await p.createRealtimeSession(
+      CALLER,
+      USER_KEY,
+      sessionRequest({ voice: 'verse' }),
+    );
+
+    expect(clientSecretsCreateMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        session: expect.objectContaining({
+          audio: { output: { voice: 'verse' } },
+        }),
+      }),
+    );
+  });
+
+  it('falls back to the requested model when the response names none', async () => {
+    // A transcription-shaped session response carries no model at all. What we
+    // asked for is the honest answer then — never a guess.
+    clientSecretsCreateMock.mockResolvedValue(
+      mintedSecret({ session: { type: 'transcription' } }),
+    );
+
+    const p = new OpenAiProvider(credentialsReturning(null), usageStub());
+    const result = await p.createRealtimeSession(
+      CALLER,
+      USER_KEY,
+      sessionRequest(),
+    );
+
+    expect(result.modelId).toBe(REALTIME_MODEL);
+  });
+
+  it('REFUSES a secret it cannot read an expiry off', async () => {
+    // A credential with no readable deadline is worse than none: the browser
+    // would hold something nothing can decide is stale, and every downstream
+    // "is it still good?" check would have to invent an answer.
+    clientSecretsCreateMock.mockResolvedValue(
+      mintedSecret({ expires_at: undefined }),
+    );
+
+    const p = new OpenAiProvider(credentialsReturning(null), usageStub());
+    const result = await p.createRealtimeSession(
+      CALLER,
+      USER_KEY,
+      sessionRequest(),
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.clientSecret).toBeNull();
+    expect(result.expiresAt).toBeNull();
+    expect(result.errorCode).toBe('malformed_result');
+  });
+
+  it('turns an SDK throw into a failure result rather than rejecting', async () => {
+    clientSecretsCreateMock.mockRejectedValue(
+      new Error('404 The model `gpt-4o-realtime-preview` does not exist'),
+    );
+
+    const p = new OpenAiProvider(credentialsReturning(null), usageStub());
+    const result = await p.createRealtimeSession(
+      CALLER,
+      USER_KEY,
+      sessionRequest(),
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.errorCode).toBe('model_not_found');
+    expect(result.clientSecret).toBeNull();
+    expect(result.expiresAt).toBeNull();
+    expect(result.modelId).toBeNull();
+  });
+
+  it('never lets the caller\'s key reach the error string', async () => {
+    clientSecretsCreateMock.mockRejectedValue(
+      new Error(`401 Incorrect API key provided: ${USER_KEY}`),
+    );
+
+    const p = new OpenAiProvider(credentialsReturning(null), usageStub());
+    const result = await p.createRealtimeSession(
+      CALLER,
+      USER_KEY,
+      sessionRequest(),
+    );
+
+    expect(result.error).not.toContain(USER_KEY);
+    expect(result.errorCode).toBe('invalid_key');
+  });
+
+  it('runs on the CALLER\'s key, never on the server key', async () => {
+    // The rule the whole BYOK design rests on (epic #25, decision 4): a
+    // realtime session minted on the organisation's key spends the
+    // administrator's quota for the length of a learner's conversation, with
+    // nothing in the result to say it happened.
+    clientSecretsCreateMock.mockResolvedValue(mintedSecret());
+    const credentials = credentialsReturning(SERVER_KEY);
+
+    const p = new OpenAiProvider(credentials, usageStub());
+    await p.createRealtimeSession(CALLER, USER_KEY, sessionRequest());
+
+    expect(constructedWith).toEqual([{ apiKey: USER_KEY }]);
+    expect(credentials.getSecret).not.toHaveBeenCalled();
   });
 });
