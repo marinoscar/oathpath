@@ -49,7 +49,10 @@ Source of truth for every claim below:
   a `User` foreign key, §4.1), and the `@db.Uuid` / `@map` / `@db.Timestamptz`
   conventions a new table follows.
 - `apps/web/src/config/adminSections.tsx` — `SettingsCardDef`, including the
-  `disabled` flag the four unwired roles reuse.
+  `disabled` flag the unwired roles reuse. Four roles were unwired when this
+  document was written; `transcribe` and `speak` wired since E9
+  (`docs/specs/voice.md` §1), so only `realtime` and `embed` still render
+  this way.
 - `apps/web/src/config/userSettingsSections.tsx` — the no-`permission` rule for
   per-user cards, and the `Security` group's stated reasoning.
 - `apps/web/src/pages/Admin/EmailSettingsPage.tsx` — the write-only secret
@@ -114,7 +117,7 @@ shapes several modules at once.
 
 | # | Decision | What it rules out |
 |---|---|---|
-| 1 | **Six role slots declared, two wired.** The schema declares all six; the admin UI binds `tutor` + `grader` and renders the other four inert using the registry's existing `disabled` card idiom. | A schema change (and a settings migration over live rows) when voice work starts. |
+| 1 | **Six role slots declared, two wired at launch.** The schema declares all six; the admin UI bound `tutor` + `grader` and rendered the other four inert using the registry's existing `disabled` card idiom. **Since E9 (`docs/specs/voice.md` §1), `transcribe` and `speak` are wired too — four wired, two still inert (`realtime`, `embed`).** | A schema change (and a settings migration over live rows) when voice work starts — which is exactly what did **not** have to happen: E9 flipped two booleans in the existing registry, no migration. |
 | 2 | **Configurable generation floor with an escape hatch.** Classify each id into a capability family, parse its generation, apply the floor (default `5.4`) **to the text families only** — plus a "show all models" toggle. | An upstream rename emptying the dropdown with no admin workaround. |
 | 3 | **Provider interface now, OpenAI concrete only.** `AiProvider` + `BaseAiProvider` mirroring `EmailProvider` / `BaseEmailProvider`, with per-provider capability flags. | Reshaping the settings surface, the test endpoint and the admin page all at once when Anthropic arrives. Also rules out an `openai-compatible` custom-baseURL kind for now. |
 | 4 | **BYOK is mandatory per user.** All inference runs on the calling user's key. There is no server-key fallback. The server key populates the model catalog and lets an admin verify connectivity — nothing else. | A shared server key, and with it any ability to tell a user what they personally spent. |
@@ -276,6 +279,16 @@ that a later refactor could relax.
 userKeyConfigured   this caller has a credential at ('ai-user', <their id>)
 systemReady         provider configured, tutor + grader bound, master switch on
 ```
+
+**`tutor` and `grader` here happened to be "every wired role" only because
+they were the only two wired roles at the time.** E9 (`docs/specs/voice.md`
+§1) wired `transcribe` and `speak` too, and narrowed `systemReady`'s formula
+in the same commit to keep meaning exactly this — the *text* roles, not
+"every wired role" — precisely so that wiring the two speech roles could not
+flip an already-deployed installation's `systemReady` to `false` for a
+capability nobody asked for. Read `docs/specs/voice.md` §1 for the failure
+that would have caused and the narrowing that prevents it; it is not
+restated here.
 
 **`userKeyConfigured === false` is a hard block.** Immediately after login the
 user is routed to `/setup/ai-key` and can reach nothing else. It is framed as a
