@@ -387,6 +387,133 @@ describe('computeReadiness', () => {
   });
 
   // ---------------------------------------------------------------------------
+  // §8 — a voice interview weighs more than a typed one, with NO engine change
+  // ---------------------------------------------------------------------------
+  //
+  // `docs/specs/realtime-interview.md` §8 makes a claim that reads like it
+  // needs code and does not: a realtime interview scores higher than an
+  // identical typed one because `interview` counts a PASS regardless of
+  // transport while `spoken` counts distinct questions answered correctly with
+  // `input_mode: 'spoken'` — two components reading two different facts, both
+  // already here since E6. Issue #158 makes a realtime civics answer carry that
+  // input mode, so a passed voice interview credits BOTH and a passed text one
+  // credits only the first.
+  //
+  // THIS TEST IS THE WHOLE OF #160's READINESS WORK, and that is the finding
+  // rather than a shortcut: nothing in `computeReadiness`, `computeSpoken` or
+  // `computeInterview` changed for E11, no `mode` is an input to any of them,
+  // and `readiness_snapshots` needs no new column because E6's `components` and
+  // `evidenceCounts` already carry all eight keys unconditionally (§8.2). A
+  // spec's arithmetic that nothing executes is a spec that can drift from the
+  // code it describes; this executes it.
+  //
+  // The numbers below are §8.1's own worked comparison, not numbers chosen
+  // here: one learner, no prior spoken or interview evidence, one interview
+  // passed by answering 8 questions correctly.
+
+  describe('§8 — the same interview, typed versus spoken', () => {
+    /** §8.1's learner, before the interview. */
+    const PRIOR = baseEvidence({
+      distinctQuestionsCorrectSpoken: 0,
+      mockInterviewsPassed: 0,
+    });
+
+    /** After a passed TEXT interview: the pass is recorded, nothing was spoken. */
+    const TYPED = baseEvidence({
+      distinctQuestionsCorrectSpoken: 0,
+      mockInterviewsPassed: 1,
+    });
+
+    /**
+     * After a passed REALTIME interview: the identical pass, plus the eight
+     * correct answers now carrying `input_mode: 'spoken'` (§6).
+     *
+     * The ONLY difference from {@link TYPED} is that one field. Every other
+     * component's evidence is held identical on purpose — a fixture that also
+     * moved `coverage` or `recall` would show a higher score for reasons that
+     * have nothing to do with the transport, and would pass whatever §8 turned
+     * out to be wrong about.
+     */
+    const SPOKEN = baseEvidence({
+      distinctQuestionsCorrectSpoken: 8,
+      mockInterviewsPassed: 1,
+    });
+
+    it('credits `interview` identically — passing is passing, whatever the transport', () => {
+      const typed = computeReadiness(TYPED);
+      const spoken = computeReadiness(SPOKEN);
+
+      expect(typed.components.interview.value).toBe(0.5);
+      expect(spoken.components.interview.value).toBe(0.5);
+      expect(typed.components.interview.contribution).toBeCloseTo(0.05, 10);
+      expect(spoken.components.interview.contribution).toBeCloseTo(0.05, 10);
+    });
+
+    it('credits `spoken` ONLY for the voice interview', () => {
+      expect(computeReadiness(TYPED).components.spoken.value).toBe(0);
+      expect(computeReadiness(SPOKEN).components.spoken.value).toBeCloseTo(0.4, 10);
+    });
+
+    it('raises BOTH components for the voice interview', () => {
+      const before = computeReadiness(PRIOR);
+      const after = computeReadiness(SPOKEN);
+
+      expect(after.components.interview.value).toBeGreaterThan(
+        before.components.interview.value,
+      );
+      expect(after.components.spoken.value).toBeGreaterThan(
+        before.components.spoken.value,
+      );
+    });
+
+    it('adds §8.1’s 5 points typed and 9 points spoken, to the point', () => {
+      // The spec's own arithmetic, executed: `0.5 × 0.10 = 0.05` for the typed
+      // interview, `0.05 + (0.4 × 0.10) = 0.09` for the spoken one — 5 and 9
+      // points on the 0-100 scale.
+      const before = computeReadiness(PRIOR).score;
+
+      expect(computeReadiness(TYPED).score - before).toBe(5);
+      expect(computeReadiness(SPOKEN).score - before).toBe(9);
+    });
+
+    it('scores the spoken interview higher than the identical typed one', () => {
+      // The headline claim, asserted as a comparison rather than as two
+      // constants, so it survives any later reweighting that keeps the
+      // relationship §8 depends on.
+      expect(computeReadiness(SPOKEN).score).toBeGreaterThan(
+        computeReadiness(TYPED).score,
+      );
+    });
+
+    it('lifts the cap either way, and the voice run lifts it through both paths', () => {
+      // §8.2: no `realtime`-specific branch anywhere in the cap. A passed
+      // interview lifts it on its own; the spoken answers lift it independently.
+      expect(computeReadiness(PRIOR).capReason).toBe('typed_only');
+      expect(computeReadiness(TYPED).capReason).toBeNull();
+      expect(computeReadiness(SPOKEN).capReason).toBeNull();
+
+      expect(computeReadiness(SPOKEN).evidenceCounts.spoken.attempts).toBe(8);
+      expect(computeReadiness(SPOKEN).evidenceCounts.interview.attempts).toBe(1);
+    });
+
+    it('reads no transport, mode or source anywhere — the same inputs, the same score', () => {
+      // `ReadinessEvidence` has no field naming a transport, and this is what
+      // that means in practice: eight spoken-correct answers score the same
+      // whether they came from a realtime interview or from ordinary spoken
+      // practice, because the engine cannot tell and does not need to (§8.2).
+      const fromInterview = computeReadiness(
+        baseEvidence({ distinctQuestionsCorrectSpoken: 8, mockInterviewsPassed: 0 }),
+      );
+      const fromPractice = computeReadiness(
+        baseEvidence({ distinctQuestionsCorrectSpoken: 8, mockInterviewsPassed: 0 }),
+      );
+
+      expect(fromInterview).toEqual(fromPractice);
+      expect(Object.keys(baseEvidence())).not.toContain('mode');
+    });
+  });
+
+  // ---------------------------------------------------------------------------
   // capReason (§3) — the lift/no-lift boundary
   // ---------------------------------------------------------------------------
 
