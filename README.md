@@ -16,10 +16,14 @@ OathPath is an AI-powered citizenship preparation companion that helps users stu
 - [Architecture](docs/ARCHITECTURE.md) — system design, components, and data model.
 - [API Reference](docs/API.md) — every endpoint, request, and response shape.
 - [Security Architecture](docs/SECURITY-ARCHITECTURE.md) — authentication, authorization, and data protection.
+- [Device Authorization](docs/DEVICE-AUTH.md) — the RFC 8628 device flow the CLI signs in with, with copy-pasteable integration examples.
+- [Personal Access Tokens](docs/personal-access-tokens.md) — creating, using, and revoking long-lived API tokens.
 - [Practicing With Your Voice](docs/spoken-practice.md) — what spoken practice does, and what happens to your voice.
 - [Practicing Reading and Writing](docs/reading-writing-practice.md) — what the reading and writing segments test, and why the writing sentence is hidden until after you submit.
 - [Runbook: Configuring voice](docs/runbooks/configuring-voice.md) — for an administrator deciding whether to bind the `transcribe`/`speak` AI roles, including what reading/writing practice needs (nothing new).
+- [Runbook: Updating civics content](docs/runbooks/updating-civics-content.md) — for a maintainer correcting a civics answer or revising the question bank.
 - [Runbook: Updating English content](docs/runbooks/updating-english-content.md) — for a maintainer adding or revising a reading/writing sentence.
+- [Runbook: Rotate SECRETS_ENCRYPTION_KEY](docs/runbooks/rotate-secrets-encryption-key.md) — for an operator rotating the key that encrypts runtime-configured credentials, or recovering from losing it.
 - [Design specs](docs/specs/) — the durable design record for each feature area, including [`voice.md`](docs/specs/voice.md) for how spoken practice works end to end and [`english-test.md`](docs/specs/english-test.md) for reading and writing.
 - [Deployment](docs/deployment/vps.md) — installing and updating a self-hosted instance.
 - [CLAUDE.md](CLAUDE.md) — codebase guidance for AI coding assistants.
