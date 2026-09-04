@@ -2663,12 +2663,15 @@ stance — lives in
 [`docs/specs/mock-interview.md`](specs/mock-interview.md); this section
 covers only the wire contract.
 
-Issue #157, epic #60 (E11 "Realtime voice interview") adds one more route —
-`POST /interviews/{id}/realtime-session` — which mints the short-lived
-credential a browser uses to conduct the same interview by voice. It changes
-nothing above: the engine still decides the phase, the question, the grade
-and the stop, and both transports drive the identical server-side state.
-Design rationale lives in
+Issues #157 and #158, epic #60 (E11 "Realtime voice interview") add two more
+routes — `POST /interviews/{id}/realtime-session`, which mints the short-lived
+credential a browser uses to conduct the same interview by voice, and
+`POST /interviews/{id}/realtime/tool-calls`, which handles the tool calls that
+session's model makes. They change nothing above: the engine still decides the
+phase, the question, the grade and the stop, and both transports drive the
+identical server-side state. The one thing a realtime interview does that a
+text one does not is **conduct the reading and writing tests for real** instead
+of announcing them as skipped. Design rationale lives in
 [`docs/specs/realtime-interview.md`](specs/realtime-interview.md).
 
 **Every route below is `@Auth()` with no permissions, and no new permission
@@ -3047,7 +3050,8 @@ deciding something the server decides.
 `next_question`, `grade_answer`, `end_phase` — and gives the model no way to
 choose a question, report a grade, or end a section early: `grade_answer` has
 no `verdict` field at all, and the question text comes back from
-`next_question` to be spoken verbatim. Handling those calls is issue #158.
+`next_question` to be spoken verbatim. Relay those calls to
+`POST /interviews/{id}/realtime/tool-calls` below.
 
 **Re-mint freely while the interview is `in_progress`.** If the secret
 expires or the connection drops, call this again: the interview resumes at
@@ -3102,6 +3106,202 @@ one fact this response exists to carry — the same posture
 - 404 Not Found — unknown interview id, or it belongs to another learner
 - 409 Conflict — the interview is completed or abandoned, or has no turn left
   to take; there is nothing left for a realtime session to conduct
+
+---
+
+#### POST /interviews/:id/realtime/tool-calls
+Handles one tool call from a realtime voice session and returns what the
+officer should do next. Issue #158, epic #60 (E11). Design rationale —
+the tool contract, the phase sequencing, the evidence written and the
+degradation path — lives in
+[`docs/specs/realtime-interview.md`](specs/realtime-interview.md) §4–§7.
+
+**This is where the model meets the engine.** Issue #155 states the risk
+the whole epic is organised around: "a speech-to-speech model asked to
+conduct a civics interview will happily invent a civics question from
+memory and declare an answer correct." The session's tool schemas close
+half of that by giving the model no field to put a question or a verdict
+in; this route closes the other half by deciding server-side what each
+call is allowed to do.
+
+**Parameters:**
+- `id` (uuid) — interview id
+
+**Request Body:** one tool call, discriminated on `tool`. **Only that
+tool's own arguments are accepted** — a field belonging to a different
+tool is a 400 naming it, and an undeclared field is a 400 too. There is
+no `userId`, no `verdict`, no pass mark and no test version: the caller
+is the authenticated session and everything else is the interview's.
+
+```json
+{ "tool": "next_question" }
+```
+```json
+{
+  "tool": "grade_answer",
+  "questionId": "8e2c…",
+  "transcript": "the constitution",
+  "confidence": 0.94
+}
+```
+```json
+{ "tool": "end_phase", "phase": "civics" }
+```
+
+`phase` accepts `smalltalk`, `n400`, `civics`, `reading` or `writing`.
+`closing` is deliberately not accepted: an interview whose closing is
+over is over, and ending it is the engine's decision, never a tool call.
+
+`confidence` is **optional, and absent means UNKNOWN — never low**. It
+feeds the same `0.6` comparison every other voice surface in this product
+uses. Omit it rather than guessing a value: defaulting it would make
+every answer on a provider that reports no confidence read as misheard.
+
+**Response — `next_question`:**
+```json
+{
+  "data": {
+    "tool": "next_question",
+    "status": "ok",
+    "text": "I am now going to ask you the civics questions.\n\nWhat is the supreme law of the land?",
+    "speakOnly": false,
+    "itemId": "8e2c…",
+    "phase": "civics",
+    "turnIndex": 9,
+    "progress": { "civicsAsked": 2, "civicsPlanned": 10 },
+    "awaitingCompletion": false
+  }
+}
+```
+
+`text` is **the exact words to say**. A civics question is
+`civics_questions.prompt` verbatim; a reading or writing sentence is
+`english_sentences.text` verbatim; everything around them is code-owned
+copy. No part of it was written by a model, and there is no argument on
+this tool through which one could have proposed it.
+
+**`speakOnly: true` means SAY IT, NEVER RENDER IT.** It is set for the
+writing test's sentence, which is dictated — printing it on screen would
+show the learner the answer rather than the question. It is also never
+written into the interview transcript, so `GET /interviews/{id}` cannot
+leak it mid-interview.
+
+`itemId` is the id a subsequent `grade_answer` must name, or `null` when
+the turn produces no scored answer (a skipped segment, the closing
+statement).
+
+**Refused** when the applicant's previous answer has not been reported
+(`answer_outstanding`), when the interview is not `in_progress`, and when
+the engine has no turn left to take.
+
+**Response — `grade_answer`:**
+```json
+{
+  "data": {
+    "tool": "grade_answer",
+    "status": "ok",
+    "ack": "Thank you.",
+    "recorded": true,
+    "phase": "civics",
+    "turnIndex": 10,
+    "progress": { "civicsAsked": 3, "civicsPlanned": 10 },
+    "awaitingCompletion": false
+  }
+}
+```
+
+**You report what you HEARD; the application decides whether it was
+right, and does not tell you.** There is no `verdict` argument and no
+verdict in the response — not a tick, not a score, not a failure cause.
+The transcript is graded by the same ladder a typed practice answer goes
+through (for a civics question) or the same word-error-rate scorer a
+typed reading attempt goes through (for a sentence), and
+`POST /interviews/{id}/complete` is the first moment any of it exists
+where the learner can see it. The real interview gives no per-question
+feedback; a rehearsal that does is coaching the applicant to expect
+reassurance the actual event will never provide.
+
+`ack` is the neutral sentence to speak, **identical whatever the outcome
+was**.
+
+`recorded` says whether evidence was written. It is `false` only for a
+reading attempt whose transcript the recogniser did not trust: no
+`english_attempts` row is written at all in that case, the segment stays
+outstanding, and `ack` asks the applicant to read it again. It never
+correlates with whether the answer was right — a low-confidence
+transcript that scored correct anyway is recorded normally.
+
+**Refused** when `questionId` is not the item the applicant was actually
+asked (`wrong_item`), and when nothing is outstanding
+(`no_answer_outstanding`). A refused call is **recorded** server-side and
+never graded.
+
+**Response — `end_phase`:**
+```json
+{
+  "data": {
+    "tool": "end_phase",
+    "status": "ok",
+    "nextPhase": "reading",
+    "context": "The interview is now in the reading test part. Call next_question.",
+    "awaitingCompletion": false
+  }
+}
+```
+
+**Honoured only when the engine independently agrees that phase is
+over.** For the civics section that means its own stop rule has fired —
+the threshold reached, the threshold become unreachable, or the plan
+exhausted — computed from the caller's own `civics_test_versions` row.
+For every other phase it means the engine has actually left it. There is
+no pass mark in this request or in this response, and none in the code
+that decides: a pass mark that adjusted itself by transport would be a
+mock interview telling a learner they are ready for a test it did not
+administer.
+
+**Response — refused:**
+```json
+{
+  "data": {
+    "tool": "end_phase",
+    "status": "rejected",
+    "reason": "phase_not_over",
+    "error": "The civics part of the interview is not over.",
+    "instruction": "Call next_question and continue the interview. Do not tell the applicant anything happened."
+  }
+}
+```
+
+`reason` is one of `interview_not_in_progress`, `interview_complete`,
+`answer_outstanding`, `no_answer_outstanding`, `wrong_item`,
+`phase_not_over`, `engine_refused`. **Do what `instruction` says and say
+nothing about it to the applicant** — do not retry the rejected call, and
+do not narrate the refusal.
+
+**Both `ok` and `rejected` are HTTP 200.** A non-2xx would be flattened
+into generic failure handling by the relay and `instruction` — the one
+field that gets the interview moving again — would never reach the model.
+The same posture `POST /interviews/{id}/realtime-session` takes toward
+`unavailable`.
+
+**What gets written.** Every turn is one `mock_interview_turns` row.
+Every civics answer is one `practice_attempts` row with
+`source: "mock_interview"`, `input_mode: "spoken"` and
+`prompt_mode: "heard"` — which is how a voice interview comes to weigh
+more than a typed one in readiness, with no readiness code involved. A
+low-confidence, non-correct civics answer is recorded with
+`failure_cause: "misheard"`, its outcome untouched, and **does not count
+against the learner's mastery**: an accent or a noisy connection is not
+forgetting. Reading and writing answers become `english_attempts` rows,
+in their own table, exactly as the practice screens' do. **No audio ever
+reaches this API** — the realtime connection is browser-to-provider — and
+transcript retention is the interview's own opt-in, default off,
+unchanged.
+
+**Error Cases:**
+- 400 Bad Request — `id` is not a uuid, or the body names a field the tool
+  does not declare
+- 404 Not Found — unknown interview id, or it belongs to another learner
 
 ---
 
