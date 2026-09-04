@@ -28,6 +28,7 @@ import { CredentialsModule } from './credentials/credentials.module';
 import { EmailModule } from './email/email.module';
 import { AiModule } from './ai/ai.module';
 import { NotificationsModule } from './notifications/notifications.module';
+import { AccountModule } from './account/account.module';
 import { LoggerModule } from './common/logger/logger.module';
 import { TestAuthModule } from './test-auth/test-auth.module';
 
@@ -177,6 +178,18 @@ import configuration from './config/configuration';
     // so a broken channel graph — a duplicate channel registration, a missing
     // transport — fails at boot rather than at the first notification.
     NotificationsModule,
+
+    // Self-service account data reset (issue #270): the "Danger zone"
+    // preview and destructive reset routes. Registered last among the
+    // feature modules because it is the one module that reaches INTO nearly
+    // every other one's tables (via `PrismaModule` directly) plus
+    // `AiModule`, `StorageModule` and `NotificationsModule` for the pieces
+    // it cannot touch directly — an ordinary account-owned feature module,
+    // just one whose dependency list is unusually wide because its job is
+    // to undo what all of them wrote. `@Auth()` with no permissions, no
+    // route parameter carrying a user id, same as every other per-learner
+    // module above.
+    AccountModule,
 
     // Test modules (non-production only)
     ...(process.env.NODE_ENV !== 'production' ? [TestAuthModule] : []),

@@ -60,6 +60,15 @@ const SAMPLE_DATA: { [K in EmailTemplateName]: EmailTemplateDataMap[K] } = {
     changedAt: new Date('2026-01-01T00:00:00.000Z'),
     appUrl: 'https://app.example.com',
   },
+  // Self-service account data reset (issue #270), the other `mandatory`
+  // event alongside `role-changed` above — see
+  // `account-data-reset.email.ts`'s own header for how the two compare.
+  'account-data-reset': {
+    recipientEmail: '<script>alert(document.cookie)</script>@example.com',
+    scope: 'data_and_key',
+    resetAt: new Date('2026-01-01T00:00:00.000Z'),
+    appUrl: 'https://app.example.com',
+  },
   // Epic #56 / E7's three reminders. Unlike every payload above, these carry
   // NO free-text field at all — a goal in minutes, a question count, a streak
   // length, and an `appUrl` the layout puts through `safeUrl` — so there is no
