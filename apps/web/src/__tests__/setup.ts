@@ -1,7 +1,32 @@
 import '@testing-library/jest-dom';
 import { cleanup } from '@testing-library/react';
 import { afterEach, beforeAll, afterAll, vi } from 'vitest';
+import { File as NodeFile } from 'node:buffer';
 import { server } from './mocks/server';
+
+// ---------------------------------------------------------------------------
+// globalThis.File -> Node's own File (node:buffer)
+//
+// This suite runs under `environment: 'jsdom'`, so without this alias
+// `globalThis.File` is jsdom's `File`. That is fine for everything the DOM
+// itself touches, but a request MSW hands a handler is parsed by **undici**,
+// in undici's own realm, not jsdom's — the same realm split `isBlobLike` in
+// `src/__tests__/services/speech.test.ts` documents from the assertion side
+// ("the request MSW hands a handler is built in undici's realm, whose `Blob`
+// and `File` are different constructors from the jsdom globals this suite
+// sees"). On Node 24, undici's multipart parser brand-checks each part with
+// `webidl.is.File(value)`, an internal-brand check jsdom's `File` cannot
+// satisfy; Node 22's undici was permissive here, which is why this only ever
+// reproduced in CI. The failure doesn't surface as a realm mismatch — it
+// throws inside the MSW handler mid-parse, the handler 500s, and the test
+// sees only an `ApiError` out of `ApiService.request`.
+//
+// Aliasing `Blob` the same way looks like the obvious follow-up cleanup — do
+// NOT do it. Verified locally: replacing `Blob` too takes this suite from 6
+// passing to 3 failing. Only `File` needs Node's realm; leave `Blob` as
+// jsdom's.
+// ---------------------------------------------------------------------------
+(globalThis as any).File = NodeFile;
 
 // Set base URL for fetch
 const BASE_URL = 'http://localhost:3000';
