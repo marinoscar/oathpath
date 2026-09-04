@@ -898,13 +898,16 @@ contributes `0.5 × 0.75 = 0.375` to `english`. The same raw count of
 successful attempts produces a materially different contribution — `0.25`
 vs. `0.375` — precisely because the two kinds of evidence are not treated
 as interchangeable, which is the entire point of giving them different
-denominators rather than one shared `/N` the way `spoken`/`english`
-(civics) share `/20` today (`readiness-model.md` §2.6–§2.7): those two
-share a denominator because they measure the *same* underlying quantity
-(distinct questions correctly spoken) filtered by language; reading and
-writing English measure two different skills scored through two different
-evidentiary paths, so a shared denominator there would be the wrong kind
-of consistency to reach for.
+denominators rather than one shared `/N` the way `spoken` alone uses a
+single `/20` for "distinct questions correctly spoken" regardless of
+category (`readiness-model.md` §2.7) — a single denominator there is right
+because every spoken civics question is the *same* underlying quantity;
+reading and writing English measure two different skills scored through two
+different evidentiary paths, so a shared denominator between *them* would
+be the wrong kind of consistency to reach for. (Before this epic, `english`
+itself shared `spoken`'s `/20` under the old, now-superseded
+`distinctQuestionsCorrectSpokenInEnglish` formula — §6.2 above replaces
+that formula rather than extending it, for exactly this reason.)
 
 **Zero with no attempts, and the explanation names the missing evidence.**
 A learner with no in-window `english_attempts` rows of either kind has
@@ -952,21 +955,31 @@ already argues against for the cap itself.
 ### 6.4 `EARNABLE_COMPONENT_KEYS` gains `english`
 
 `apps/api/src/readiness/top-recommendation.ts`'s `EARNABLE_COMPONENT_KEYS`
-(verified directly, lines 62–68 — a five-entry, module-private `const`
-today: `coverage`, `recall`, `retention`, `consistency`, `remediation`)
-gains a sixth entry, `english`, once this epic ships. This is that file's
-own stated precondition for adding a key, quoted rather than re-derived:
-`english`/`spoken`/`interview` are excluded today specifically because
-"recommending 'go do more spoken/interview practice' would be recommending
-a feature that does not exist yet." After this epic, English practice is a
-real, routed feature — `/api/english/*` (§7) backing a real UI destination
-— so the precondition that file's header sets for adding a component key
-is met, and the top-recommendation logic's weighted-headroom computation
+(verified directly, lines 91–98) gained a sixth entry, `english`, when this
+epic shipped — it was a five-entry, module-private `const` before this epic
+(`coverage`, `recall`, `retention`, `consistency`, `remediation`). This is
+that file's own stated precondition for adding a key, quoted rather than
+re-derived: `english`/`spoken`/`interview` were excluded before this epic
+specifically because "recommending 'go do more spoken/interview practice'
+would be recommending a feature that does not exist yet." This epic makes
+`/api/english/*` (§7) a real, routed API feature, so the precondition that
+file's header sets for adding a component key is met for `english`
+specifically — `spoken` and `interview` remain excluded, because neither
+has a practice surface of its own yet either. **The reading and writing
+screens themselves do not exist yet** (issues #144/#147, later in this same
+epic; `apps/web/src/App.tsx` mounts no `/practice/english`, `/practice/reading`,
+or `/practice/writing` route), so the shipped `copyFor('english', ...)`
+branch points at `/practice` rather than a screen that would 404, with a
+comment on the call site itself saying to re-point it once those issues
+land — the same "a recommendation must point at the destination it names"
+rule this file's own header states, and the same debt pattern
+`readiness-model.md` §8.2 already records for the capped card's own path.
+The top-recommendation logic's weighted-headroom computation
 (`weight * (1 - value)`, already generic over whichever keys are in the
-array) needs no change beyond the one-line array edit and, per §6.2's copy
-convention elsewhere in that file, one new `copyFor('english', ...)`
-branch grounded in `evidenceCounts.english` — never a hand-templated
-count that could drift from the object the engine already produced.
+array) needed no change beyond the one-line array edit and the new
+`copyFor('english', ...)` branch, grounded in `evidenceCounts.english` —
+never a hand-templated count that could drift from the object the engine
+already produced.
 
 ### 6.5 Recomputation triggers — no new schedule
 

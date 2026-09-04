@@ -3071,17 +3071,24 @@ existing snapshot older than the caller's most recent
 never stale by this rule — the cron already reflects every attempt that
 existed when it ran.
 
-`score` is 0-100, and structurally can't exceed 75 while `capReason` is
-`"typed_only"` — the three components that lift the cap
-(`english`/`spoken`/`interview`) sum to 0.25 of the total weight and are all
-`0` with no spoken-answer or mock-interview evidence. `capReason` becomes
-`null` the instant either kind of evidence exists at all, even once — a
-distinct, binary signal from `score` itself, which keeps climbing gradually
-as more evidence arrives.
+`score` is 0-100. `capReason` becomes `"typed_only"` when there is no
+spoken-answer evidence and no mock-interview evidence, and `null` the
+instant either kind of evidence exists at all, even once — a distinct,
+binary signal from `score` itself, which keeps climbing gradually as more
+evidence arrives. `spoken` and `interview` (0.10 each) are the two
+components `capReason` reads, and both are `0` for a `"typed_only"`
+learner, so their score can never exceed `0.80`. `english` (0.05) is *not*
+one of the two — a learner can earn full `english` credit (reading and
+writing practice) without ever having spoken a civics answer or sat a mock
+interview, so a `"typed_only"` learner's score can still reach `0.80` with
+full `english` credit, or `0.75` with none at all; see
+[`docs/specs/readiness-model.md`](specs/readiness-model.md) §2.9 for why
+`english` deliberately does not lift `capReason` itself.
 
 `topRecommendation` is always present: the fixed cap message while capped,
 otherwise the earnable component (`coverage`, `recall`, `retention`,
-`consistency`, or `remediation`) with the greatest weighted headroom.
+`consistency`, `remediation`, or `english`) with the greatest weighted
+headroom.
 
 `narrative`/`narrativeGeneratedAt` are the Progress Guide's one
 AI-generated paragraph (issue #134), filled in lazily on the caller's own
@@ -3116,7 +3123,7 @@ current) snapshot fills them in once it can.
       "retention": { "masteredCount": 36, "reviewCount": 18, "totalAttemptedQuestions": 72 },
       "consistency": { "distinctPracticeDaysInLast14": 6 },
       "remediation": { "everWeakCount": 5, "remediatedCount": 3 },
-      "english": { "distinctQuestionsCorrectSpokenInEnglish": 0 },
+      "english": { "readingSentences": 0, "writingSentences": 0, "readingCredit": 0, "writingCredit": 0 },
       "spoken": { "attempts": 0 },
       "interview": { "attempts": 0 }
     },
