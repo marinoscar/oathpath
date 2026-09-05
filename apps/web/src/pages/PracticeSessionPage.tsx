@@ -6,7 +6,7 @@
  * step: `/learn` (E2) is `VISION.md`'s "See it → Understand it", deliberately
  * before any recall, and this is the first place recall is asked for.
  *
- * =============================================================================
+ * ======================================================================  /**
  * THE ONE CONSTRAINT THIS WHOLE SCREEN IS BUILT AROUND
  * =============================================================================
  *
@@ -436,6 +436,18 @@ export default function PracticeSessionPage() {
    * of them editable — which is where a learner's correction goes unnoticed.
    */
   const [correction, setCorrection] = useState<string | null>(null);
+  /**
+   * Has this session had a real user gesture yet? (#287)
+   *
+   * ARMS THE ANSWER'S AUTOPLAY, and nothing else. Browsers refuse sound until
+   * the document has been interacted with, so `AttemptFeedback` is told whether
+   * one has happened rather than left to guess. It is set in `submitAttempt`
+   * because that funnel is reached from a click or a form submit and from
+   * nowhere else — the gesture that produced the verdict IS the gesture that
+   * permits reading it out. A blocked play is silent either way; this only
+   * keeps the page from asking for sound it knows will be refused.
+   */
+  const [hasUserGesture, setHasUserGesture] = useState(false);
 
   const inputRef = useRef<HTMLInputElement | null>(null);
   /** When the question on screen was first shown, for an honest `durationMs`. */
@@ -691,6 +703,8 @@ export default function PracticeSessionPage() {
       mode: Pending,
     ) => {
       if (!id || !question) return;
+      // Reached only from a click or a form submit — see `hasUserGesture`.
+      setHasUserGesture(true);
       setPending(mode);
       setActionError(null);
       setSelfMarkError(null);
@@ -1486,6 +1500,16 @@ export default function PracticeSessionPage() {
                 onSelfMark={() => void handleSelfMark()}
                 selfMarking={selfMarking}
                 selfMarkError={selfMarkError}
+                // THE SAME STORED PREFERENCES the question's player above
+                // reads (#288), pointed at the answer (#287). `readAnswersAloud`
+                // is its own switch, not `readQuestionsAloud`: wanting the
+                // question read is not the same wish as wanting the answer
+                // read back.
+                readAnswersAloud={voicePrefs.readAnswersAloud}
+                hasUserGesture={hasUserGesture}
+                premiumVoice={voicePrefs.preferPremiumVoice}
+                preferredVoice={voicePrefs.preferredVoice}
+                speechRate={voicePrefs.speechRate}
               />
             </Paper>
           )}

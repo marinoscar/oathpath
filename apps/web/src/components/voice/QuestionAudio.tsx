@@ -60,6 +60,25 @@
  * path, the `onPlayed`-only-when-audio-starts rule and the absent-not-disabled
  * control are the same on every caller, which is the reason this is one
  * component with a copy prop rather than a second player.
+ *
+ * =============================================================================
+ * ONE VOICE AT A TIME, ACROSS EVERY MOUNTED INSTANCE
+ * =============================================================================
+ *
+ * Since #287 a practice screen mounts this component TWICE — once for the
+ * question, once for the accepted answer in the result region — and the two are
+ * on screen together. Starting either one therefore has to silence the other,
+ * and the per-instance `stop()` alone could not promise that: it cancels
+ * `window.speechSynthesis` (which is global, so browser-voice against
+ * browser-voice happened to be safe) but it only pauses ITS OWN `<audio>`
+ * element, so on a deployment with `speak` bound, two premium clips could talk
+ * over each other with nothing in either instance able to notice.
+ *
+ * `ACTIVE_PLAYERS` closes that: every mounted instance registers its own
+ * `stop`, and `play()` runs the others before it starts. It lives HERE, in the
+ * one component, rather than as coordination bolted onto each host — a host
+ * cannot observe a click on a button it does not own, and the invariant is a
+ * property of "this is the app's audio player", not of any one screen.
  */
 
 import StopIcon from '@mui/icons-material/Stop';
@@ -129,6 +148,23 @@ const DEFAULT_COPY: QuestionAudioCopy = {
  * the other, and `speak()` on a half-implemented API throws rather than
  * degrading.
  */
+/**
+ * Every mounted instance's `stop`, so starting one can silence the rest.
+ *
+ * Module-level and deliberately not a context: there is exactly one pair of
+ * speakers, an instance rendered outside any provider must still yield to one
+ * rendered inside it, and a `Set` of stable callbacks is the whole mechanism.
+ * See the file header for what it prevents.
+ */
+const ACTIVE_PLAYERS = new Set<() => void>();
+
+/** Silence every OTHER instance. Idempotent, and a no-op when this is the only one. */
+function stopOtherPlayers(self: () => void): void {
+  for (const other of ACTIVE_PLAYERS) {
+    if (other !== self) other();
+  }
+}
+
 export function browserSpeechAvailable(): boolean {
   return (
     typeof window !== 'undefined' &&
@@ -196,6 +232,24 @@ export interface QuestionAudioProps {
    */
   onPlayed?: (source: QuestionAudioSource) => void;
 
+  /**
+   * Speak as soon as this mounts (and again whenever `text` changes), with no
+   * click.
+   *
+   * FALSE BY DEFAULT, and a caller should only set it from a stored preference
+   * the learner turned on — `user_settings.voice.readQuestionsAloud` /
+   * `readAnswersAloud` (#288). Audio that starts by itself is intrusive when
+   * nobody asked for it, so there is no "on by default" reading of this prop.
+   *
+   * A BLOCKED AUTOPLAY IS NOT AN ERROR. Browsers refuse sound until the
+   * document has had a user gesture, and `playBlob` already returns `false`
+   * rather than throwing in that case, so the ordinary fall-through applies and
+   * nothing is shown. The host is what knows whether a gesture has happened —
+   * it passes `false` until one has — because this component sees only its own
+   * button, which by definition was not pressed.
+   */
+  autoPlay?: boolean;
+
   /** Passed through to the button. */
   size?: 'small' | 'medium' | 'large';
 
@@ -215,6 +269,7 @@ export function QuestionAudio({
   voice,
   rate = DEFAULT_SPEECH_RATE,
   onPlayed,
+  autoPlay = false,
   size = 'small',
   copy,
 }: QuestionAudioProps) {
@@ -287,6 +342,16 @@ export function QuestionAudio({
   // the premium path it is also audio nobody is listening to.
   useEffect(() => stop, [stop, text]);
 
+  // Join the "one voice at a time" set for as long as this instance is mounted.
+  // See the file header: this is what makes a SECOND mount — the accepted
+  // answer's player, #287 — unable to talk over the first.
+  useEffect(() => {
+    ACTIVE_PLAYERS.add(stop);
+    return () => {
+      ACTIVE_PLAYERS.delete(stop);
+    };
+  }, [stop]);
+
   const speakWithBrowser = useCallback(
     (request: number): boolean => {
       if (!supportsBrowserSpeech) return false;
@@ -328,6 +393,11 @@ export function QuestionAudio({
 
   const play = useCallback(async () => {
     setMessage(null);
+    // EVERY OTHER MOUNTED PLAYER FIRST, then this one's own leftovers. The
+    // order matters: `speakWithBrowser` below hands an utterance to the same
+    // global engine every other instance's `stop()` cancels, so cancelling
+    // after starting would silence the thing we are starting.
+    stopOtherPlayers(stop);
     stop();
     const request = (requestRef.current += 1);
 
@@ -396,6 +466,26 @@ export function QuestionAudio({
     usePremium,
     voice,
   ]);
+
+  /**
+   * The latest `play`, without making it an effect dependency.
+   *
+   * `play` is rebuilt whenever any of its eight inputs changes — the AI status
+   * landing, a preference resolving — and an autoplay effect that depended on
+   * it would re-speak the same sentence on each of those, which is the one
+   * thing unrequested audio must never do.
+   */
+  const playRef = useRef(play);
+  playRef.current = play;
+
+  // AUTOPLAY: ONCE PER `text`, NEVER ON A RE-RENDER. Runs after the `stop`
+  // effect above (declared earlier, so its cleanup has already silenced the
+  // previous sentence), and no-ops silently when the browser refuses sound for
+  // want of a gesture — see the `autoPlay` prop.
+  useEffect(() => {
+    if (!autoPlay) return;
+    void playRef.current();
+  }, [autoPlay, text]);
 
   // The control is ABSENT rather than disabled when nothing could speak. See
   // the file header.
