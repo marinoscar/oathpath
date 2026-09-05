@@ -762,13 +762,26 @@ describe('PracticeService', () => {
 
       await missOnce();
 
-      // One read, for the authenticated caller. There is no route parameter,
-      // body field or DTO on this path that could name a different learner —
-      // `@CurrentUser('id')` is the only source of a user id in this module
-      // (CLAUDE.md's Practice paragraph), and this assertion is what keeps a
-      // future "grade as user X" convenience from being added quietly.
-      expect(userSettings.readCoachPreferences).toHaveBeenCalledTimes(1);
-      expect(userSettings.readCoachPreferences).toHaveBeenCalledWith(USER_A);
+      // FOR THE AUTHENTICATED CALLER, ON EVERY READ, WITHOUT EXCEPTION. There
+      // is no route parameter, body field or DTO on this path that could name a
+      // different learner — `@CurrentUser('id')` is the only source of a user
+      // id in this module (CLAUDE.md's Practice paragraph), and this assertion
+      // is what keeps a future "grade as user X" convenience from being added
+      // quietly.
+      //
+      // Asserted over EVERY call rather than as a count, because #320 added a
+      // second reader on this same request: the grader's voice (#319, one layer
+      // down in `AttemptGradingService`) and the reaction line attached to the
+      // response (`PracticeService.resolveCoachContext`) each read the caller's
+      // own preference. A count would be asserting how many times the setting
+      // happens to be read, which is an implementation detail; that no call
+      // ever names anybody else is the property that matters.
+      expect(
+        userSettings.readCoachPreferences.mock.calls.length,
+      ).toBeGreaterThanOrEqual(1);
+      for (const [calledWith] of userSettings.readCoachPreferences.mock.calls) {
+        expect(calledWith).toBe(USER_A);
+      }
     });
 
     it('puts the chosen persona in the SYSTEM turn and leaves the user turn alone', async () => {
@@ -830,18 +843,34 @@ describe('PracticeService', () => {
       expect(sentMessages().system).toBe(GRADING_SYSTEM_MESSAGE);
     });
 
-    it('does not read settings at all when rung 1 matched — the hot path is untouched', async () => {
-      // A correct answer short-circuits before the grader, so it must also
-      // short-circuit before the persona read: every attempt a learner gets
-      // right on the ordinary deterministic path pays for neither.
-      await service.recordAttempt(
+    it('spends no AI call when rung 1 matched, and still reads only the caller’s own preference', async () => {
+      // A correct answer short-circuits before the grader, and THAT is the hot
+      // path property worth holding: no model call, no token spend, no latency
+      // on the answer every learner gets right on the ordinary path.
+      //
+      // THIS TEST USED TO ALSO ASSERT THE SETTINGS READ DID NOT HAPPEN, and
+      // #320 made that false on purpose. Every attempt now carries a
+      // `coachReaction` — that is the whole point of the epic, since a
+      // deterministically-graded attempt is exactly the one that has no AI
+      // sentence to colour — so the persona is resolved on this path too. It is
+      // one indexed lookup on the caller's own row against no network call at
+      // all, which is a different order of cost from the one the short-circuit
+      // exists to avoid.
+      const result = await service.recordAttempt(
         USER_A,
         SESSION_ID,
         attemptInput({ responseText: 'Congress' }),
       );
 
       expect(dispatch.runStructured).not.toHaveBeenCalled();
-      expect(userSettings.readCoachPreferences).not.toHaveBeenCalled();
+      for (const [calledWith] of userSettings.readCoachPreferences.mock.calls) {
+        expect(calledWith).toBe(USER_A);
+      }
+
+      // And the reaction is there, on the attempt with no `aiFeedback` at all.
+      expect(result.attempt.gradingMethod).toBe('exact');
+      expect(result.attempt.aiFeedback).toBeNull();
+      expect(result.attempt.coachReaction?.text).toEqual(expect.any(String));
     });
   });
 
