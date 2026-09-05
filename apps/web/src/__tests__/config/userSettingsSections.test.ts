@@ -163,3 +163,50 @@ describe('USER_SETTINGS_SECTIONS - Your plan card (issue #77)', () => {
     expect(gates.has('/settings/journey')).toBe(true);
   });
 });
+
+/**
+ * Issue #270. `Danger zone` is its OWN group, deliberately not a third member
+ * of `Security` — see `config/userSettingsSections.tsx`'s own comment on the
+ * group for why a data reset is not a credential and does not belong there.
+ *
+ * The route-existence and no-permission halves of this card are already
+ * covered generically by "routes EVERY user-settings card path in App.tsx,
+ * each with no permission gate" above (it loops over the whole registry), so
+ * this block only asserts what is specific to THIS card and group: the group
+ * has exactly one card, the card is the right one, and the group sits after
+ * `Security` — the ordering CLAUDE.md's Settings UI Pattern implies by
+ * calling it a distinct, later destination rather than folding it in.
+ */
+describe('USER_SETTINGS_SECTIONS - Danger zone group (issue #270)', () => {
+  function findDangerZone() {
+    return USER_SETTINGS_SECTIONS.find((s) => s.label === 'Danger zone');
+  }
+
+  it('exists, with exactly one card: Reset your data at /settings/reset', () => {
+    const group = findDangerZone();
+    expect(group).toBeDefined();
+    expect(group?.cards).toHaveLength(1);
+    expect(group?.cards[0].title).toBe('Reset your data');
+    expect(group?.cards[0].path).toBe('/settings/reset');
+  });
+
+  it('declares no permission on its card - every authenticated user owns their own data', () => {
+    const card = findDangerZone()?.cards[0];
+    expect(card).toBeDefined();
+    expect('permission' in (card as object)).toBe(false);
+    expect(card?.permission).toBeUndefined();
+  });
+
+  it('sits after Security in USER_SETTINGS_SECTIONS - a data reset is not a credential', () => {
+    const securityIndex = USER_SETTINGS_SECTIONS.findIndex((s) => s.label === 'Security');
+    const dangerZoneIndex = USER_SETTINGS_SECTIONS.findIndex((s) => s.label === 'Danger zone');
+
+    expect(securityIndex).toBeGreaterThanOrEqual(0);
+    expect(dangerZoneIndex).toBeGreaterThan(securityIndex);
+  });
+
+  it('is not folded into the Security group - reachability, not a tab on an existing card', () => {
+    const securitySection = USER_SETTINGS_SECTIONS.find((s) => s.label === 'Security');
+    expect(securitySection?.cards.some((c) => c.path === '/settings/reset')).toBe(false);
+  });
+});

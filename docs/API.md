@@ -3936,6 +3936,151 @@ The storage system provides file upload and management capabilities with support
 
 ---
 
+### Account (Per User)
+
+Issue #270. The "Danger zone" — a read-only preview of what a self-service
+data reset would touch, and the reset itself. Full design rationale — the
+delete ordering, why storage deletion runs outside the transaction, why the
+AI-key purge reuses `AiUserKeyService.purgeForDeletedUser`, what is
+deliberately retained — lives in
+[`docs/specs/account-reset.md`](specs/account-reset.md); this section covers
+only the wire contract.
+
+**Every route below is caller-scoped and takes no user id**, in the path, the
+query, or the body. The account is resolved from `@CurrentUser('id')` and
+from nowhere else, so no caller can reset another user's data by any input —
+**and neither can an administrator**. That is enforced structurally rather
+than by a permission check: there is no parameter naming a target for a
+relaxed check to admit.
+
+Both are `@Auth()` with **no permissions**: every authenticated user owns
+their own data, and erasing it is a choice only its owner can make about
+themselves — inventing a permission string here would gate a user out of a
+choice that is structurally theirs alone.
+
+**This is a data reset, not an account deletion.** The `users` row, its OAuth
+identity, its role assignments, and its `refresh_tokens` all survive either
+scope — the refresh token *is* the login, and the login is untouched. See
+`docs/specs/account-reset.md` §5 for the complete retained/erased boundary,
+including why `audit_events` is retained by design rather than pruned.
+
+#### GET /account/data-summary
+Per-table row counts, for everything `POST /account/reset` would erase for
+**you**, plus the exact confirmation phrase each scope requires. Read-only —
+this runs `count`, never `delete`, and calling it any number of times changes
+nothing.
+
+**Response:**
+```json
+{
+  "data": {
+    "counts": {
+      "practice_attempts": 142,
+      "mock_interviews": 3,
+      "practice_sessions": 18,
+      "question_mastery": 96,
+      "readiness_snapshots": 5,
+      "daily_activity": 41,
+      "english_attempts": 27,
+      "ai_usage_events": 210,
+      "notifications": 12,
+      "notification_deliveries": 12,
+      "personal_access_tokens": 1,
+      "device_codes": 0,
+      "learner_profiles": 1,
+      "user_settings": 1,
+      "storage_objects": 2
+    },
+    "phrases": {
+      "data": "DELETE MY DATA",
+      "data_and_key": "DELETE EVERYTHING"
+    }
+  }
+}
+```
+
+`counts` is keyed by the same `table` strings `ACCOUNT_RESET_TABLES`
+declares, plus `storage_objects` — deleted through `ObjectsService.delete`,
+not a table in that constant, because a blob delete is network I/O and runs
+outside the transaction (`docs/specs/account-reset.md` §6). `phrases` is
+`ACCOUNT_RESET_PHRASES` itself, echoed back verbatim, so the confirmation
+screen renders exactly the string the server will check — see
+`docs/specs/account-reset.md` §3 for why this is served rather than
+duplicated as a web constant.
+
+**Error Cases:**
+- `401 Unauthorized` — no valid access token.
+
+#### POST /account/reset
+Erase every row this application holds about **you** — practice and mock
+interview history, readiness and progress, English attempts, recorded AI
+usage, notifications, personal access tokens, device sessions, your learner
+profile, your app settings, and any files you uploaded. **This cannot be
+undone.** Always `HTTP 200` on success (`@HttpCode(200)`), never `201`.
+
+**Request:**
+```json
+{
+  "scope": "data",
+  "confirmationPhrase": "DELETE MY DATA"
+}
+```
+
+`scope` is `data` (keeps your stored AI key) or `data_and_key` (erases that
+too). `confirmationPhrase` must match the scope's exact phrase from
+`GET /account/data-summary` — `DELETE MY DATA` for `data`,
+`DELETE EVERYTHING` for `data_and_key` — **verified here on the server**,
+`.trim()`-only and case-sensitive. A disabled button on the client is not the
+control; this check is. Nothing is deleted on a mismatch.
+
+**Response:**
+```json
+{
+  "data": {
+    "scope": "data",
+    "deleted": {
+      "practice_attempts": 142,
+      "mock_interviews": 3,
+      "practice_sessions": 18,
+      "question_mastery": 96,
+      "readiness_snapshots": 5,
+      "daily_activity": 41,
+      "english_attempts": 27,
+      "ai_usage_events": 210,
+      "notifications": 12,
+      "notification_deliveries": 12,
+      "personal_access_tokens": 1,
+      "device_codes": 0,
+      "learner_profiles": 1,
+      "user_settings": 1,
+      "storage_objects": 2
+    },
+    "aiKeyRemoved": false
+  }
+}
+```
+
+`deleted` is the per-table counts actually removed — the transaction's
+fourteen tables plus `storage_objects`, deleted separately. `aiKeyRemoved` is
+a separate boolean, not inferred from `scope === 'data_and_key'`: it states
+the *outcome*, `true` only when the `data_and_key` branch actually ran.
+
+You will receive an email confirming what was erased
+(`account.data_reset`). **That notification cannot be turned off** — it is
+`mandatory: true` in the notification registry, both because an irreversible
+loss like this must not be silenceable and because `user_settings` (where a
+non-mandatory event's channel preference would live) was just deleted by
+this same request — see `docs/specs/account-reset.md` §9.
+
+**Error Cases:**
+- `401 Unauthorized` — no valid access token.
+- `400 Bad Request` — `confirmationPhrase` did not match the selected
+  `scope`'s exact phrase (missing, empty, wrong case, or the *other* scope's
+  phrase). Nothing is deleted.
+- `400 Bad Request` — `scope` is not one of `data` / `data_and_key`.
+
+---
+
 ### Health
 
 **Public endpoints** - Used for Kubernetes liveness/readiness probes.

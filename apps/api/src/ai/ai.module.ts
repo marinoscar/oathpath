@@ -215,6 +215,16 @@ export function resolveAiProvider(
     AiUsageService,
     AiDispatchService,
     OpenAiProvider,
+    // Exported for `AccountModule` (#270): `AccountResetService`'s
+    // `data_and_key` scope calls `purgeForDeletedUser` directly, on the SAME
+    // service every route in this module already resolves credentials
+    // through — not a copy of its logic and not a second way to reach
+    // `CredentialsService.deleteSecret` for this address. Every method on
+    // this class still enforces its own "no route/caller passes a user id it
+    // did not already hold" discipline (see this class's own header); adding
+    // an exporter does not relax that, it only adds one more reviewed
+    // in-process caller.
+    AiUserKeyService,
   ],
 })
 export class AiModule {

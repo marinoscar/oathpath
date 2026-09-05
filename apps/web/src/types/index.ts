@@ -2535,6 +2535,56 @@ export interface InterviewPage {
 }
 
 // =============================================================================
+// Self-service account data reset (issue #270) — the "Danger zone"
+// =============================================================================
+
+/**
+ * Which of the two destructive scopes a reset invokes.
+ *
+ * `data` keeps the caller's stored AI key; `data_and_key` erases that too and
+ * needs its own, more severe confirmation phrase. See `AccountDataSummary`.
+ */
+export type AccountResetScope = 'data' | 'data_and_key';
+
+/**
+ * `GET /api/account/data-summary` — what a reset would touch, before anyone
+ * commits to anything.
+ *
+ * `counts` is a `Record<string, number>` keyed by table name
+ * (`practice_attempts`, `mock_interviews`, ...), not one named field per
+ * table — an open, code-owned key set the API can grow without a shape change
+ * here, matching `AiUsageBreakdown`'s own `key` convention.
+ *
+ * `phrases` MUST be read from this response, never hardcoded on the web: it
+ * is `ACCOUNT_RESET_PHRASES` on the API, echoed back so the confirmation
+ * screen renders the exact string the server will check, sourced from the
+ * one place that check reads from rather than a value that could go stale
+ * the moment either phrase changes server-side.
+ */
+export interface AccountDataSummary {
+  counts: Record<string, number>;
+  phrases: {
+    data: string;
+    data_and_key: string;
+  };
+}
+
+/**
+ * `POST /api/account/reset` — what actually happened.
+ *
+ * `deleted` mirrors `AccountDataSummary.counts`'s shape for the same reason.
+ * `aiKeyRemoved` is a separate boolean rather than inferred from
+ * `scope === 'data_and_key'` — it states the OUTCOME, not the request, so it
+ * stays correct even if the server's own gating logic for the key-removal
+ * branch ever grows more conditions than a bare scope check.
+ */
+export interface AccountResetResult {
+  scope: AccountResetScope;
+  deleted: Record<string, number>;
+  aiKeyRemoved: boolean;
+}
+
+// =============================================================================
 // The realtime voice interview — mint and relay (issues #157/#158/#159, E11)
 // =============================================================================
 //

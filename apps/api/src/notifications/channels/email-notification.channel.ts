@@ -90,6 +90,9 @@ export const EVENT_EMAIL_TEMPLATES: Partial<Record<string, EmailTemplateName>> =
     'user.welcome': 'user-welcome',
     'allowlist.invitation': 'allowlist-invitation',
     'security.role_changed': 'role-changed',
+    // Self-service account data reset (issue #270), the other `mandatory`
+    // event alongside `security.role_changed` above.
+    'account.data_reset': 'account-data-reset',
     // Epic #56 / E7's three practice reminders. Every one of the three
     // declares `email`, so every one of the three needs a line here — an
     // omission would be a recorded FAILED delivery per firing per learner,

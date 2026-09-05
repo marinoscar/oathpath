@@ -339,6 +339,9 @@ import type {
   RealtimeToolCallInput,
   RealtimeToolCallResponse,
   EngagementSummary,
+  AccountDataSummary,
+  AccountResetScope,
+  AccountResetResult,
   EnglishAttemptResult,
   EnglishNextResponse,
   EnglishProgress,
@@ -1521,6 +1524,39 @@ export async function getInterviews(params?: {
 
   const query = searchParams.toString();
   return api.get<InterviewPage>(`/interviews${query ? `?${query}` : ''}`);
+}
+
+/**
+ * Preview what a data reset would touch — `GET /api/account/data-summary`
+ * (#270).
+ *
+ * Read-only: the server runs `count`, never `delete`. This is what the
+ * "Danger zone" screen renders before the caller commits to anything, and
+ * where the two confirmation phrases come from — the web never hardcodes
+ * either, it reads `phrases` off this response.
+ */
+export async function getAccountDataSummary(): Promise<AccountDataSummary> {
+  return api.get<AccountDataSummary>('/account/data-summary');
+}
+
+/**
+ * Erase the caller's own data — `POST /api/account/reset` (#270).
+ * IRREVERSIBLE.
+ *
+ * `scope` picks how much: `data` keeps the stored AI key, `data_and_key`
+ * erases that too. `confirmationPhrase` must match the scope's exact phrase
+ * from `getAccountDataSummary`, re-verified server-side before anything is
+ * deleted — a disabled button on the client is a convenience, not the
+ * control. A mismatch is a 400 and nothing is deleted.
+ */
+export async function resetAccountData(
+  scope: AccountResetScope,
+  confirmationPhrase: string,
+): Promise<AccountResetResult> {
+  return api.post<AccountResetResult>('/account/reset', {
+    scope,
+    confirmationPhrase,
+  });
 }
 
 // =============================================================================

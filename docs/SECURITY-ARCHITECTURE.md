@@ -2167,6 +2167,167 @@ confirms by grepping `apps/api/src/ai/ai-speech.controller.ts` and
 `schema.prisma` for any new column referencing `storage_objects` from
 `practice_attempts`, and finding none.
 
+## 18. Self-Service Account Data Reset
+
+Issue #270. `apps/api/src/account/` — a preview endpoint and a destructive
+endpoint over the caller's own accumulated data. Full design rationale — the
+delete ordering, why storage deletion runs outside the transaction, the
+notification's `mandatory` reasoning — lives in
+[`docs/specs/account-reset.md`](specs/account-reset.md); this section states
+only the security-relevant properties, for the same reason §16 and §17 give:
+a security document that says "see the spec" for its own core claim is not a
+security document.
+
+### The reset itself is a security control, not only a convenience
+
+A learner who practised for weeks against the wrong test version or state, or
+who shares a household account, has no operator to call in this product —
+there is no support queue and no admin-initiated data wipe (§10 below
+explains why that is deliberately absent, not merely unbuilt). Before this
+feature, the only way to clear a wrong or compromised account's accumulated
+history was direct database access by whoever runs the deployment. Treating
+"start over" as a self-service action a learner can take **without anyone
+else's involvement** is itself the security-relevant design decision: it
+removes a class of request ("please wipe my account") that would otherwise
+have to be handled by an operator reading an ad hoc request and running SQL
+by hand, with all the attendant risk of doing that against the wrong row.
+
+### No route accepts a user id — the same structural guarantee as `/api/ai/key`
+
+`apps/api/src/account/account.controller.ts` resolves the account
+exclusively from `@CurrentUser('id')`. There is no path parameter, no query
+parameter and no body field naming a user on either
+`GET /api/account/data-summary` or `POST /api/account/reset` — the identical
+discipline §15 states for `apps/api/src/ai/ai-user-key.controller.ts`,
+applied here to the caller's own data rather than the caller's own
+credential.
+
+**An administrator cannot reset another user's data through this
+controller**, and that is enforced structurally, not by a permission check a
+later refactor could relax: there is no permission gate to widen in the
+first place, because there is no parameter naming a target for a widened
+check to admit. `@Auth()` carries no permissions, matching every other
+caller-scoped module in this codebase (AI key, Journey, Practice, Progress,
+Readiness, Engagement, Interviews, Voice, English) — erasing your own data
+is not a privilege, it is what owning the account already means.
+
+The integration suite proves this directly rather than only by omission: a
+request that includes an extra `userId` field in the `POST /api/account/reset`
+body is shown to run entirely against the caller's own id — `deleteMany` is
+asserted to have been called with the caller's id and asserted **not** to
+have been called with the injected one
+(`apps/api/test/account-reset.integration.spec.ts`, "the route accepts no
+user id"). An unknown field reaching the DTO layer is stripped by Zod and
+never reaches the service; the test exists because a happy-path request
+alone cannot distinguish "the extra field was ignored" from "the extra field
+was never sent."
+
+### The confirmation phrase: a disabled button is UX, the server check is the control
+
+`ACCOUNT_RESET_PHRASES` declares two exact phrases, `DELETE MY DATA` and
+`DELETE EVERYTHING` (`apps/api/src/account/account-reset.constants.ts`), and
+`AccountResetService.reset` re-verifies the submitted phrase — trimmed,
+case-sensitive, compared against the constant — as the **first** of its six
+steps, before a single row is touched. Nothing runs on a mismatch.
+
+The web dialog (`ResetAccountDialog.tsx`) disables its confirm button until
+the typed value matches, which is real UX value — it stops an accidental
+click — but it is not the security boundary. A direct
+`POST /api/account/reset` from a script, a replayed request, or a client the
+web team never wrote is stopped by the server-side comparison alone. The
+phrase itself is never hardcoded on the web: `GET /api/account/data-summary`
+echoes `ACCOUNT_RESET_PHRASES` back as `phrases`, so the client renders and
+the server checks the *same* declaration — see
+`docs/specs/account-reset.md` §3, which draws the explicit parallel to the
+one-registry-entry argument `notification-events.ts` already makes for a
+different security-relevant string.
+
+### The audit trail: action, target, and counts — never values
+
+Every reset, on success, writes exactly one `audit_events` row:
+
+```json
+{
+  "actorUserId": "<the caller's own id>",
+  "action": "account:reset",
+  "targetType": "user",
+  "targetId": "<the caller's own id>",
+  "meta": {
+    "scope": "data",
+    "deleted": {
+      "practice_attempts": 142,
+      "...": "...one entry per ACCOUNT_RESET_TABLES table, plus storage_objects",
+      "aiKeyRemoved": false
+    }
+  }
+}
+```
+
+`meta` carries table names and row **counts** only — never a deleted row's
+content. This is the same "meta carries counts, never values" discipline §15
+states for `ai_key:set`/`ai_key:delete`/`ai_key:test`, applied to fourteen
+tables instead of one credential.
+
+**The row is written after destruction completes, never before or during** —
+step 5 of 6, after the storage-object sweep and the fourteen-table
+transaction have both already run. This is the identical ordering §15 states
+for `AiUserKeyService.purgeForDeletedUser`: "an unaudited deletion is a
+smaller problem than a retained credential," generalized one level up to "an
+unaudited deletion is a smaller problem than a reset that only half-happened
+while an audit row claims it fully did." Writing the row first would risk a
+crash between the write and the actual deletion leaving a lie in
+`audit_events` — a row asserting destruction that had not yet occurred.
+Writing it last means the row is only ever written for destruction that
+genuinely already happened.
+
+`account:reset` audit rows are themselves retained by the same rule §16 and
+§18's own §5 (in `docs/specs/account-reset.md`) state for `audit_events`
+generally: `actorUserId` is `onDelete: SetNull`, the table is append-only
+from this feature's point of view, and a reset cannot erase the record that
+it happened — the one table in `ACCOUNT_RESET_TABLES`'s candidate list that
+was deliberately left out because deleting it would let a caller destroy the
+evidence of their own destructive action.
+
+### The email notification as an out-of-band tripwire
+
+`account.data_reset` is `mandatory: true` in the notification registry and
+`channels: ['email']` only. The mandatory flag means resolution ignores any
+stored channel preference for this one event — which sidesteps an ordering
+hazard unique to this feature (`user_settings`, where a non-mandatory
+event's preference would live, was deleted moments earlier in the same
+request) — but the security-relevant property is narrower and more direct:
+**an irreversible data loss must reach the account holder somewhere other
+than the tab where it happened.**
+
+`POST /api/account/reset` is `@Auth()` with no permissions, resolved
+entirely from `@CurrentUser('id')` — so under ordinary use, "who did this"
+is always "you, moments ago," and the email is confirmatory. Its actual
+security value is the case that copy is written for: a compromised or
+shared session used to erase a learner's data without the real owner's
+knowledge. Because the notification is mandatory and channel-independent of
+whatever was just deleted, the account holder learns what happened even
+though the actor who triggered it was not — and could not have been — the
+one who receives it. The template
+(`apps/api/src/email/templates/account-data-reset.email.ts`) does not name
+an actor (there usually is none to name) and closes with an explicit
+instruction to contact an administrator if the reader did not do this
+themselves.
+
+### The delete ordering matters for the same reason a SetNull-heavy schema does anywhere else
+
+`practice_attempts` carries three `onDelete: SetNull` foreign keys designed
+so that deleting a *parent* row (a session, an interview, a usage event)
+never deletes the *evidence* row that references it. `ACCOUNT_RESET_TABLES`
+deletes `practiceAttempt` first, precisely so that guarantee — built for the
+opposite case, an admin or cleanup task removing a parent while evidence
+should survive — is never exercised on a caller's own reset. Getting this
+order wrong would not corrupt data or open an authorization hole; it would
+leave orphaned, nulled-out `practice_attempts` rows behind after a reset
+that was supposed to remove them, which is a data-integrity defect in a
+security document's adjacent territory rather than a security bug itself —
+recorded here because `docs/specs/account-reset.md` §4.1 is the place a
+future contributor reordering this list needs to have read first.
+
 ---
 
 ## Conclusion

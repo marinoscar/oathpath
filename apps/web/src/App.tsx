@@ -84,6 +84,9 @@ const UserJourneyPage = lazy(() => import("./pages/UserJourneyPage"));
 const UserTokensPage = lazy(() => import("./pages/UserTokensPage"));
 // Issue #42, epic #25 — the user's own OpenAI key and what it has been used for.
 const UserAiKeyPage = lazy(() => import("./pages/UserAiKeyPage"));
+// Issue #270 — the "Danger zone": self-service erasure of the caller's own
+// data (and, optionally, their stored AI key).
+const UserDataResetPage = lazy(() => import("./pages/UserDataResetPage"));
 
 // Console — the hub (#93) plus one route per card in
 // `config/adminSections.tsx` (#92, epic #90).
@@ -466,6 +469,15 @@ function AppRoutes() {
                             would leave the gated role unable to use the app at all,
                             since a keyless user is hard-blocked. */}
                         <Route path="/settings/ai" element={<UserAiKeyPage />} />
+                        {/* Ungated like its siblings (#270). Both endpoints behind
+                            it — `GET /api/account/data-summary` and
+                            `POST /api/account/reset` — are `@Auth()` with no
+                            permissions and resolve the account from
+                            `@CurrentUser('id')` only, so the `Reset your data`
+                            card correspondingly declares no `permission`: every
+                            authenticated user owns their own data, and erasing
+                            it is a choice only its owner can make. */}
+                        <Route path="/settings/reset" element={<UserDataResetPage />} />
                         {/* Route-level AUTHORIZATION, not just authentication.
                         `ProtectedRoute` above only establishes that someone is
                         logged in — before this, a Viewer typing `/admin/settings`

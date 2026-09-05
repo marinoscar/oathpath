@@ -629,6 +629,18 @@ for the operator-facing walkthrough. See
 [`docs/specs/voice.md`](docs/specs/voice.md) §9-§10 and
 [`docs/API.md`](docs/API.md#ai-speech).
 
+### Account (Per User)
+- `GET /api/account/data-summary` - Per-table row counts a reset would erase, plus the exact confirmation phrase each scope requires
+- `POST /api/account/reset` - Erase your own data (`scope: 'data'`) or your data and stored AI key (`scope: 'data_and_key'`); requires the matching typed phrase, verified server-side
+
+The "Danger zone": a data reset, not an account deletion — your sign-in,
+OAuth identity, roles and `refresh_tokens` all survive either scope, and
+`audit_events` is appended to, never pruned. See
+[`docs/specs/account-reset.md`](docs/specs/account-reset.md) for the full
+delete-ordering rationale, why storage-object deletion runs outside the
+transaction, and why the AI-key purge reuses
+`AiUserKeyService.purgeForDeletedUser`.
+
 ### Health
 - `GET /api/health/live` - Liveness check
 - `GET /api/health/ready` - Readiness check (includes DB)
@@ -768,6 +780,14 @@ genuinely does not exist; an `english_attempts` row is private, and
 protected structurally rather than by a check — **no route on the module
 accepts an attempt id at all**, so cross-user access has no expressible
 request. See [`docs/specs/english-test.md`](docs/specs/english-test.md) §7.
+
+**Account reset adds no permission strings either, for the same reason.**
+Both `/api/account/*` routes are `@Auth()` with no permissions: every
+authenticated learner owns their own data, exactly as they own their own
+practice attempts and their own AI credentials, and no route accepts a user
+id — `@CurrentUser('id')` is the only source of one, so there is no "reset
+another learner's data" action for a permission to gate in the first place.
+See [`docs/specs/account-reset.md`](docs/specs/account-reset.md) §11.
 
 ## Database Tables
 

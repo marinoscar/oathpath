@@ -228,6 +228,45 @@ export const NOTIFICATION_EVENTS: NotificationEventDef[] = [
     // nobody outside the admin console can tell. Not silenceable.
     mandatory: true,
   },
+  {
+    key: 'account.data_reset',
+    label: 'Your data was reset',
+    description:
+      'Sent when all of your OathPath data is erased from this account.',
+    // Email only, and not because the browser channel has not shipped for
+    // this event — the browser channel exists (`security.role_changed`
+    // above already uses it) and it is still wrong here, for the identical
+    // reason `allowlist.invitation` above gives for its own recipient
+    // having no open tab, applied to the OPPOSITE moment in the account's
+    // lifecycle: a browser notification renders in the SAME TAB that just
+    // finished the reset. Its reader has just watched the confirmation
+    // screen report success; a bell badge repeating that fact a second
+    // later, in the one tab already showing it, has no reader who does not
+    // already know. Email is the only channel that reaches this person
+    // somewhere OTHER than the tab where the action happened — which is
+    // exactly where a "did I really mean to do that, and did it actually
+    // happen" record belongs.
+    channels: ['email'],
+    defaultEnabled: true,
+    // `mandatory: true` for the same reason `security.role_changed` above
+    // carries it: an irreversible destruction of every practice attempt,
+    // readiness snapshot, and interview a learner has built is a fact they
+    // must not be able to silence — the exact class of "the user must
+    // always be told" event this flag exists for, applied to data loss
+    // instead of a privilege change.
+    //
+    // It also sidesteps an ordering hazard that is unique to this one
+    // event: `AccountResetService.reset` deletes `user_settings` — which is
+    // where a non-mandatory event's stored channel preference would live —
+    // MOMENTS before this notification dispatches. A resolver that read
+    // stored preferences here would be reading a row the very call that
+    // triggers it just deleted, and would have to fall back to the
+    // registry default anyway. `mandatory` sidesteps the question entirely:
+    // resolution ignores stored preferences for a mandatory event
+    // (`NotificationEventDef.mandatory`'s own doc comment), so there is no
+    // preference row to race against its own deletion.
+    mandatory: true,
+  },
 
   // ===========================================================================
   // The three practice reminders (epic #56 / E7 "Habit")

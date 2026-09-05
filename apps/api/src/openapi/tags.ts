@@ -117,6 +117,19 @@ export const TAG_GROUPS: OpenApiTagGroup[] = [
           'can read another user\'s key through this API.',
       },
       {
+        name: 'Account',
+        description:
+          "The \"Danger zone\": a preview of what a reset would touch, and the reset " +
+          "itself — practice and mock interview history, readiness and progress, " +
+          "English attempts, recorded AI usage, notifications, personal access " +
+          "tokens, device sessions, the learner profile, app settings, and any " +
+          "uploaded files. **Irreversible.** Every route resolves the account from " +
+          "the authenticated session and **takes no user id** — nobody, " +
+          "administrators included, can reset another user's data through this " +
+          "API. No permission gates it: erasing your own data is not a privilege, " +
+          "it is what owning the account already means.",
+      },
+      {
         name: 'AI Settings',
         description:
           'Server-side AI configuration: which provider, the master switch, and which model serves ' +
