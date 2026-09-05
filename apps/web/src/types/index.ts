@@ -87,7 +87,7 @@ export type StudySettingsPatch = {
 // failure mode in full. `StudySettings` above is the same contract, decided the
 // same way, for the same reason.
 //
-// NONE OF THESE SIX IS A STATEMENT ABOUT WHAT THIS DEPLOYMENT CAN DO.
+// NONE OF THESE SEVEN IS A STATEMENT ABOUT WHAT THIS DEPLOYMENT CAN DO.
 // `preferPremiumVoice` is a WISH, not a capability: an unbound `speak` role
 // means the browser's own `speechSynthesis` reads everything regardless, which
 // `docs/specs/voice.md` §2 is explicit is the ordinary state of a fresh install
@@ -115,6 +115,14 @@ export interface VoiceSettings {
   readQuestionsAloud?: boolean;
   /** Read an answer aloud automatically when it appears. */
   readAnswersAloud?: boolean;
+  /**
+   * Start a practice session in hands-free Voice mode rather than typed
+   * (#307, epic #304 "Conversation mode").
+   *
+   * A WISH, like `preferPremiumVoice` above: whether this browser can listen
+   * at all is a separate fact the practice screen answers for itself.
+   */
+  conversationMode?: boolean;
 }
 
 /**
@@ -377,7 +385,7 @@ export interface UserSettings {
    * How spoken practice sounds and behaves (#282, epic #280).
    *
    * OPTIONAL, AND ABSENT IS THE NORMAL CASE, exactly as `study` above: no
-   * account has this key until the learner moves one of the six controls on
+   * account has this key until the learner moves one of the voice controls on
    * `/settings/voice`, and absent resolves to the built-in defaults. Never
    * backfill it with a materialised object.
    */

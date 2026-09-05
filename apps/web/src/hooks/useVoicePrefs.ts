@@ -1,5 +1,5 @@
 /**
- * `user_settings.voice` — the six spoken-practice preferences, resolved.
+ * `user_settings.voice` — the seven spoken-practice preferences, resolved.
  *
  * Issue #288, epic #280. **No new endpoint and no new request pattern**: this
  * reads the same `GET`/`PATCH /api/user-settings` the rest of the app already
@@ -79,6 +79,16 @@ export const DEFAULT_VOICE_READ_QUESTIONS_ALOUD = false;
 /** Mirrors `DEFAULT_VOICE_READ_ANSWERS_ALOUD`. Auto-play is opt-in. */
 export const DEFAULT_VOICE_READ_ANSWERS_ALOUD = false;
 
+/**
+ * Mirrors `DEFAULT_VOICE_CONVERSATION_MODE` (issue #307, epic #304), on the
+ * same terms as its neighbours above: a display/behaviour default only, never
+ * sent, so the server's constant stays the one that decides what an
+ * unopinionated learner gets.
+ *
+ * `false` — hands-free Voice mode is opt-in, exactly as autoplay is.
+ */
+export const DEFAULT_VOICE_CONVERSATION_MODE = false;
+
 /** Mirrors `VOICE_PREFERRED_VOICE_PATTERN`. Shape only — membership is the provider's. */
 export const VOICE_PREFERRED_VOICE_PATTERN = /^[A-Za-z0-9_-]+$/;
 
@@ -98,6 +108,15 @@ export interface VoicePreferences {
   speechRate: number;
   readQuestionsAloud: boolean;
   readAnswersAloud: boolean;
+  /**
+   * Whether a practice session starts in hands-free Voice mode rather than the
+   * typed one (#307, epic #304).
+   *
+   * A WISH, NOT A CAPABILITY, on the same terms as `preferPremiumVoice` above:
+   * whether this browser can actually listen is a different fact, answered by
+   * the speech-recognition support check at the point of use, never here.
+   */
+  conversationMode: boolean;
 }
 
 /** A stored boolean, or the built-in default. A stored `false` is real. */
@@ -164,6 +183,10 @@ export function resolveVoicePreferences(
     readAnswersAloud: resolveBoolean(
       voice?.readAnswersAloud,
       DEFAULT_VOICE_READ_ANSWERS_ALOUD,
+    ),
+    conversationMode: resolveBoolean(
+      voice?.conversationMode,
+      DEFAULT_VOICE_CONVERSATION_MODE,
     ),
   };
 }
