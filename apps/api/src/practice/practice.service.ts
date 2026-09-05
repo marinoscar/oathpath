@@ -17,6 +17,7 @@ import { excludeUnanswerable } from './question-selection';
 import { type GradingVerdict } from './grading';
 import { isMisheardAttempt } from './mastery/mastery-skip';
 import { toAttemptOutcome } from './mastery/outcome-mapping';
+import { recomputeMasteryForQuestion } from './mastery/recompute';
 import {
   classifyMasteryBucket,
   selectQuestionsV2,
@@ -882,6 +883,45 @@ export class PracticeService {
           asrConfidence: input.asrConfidence,
         },
       );
+
+      // -----------------------------------------------------------------
+      // AND THEN, FOR A RETRY ONLY: REPLAY THE WHOLE QUESTION (issue #285,
+      // epic #280)
+      // -----------------------------------------------------------------
+      //
+      // `retryOfAttemptId` is set, so the row just written SUPERSEDES an
+      // earlier one, and `docs/specs/voice.md` §3.2 says a superseded attempt
+      // must not be counted. Until this issue that rule reached the session
+      // SUMMARY (`dropSuperseded`, below) and nothing else — the superseded
+      // attempt's effect on `question_mastery` stayed exactly where
+      // `scheduleMastery` had put it, and the retry scheduled forward from
+      // that damage. `mastery/recompute.ts` carries the full argument; the
+      // short version is that epic #280's auto-submit makes a CONFIDENTLY
+      // mis-transcribed answer reachable, `isMisheardAttempt` correctly
+      // declines to call it misheard, and so a learner's accent turns into a
+      // real lapse in the one place they can neither see nor appeal.
+      //
+      // ORDER IS LOAD-BEARING, AND SO IS THE FACT THAT `scheduleMastery`
+      // STILL RUNS ABOVE. The recompute writes ONLY `question_mastery`: it
+      // deliberately does not fire `nextStageOnMasteryEvent`, because a
+      // replay walks the whole history and would raise that monotonic
+      // transition once per historical attempt. Skipping the ordinary
+      // `scheduleMastery` call instead would therefore drop the stage
+      // transition this attempt genuinely earns — a learner whose first ever
+      // schedulable event is a retry would sit in `oriented` for good. So
+      // both run, in this order: `scheduleMastery` for its stage
+      // consequence and the skip rule it owns, then the replay, which is the
+      // authority on the row and overwrites it. The recompute is idempotent
+      // and total over the history, so what it writes does not depend on
+      // what the call above wrote.
+      //
+      // Nothing is conditional on the skip rule here: a retry that is itself
+      // refused (misheard again, or `state_required`) still replays, and the
+      // replay is what may then DELETE a mastery row that only superseded
+      // and refused attempts ever produced.
+      if (input.retryOfAttemptId) {
+        await recomputeMasteryForQuestion(tx, userId, question.id);
+      }
 
       return created;
     });
