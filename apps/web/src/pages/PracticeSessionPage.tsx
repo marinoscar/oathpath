@@ -242,7 +242,7 @@ import { QuestionAudio } from '../components/voice/QuestionAudio';
 import type { QuestionAudioHandle } from '../components/voice/QuestionAudio';
 import { MicrophoneReadinessNotice } from '../components/voice/MicrophoneReadinessNotice';
 import { VoiceUnavailableNotice } from '../components/voice/VoiceUnavailableNotice';
-import { isLowConfidence } from '../components/voice/confidence';
+import { spokenDoubt } from '../components/voice/confidence';
 import { useOptionalAiStatus } from '../contexts/AiStatusContext';
 import { usePracticeSession } from '../hooks/usePracticeSession';
 import { useAudioCapture } from '../hooks/useAudioCapture';
@@ -301,6 +301,17 @@ type Pending = 'answer' | 'reveal' | 'skip' | 'complete' | null;
 interface SpokenDraft {
   /** 0..1, or NULL for "the recogniser did not say". NEVER coerce it to 0. */
   confidence: number | null;
+
+  /**
+   * Could this deployment's bound model have said, at all? (issue #348.)
+   *
+   * Carried BESIDE `confidence` rather than folded into it, because a `null`
+   * score means two different things and only one of them is worth a word to
+   * the learner — see `SpeechTranscriptionOk.confidenceAvailable` and
+   * `spokenDoubt`. `false` here is what turns a silence that reads as "fine"
+   * into "we cannot tell how clearly that came through, so please read it".
+   */
+  confidenceAvailable: boolean;
 }
 
 /**
@@ -644,6 +655,24 @@ export default function PracticeSessionPage() {
    */
   const [voiceUnavailable, setVoiceUnavailable] =
     useState<AiUnavailableCause | null>(null);
+
+  /**
+   * Can this deployment's transcription model report a confidence at all?
+   * (issue #348, epic #345.)
+   *
+   * A PROPERTY OF THE DEPLOYMENT, so it is NOT cleared by
+   * `clearQuestionState`: it is learned from the first transcription of the
+   * session and stays true for every one after it. The post-verdict correction
+   * panel needs it after the draft that carried it has been cleared, which is
+   * why it does not live on `SpokenDraft` alone.
+   *
+   * `null` until the first transcription lands, and `spokenDoubt` reads a
+   * missing value as today's behaviour — the quieter copy — so a page that has
+   * not heard anything yet never apologises for a recording it has not made.
+   */
+  const [confidenceMeasurable, setConfidenceMeasurable] = useState<
+    boolean | null
+  >(null);
   /** Set while the text in the answer field CAME FROM the microphone. */
   const [spokenDraft, setSpokenDraft] = useState<SpokenDraft | null>(null);
   /** The attempt the next submission supersedes, once a retry is taken up. */
@@ -817,7 +846,15 @@ export default function PracticeSessionPage() {
 
     void (async () => {
       try {
-        const result = await transcribeAudio(recording);
+        // THE QUESTION ID, AND ONLY THE ID (issue #348, epic #345). The server
+        // turns it into a biasing glossary from its own rows; this page has the
+        // question text on screen and still must not send it — see
+        // `transcribeAudio`.
+        // `?? undefined`, NOT `?? ''`: an absent hint must be an ABSENT form
+        // field, and an empty one is a 400 from the id's shape check.
+        const result = await transcribeAudio(recording, {
+          questionId: questionId ?? undefined,
+        });
         if (!isMounted()) return;
 
         // THREE ENDINGS, AND ONLY ONE OF THEM IS AN ERROR (issue #277). All
@@ -845,7 +882,16 @@ export default function PracticeSessionPage() {
             // a provider that reports no score with "that may not be what you
             // said" about a transcript nothing was uncertain about.
             // `confidence.ts` has the whole argument.
-            setSpokenDraft({ confidence: result.confidence });
+            setSpokenDraft({
+              confidence: result.confidence,
+              confidenceAvailable: result.confidenceAvailable,
+            });
+            // REMEMBERED PAST THE DRAFT (issue #348). The post-verdict
+            // correction panel reads the confidence off the RECORDED ATTEMPT,
+            // by which time the draft has been cleared — but whether a
+            // confidence was measurable at all is a property of the deployment,
+            // not of the draft, so it outlives it.
+            setConfidenceMeasurable(result.confidenceAvailable);
 
             // HANDS-FREE (issue #286, epic #280 / E12). Both `setResponse` and
             // `setSpokenDraft` above still run on this path, and neither is
@@ -901,7 +947,12 @@ export default function PracticeSessionPage() {
         releaseRecording();
       }
     })();
-  }, [isMounted, recording, releaseRecording]);
+    // `questionId` IS A DEPENDENCY EVEN THOUGH IT ONLY DECIDES A HINT: the
+    // effect must send the id of the question that is on screen NOW, not the
+    // one that was when it last ran. Re-running is free — `uploadedRef` returns
+    // early for a recording already sent, so a question change never
+    // re-uploads and never re-bills.
+  }, [isMounted, questionId, recording, releaseRecording]);
 
   /**
    * The server has just told us something the cached AI status disagrees with.
@@ -1037,7 +1088,16 @@ export default function PracticeSessionPage() {
 
   /** NULL MEANS UNKNOWN. Read out once, never coalesced to a number. */
   const draftConfidence = spokenDraft?.confidence ?? null;
-  const lowConfidence = isLowConfidence(draftConfidence);
+  /**
+   * Three states, not two (issue #348): measured-and-low, measured-and-fine,
+   * and NOT MEASURABLE AT ALL on this deployment. The third is the ordinary
+   * case on the recommended model and used to be indistinguishable from the
+   * second — see `spokenDoubt`.
+   */
+  const draftDoubt = spokenDoubt(
+    draftConfidence,
+    spokenDraft?.confidenceAvailable,
+  );
 
   /**
    * The voice fields for the attempt the LEARNER is about to submit by hand —
@@ -1270,12 +1330,30 @@ export default function PracticeSessionPage() {
     [elapsedMs, promptWasHeard, submitAttempt],
   );
 
+  /**
+   * `transcribeAudio`, bound to the question on screen (issue #348).
+   *
+   * A `useCallback` rather than an inline arrow because
+   * `useConversationSession` holds this function across a turn: a new identity
+   * on every render would be a new function handed to a driver mid-recording.
+   * It changes exactly when `questionId` does, which is exactly when the hint
+   * should change.
+   */
+  const conversationTranscribe = useCallback(
+    (blob: Blob) => transcribeAudio(blob, { questionId: questionId ?? undefined }),
+    [questionId],
+  );
+
   const conversation = useConversationSession({
     capture: conversationCapture,
     voiceActivity,
     speech: conversationSpeech,
-    // The identical call the hand-driven transcription effect makes.
-    transcribe: transcribeAudio,
+    // The identical call the hand-driven transcription effect makes, INCLUDING
+    // the question hint (#348). The driver has no idea a hint exists — it hands
+    // over a blob and reads a transcript — so binding the id here keeps the two
+    // paths from quietly diverging into a hands-free session that transcribes
+    // less accurately than the hand-driven one beside it.
+    transcribe: conversationTranscribe,
     submit: conversationSubmit,
     // The host's own Next, unchanged. The driver does not wait on it — it
     // waits for `questionId` to change, which is the only signal that means
@@ -1524,7 +1602,10 @@ export default function PracticeSessionPage() {
   const gradedTranscript =
     result?.attempt.transcript ?? result?.attempt.responseText ?? '';
   /** The doubt the RECOGNISER reported about the graded words. Copy only. */
-  const gradedLowConfidence = isLowConfidence(result?.attempt.asrConfidence);
+  const gradedDoubt = spokenDoubt(
+    result?.attempt.asrConfidence,
+    confidenceMeasurable,
+  );
 
   const handleAnswerAgain = () => {
     if (!result) return;
@@ -2164,14 +2245,23 @@ export default function PracticeSessionPage() {
                           role="presentation"
                         >
                           <AlertTitle>
-                            {lowConfidence
+                            {draftDoubt === 'low'
                               ? 'That may not be what you said.'
                               : 'Is this what you said?'}
                           </AlertTitle>
+                          {/* THREE STATES SINCE #348, and the third is not a
+                              worse version of the second. `unmeasured` means
+                              this deployment's model reports no confidence at
+                              all, so nothing checked this transcript and
+                              saying nothing would imply something did.
+                              `low` still means we measured and doubted it,
+                              which is a stronger and rarer claim. */}
                           <Typography variant="body2" sx={{ mb: 1.5 }}>
-                            {lowConfidence
+                            {draftDoubt === 'low'
                               ? 'Your recording was hard to make out, so this is more likely our mistake than yours. Read it below, change anything that is wrong, or record it again — nothing has been graded yet.'
-                              : 'Read it below and change anything that is wrong. Nothing is graded until you choose Use this answer.'}
+                              : draftDoubt === 'unmeasured'
+                                ? 'We cannot tell how clearly that came through, so please read it before it is graded. Change anything that is wrong, or record it again — nothing is graded until you choose Use this answer.'
+                                : 'Read it below and change anything that is wrong. Nothing is graded until you choose Use this answer.'}
                           </Typography>
                           <Stack
                             direction={{ xs: 'column', sm: 'row' }}
@@ -2335,8 +2425,13 @@ export default function PracticeSessionPage() {
             THE TRANSCRIPT IS VISIBLE HERE FOR EVERY SPOKEN ATTEMPT, not only a
             doubted one: the transcript a learner most needs to see is the
             confidently-wrong one, which is exactly the one nothing flags.
-            `gradedLowConfidence` chooses the WORDS and nothing else, and the
-            confidence number itself is never rendered (`voice.md` §3.1).
+            `gradedDoubt` chooses the WORDS and nothing else, and the
+            confidence number itself is never rendered (`voice.md` §3.1). Since
+            #348 it has three values rather than two: on a deployment whose
+            model reports no confidence — the recommended one — `voice.md` §3's
+            misheard protection cannot fire at all, and this panel IS the
+            protection that replaces it, so the copy says so instead of
+            implying a check that never ran.
 
             Outside the `role="status"` region above for the same reason the
             explain action below is: a control appended to a live region is
@@ -2354,7 +2449,7 @@ export default function PracticeSessionPage() {
           <Box sx={{ mt: 3 }}>
             <Alert severity="info" icon={false} role="presentation">
               <AlertTitle>
-                {gradedLowConfidence
+                {gradedDoubt === 'low'
                   ? 'That may not be what you said.'
                   : 'This is what we heard.'}
               </AlertTitle>
@@ -2362,9 +2457,11 @@ export default function PracticeSessionPage() {
                 &ldquo;{gradedTranscript}&rdquo;
               </Typography>
               <Typography variant="body2" sx={{ mb: 1.5 }}>
-                {gradedLowConfidence
+                {gradedDoubt === 'low'
                   ? 'Your recording was hard to make out, so anything wrong above is more likely our mistake than yours. Please check it — putting it right replaces this attempt and costs you nothing.'
-                  : 'Those are the words that were graded. If they are not what you said, put it right — that replaces this attempt, does not count as a second question, and costs you nothing.'}
+                  : gradedDoubt === 'unmeasured'
+                    ? 'We have no way to tell how clearly that came through, so please check it yourself. If those are not your words, put it right — that replaces this attempt, does not count as a second question, and costs you nothing.'
+                    : 'Those are the words that were graded. If they are not what you said, put it right — that replaces this attempt, does not count as a second question, and costs you nothing.'}
               </Typography>
 
               {correction === null ? (

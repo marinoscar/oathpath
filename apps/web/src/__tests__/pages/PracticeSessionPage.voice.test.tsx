@@ -288,8 +288,18 @@ interface Options {
   attemptResult?: PracticeAttemptResult | (() => PracticeAttemptResult);
   /** Refuse the POST with this status — the retry refusals. */
   attemptStatus?: number;
-  /** `POST /api/ai/speech/transcribe` answers `{status:'ok', ...}` with this. */
-  transcription?: { text: string; confidence: number | null };
+  /**
+   * `POST /api/ai/speech/transcribe` answers `{status:'ok', ...}` with this.
+   *
+   * `confidenceAvailable` defaults to `true` — the shape a deployment whose
+   * model CAN measure sends (issue #348). A test that wants the other
+   * deployment, where nothing is ever scored, says so explicitly.
+   */
+  transcription?: {
+    text: string;
+    confidence: number | null;
+    confidenceAvailable?: boolean;
+  };
   /**
    * …or a genuine transport failure (a real non-2xx, which still rejects).
    * Distinct from `transcriptionUnavailable`/`transcriptionFailed` below,
@@ -323,6 +333,15 @@ interface Options {
 }
 
 let transcribeCalls = 0;
+
+/**
+ * The `questionId` field the page sent with the last transcription (#348).
+ *
+ * `null` means the request carried none at all, which is a different fact from
+ * "carried the wrong one" — an empty or absent field is what the server reads
+ * as "no hint", and an empty STRING would be a 400 on its shape check.
+ */
+let lastTranscribeQuestionId: string | null = null;
 
 function renderSession(options: Options = {}) {
   const detail = options.detail ?? detailFor();
@@ -377,8 +396,11 @@ function renderSession(options: Options = {}) {
       }
       return HttpResponse.json({ data: status });
     }),
-    http.post(`${API_BASE}/ai/speech/transcribe`, async () => {
+    http.post(`${API_BASE}/ai/speech/transcribe`, async ({ request }) => {
       transcribeCalls += 1;
+      const form = await request.formData();
+      const sent = form.get('questionId');
+      lastTranscribeQuestionId = typeof sent === 'string' ? sent : null;
       if (options.transcriptionFails) {
         return HttpResponse.json(
           { error: { code: 'AI_UNAVAILABLE', message: 'Speech recognition is not available right now.' } },
@@ -406,6 +428,7 @@ function renderSession(options: Options = {}) {
       return HttpResponse.json({
         data: {
           status: 'ok',
+          confidenceAvailable: true,
           ...(options.transcription ?? { text: 'the Constitution', confidence: 0.94 }),
         },
       });
@@ -521,6 +544,7 @@ function answerField(): HTMLInputElement {
 beforeEach(() => {
   captureControl.reset();
   transcribeCalls = 0;
+  lastTranscribeQuestionId = null;
 });
 
 afterEach(() => {
@@ -570,6 +594,13 @@ describe('a spoken answer grades itself the moment it lands', () => {
     expect(posted[0].promptMode).toBe('read');
     expect(posted[0].asrConfidence).toBe(0.94);
     expect(posted[0].retryOfAttemptId).toBeUndefined();
+
+    // THE RECOGNISER HINT (#348, epic #345): the id of the question on screen,
+    // and only the id. The server resolves it into a biasing glossary from its
+    // own rows — this page has the question TEXT right there and must never
+    // send it, because a client that could name its own biasing text could
+    // steer its own recogniser toward the words it wanted to be heard saying.
+    expect(lastTranscribeQuestionId).toBe('question-1');
   });
 
   it('NEVER submits an empty transcript, and says so instead', async () => {
@@ -979,6 +1010,57 @@ describe('a low-confidence transcription', () => {
 
     expect(await screen.findByText('This is what we heard.')).toBeInTheDocument();
     expect(screen.queryByText(/that may not be what you said/i)).toBeNull();
+  });
+
+  it('says so plainly when this deployment cannot measure confidence at all', async () => {
+    // Issue #348, epic #345. `confidence: null` used to be indistinguishable
+    // from a model that simply did not score THIS recording, so the panel said
+    // nothing — which reads as "we checked and it was fine" about a transcript
+    // nothing checked. `confidenceAvailable: false` is the server saying the
+    // bound model measures nothing at all, on any call, so `voice.md` §3's
+    // misheard protection cannot fire here and this panel IS the protection.
+    const user = userEvent.setup();
+    renderSession({
+      transcription: {
+        text: 'the Constitution',
+        confidence: null,
+        confidenceAvailable: false,
+      },
+    });
+
+    await startSpeaking(user);
+    finishRecording();
+
+    expect(await screen.findByText('This is what we heard.')).toBeInTheDocument();
+    expect(
+      screen.getByText(/no way to tell how clearly that came through/i),
+    ).toBeInTheDocument();
+    // NOT the low-confidence copy. Unmeasured is not doubted, and apologising
+    // for a transcript nothing was uncertain about is the exact failure the
+    // "unknown is not low" rule exists to prevent.
+    expect(screen.queryByText(/that may not be what you said/i)).toBeNull();
+  });
+
+  it('still offers the correction, which was never gated on confidence', async () => {
+    // The load-bearing half of issue #348's answer: what a learner gets on a
+    // deployment that cannot measure is not "less", it is the SAME affordance,
+    // because `canAnswerAgain` reads `inputMode === 'spoken'` and never
+    // `failureCause === 'misheard'`.
+    const user = userEvent.setup();
+    renderSession({
+      transcription: {
+        text: 'the Constitution',
+        confidence: null,
+        confidenceAvailable: false,
+      },
+    });
+
+    await startSpeaking(user);
+    finishRecording();
+
+    expect(
+      await screen.findByRole('button', { name: /that.s not what i said/i }),
+    ).toBeInTheDocument();
   });
 
   it('trusts the transcript at EXACTLY the threshold — 0.6 is not low', async () => {

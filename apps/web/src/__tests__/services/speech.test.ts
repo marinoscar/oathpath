@@ -108,6 +108,89 @@ describe('transcribeAudio', () => {
     expect(defaultAudioFileName(new Blob([]))).toBe('answer.webm');
   });
 
+  it('sends the question id as a form field, and never any biasing text', async () => {
+    // Issue #348, epic #345. The server turns this ID into a glossary from its
+    // own rows. This client has the question text on screen and must NEVER
+    // send it: text a browser chose is text a browser could choose
+    // differently, and a caller that could name its own prompt could steer its
+    // own recogniser toward the words it wanted to be heard saying.
+    let sentQuestionId: FormDataEntryValue | null = null;
+    let sentPrompt: FormDataEntryValue | null = null;
+
+    server.use(
+      http.post('*/api/ai/speech/transcribe', async ({ request }) => {
+        const form = await request.formData();
+        sentQuestionId = form.get('questionId');
+        sentPrompt = form.get('prompt');
+        return HttpResponse.json({
+          data: {
+            status: 'ok',
+            text: 'George Washington',
+            confidence: 0.94,
+            confidenceAvailable: true,
+          },
+        });
+      }),
+    );
+
+    await transcribeAudio(recording(), {
+      questionId: '3f1b7c2e-8a4d-4f9e-9c11-2b6d5a0e7f83',
+    });
+
+    expect(sentQuestionId).toBe('3f1b7c2e-8a4d-4f9e-9c11-2b6d5a0e7f83');
+    expect(sentPrompt).toBeNull();
+  });
+
+  it('sends NO question field at all when the caller names none', async () => {
+    // ABSENT, not empty. An empty `questionId` fails the server's shape check
+    // and turns a recording that was fine into a 400.
+    let hadQuestionId = true;
+
+    server.use(
+      http.post('*/api/ai/speech/transcribe', async ({ request }) => {
+        const form = await request.formData();
+        hadQuestionId = form.has('questionId');
+        return HttpResponse.json({
+          data: {
+            status: 'ok',
+            text: 'George Washington',
+            confidence: 0.94,
+            confidenceAvailable: true,
+          },
+        });
+      }),
+    );
+
+    await transcribeAudio(recording());
+
+    expect(hadQuestionId).toBe(false);
+  });
+
+  it('carries `confidenceAvailable: false` through as the fact it is', async () => {
+    // The deployment fact, not a fact about this recording (#348). A client
+    // must be able to tell "this call was not scored" from "nothing here ever
+    // is" — the second is what makes `voice.md` §3's misheard protection
+    // unenforceable and the correction affordance the only one there is.
+    server.use(
+      http.post('*/api/ai/speech/transcribe', () =>
+        HttpResponse.json({
+          data: {
+            status: 'ok',
+            text: 'the president',
+            confidence: null,
+            confidenceAvailable: false,
+          },
+        }),
+      ),
+    );
+
+    const result = await transcribeAudio(recording());
+
+    if (result.status !== 'ok') throw new Error('expected ok');
+    expect(result.confidence).toBeNull();
+    expect(result.confidenceAvailable).toBe(false);
+  });
+
   it('keeps `confidence: null` as null — UNKNOWN IS NOT ZERO', async () => {
     server.use(
       http.post('*/api/ai/speech/transcribe', () =>

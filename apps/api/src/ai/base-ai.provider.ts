@@ -264,6 +264,28 @@ export abstract class BaseAiProvider implements AiProvider {
     return this.defaultSpeechVoice;
   }
 
+  /**
+   * Can the bound transcription model report a confidence? `false` here, and a
+   * subclass overrides when it knows better (issue #348, epic #345).
+   *
+   * NOT ABSTRACT, AND `false` IS THE SAFE DEFAULT. A provider that has not
+   * been taught which of its model families carry a confidence signal must not
+   * claim one: a `true` it cannot back up would leave a caller trusting a
+   * protection that never fires, which is the exact failure issue #348 was
+   * filed against. `false` says only "do not count on a score here", and every
+   * consumer's fallback for that is the mechanism that needs no score at all —
+   * the learner reads what was heard and can correct it
+   * (`docs/specs/voice.md` §3).
+   *
+   * Not gated on `supports('transcribe')`: a provider that cannot transcribe
+   * cannot measure either, and `false` is already the answer.
+   */
+  reportsTranscriptionConfidence(modelId: string): boolean {
+    void modelId;
+
+    return false;
+  }
+
   // ---------------------------------------------------------------------------
   // Subclass surface — MAY THROW FREELY
   // ---------------------------------------------------------------------------

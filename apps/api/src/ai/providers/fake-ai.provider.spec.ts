@@ -728,6 +728,40 @@ describe('FakeAiProvider.transcribe', () => {
     });
   });
 
+  it('BIASES rather than constrains: a transcript outside the prompt survives', async () => {
+    // The line issue #348 draws, exercised against the fake every voice suite
+    // in this repository already trusts. The prompt names the question and its
+    // one accepted answer; the recording dictates something that is NOT an
+    // accepted answer — a learner who is wrong — and the transcript comes back
+    // exactly as it was heard.
+    //
+    // If a future edit ever made the prompt a CONSTRAINT, this is where it
+    // would show up: the grader downstream would start receiving its own answer
+    // back and every wrong answer would silently become a right one.
+    const p = provider();
+
+    const result = await p.transcribe(ALICE, KEY, {
+      ...recording('TRANSCRIPT:the king of England'),
+      languageHint: 'en',
+      prompt:
+        'What is the name of the President of the United States now?, Donald Trump.',
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.text).toBe('the king of England');
+  });
+
+  it('reports a confidence as available, matching what it actually returns', async () => {
+    // The fake scores every call, for every model id, so it must say so —
+    // including for `gpt-4o-transcribe`, the id most voice tests name and the
+    // one the real provider cannot measure. A fake that mirrored the real rule
+    // here would tell a test no confidence was available while handing it 0.97.
+    const p = provider();
+
+    expect(p.reportsTranscriptionConfidence('gpt-4o-transcribe')).toBe(true);
+    expect(p.reportsTranscriptionConfidence('whisper-1')).toBe(true);
+  });
+
   it('still writes an ai_usage_events row through the real recording path', async () => {
     const usage = usageStub();
     const p = provider(usage);

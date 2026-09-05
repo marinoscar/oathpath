@@ -502,6 +502,41 @@ export interface AiTranscriptionRequest {
    * Omitted means "let the provider decide".
    */
   languageHint?: string;
+
+  /**
+   * A short biasing context string — the vocabulary this recording is likely
+   * to contain (issue #348, epic #345).
+   *
+   * ---------------------------------------------------------------------------
+   * A BIAS, NEVER A CONSTRAINT, AND THE DISTINCTION IS ONE EDIT WIDE
+   * ---------------------------------------------------------------------------
+   *
+   * Providers treat this as prior context: it makes rare, in-domain spellings
+   * (`Woodrow Wilson`, `the Bill of Rights`, `Chief Justice`) cheaper for the
+   * decoder to produce, and it makes NOTHING else more expensive. The
+   * recogniser may still return words that appear nowhere in it, and it must —
+   * a learner who answers wrongly has to be heard saying the wrong thing, or
+   * the grader downstream is being handed a foregone conclusion rather than an
+   * answer. "Help it hear correctly" and "tell it what to hear" are separated
+   * by exactly this property, so nothing anywhere may compare a transcript
+   * against this string, filter by it, or re-ask for a transcript that does not
+   * match it.
+   *
+   * ---------------------------------------------------------------------------
+   * BUILT SERVER-SIDE FROM ROWS, NEVER FROM A CLIENT FIELD
+   * ---------------------------------------------------------------------------
+   *
+   * The only producer in this codebase is
+   * `TranscriptionContextService.resolve`, which reads the caller's own
+   * `civics_questions` / `civics_answers` rows through `CivicsService` — the
+   * same rows `GET /api/civics/questions/{id}` already serves that caller. No
+   * request field reaches it, and `TranscribeUpload` (the client-derived half
+   * of the transcription request) carries a compile-time proof that it has no
+   * `prompt` of its own. A caller that could name its own biasing text could
+   * steer somebody else's recogniser, and could put arbitrary text into a
+   * provider request field for free.
+   */
+  prompt?: string;
 }
 
 /**
