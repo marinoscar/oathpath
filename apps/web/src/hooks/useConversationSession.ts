@@ -140,6 +140,20 @@
  * between waiting and giving up, and it is stopped on EVERY exit from that
  * state — verdict, error, learner tap, unmount.
  *
+ * SINCE ISSUE #357 (epic #345) NO CUE IS PLAYED FROM A CALL SITE IN THIS FILE.
+ * `setPhase` hands every `(previous, next)` pair to `applyConversationCue`
+ * (`lib/conversationCues.ts`), whose table is exhaustive over the phase union
+ * in both dimensions — so the tap that starts a session is cued BEFORE the
+ * device is opened, a normal end and a failure exit sound different, the
+ * otherwise-silent advancing pause is marked, and an eighth phase added here
+ * does not compile until its cues have been decided. The pulse became derived
+ * in the same change: it starts on the way into `processing` and stops on the
+ * way out, so no path that never pulsed can stop one.
+ *
+ * All of it is off — as in no oscillator is constructed at all — for a learner
+ * who has turned `voice.soundCues` off in settings. Conversation mode still
+ * speaks every question, every verdict and every exit; only the tones go.
+ *
  * =============================================================================
  * NO API CALL IS CHANGED, AND NONE IS MADE HERE
  * =============================================================================
@@ -154,13 +168,11 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 
+import { closeSharedAudioContext } from '../lib/earcons';
 import {
-  closeSharedAudioContext,
-  playCapturedEarcon,
-  playListeningEarcon,
-  startProcessingPulse,
-  stopProcessingPulse,
-} from '../lib/earcons';
+  applyConversationCue,
+  silenceProcessingCue,
+} from '../lib/conversationCues';
 import type { PracticeOutcome, TranscribeResponse } from '../types';
 import type {
   AudioCaptureProblem,
@@ -503,12 +515,33 @@ export function useConversationSession(
   const optionsRef = useRef(options);
   optionsRef.current = options;
 
-  /** The phase, readable from a continuation. `phase` re-renders; this decides. */
+  /**
+   * The phase, readable from a continuation. `phase` re-renders; this decides.
+   *
+   * AND IT IS WHERE EVERY CUE COMES FROM (issue #357, epic #345). Nothing below
+   * plays an earcon, starts a pulse or stops one: this single funnel hands the
+   * pair `(previous, next)` to `applyConversationCue`, which looks the
+   * transition up in `lib/conversationCues.ts`'s exhaustive table. That is what
+   * makes "every transition either has a cue or has a recorded reason for its
+   * silence" a property of the machine rather than of whoever last edited a
+   * call site — and it is why an eighth phase cannot be added without fifteen
+   * cue decisions being made for it.
+   *
+   * `exitReason` is read only for a transition into `idle`, where the phase
+   * pair alone cannot tell a finished session from a failed one. `finish()` is
+   * the only caller that passes it, because `finish()` is the only way to
+   * `idle`.
+   */
   const phaseRef = useRef<ConversationPhase>('idle');
-  const setPhase = useCallback((next: ConversationPhase) => {
-    phaseRef.current = next;
-    setPhaseState(next);
-  }, []);
+  const setPhase = useCallback(
+    (next: ConversationPhase, exitReason?: ConversationStopReason) => {
+      const previous = phaseRef.current;
+      phaseRef.current = next;
+      setPhaseState(next);
+      applyConversationCue(previous, next, exitReason);
+    },
+    [],
+  );
 
   /**
    * The turn token.
@@ -608,7 +641,6 @@ export function useConversationSession(
     ) => {
       beginTurn();
       clearTimers();
-      stopProcessingPulse();
 
       const opts = optionsRef.current;
       opts.voiceActivity.disarm();
@@ -619,7 +651,11 @@ export function useConversationSession(
 
       questionIdRef.current = null;
       uploadedRef.current = null;
-      setPhase('idle');
+      // The pulse (if one was running) stops here, and the exit cue — a
+      // resolved cadence for a finished session, a low fall for a failure —
+      // plays here, chosen from `reason`. Both are the transition's doing, not
+      // this function's: see `setPhase`.
+      setPhase('idle', reason);
 
       const spoken = message ?? STOP_MESSAGES[reason];
       if (!spoken) {
@@ -646,8 +682,10 @@ export function useConversationSession(
       // Idempotent, and the one call that guarantees nothing is still speaking
       // when the microphone opens.
       opts.speech.stop();
+      // The rising cue rides on the transition into `listening` (#357), from
+      // every phase that can reach it — including `listening` itself, which is
+      // a nudge re-opening the microphone for another go.
       setPhase('listening');
-      playListeningEarcon();
       // BEFORE the detector is armed, and after `speech.stop()`: the pre-roll
       // window has to already be filling when the learner starts, or there is
       // nothing in front of the onset to keep (issue #347). Discarded by the
@@ -721,7 +759,11 @@ export function useConversationSession(
    */
   const retryOrMoveOn = useCallback(
     async (nudge: string, turn: number) => {
-      stopProcessingPulse();
+      // THE ONE PATH THAT FALLS SILENT WITHOUT CHANGING PHASE: the nudge is
+      // spoken from inside `processing`, and a pulse beating under it is
+      // nagging. Phase-guarded, so the `onsetTimeout` path — which arrives here
+      // from `listening`, where no pulse ever started — stops nothing (#357).
+      silenceProcessingCue(phaseRef.current);
 
       if (retryUsedRef.current) {
         if (!gradedRef.current) {
@@ -753,8 +795,9 @@ export function useConversationSession(
       }
       if (!isCurrent(turn)) return;
 
-      stopProcessingPulse();
-
+      // No `stopProcessingPulse()` here: both ways out of this branch change
+      // phase — `speakingAnswer` on a grade, `idle` on a failure — and leaving
+      // `processing` is what stops the pulse (#357).
       if (!grade) {
         finish('grade_failed');
         return;
@@ -841,9 +884,10 @@ export function useConversationSession(
       const opts = optionsRef.current;
       opts.voiceActivity.disarm();
       opts.capture.stop();
-      playCapturedEarcon();
+      // The falling cue and the pulse both belong to this transition: entering
+      // `processing` plays "got it" and then starts the beat that covers the
+      // transcription and grading behind it (#357).
       setPhase('processing');
-      startProcessingPulse();
 
       recordingWaitRef.current = setTimeout(() => {
         recordingWaitRef.current = null;
@@ -911,7 +955,6 @@ export function useConversationSession(
 
     const turn = beginTurn();
     clearTimers();
-    stopProcessingPulse();
 
     const opts = optionsRef.current;
     opts.voiceActivity.disarm();
@@ -921,7 +964,8 @@ export function useConversationSession(
     uploadedRef.current = null;
 
     // No pause. The learner asked to move on, and has already waited for
-    // whatever they were interrupting.
+    // whatever they were interrupting. The transition plays the advancing cue
+    // and, from `processing` only, stops the pulse on its way out (#357).
     setPhase('advancing');
     if (!isCurrent(turn)) return;
     opts.advance();
@@ -1055,7 +1099,9 @@ export function useConversationSession(
   useEffect(
     () => () => {
       clearTimers();
-      stopProcessingPulse();
+      // Phase-guarded, so an unmount from a phase that never pulsed stops
+      // nothing (#357). `closeSharedAudioContext` below covers the context.
+      silenceProcessingCue(phaseRef.current);
       const opts = optionsRef.current;
       opts.voiceActivity.disarm();
       opts.speech.stop();
