@@ -921,6 +921,167 @@ test.describe('Voice foundation (issue #114), epic #58 (E9)', () => {
     expect(await countStorageObjectsUploadedBy([userId])).toBe(0);
   });
 
+  // ===========================================================================
+  // TEST 7 — E12's acceptance journey (issue #289, epic #280)
+  // ===========================================================================
+  //
+  // Everything above this point is E9 (#114): the confirm-before-grade flow,
+  // written before epic #280 existed. This test is the one addition #289 asks
+  // for — the epic's own acceptance journey, driven end to end against the
+  // fake provider and the fake media recorder this file already builds:
+  // `/settings/voice` -> pick a voice -> preview it -> a whole Quick 5
+  // answered OUT LOUD with no typed answer at any point -> one correction,
+  // by voice, not by editing text -> completion -> a summary whose count
+  // treats the corrected question as ONE, never two.
+  //
+  // It runs LAST and depends on Test 2's `transcribe`/`speak` binding still
+  // being in place — `test.describe.configure({ mode: 'serial' })` above is
+  // what makes that safe, exactly as Tests 3-6 already depend on it.
+  //
+  // `autoSubmitSpoken` is left at its DEFAULT (`true`, epic #280) rather than
+  // set explicitly: the acceptance journey is what a fresh learner who has
+  // never opened `/settings/voice`'s auto-submit toggle actually experiences,
+  // and every button label and copy string quoted below (`Record it again`,
+  // `That's not what I said`, `See your summary`) was read directly out of
+  // `PracticeSessionPage.tsx` and `PracticeSummaryPage.tsx` on this branch —
+  // the identical discipline the rest of this file states in its own header.
+  // As with every other test in this file, THIS WAS NOT EXECUTED — see the
+  // report handed back with this change for what was verified another way
+  // (the equivalent flow's Vitest coverage in `PracticeSessionPage.voice.test.tsx`
+  // and `VoiceSettingsPage.test.tsx`, which the button labels and copy below
+  // were cross-checked against).
+
+  test('the acceptance journey: settings, a voice, a whole Quick 5 by voice, one correction, and a summary that counts once', async ({
+    page,
+  }) => {
+    await page.addInitScript(installFakeMediaRecorder);
+
+    const email = testEmail('acceptance');
+    const { accessToken } = await seedOnboarding(page, { email, onboarding: 'full' });
+    await page.waitForURL('/', { timeout: 10000 });
+    const headers = { Authorization: `Bearer ${accessToken}` };
+    const userId = await fetchUserId(page, headers);
+    createdUserIds.push(userId);
+
+    // -------------------------------------------------------------------
+    // SETTINGS: pick a voice, and preview it.
+    // -------------------------------------------------------------------
+    //
+    // `FAKE_TTS_VOICES` (`fake-ai.provider.ts`) is the catalog this deployment
+    // actually offers under `AI_PROVIDER_FAKE=true` — three fixtures, never
+    // OpenAI's own ids (see that file's header for why). Neither is the
+    // default (`fake-warm`), so choosing one is a real, observable action.
+    await page.goto('/settings/voice');
+    await expect(page.getByRole('heading', { level: 1, name: 'Voice' })).toBeVisible();
+
+    const voiceGroup = page.getByRole('radiogroup', { name: 'Voice' });
+    await expect(voiceGroup).toBeVisible();
+    const brightVoice = voiceGroup.getByRole('radio', { name: /Fixture \(bright\)/ });
+    await expect(brightVoice).toBeVisible();
+    await brightVoice.check();
+    await expect(brightVoice).toBeChecked();
+
+    const preview = page.getByRole('button', { name: 'Preview the Fixture (bright) voice' });
+    await preview.click();
+    // `previewStatusText` when `preview.kind === 'playing'`
+    // (`VoiceSettings.tsx`) — the observable proof the `speak` role actually
+    // ran, on this learner's own key, against the fake provider.
+    await expect(
+      page.getByText('Playing a sample in the Fixture (bright) voice.', { exact: true }),
+    ).toBeVisible();
+
+    // -------------------------------------------------------------------
+    // A QUICK 5, ENTIRELY BY VOICE — no `fill()` on "Your answer" anywhere
+    // below, on any of the five questions.
+    // -------------------------------------------------------------------
+    const sessionId = await startQuickFive(page);
+
+    // Question 1: the one correction, done BY VOICE — `Record it again`, not
+    // the typed-correction card (`That's not what I said` / `Use this
+    // instead`), so this half of the journey never touches a keyboard input
+    // either.
+    const q1 = await currentQuestionAndAnswer(page, headers, sessionId);
+    const misheard = await recordSpokenAnswer(page, 'LOWCONF');
+    expect(misheard.confidence).toBeLessThan(0.6);
+
+    // AUTO-SUBMIT: no confirm click anywhere in this file's new test — the
+    // verdict from a spoken answer appears the moment recording stops.
+    await expect(page.getByText('Not a match', { exact: true })).toBeVisible({
+      timeout: VERDICT_REGION_TIMEOUT,
+    });
+    const recordItAgain = page.getByRole('button', { name: 'Record it again' });
+    await expect(recordItAgain).toBeVisible();
+    await recordItAgain.click();
+
+    // Back on the same question — `recordSpokenAnswer` re-clicks "Speak",
+    // which MUI's exclusive toggle reports as a no-op when it is already the
+    // selected mode (see that helper's own comment).
+    await expect(page.getByRole('heading', { level: 2 })).toBeVisible();
+    const q1Retry = await recordSpokenAnswer(page, `TRANSCRIPT:${q1.acceptedAnswer}`);
+    expect(q1Retry.text).toBe(q1.acceptedAnswer);
+    await expect(page.getByText('Correct', { exact: true })).toBeVisible({
+      timeout: VERDICT_REGION_TIMEOUT,
+    });
+
+    // Questions 2 through 5: answered by voice, first try, every time.
+    for (let n = 2; n <= 5; n += 1) {
+      const isLast = n === 5;
+      await expect(page.getByText(`Question ${n} of 5`, { exact: true })).toBeVisible();
+      const question = await currentQuestionAndAnswer(page, headers, sessionId);
+      await recordSpokenAnswer(page, `TRANSCRIPT:${question.acceptedAnswer}`);
+      await expect(page.getByText('Correct', { exact: true })).toBeVisible({
+        timeout: VERDICT_REGION_TIMEOUT,
+      });
+
+      const advance = page.getByRole('button', {
+        name: isLast ? 'See your summary' : 'Next question',
+      });
+      await expect(advance).toBeVisible();
+      await advance.click();
+    }
+
+    // -------------------------------------------------------------------
+    // COMPLETION, AND THE SUMMARY THAT COUNTS EACH QUESTION ONCE.
+    // -------------------------------------------------------------------
+    await expect(page).toHaveURL(`/practice/sessions/${sessionId}/summary`);
+    await expect(page.getByRole('heading', { level: 1, name: 'Practice summary' })).toBeVisible();
+    // `SummaryTally`'s own sentence, over the server's `summary.answered` and
+    // `summary.plannedCount` — never a number this test computed itself.
+    await expect(page.getByText('You answered 5 of 5.', { exact: true })).toBeVisible();
+
+    const finalDetail = await fetchSessionDetail(page, headers, sessionId);
+    expect(finalDetail.progress.answered).toBe(5);
+    expect(finalDetail.session.status).toBe('completed');
+
+    // FIVE DISTINCT QUESTIONS — not six. The misheard attempt at Question 1
+    // is still in the table (evidence is never deleted, §3.2) alongside its
+    // retry, so this is the concrete, question-by-question proof behind the
+    // "5 of 5" sentence above: a set of `questionId`s, not a count of rows.
+    const distinctQuestionIds = new Set(finalDetail.attempts.map((a) => a.questionId));
+    expect(distinctQuestionIds.size).toBe(5);
+    expect(finalDetail.attempts.length).toBe(6);
+    const q1Attempts = finalDetail.attempts.filter((a) => a.questionId === q1.questionId);
+    expect(q1Attempts).toHaveLength(2);
+    const q1OriginalAttempt = q1Attempts.find((a) => a.retryOfAttemptId === null);
+    const q1RetryAttempt = q1Attempts.find((a) => a.retryOfAttemptId !== null);
+    if (!q1OriginalAttempt || !q1RetryAttempt) {
+      throw new Error('expected exactly one original and one retry attempt for question 1');
+    }
+    expect(q1OriginalAttempt.failureCause).toBe('misheard');
+    expect(q1RetryAttempt.retryOfAttemptId).toBe(q1OriginalAttempt.id);
+    expect(q1RetryAttempt.outcome).toBe('correct');
+
+    // Every single attempt was spoken — no keyboard input anywhere above.
+    for (const attempt of finalDetail.attempts) {
+      expect(attempt.inputMode).toBe('spoken');
+    }
+
+    expect(
+      await countStorageObjectsUploadedBy([userId]),
+      'no storage_objects row for a whole session answered entirely by voice',
+    ).toBe(0);
+  });
+
   test.afterAll(async () => {
     // A whole-file sweep across every learner this spec created, on top of
     // each test's own per-user check — cheap, and it catches a leak that
@@ -937,12 +1098,15 @@ test.describe('Voice foundation (issue #114), epic #58 (E9)', () => {
 // UNTOUCHED FILES
 // =============================================================================
 //
-// This change adds `voice.spec.ts` and `helpers/db.ts`, and edits
-// `playwright.config.ts` (the two Chromium flags) and `tests/e2e/package.json`
-// / `package-lock.json` (the `pg` dependency the database helper needs).
-// Every other file under `tests/e2e/` is untouched, including the OAuth,
-// mock-interview, memory, habit, civics-learn, journey-shell and
-// practice-session specs — none of them is imported by, or shares any
-// mutable state with, this file beyond the same `system_settings.key = 'ai'`
-// row `ai-evaluation.spec.ts` already documents writing to.
+// The original E9 change (#114) added `voice.spec.ts` and `helpers/db.ts`, and
+// edited `playwright.config.ts` (the two Chromium flags) and
+// `tests/e2e/package.json` / `package-lock.json` (the `pg` dependency the
+// database helper needs). Issue #289 (epic #280 / E12, this file's own Test 7)
+// adds one test to THIS file and touches nothing else in `tests/e2e/` — no new
+// helper, no config change, no new dependency. Every other file under
+// `tests/e2e/` remains untouched, including the OAuth, mock-interview, memory,
+// habit, civics-learn, journey-shell and practice-session specs — none of
+// them is imported by, or shares any mutable state with, this file beyond the
+// same `system_settings.key = 'ai'` row `ai-evaluation.spec.ts` already
+// documents writing to.
 // =============================================================================
