@@ -114,7 +114,10 @@
  *     questions already answered and the progress counter all live on the
  *     server (see the section below), so flipping the toggle changes which
  *     control renders and NOTHING else. A learner whose microphone dies
- *     mid-session, or who gets on a bus, keeps everything.
+ *     mid-session, or who gets on a bus, keeps everything. Since #350 the same
+ *     toggle is offered one screen earlier, on `/practice`, from the shared
+ *     `AnswerModeChoice` — this page's copy is what keeps the choice
+ *     REVERSIBLE, which is the half that must never move.
  *  2. **The question can be READ ALOUD on every deployment.** `QuestionAudio`
  *     is never gated on the `speak` role — the browser's own voice needs no
  *     model, no key and no admin (`docs/specs/voice.md` §2). It reports when
@@ -158,11 +161,18 @@
  *
  * Every fact on this screen comes from `GET /api/practice/sessions/:id` —
  * which question is next, how many are answered, how many were planned. Nothing
- * is carried through `navigate(..., { state })`, nothing is counted in the
- * browser, and no attempt is buffered locally. So a reload, a crash, a closed
- * tab or a second tab all resume at the same place with every recorded attempt
- * intact, and two tabs cannot disagree about the count. `usePracticeSession`'s
- * header has the full argument.
+ * is counted in the browser, and no attempt is buffered locally. So a reload, a
+ * crash, a closed tab or a second tab all resume at the same place with every
+ * recorded attempt intact, and two tabs cannot disagree about the count.
+ * `usePracticeSession`'s header has the full argument.
+ *
+ * ONE THING IS CARRIED THROUGH `navigate(..., { state })`, AND IT IS NOT A
+ * FACT ABOUT THE SESSION (#350, epic #345): `{ handsFree: true }`, the intent
+ * of the tap on `/practice` that created this session. It decides whether the
+ * hands-free loop arms itself on arrival and nothing else — no question, no
+ * count, no attempt — and it is consumed once and cleared, so a reload restores
+ * the session from the server exactly as before and simply does not re-arm.
+ * See `components/practice/handsFreeStart.ts`.
  *
  * =============================================================================
  * WHAT THIS PAGE IS NOT
@@ -207,16 +217,22 @@ import {
   Paper,
   Stack,
   TextField,
-  ToggleButton,
-  ToggleButtonGroup,
   Typography,
 } from '@mui/material';
 import ArrowBackIcon from '@mui/icons-material/ArrowBack';
-import KeyboardIcon from '@mui/icons-material/Keyboard';
 import MicIcon from '@mui/icons-material/Mic';
 import StopIcon from '@mui/icons-material/Stop';
-import { Link as RouterLink, Navigate, useNavigate, useParams } from 'react-router-dom';
+import {
+  Link as RouterLink,
+  Navigate,
+  useLocation,
+  useNavigate,
+  useParams,
+} from 'react-router-dom';
 
+import { AnswerModeChoice } from '../components/practice/AnswerModeChoice';
+import type { AnswerMode } from '../components/practice/AnswerModeChoice';
+import { wantsHandsFreeStart } from '../components/practice/handsFreeStart';
 import { AttemptFeedback } from '../components/practice/AttemptFeedback';
 import { AiNotReady } from '../components/ai/AiNotReady';
 import { AI_KEY_SETTINGS_PATH, ExplainPanel } from '../components/ai/ExplainPanel';
@@ -268,17 +284,6 @@ import { sessionKindLabel } from '../components/practice/outcome';
 
 /** The three ways to end a question, for disabling the right control. */
 type Pending = 'answer' | 'reveal' | 'skip' | 'complete' | null;
-
-/**
- * Which control the learner is answering with.
- *
- * PRESENTATION ONLY. Nothing about the session — the questions already
- * answered, the progress counter, the attempt rows — lives in or below this
- * value, so flipping it can never lose any of them. What the attempt actually
- * records is `inputMode`, which is decided at submit time from whether the
- * text in the field came from the microphone; see {@link SpokenDraft}.
- */
-type AnswerMode = 'text' | 'voice';
 
 /**
  * What the microphone produced, waiting to be confirmed.
@@ -489,7 +494,18 @@ export function practiceSummaryPath(sessionId: string): string {
 export default function PracticeSessionPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const location = useLocation();
   const isMounted = useIsMounted();
+  /**
+   * Did the tap that created this session ask for the hands-free loop? (#350)
+   *
+   * The one tap, carried across one navigation — see
+   * `components/practice/handsFreeStart.ts` for why this is the router's state
+   * and not the stored preference. It is CONSUMED once, below, so a reload of
+   * this URL (which restores `history.state`) is a resumed session rather than
+   * a second tap.
+   */
+  const handsFreeRequested = wantsHandsFreeStart(location.state);
   const { detail, isLoading, error, refresh } = usePracticeSession(id);
 
   // The question on screen and the count beside it. Seeded from the server's
@@ -1275,18 +1291,37 @@ export default function PracticeSessionPage() {
   /**
    * Land on the mode the learner asked for, once.
    *
-   * BOTH READS HAVE TO HAVE SETTLED. `voice.conversationMode` says what they
-   * want; `transcribeBound` says whether this deployment can offer it, and
-   * both start out as "not yet". Seeding before either lands would put a
-   * learner who chose Voice on Text (or, worse, on a Voice mode this
-   * deployment cannot record in) and then move the control under them.
+   * TWO SOURCES, AND THE TAP OUTRANKS THE PREFERENCE (#350, epic #345):
+   *
+   *  1. **The hand-off**, when this session was started from `/practice` with
+   *     Voice chosen. It does NOT wait on the settings read: the `PATCH` that
+   *     stored that choice may still be in flight, so `voice.conversationMode`
+   *     can honestly answer with the document as it was a moment ago. The tap
+   *     is both newer and already here — see `handsFreeStart.ts`.
+   *  2. **The stored preference**, for every other arrival — a resumed
+   *     session, a reload, a link. That one DOES wait for both reads to
+   *     settle: `voice.conversationMode` says what the learner wants and
+   *     `transcribeBound` says whether this deployment can offer it, and
+   *     seeding before either lands would put a learner who chose Voice on
+   *     Text (or, worse, on a Voice mode this deployment cannot record in) and
+   *     then move the control under them.
+   *
+   * `transcribeBound` gates both: with no `transcribe` model there is no Voice
+   * on this deployment, whatever anybody asked for.
    */
   useEffect(() => {
     if (modeSeededRef.current) return;
-    if (voicePrefsLoading || voiceAvailabilityLoading) return;
+    if (voiceAvailabilityLoading) return;
+    if (handsFreeRequested && transcribeBound) {
+      modeSeededRef.current = true;
+      setAnswerMode('voice');
+      return;
+    }
+    if (voicePrefsLoading) return;
     modeSeededRef.current = true;
     if (voicePrefs.conversationMode && transcribeBound) setAnswerMode('voice');
   }, [
+    handsFreeRequested,
     transcribeBound,
     voiceAvailabilityLoading,
     voicePrefs.conversationMode,
@@ -1393,6 +1428,62 @@ export default function PracticeSessionPage() {
     setHasUserGesture(true);
     conversation.start();
   };
+
+  /**
+   * The other half of the one tap (#350, epic #345).
+   *
+   * The learner tapped "Start a Quick 5" on `/practice` with Voice chosen. That
+   * tap created the session and brought them here; it also has to arm the loop,
+   * or "one tap" is two — choose Voice, then find Start again on a screen they
+   * did not ask to stop on.
+   *
+   * IT GOES THROUGH `handleStartConversation`, NOT `conversation.start()`, so
+   * the automatic path and the manual one are the same path: the same
+   * synchronous device re-check (#349), the same refusal copy in the same
+   * place, the same `hasUserGesture`. A blocked microphone therefore stops here
+   * exactly as it stops a tap, with the loop unarmed, the explicit Start
+   * control on screen and typing one control away.
+   *
+   * IT WAITS FOR THE QUESTION. `conversation.start()` returns silently with no
+   * `questionText`, so arming before the session's first read lands would be a
+   * start that never happened and a learner waiting for a voice.
+   *
+   * IT ALSO WAITS FOR THE PREFLIGHT (`isChecking`). `recheck()` is synchronous
+   * because a TAP must not be spent on a promise, and it reads a live
+   * `PermissionStatus` that does not exist until the first probe resolves — so
+   * an automatic arm firing the instant the question lands could pass a check
+   * that had nothing to check yet, and open the microphone on a device that had
+   * already refused. One tick of latency is not a cost here: nobody is waiting
+   * on a control they just pressed, and the tap that authorised sound happened
+   * on the previous screen and stays authorised.
+   *
+   * IT RUNS ONCE, AND THEN THE HAND-OFF IS CLEARED. `history.state` survives a
+   * reload, and a reload is not a tap: a learner who comes back to a session
+   * mid-way is RESUMING, which `#350` keeps the explicit arm control for. The
+   * `replace` navigation is what makes the difference visible to the next
+   * mount.
+   */
+  const handsFreeConsumedRef = useRef(false);
+  useEffect(() => {
+    if (!handsFreeRequested || handsFreeConsumedRef.current) return;
+    if (!question || !transcribeBound || answerMode !== 'voice') return;
+    if (mediaReadiness.isChecking || conversation.isRunning) return;
+    handsFreeConsumedRef.current = true;
+    navigate(location.pathname, { replace: true, state: null });
+    handleStartConversation();
+    // `handleStartConversation` is re-created every render and deliberately not
+    // a dependency: this effect fires once, guarded by its own ref, and adding
+    // it would only re-run a body that returns immediately.
+  }, [
+    answerMode,
+    conversation.isRunning,
+    handsFreeRequested,
+    location.pathname,
+    mediaReadiness.isChecking,
+    navigate,
+    question,
+    transcribeBound,
+  ]);
 
   /**
    * Another go at a question whose spoken answer is not what the learner said.
@@ -1687,36 +1778,15 @@ export default function PracticeSessionPage() {
                 which is the failure locked decision 4 exists to prevent. With
                 nothing to choose between, the whole group goes: a one-button
                 picker is a control that cannot be operated, and the notice
-                above has already said why. */}
+                above has already said why.
+
+                THE SAME CONTROL `/practice` RENDERS (#350, epic #345), not a
+                second one built here: the choice is now made before a session
+                exists, and this is where it stays REVERSIBLE. One component,
+                so the two screens cannot drift in what they offer or in how
+                they are announced. */}
             {question && transcribeBound && (
-              <ToggleButtonGroup
-                exclusive
-                size="small"
-                value={answerMode}
-                // The two buttons say what they DO; this says what they are
-                // choosing between, which is what a screen-reader user needs
-                // before either label means anything. It names the GROUP, so
-                // both buttons are reachable and announced in its context —
-                // and `ToggleButton` renders real `<button>`s, so Tab and
-                // Space/Enter work with nothing added.
-                aria-label="How you want to answer"
-                onChange={(_event, next: AnswerMode | null) => {
-                  // MUI reports `null` when the already-active button is
-                  // pressed again. Ignored: there is no third state, and
-                  // clearing the choice would leave a learner with neither
-                  // control on screen.
-                  if (next) chooseAnswerMode(next);
-                }}
-              >
-                <ToggleButton value="text">
-                  <KeyboardIcon fontSize="small" sx={{ mr: 0.5 }} />
-                  Text
-                </ToggleButton>
-                <ToggleButton value="voice">
-                  <MicIcon fontSize="small" sx={{ mr: 0.5 }} />
-                  Voice
-                </ToggleButton>
-              </ToggleButtonGroup>
+              <AnswerModeChoice value={answerMode} onChange={chooseAnswerMode} />
             )}
 
             {/* THE LOOP'S OWN CONTROLS AND ITS ONE STATUS REGION.

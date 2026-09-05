@@ -174,6 +174,21 @@ export interface VoiceSettingsProps {
   onChange: (patch: VoiceSettingsPatch) => void;
 }
 
+/**
+ * The `voice.conversationMode` switch's label.
+ *
+ * EXPORTED SO A TEST CAN PIN IT AGAINST WHAT IT ACTUALLY DOES (#350, epic
+ * #345). #313 shipped this switch promising to "start practice sessions
+ * hands-free" while it started nothing — it seeded a mode and left the loop
+ * behind a second, separate tap — and nothing in the suite could notice,
+ * because the label lived in this file and the behaviour lived two screens
+ * away with no shared symbol between them. This constant is that symbol:
+ * `PracticeOneTapHandsFree.test.tsx` imports it, reads the promise out of the
+ * string, and then proves the flow keeps it. Rewording the label without
+ * changing the flow now fails a test rather than quietly becoming a lie again.
+ */
+export const CONVERSATION_MODE_LABEL = 'Start practice sessions hands-free';
+
 export function VoiceSettings({
   voice,
   voices,
@@ -368,7 +383,8 @@ export function VoiceSettings({
             anything that came out wrong, and send it yourself.
           </Typography>
 
-          {/* CONVERSATION MODE (#313, epic #304 / E13).
+          {/* CONVERSATION MODE (#313, epic #304 / E13; behaviour completed by
+              #350, epic #345).
 
               IN THIS CARD, not a new one, and not a new settings page: it
               answers the same question its neighbour above does — what happens
@@ -376,13 +392,24 @@ export function VoiceSettings({
               reserves a new destination for a new question, never for one more
               switch about an existing one.
 
+              THE LABEL IS NOW TRUE. #313 shipped this switch labelled "Start
+              practice sessions hands-free" while it started nothing at all: it
+              only seeded the session screen's `Text | Voice` control, and the
+              loop still needed a second, separate "Start hands-free" tap. #350
+              moved the mode choice onto `/practice` and made starting a session
+              with Voice chosen start the loop too — so the label describes what
+              happens, and the help text below describes the one arrival it does
+              not cover (resuming a session already under way, where arming is
+              still a deliberate tap). `VoiceSettings.test.tsx` pins the two
+              against each other.
+
               Bound with `writeFor` like every other control here, so turning it
               back off sends the null-delete rather than pinning this learner to
               today's `false` forever. See rule C in the file header. */}
           <Box sx={{ mt: 2 }}>
             <FormControlLabel
               disabled={isSaving}
-              label="Start practice sessions hands-free"
+              label={CONVERSATION_MODE_LABEL}
               control={
                 <Switch
                   checked={resolved.conversationMode}
@@ -407,9 +434,11 @@ export function VoiceSettings({
               color="text.secondary"
               sx={{ maxWidth: '62ch' }}
             >
-              Practice starts on Voice instead of Text, so you can put the phone
-              down and answer out loud. You can switch back to typing at any
-              moment, and nothing you have already answered is lost.
+              Practice starts on Voice instead of Text, and starting a session
+              opens your microphone and begins straight away &mdash; so you can
+              put the phone down and answer out loud. Coming back to a session
+              you left waits for you to start it. You can switch back to typing
+              at any moment, and nothing you have already answered is lost.
             </Typography>
           </Box>
         </CardContent>

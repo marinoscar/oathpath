@@ -126,11 +126,46 @@
  * subtree, which is why the rail keeps highlighting Practice inside a session.
  *
  * =============================================================================
+ * THE `Text | Voice` CHOICE IS MADE HERE, BEFORE A SESSION EXISTS (#350)
+ * =============================================================================
+ *
+ * Epic #345. #313 put the picker inside the session, which meant the decision
+ * could not be made until a session row already existed, and starting
+ * hands-free cost two taps on two controls in two blocks: choose Voice, then
+ * find "Start hands-free". Both problems are the same problem — the choice was
+ * downstream of the act it was supposed to govern.
+ *
+ * So it sits in band 0b, beside the device preflight and above every start
+ * action, and three things follow from that position:
+ *
+ *  * **It is made before any microphone is touched.** `useMediaReadiness`
+ *    observes and never prompts, so a learner is told their microphone is
+ *    blocked while both hands are still on the device — and the mode they
+ *    choose is informed by that answer rather than discovered to contradict it
+ *    one screen later.
+ *  * **It is remembered, in `voice.conversationMode`.** The same preference
+ *    #307 added and the session screen already reads — no new setting, no
+ *    migration — written through `writeFor`'s null-delete, so a learner
+ *    returning to the built-in default stores NOTHING rather than pinning
+ *    themselves to today's value (`useVoicePrefs`'s own header).
+ *  * **It makes starting one tap.** With Voice chosen, `start()` hands the
+ *    intent to the session screen (`handsFreeStartState`) and the loop arms
+ *    itself there — the session and the loop from the single tap that was
+ *    already being made. The explicit "Start hands-free" control survives on
+ *    the session screen for the two cases that are not this one: a session
+ *    resumed mid-way, and a learner who switches to Voice after starting.
+ *
+ * With no `transcribe` model bound the Voice option is ABSENT, not disabled
+ * (`voice.md` §1), and `VoiceUnavailableNotice` says why — the same pairing the
+ * session screen uses, for the same reason.
+ *
+ * =============================================================================
  * WIDTH AND HEADINGS
  * =============================================================================
  *
- * One `h1` ("Practice") with an `h2` on each of the five bands (Your queue,
- * Start practising, Practise one section, Mock interview, Recent sessions).
+ * One `h1` ("Practice") with an `h2` on each band (Text or voice,
+ * Start practising, Practise one section, Reading aloud, Writing from
+ * dictation, Mock interview, Recent sessions).
  * Mobile-first,
  * every responsive value steps at `sm` (600px), and none of `CLAUDE.md`'s five
  * coupled gates is touched — this page only agrees with them.
@@ -157,8 +192,12 @@ import HistoryEduOutlinedIcon from '@mui/icons-material/HistoryEduOutlined';
 import RecordVoiceOverOutlinedIcon from '@mui/icons-material/RecordVoiceOverOutlined';
 import { Link as RouterLink, useNavigate } from 'react-router-dom';
 
+import { AnswerModeChoice } from '../components/practice/AnswerModeChoice';
+import type { AnswerMode } from '../components/practice/AnswerModeChoice';
+import { handsFreeStartState } from '../components/practice/handsFreeStart';
 import { LoadingSpinner } from '../components/common/LoadingSpinner';
 import { MicrophoneReadinessNotice } from '../components/voice/MicrophoneReadinessNotice';
+import { VoiceUnavailableNotice } from '../components/voice/VoiceUnavailableNotice';
 import { PracticeQueueSummary } from '../components/practice/PracticeQueueSummary';
 import { RecentSessions } from '../components/practice/RecentSessions';
 import { INTERVIEWS_PATH } from '../components/interview/paths';
@@ -174,6 +213,11 @@ import { useCivicsCategories } from '../hooks/useCivicsCategories';
 import { useIsMounted } from '../hooks/useIsMounted';
 import { useMediaReadiness } from '../hooks/useMediaReadiness';
 import { useVoiceAvailability } from '../hooks/useVoiceAvailability';
+import {
+  DEFAULT_VOICE_CONVERSATION_MODE,
+  useVoicePrefs,
+  writeFor,
+} from '../hooks/useVoicePrefs';
 import { useLearnerProfile } from '../contexts/LearnerProfileContext';
 import { usePracticeQueue } from '../hooks/usePracticeQueue';
 import { usePracticeSessions } from '../hooks/usePracticeSessions';
@@ -232,6 +276,53 @@ export default function PracticePage() {
   // that is not on offer.
   const { transcribeBound } = useVoiceAvailability();
 
+  /**
+   * The learner's stored `voice.conversationMode` (#307), read through the same
+   * `useUserSettings` the rest of the app uses — no second fetch of the
+   * settings document, exactly as on the session screen.
+   */
+  const { voice: voicePrefs, saveVoice } = useVoicePrefs();
+  /**
+   * The mode the learner picked ON THIS SCREEN, or `null` for "not yet".
+   *
+   * DERIVED RATHER THAN SEEDED BY AN EFFECT. The stored preference settles a
+   * round trip after first paint, and an effect that copied it into state would
+   * have to be careful not to stamp over a learner who had already tapped.
+   * Falling back to the stored value only while nothing has been chosen here
+   * gets both halves for free: the control shows the remembered mode the moment
+   * it is known, and a tap wins from then on.
+   */
+  const [chosenMode, setChosenMode] = useState<AnswerMode | null>(null);
+  // `transcribeBound` is the last word in either direction: with no
+  // `transcribe` model on this deployment there is no Voice to be in, and a
+  // stored preference from a deployment that once had one must not put this
+  // page into a mode it cannot honour.
+  const requestedMode: AnswerMode =
+    chosenMode ?? (voicePrefs.conversationMode ? 'voice' : 'text');
+  const answerMode: AnswerMode =
+    transcribeBound && requestedMode === 'voice' ? 'voice' : 'text';
+
+  /**
+   * The learner chose how they want to answer — for this session and the next.
+   *
+   * `writeFor`'s NULL-DELETE, the same reducer `/settings/voice` and the
+   * session screen use: going back to Text sends `null`, never `false`, so a
+   * learner who returns to the built-in default stores nothing at all. Writing
+   * today's default back would pin them to it forever, invisibly, including
+   * after a later release moves it (`useVoicePrefs`'s own header).
+   *
+   * `saveVoice` never rejects: a preference that could not be stored must not
+   * stop somebody practising. The mode they just chose is already theirs on
+   * screen; all that is lost is that it will not be there next time.
+   */
+  const chooseAnswerMode = (next: AnswerMode) => {
+    if (next === answerMode) return;
+    setChosenMode(next);
+    void saveVoice({
+      conversationMode: writeFor(next === 'voice', DEFAULT_VOICE_CONVERSATION_MODE),
+    });
+  };
+
   // Same gate `study-coach.ts`'s `recommendStudyAction` fires its `review`
   // rung on (`memory-model.md` §6) — reused here so the Quick 5 action reads
   // as the same coach as Home's Next-up card, not a second opinion. There is
@@ -261,7 +352,13 @@ export default function PracticePage() {
     try {
       const state = await createPracticeSession(input);
       if (!isMounted()) return;
-      navigate(`/practice/sessions/${state.session.id}`);
+      // ONE TAP (#350). With Voice chosen, the navigation carries the tap's own
+      // intent and the session screen arms the loop from it — see
+      // `handsFreeStart.ts` for why the stored preference is deliberately not
+      // what does this.
+      navigate(`/practice/sessions/${state.session.id}`, {
+        state: handsFreeStartState(answerMode === 'voice'),
+      });
     } catch (err) {
       if (isMounted()) {
         setStartError(
@@ -372,9 +469,8 @@ export default function PracticePage() {
 
                     Between the queue and the actions, because it qualifies
                     the actions rather than reporting on the evidence above
-                    — and this is where issue #350's mode choice lands, so
-                    the answer sits immediately beside the question it is
-                    about. #350 owns that control; nothing here builds it.
+                    — and issue #350's mode choice lands immediately below it,
+                    so the answer sits beside the question it is about.
 
                     IT NEVER BLOCKS ANYTHING. Every button on this page still
                     works: a Quick 5 is a typed session unless a learner
@@ -388,6 +484,53 @@ export default function PracticePage() {
                 audioSuspended={mediaReadiness.isAudioOutputSuspended}
                 sx={{ mb: 3 }}
               />
+            )}
+
+            {/* -----------------------------------------------------------
+                0c. Text or Voice, BEFORE a session exists (#350, epic #345).
+
+                    ABOVE EVERY START ACTION, which is the whole point: the
+                    choice governs what those buttons do, so it cannot sit
+                    downstream of them. Nothing here touches a microphone —
+                    choosing Voice records a preference and nothing else; the
+                    device is opened by the loop, one screen and one tap later.
+
+                    MOUNTED UNCONDITIONALLY, RENDERED CONDITIONALLY. The notice
+                    answers "why is there no Voice option?" and returns null
+                    until `transcribe` is KNOWN to be unbound, so it can sit
+                    here without this page having to get the timing right; the
+                    control itself is absent — never disabled — in exactly that
+                    state, because a one-button picker is a control that cannot
+                    be operated (`voice.md` §1's "hidden, not disabled").
+                ----------------------------------------------------------- */}
+            <VoiceUnavailableNotice feature="Answering out loud" />
+            {transcribeBound && (
+              <Box
+                component="section"
+                aria-labelledby="practice-mode-heading"
+                sx={{ mb: 3 }}
+              >
+                <Typography
+                  id="practice-mode-heading"
+                  variant="overline"
+                  component="h2"
+                  color="text.secondary"
+                  sx={{ display: 'block' }}
+                >
+                  {/* DELIBERATELY NOT the group's own accessible name
+                      ("How you want to answer"). The band and the control sit
+                      one line apart, and giving them the same string makes a
+                      screen reader announce it twice with no way to tell the
+                      region from the buttons inside it. */}
+                  Text or voice
+                </Typography>
+                <Typography color="text.secondary" sx={{ mt: 1, mb: 1.5, maxWidth: '60ch' }}>
+                  {answerMode === 'voice'
+                    ? 'Voice: we read each question aloud, listen for your answer and move on by itself. You can switch back to typing at any moment.'
+                    : 'Text: you type your answers. Choose Voice to practise out loud, hands-free.'}
+                </Typography>
+                <AnswerModeChoice value={answerMode} onChange={chooseAnswerMode} />
+              </Box>
             )}
 
             {/* -----------------------------------------------------------
