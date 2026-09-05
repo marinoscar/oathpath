@@ -1253,7 +1253,13 @@ either response exists to carry: *why* no answer or no audio was produced,
 which a caller (`AiNotReady`-style UI) needs to render correctly. `cause` is
 one of `no_user_key` / `ai_disabled` / `role_unbound` /
 `capability_unsupported` — the same four values every other AI feature in
-this application uses (`docs/specs/ai-evaluation.md` §4).
+this application uses (`docs/specs/ai-evaluation.md` §4). **A caller MUST
+switch on `status`** (and, for synthesize's success case, on
+`Content-Type`) rather than assume `ok` — see
+[`docs/specs/voice.md`](specs/voice.md#91-the-client-obligation-issue-277)
+§9.1 for the client-side contract this shape requires, and for issue #277,
+where a flat client-side type that skipped this became a JavaScript error
+on a learner's screen.
 
 #### POST /ai/speech/transcribe
 Multipart upload, one audio file in the `audio` field (optional

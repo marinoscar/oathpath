@@ -620,7 +620,10 @@ key, exactly as they own their own practice attempts and their own AI
 credentials, and gating either route would leave a Viewer unable to
 practise at all. Both responses are typed `ok`/`unavailable`/`failed`
 discriminated unions, always HTTP 200 — never a 4xx/5xx for an AI reason,
-the same posture every other AI surface in this codebase takes. Binding
+the same posture every other AI surface in this codebase takes. **A caller
+MUST switch on `status` and never assume the `ok` member** — issue #277 is
+the shipped case where a client type that skipped this became a
+`TypeError` on a learner's screen (`docs/specs/voice.md` §9.1). Binding
 either role is optional and never affects `systemReady`, which is a
 statement about the `tutor`/`grader` text roles only; see
 [`docs/specs/voice.md`](docs/specs/voice.md) §1 for the degradation rule and

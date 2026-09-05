@@ -873,6 +873,84 @@ and the web client's generic non-2xx handling would discard, and the cause
 is the one fact this response exists to carry. The same reasoning applies to
 `transcribe`'s `unavailable`/`failed` branches above.
 
+### 9.1 The client obligation (issue #277)
+
+Everything above specifies what the server sends. It says nothing about what
+a caller does with it, and that gap is where the bug lived: the response
+shape was right on the wire and wrong the moment it reached a variable typed
+as if `ok` were the only member.
+
+**A caller MUST switch on `status` — never destructure a success field and
+assume it is there.** This is not a style preference; it is the reason the
+response is a union instead of `{ text: string | null, cause: string | null
+}`. A type that claims `text: string` when the server can answer
+`unavailable` is not a simplification, it is a claim the server does not
+make, and TypeScript will not catch the gap on the caller's behalf unless the
+caller's own type says all three members exist.
+
+- **`ok`** carries the answer (`text`/`confidence` for transcribe; the audio
+  bytes for synthesize). Use it.
+- **`unavailable` is not an error, and must never be rendered as one.** It
+  means no call was attempted — an administrator has not bound the role, has
+  not turned AI on, or the caller has no key of their own. The one correct
+  rendering is the shared `AiNotReady` component (`CLAUDE.md`'s "Adding an
+  AI feature" section makes the same point for `systemReady === false`; this
+  is its per-role counterpart), scoped to the `role` the response names.
+  **Never a retry affordance for `unavailable`** — retrying does not
+  change whether a model is bound. `no_user_key` is the one cause that names
+  something the *learner* can act on and is worth its own short, specific
+  copy instead of the admin-facing `AiNotReady` sentence, but it is still not
+  a retry: it is a "go add a key" affordance.
+- **`failed` is worth a retry.** The call was made and did not produce a
+  usable answer — a transient provider error, a timeout, a rejected upload.
+  This is the one branch where an amber "something went wrong, try again"
+  alert is the honest rendering.
+- **`error` and `errorCode` are diagnostic, never learner-facing.** Log them
+  (`console.error` or the equivalent) and show calm, generic retry copy of
+  the surface's own instead. `error` is a provider sentence redacted for a
+  developer, not phrased for someone studying for a naturalization
+  interview, and putting it on screen teaches that learner their own
+  recording or key is at fault when nothing about either is.
+- **Typing remains available on every path.** Voice is always an
+  alternative input method (§5), never a gate in front of the one every
+  learner already has — an `unavailable`, a `failed`, or a `misheard`
+  transcription must all leave the text field exactly as usable as before
+  the attempt.
+
+**What the flat type cost (issue #277, the worked example).** The web
+client's `transcribeAudio` was typed `{ text: string; confidence: number |
+null }` — the `ok` shape asserted as the whole answer. Both call sites
+destructured `text` off the result and called `.trim()` on it immediately.
+On any `unavailable` or `failed` response `text` is `undefined`, so the
+learner's spoken answer ended in `TypeError: Cannot read properties of
+undefined (reading 'trim')`, rendered verbatim in the amber retry alert —
+a JavaScript diagnostic, shown to somebody studying for a naturalization
+interview, describing a deployment where an administrator had simply not
+finished binding a model. Nothing was broken and nothing was billed; the
+product said the opposite as loudly as it could. The fix was not a null
+check bolted onto the old type — it was deleting the old type. `text` and
+`confidence` moved onto their own `SpeechTranscriptionOk` interface,
+`SpeechUnavailable`/`SpeechFailed` became siblings rather than optional
+fields, and the union (`TranscribeResponse`) replaced the alias everywhere
+with no backward-compatible name left to import — which is what turned
+every unread `status` into a compile error instead of a runtime one. A type
+that is merely optimistic about which member arrived is indistinguishable,
+at the call site, from a type that is correct — until the branch the
+optimism excluded actually arrives in production.
+
+**Synthesis has the same obligation, over a different signal.** There is no
+`status` to switch on for the success case — the `ok` case is not JSON at
+all, it is audio bytes. The two response shapes share one HTTP status (200)
+and are told apart only by `Content-Type`: `audio/…` is bytes to play,
+anything else (`application/json`) is the `unavailable`/`failed` envelope
+above and must be parsed and switched on, not handed to an `<audio>`
+element or a blob URL. A client that requests a blob unconditionally and
+lets a non-audio response fail inside the `<audio>` element's own error
+handler is reaching the right fallback (browser `speechSynthesis`, per §2)
+by accident, through a `catch` that was written for a different failure —
+which is what shipped, until #277 made it an explicit `Content-Type` check
+instead.
+
 ## 10. RBAC
 
 **Voice adds no permission strings**, for the identical reason every other
