@@ -302,17 +302,26 @@ One more fix landed while working this epic, outside its own child list:
 **#266 (PR #267)** — the web CI job had been red on `main` for roughly ten
 merges because jsdom's `File` fails undici's brand check on Node 24.
 
-E11 carries two things a later reader should not assume this footnote
-settles — one on the identical terms E5's, E9's, and E10's footnotes above
-state it, the other new to this epic because nothing before it shipped a
+E11 departs from its predecessors on the first of these two points and
+adds a second that is new to this epic, because nothing before it shipped a
 manual checklist of its own:
 
-1. **Whether a human has actually run
-   `tests/e2e/specs/mock-interview-realtime.spec.ts` against the compose
-   stack** — the §6 check this legend requires. It was written against the
-   real component sources and it typechecks and registers, but Docker was
-   unavailable in the authoring environment, so nobody has run it against
-   the compose stack.
+1. **`tests/e2e/specs/mock-interview-realtime.spec.ts` HAS been executed** —
+   unlike every prior epic's journey spec, whose footnote above says
+   plainly that nobody has run it. It passes 5/5 standalone and 8/8 run
+   sequentially alongside `mock-interview-text.spec.ts`. Read the claim
+   precisely, though: no Docker daemon was available, so it was run against
+   a **hand-assembled equivalent** of the compose stack — a real PostgreSQL
+   migrated and seeded with the real content, the real API under
+   `AI_PROVIDER_FAKE=true`, and the real Vite dev server on 3535 — not
+   against `docker compose` itself. That is materially more than the other
+   epics can claim and materially less than the §6 check literally asks
+   for, and both halves belong in the same sentence. Writing it surfaced a
+   genuine cross-file hazard, since fixed: leaving `realtime` bound past
+   this spec's own run changes the button text
+   `mock-interview-text.spec.ts` selects on, so an `afterAll` hook restores
+   `tutor`+`grader`-only bindings — which closes the sequential case this
+   suite is actually run in, and not a true concurrent-worker race.
 2. **Whether the manual verification checklist in
    `docs/specs/realtime-interview.md` §11 has been run — it has not.** That
    checklist (barge-in in both directions, end-to-end latency, the end
