@@ -185,6 +185,9 @@ function makeHarness() {
       captureState.current = { status: 'idle' };
     }),
     acquireStream: vi.fn(() => Promise.resolve({} as MediaStream)),
+    // Issue #347: the driver opens the pre-roll window when the microphone
+    // opens for the learner, so the first syllable is inside the blob.
+    startPreRoll: vi.fn(),
     releaseStream: vi.fn(),
     stream: {} as MediaStream | null,
   };
@@ -622,6 +625,81 @@ describe('useConversationSession — the recorder never runs while the app talks
     // `speakAnswer` fires a second onset of its own; nothing else started it.
     expect(harness.capture.start).toHaveBeenCalledTimes(2);
   });
+
+  // ---- The pre-roll — issue #347, epic #345 -------------------------------
+  //
+  // It moves the recorder EARLIER inside the window where it was always
+  // allowed to run, and nowhere else: `listening` is entered after
+  // `speech.stop()`, so the app is by definition not talking there.
+
+  it('opens the pre-roll window when the microphone opens for the learner', async () => {
+    const harness = makeHarness();
+    const view = mount(harness);
+    await startToListening(harness, view);
+
+    // The detector cannot report an onset until 145-190 ms after the learner
+    // began; the window has to already be filling by then or there is nothing
+    // in front of the onset to keep.
+    expect(harness.capture.startPreRoll).toHaveBeenCalledTimes(1);
+    expect(harness.capture.start).not.toHaveBeenCalled();
+  });
+
+  it('does NOT open it while the app is speaking', async () => {
+    const harness = makeHarness();
+    harness.speech.hold = true;
+    const view = mount(harness);
+
+    await act(async () => {
+      view.result.current.start();
+    });
+
+    expect(phaseOf(view)).toBe('speakingQuestion');
+    // The whole structural guarantee: no recorder of any kind runs over the
+    // app's own voice, so the app can never transcribe itself.
+    expect(harness.capture.startPreRoll).not.toHaveBeenCalled();
+    expect(harness.capture.start).not.toHaveBeenCalled();
+  });
+
+  it('opens one per turn, including the barge-in turn', async () => {
+    const harness = makeHarness();
+    harness.speech.hold = true;
+    const view = mount(harness);
+    await act(async () => {
+      view.result.current.start();
+    });
+
+    fire(view, { type: 'bargeIn', at: 1_000, level: 0.9 });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    // The learner is already mid-word, so the window opens and is promoted in
+    // the same breath — `start()` on a running pre-roll keeps its buffer.
+    expect(harness.capture.startPreRoll).toHaveBeenCalledTimes(1);
+    expect(harness.capture.start).toHaveBeenCalledTimes(1);
+  });
+
+  it('discards the window when nobody spoke', async () => {
+    // `voice.md` §4: half a second of a room nobody answered in is not a
+    // recording anybody asked for. `stop()` on a recorder that never reached
+    // an onset drops its bytes rather than handing them over.
+    const harness = makeHarness();
+    const view = mount(harness);
+    await startToListening(harness, view);
+
+    await act(async () => {
+      view.result.current.onVoiceActivityEvent({
+        type: 'onsetTimeout',
+        at: 9_000,
+        waitedMs: 8_000,
+      });
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    expect(harness.capture.stop).toHaveBeenCalled();
+    expect(harness.capture.start).not.toHaveBeenCalled();
+    expect(harness.transcribe).not.toHaveBeenCalled();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1012,6 +1090,11 @@ describe('useConversationSession — every involuntary exit is spoken', () => {
     'device_in_use',
     'insecure_origin',
     'unsupported',
+    // Issue #347's seventh. A hands-free learner is not reading the screen, so
+    // it has to be spoken with its own remedy exactly like the other six —
+    // and it must not be spoken in `device_in_use`'s words, which would send
+    // somebody walking down a street to go and close an application.
+    'recording_too_short',
   ];
 
   it.each(CODES)(
@@ -1043,7 +1126,7 @@ describe('useConversationSession — every involuntary exit is spoken', () => {
     },
   );
 
-  it('the six problems produce six distinct sentences', () => {
+  it('every problem produces a distinct sentence', () => {
     const sentences = new Set(
       CODES.map((code) => {
         const problem = describeCaptureProblem(code);
