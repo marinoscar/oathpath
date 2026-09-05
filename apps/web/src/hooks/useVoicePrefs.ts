@@ -119,6 +119,23 @@ export interface VoicePreferences {
   conversationMode: boolean;
 }
 
+/**
+ * What to send for a value the learner just chose: the value, or `null`.
+ *
+ * `null` is the DELETE. Writing today's default back because the learner
+ * happened to land on it pins them to it forever, invisibly, including after a
+ * later release moves it — this file's own header states the cost in full.
+ *
+ * IT LIVES HERE, BESIDE THE DEFAULTS IT IS ALWAYS CALLED WITH, so the two
+ * surfaces that write a voice preference — `/settings/voice` and the practice
+ * screen's own `Text | Voice` control (#313) — share one reducer rather than
+ * one of them re-deriving it. `components/settings/VoiceSettings.tsx` re-exports
+ * it, so every existing caller of `writeFor` is unaffected.
+ */
+export function writeFor<T>(next: T, builtInDefault: T): T | null {
+  return next === builtInDefault ? null : next;
+}
+
 /** A stored boolean, or the built-in default. A stored `false` is real. */
 function resolveBoolean(value: unknown, fallback: boolean): boolean {
   return typeof value === 'boolean' ? value : fallback;

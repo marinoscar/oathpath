@@ -87,6 +87,7 @@ import {
   VOICE_SPEECH_RATE_MAX,
   VOICE_SPEECH_RATE_MIN,
   resolveVoicePreferences,
+  writeFor,
 } from '../../hooks/useVoicePrefs';
 import type {
   SpeechVoice,
@@ -120,15 +121,15 @@ const RATE_MARKS = [
 ];
 
 /**
- * What to send for a value the learner just chose: the value, or `null`.
+ * The null-delete reducer every control on this page uses — see rule C in the
+ * file header for what it prevents.
  *
- * `null` is the DELETE. Writing today's default back because the learner
- * happened to land on it pins them to it forever, invisibly, including after a
- * later release moves it — see rule C in the file header.
+ * DEFINED IN `hooks/useVoicePrefs.ts`, beside the `DEFAULT_VOICE_*` constants
+ * it is always called with, since #313 gave the practice screen a second
+ * surface that writes a voice preference. Re-exported here unchanged, so this
+ * file is still where a reader of the settings page finds it.
  */
-export function writeFor<T>(next: T, builtInDefault: T): T | null {
-  return next === builtInDefault ? null : next;
-}
+export { writeFor };
 
 /** What the preview is currently saying, if anything. */
 type PreviewState =
