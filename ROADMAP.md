@@ -87,6 +87,7 @@ a v2.
 | E10 | Reading and writing tests | Vocabulary-sourced sentences, word-error-rate reading scoring, dictated writing scoring, the readiness `english` component | E9 | done<sup>**</sup> | [#59](https://github.com/marinoscar/oathpath/issues/59) |
 | E11 | Realtime voice interview | `realtime` wired, ephemeral session tokens, the E8 engine driving a realtime model over tool calls — closes Milestone B and the MVP | #25, E8, E9, E10 | done<sup>††</sup> | [#60](https://github.com/marinoscar/oathpath/issues/60) |
 | E12 | Hands-free voice practice | Auto-submit replaces confirm-before-grade as the default (with a zero-cost correction via `recomputeMasteryForQuestion`), a shared content-addressed cache for civics question/answer audio, and a learner-chosen premium voice | E9, E5 | done<sup>‡‡</sup> | [#280](https://github.com/marinoscar/oathpath/issues/280) |
+| E14 | The Coach's personality | A learner-chosen coach delivery style (`supportive`/`academic`/`playful`/`unfiltered`, defaulting to today's voice) delivered through two mechanisms — a curated, no-AI-call reaction-line bank covering the deterministically-graded majority of attempts, and a persona prompt fragment appended to calls that already run (the grader's feedback sentence, the civics explanation stream) — both bounded by one invariant floor enforced twice, in the prompt and by a lint over the shipped reaction bank; the mock-interview officer, the debrief, and notifications are permanently excluded | E4, E12 (for the audio cache) | in progress | [#305](https://github.com/marinoscar/oathpath/issues/305) |
 
 **E12 is the first epic filed after the MVP boundary.** E1–E11 closed
 Milestone A and Milestone B — the whole MVP, per [§2](#2-what-the-mvp-is) —
@@ -957,3 +958,78 @@ nothing — mechanically, not by exception. `docs/specs/voice.md` §3, §3.1,
 pointing here rather than being silently rewritten; see
 [`docs/specs/voice-hands-free.md`](docs/specs/voice-hands-free.md) for the
 full design.
+
+**2026-09-05 — `VISION.md`'s AI-personality section is formally amended, not
+silently contradicted, to let the learner choose their coach's delivery style
+(E14, #305).** The section's original eight traits ("Warm, but not sugary,"
+"Never condescending about English ability," and the rest) were written as
+the product's own voice — one voice, chosen by nobody, imposed on everybody.
+"### The Voice Is Chosen by the Learner," added directly beneath them on this
+same branch rather than replacing a word of them, states plainly what changes
+and what does not: the eight traits stay exactly what a learner gets by
+default, and become the **floor** every other voice must clear, while the
+learner is handed the choice to hear something else instead — academic,
+playful, or a coach willing to roast a wrong answer out loud
+(`unfiltered`). This is a page a person who filed no ticket, asked for no
+preference, and never opens a settings screen would not notice was ever
+written, which is the test this section has always applied to a product
+decision that touches tone. Two other passages needed the identical
+reconciliation rather than a silent workaround, because both read, out of
+context, like they forbid this feature outright: line 424's "we should never
+create pressure, shame, fear, or unhealthy compulsion to increase engagement
+metrics" is a rule about the **product** manufacturing pressure to chase a
+metric, not about a learner asking their own coach to be blunter with them —
+nothing in E14 is metric-driven, and `unfiltered` is opt-in, never suggested,
+never surfaced as a nudge; and line 491's "What We Will Not Build" list
+("a product that shames users for missing study sessions," "a product that
+treats non-native English speakers as less capable") describes things done
+**to** a learner who never asked for them, exactly the distinction the new
+VISION.md subsection itself draws in its closing line. Principle #9, "Never
+patronize, shame, or underestimate the learner," survives for the same
+reason every one of these does: it binds what OathPath does unprompted, and
+what OathPath does here is hand a person a switch, defaulting to the voice
+they already had, that they can flip and unflip in one tap.
+
+The reconciliation is not merely rhetorical — it is backed by an **invariant
+floor**, seven rules with no exception and no configuration surface for
+anybody, appended to a persona fragment's text and stated in the prompt to
+override everything above it: never comment on the learner's English,
+accent, grammar, or pronunciation; never reference their country of origin,
+immigration status, religion, race, or family; never imply the material
+should be obvious or that they are slow; never say or imply they will fail
+or will not become a citizen; never change the verdict, the accepted answer,
+or any readiness figure; the joke, when there is one, is about the miss and
+never the person; and a wrong answer always ends on a forward action. That
+floor is enforced **twice**, deliberately redundantly: once in the prompt
+text, which is a request a model can in principle decline, and once as a
+banned-topic lint test over the entire shipped reaction-line bank, which is a
+guarantee about what actually ships regardless of what any model does. A
+prompt instruction alone was judged not enough to ship `unfiltered` on; a lint
+over a small, curated, human-reviewed set of lines is. See
+[`docs/specs/coach-personality.md`](docs/specs/coach-personality.md) for the
+full design, including the two-mechanism architecture (a free, instant,
+AI-independent reaction bank for the deterministically-graded majority of
+attempts, and a persona prompt fragment for the AI calls that already run),
+the four personas, and the `coach` user-settings namespace this epic adds
+following `docs/specs/habit-streaks.md` §7's own file-by-file pattern.
+
+Three surfaces are excluded **permanently**, as a reasoned decision each,
+not a v1 gap awaiting a follow-up issue. The mock-interview officer and its
+debrief are excluded because the prohibition `officer-prompt.ts` has stated
+since E8 is tied to realism, not to taste — a learner rehearsing the actual
+event is entitled to the actual event, and `OFFICER_VERDICT_PROHIBITION`
+already means the officer gives no per-question feedback at all, on either
+transport, so there is no sentence for a persona to colour even if the
+exclusion were lifted; `InterviewDebriefPage.test.tsx`'s own vocabulary
+assertion is the guard, and this epic does not weaken it. Notifications stay
+on the default supportive voice unconditionally, because a push notification
+a learner did not summon is not a place to find out their coach roasts wrong
+answers — `VISION.md`'s "Notifications Should Feel Intelligent" section
+(lines 428–444, "the goal is to help users return, not
+make them feel guilty") already rules this out for the product's own default
+voice, and nothing about a learner's in-app persona preference changes what
+arrives on their lock screen. The readiness narrative
+(`progress-guide-prompt.ts`) is the one exclusion that is scope rather than
+principle — deferred to a later epic, which would wire the identical
+fragment-plus-floor pattern this document already uses everywhere else, not
+a different one.
