@@ -2037,11 +2037,25 @@ export default function PracticeSessionPage() {
                   alignItems: { xs: 'stretch', sm: 'center' },
                 }}
               >
+                {/* INERT WHILE THE LOOP IS DRIVING, all three of them. The
+                    driver is about to submit this question itself, and a hand
+                    on Submit, Show me the answer or Skip in the middle of that
+                    is two attempts at one question — the second of which the
+                    server would refuse as a retry of a retry. The escape is
+                    "Type instead", which is on screen at every phase and ends
+                    the loop before handing the question back. In Text mode, and
+                    in Voice mode with the loop idle, `isRunning` is false and
+                    nothing about these three has changed. */}
                 <Button
                   type="submit"
                   variant="contained"
                   size="large"
-                  disabled={!trimmed || pending !== null || result !== null}
+                  disabled={
+                    !trimmed ||
+                    pending !== null ||
+                    result !== null ||
+                    conversation.isRunning
+                  }
                 >
                   {pending === 'answer'
                     ? 'Checking…'
@@ -2052,7 +2066,7 @@ export default function PracticeSessionPage() {
                 <Button
                   variant="outlined"
                   onClick={handleReveal}
-                  disabled={pending !== null || result !== null}
+                  disabled={pending !== null || result !== null || conversation.isRunning}
                 >
                   {pending === 'reveal' ? 'Showing…' : 'Show me the answer'}
                 </Button>
@@ -2060,7 +2074,7 @@ export default function PracticeSessionPage() {
                   variant="text"
                   color="inherit"
                   onClick={handleSkip}
-                  disabled={pending !== null || result !== null}
+                  disabled={pending !== null || result !== null || conversation.isRunning}
                 >
                   {pending === 'skip' ? 'Skipping…' : 'Skip'}
                 </Button>
