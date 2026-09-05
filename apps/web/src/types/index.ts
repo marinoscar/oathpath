@@ -2135,6 +2135,49 @@ export interface PracticeAttempt {
    * judgement; render it beside the verdict, never in place of one.
    */
   coachReaction: { text: string; persona: CoachPersona } | null;
+
+  // ---------------------------------------------------------------------------
+  // The spoken turn (#351, epic #345 "The conversation the coach has")
+  // ---------------------------------------------------------------------------
+
+  /**
+   * What the coach SAYS about this attempt, in order — composed server-side.
+   *
+   * Never empty: the verdict is unconditional. Before this field the hands-free
+   * loop spoke `acceptedAnswers[0].text` and nothing else, so a right answer
+   * and a wrong answer produced byte-identical audio and a learner had to guess
+   * which had happened. Every fact needed to tell them apart was already on
+   * this interface — `outcome`, `failureCause`, `aiFeedback`, `coachReaction` —
+   * and every one of them was reachable only by something that RENDERS.
+   *
+   * COMPUTED SERVER-SIDE AT READ TIME AND NEVER PERSISTED, exactly like
+   * `coachReaction` above and behind no AI gate: an attempt graded
+   * deterministically on a deployment with no AI configured still carries a
+   * full turn.
+   *
+   * A `string[]` rather than one joined string so a driver can pace between
+   * elements, be interrupted between them, and honour `retryBoundary` below.
+   * A screen that only renders ignores both fields.
+   */
+  spokenTurn: string[];
+
+  /**
+   * Index into {@link spokenTurn} at which the retry-deferred tail begins, or
+   * `null` when no retry of this attempt is available.
+   *
+   * `null` → speak the whole array. A number `k` → speak
+   * `spokenTurn.slice(0, k)`, offer the retry, and speak `spokenTurn.slice(k)`
+   * only once retrying is off the table. `k === spokenTurn.length` is
+   * legitimate and means a retry is armed with nothing deferred.
+   *
+   * IT IS AN OPPORTUNITY, NOT AN INSTRUCTION. Whether a retry is actually
+   * offered stays this client's call — the per-question retry budget is the
+   * client's and the server cannot see it. What the server decides is only
+   * what is safe to say BEFORE one: reading the accepted answer aloud and then
+   * inviting a retry turns the retry into a repeat-after-me, which is the
+   * second defect #345 names.
+   */
+  retryBoundary: number | null;
 }
 
 /**
