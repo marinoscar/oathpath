@@ -85,7 +85,7 @@ a v2.
 | E8 | Mock interview — text mode | Deterministic interview engine (question selection, pass rules from `civics_test_versions`), text-mode interview and debrief — closes Milestone A | #25 (for `tutor`), E4, E6 | done<sup>‖</sup> | [#57](https://github.com/marinoscar/oathpath/issues/57) |
 | E9 | Voice foundation | `transcribe`/`speak` wired, audio capture and playback, spoken practice mode with transcript confirmation, misheard-vs-wrong distinction — opens Milestone B | #25, E4, E6 | done<sup>¶</sup> | [#58](https://github.com/marinoscar/oathpath/issues/58) |
 | E10 | Reading and writing tests | Vocabulary-sourced sentences, word-error-rate reading scoring, dictated writing scoring, the readiness `english` component | E9 | done<sup>**</sup> | [#59](https://github.com/marinoscar/oathpath/issues/59) |
-| E11 | Realtime voice interview | `realtime` wired, ephemeral session tokens, the E8 engine driving a realtime model over tool calls — closes Milestone B and the MVP | #25, E8, E9, E10 | not started | [#60](https://github.com/marinoscar/oathpath/issues/60) |
+| E11 | Realtime voice interview | `realtime` wired, ephemeral session tokens, the E8 engine driving a realtime model over tool calls — closes Milestone B and the MVP | #25, E8, E9, E10 | done<sup>††</sup> | [#60](https://github.com/marinoscar/oathpath/issues/60) |
 
 Status legend: `not started` — no child issue in progress; `in progress` —
 at least one child issue has an open PR or merged work; `done` — the epic
@@ -252,11 +252,10 @@ stack** — the §6 check this legend requires. All three specs exist on `main`
 alongside the shipped code they exercise, but nothing here confirms any of
 them has been executed end to end.
 
-With this, Milestone A (E1–E8) is `done` on paper across every epic in it;
-per [§2](#2-what-the-mvp-is), Milestone B (E9–E11) is still required to
-close the MVP. E9 already carries its own `done` footnote above, and E10
-now does too (see the `**` footnote below) — E11 (#60) is the only epic
-left before Milestone B, and the MVP, close.
+With this, Milestone A (E1–E8) is `done` on paper across every epic in it.
+E9 and E10 already carry their own `done` footnotes above, and E11 (#60)
+now does too (see the `††` footnote below) — which per
+[§2](#2-what-the-mvp-is) closes Milestone B, and with it the MVP itself.
 
 <sup>**</sup> **E10 is marked `done`, on the same convention this table has
 followed since E5**: an epic whose child issues are all merged and whose CI
@@ -279,9 +278,70 @@ Docker is unavailable in the environment it was authored in, so the compose
 stack it targets could not be raised, and the suite has not been executed
 end to end.
 
-E11 (#60) has all eight children open (#155–#162) and no merged work, so it
-remains `not started` — it is now the only epic standing between Milestone
-B and the MVP close; see [§2](#2-what-the-mvp-is).
+<sup>††</sup> **E11 is marked `done`, on the same convention this table has
+followed since E5**: an epic whose child issues are all merged and whose CI
+is green is `done`, and an unrun Playwright journey spec is a footnoted
+fact, not a status. All eight child issues are merged to `main`: #155
+(`docs/specs/realtime-interview.md`, the design spec, PR #264), #156
+(`realtime` wired and `createRealtimeSession` added to the provider surface,
+PR #265), #157 (`POST /api/interviews/:id/realtime-session`, ephemeral
+session minting, PR #268), #158 (the interview engine driven over the
+realtime tool contract, `POST /api/interviews/:id/realtime/tool-calls`, PR
+#269 — this PR also fixed issue #245, moving the mastery-skip rule inside
+`AttemptGradingService` so both call sites cannot disagree), #159 (the
+realtime interview screen, `/practice/interviews/:id/voice`, PR #273 — this
+PR also fixed issue #272, an nginx `Permissions-Policy: microphone=()`
+header that denied the microphone to its own origin, silently breaking E9's
+push-to-talk in every deployment behind the proxy, plus a CSP `connect-src`
+block), #160 (the realtime debrief and readiness weighting, PR #271), #161
+(the tool-contract sequence suite and the Playwright fallback spec, PR
+#275), and #162 (the operator runbook, the learner page, and the reference
+updates, PR #274).
+
+One more fix landed while working this epic, outside its own child list:
+**#266 (PR #267)** — the web CI job had been red on `main` for roughly ten
+merges because jsdom's `File` fails undici's brand check on Node 24.
+
+E11 departs from its predecessors on the first of these two points and
+adds a second that is new to this epic, because nothing before it shipped a
+manual checklist of its own:
+
+1. **`tests/e2e/specs/mock-interview-realtime.spec.ts` HAS been executed** —
+   unlike every prior epic's journey spec, whose footnote above says
+   plainly that nobody has run it. It passes 5/5 standalone and 8/8 run
+   sequentially alongside `mock-interview-text.spec.ts`. Read the claim
+   precisely, though: no Docker daemon was available, so it was run against
+   a **hand-assembled equivalent** of the compose stack — a real PostgreSQL
+   migrated and seeded with the real content, the real API under
+   `AI_PROVIDER_FAKE=true`, and the real Vite dev server on 3535 — not
+   against `docker compose` itself. That is materially more than the other
+   epics can claim and materially less than the §6 check literally asks
+   for, and both halves belong in the same sentence. Writing it surfaced a
+   genuine cross-file hazard, since fixed: leaving `realtime` bound past
+   this spec's own run changes the button text
+   `mock-interview-text.spec.ts` selects on, so an `afterAll` hook restores
+   `tutor`+`grader`-only bindings — which closes the sequential case this
+   suite is actually run in, and not a true concurrent-worker race.
+2. **Whether the manual verification checklist in
+   `docs/specs/realtime-interview.md` §11 has been run — it has not.** That
+   checklist (barge-in in both directions, end-to-end latency, the end
+   control under load, audio device switching mid-session, microphone
+   denial, network loss mid-interview, and secret expiry mid-interview) is
+   deliberately not automatable, for the reason §10 of the same document
+   gives: no suite in this codebase opens a real WebRTC connection to a
+   realtime model, speaks synthetic audio at it, and asserts on what comes
+   back, and none should — a fabricated realtime transport convincing
+   enough to stand in for actual speech recognition and barge-in behaviour
+   would only be a test asserting against a fake of the one thing it exists
+   to verify. §11 itself requires each item to be run, by a person, against
+   a real deployment and a real microphone, before any release that changes
+   voice or realtime code, with the pass/fail result recorded in
+   `CHANGELOG.md`. That has not happened yet.
+
+With E11 marked `done`, Milestone B (E9–E11) closes, and with it the MVP
+(E1–E11 plus the AI configuration foundation): done on paper across every
+epic, with the manual and end-to-end verification the legend requires still
+outstanding — see [§2](#2-what-the-mvp-is).
 
 ## 4. Why this order
 
