@@ -79,27 +79,36 @@
  * looking like the product refusing to listen.
  *
  * =============================================================================
- * ANSWERING OUT LOUD: HEAR IT, SAY IT, CONFIRM IT, *THEN* GRADE IT
+ * ANSWERING OUT LOUD: HEAR IT → SAY IT → GRADE IT → CORRECT IT
  * =============================================================================
  *
- * Issue #104, epic #58 / E9. The loop above gains one input method and exactly
- * one new rule, and the rule is the reason the feature is safe to have at all:
+ * Issue #104, epic #58 / E9, amended by issue #286, epic #280 / E12
+ * (`docs/specs/voice-hands-free.md` §1). The loop above gains one input method,
+ * and the shape of that method changed once, deliberately, on the record.
  *
- * **NOTHING A MICROPHONE PRODUCED IS EVER GRADED BEFORE THE LEARNER HAS SEEN
- * IT AND BEEN ABLE TO CHANGE IT.**
- *
- * The transcript arrives, it goes into the "Your answer" field — the same
- * field, with the same real `<label>`, that has always been there — and the
- * learner submits it themselves. That is not a courtesy step that could be
- * skipped to save a click: `VISION.md` line 228 promises a learner is never
- * "unfairly penalized for accent or speech-recognition errors", and this is
- * the only mechanism in the product that keeps it. Grade the raw transcript
+ * **E9 shipped CONFIRM-THEN-GRADE.** The transcript arrived, the learner read
+ * it in the "Your answer" field, edited anything wrong, and pressed Submit
+ * themselves. That step was the only mechanism in the product keeping
+ * `VISION.md` line 228's promise that a learner is never "unfairly penalized
+ * for accent or speech-recognition errors": grade a raw transcript
  * automatically and a learner who KNEW the answer and was misheard has a
  * permanent `incorrect` row in the one table E5, E6, E7 and E8 all read as
- * fact — and neither they nor anybody else can tell afterwards that the words
- * were never theirs.
+ * fact.
  *
- * Four decisions follow from it, and each prevents a specific failure:
+ * **E12 ships GRADE-THEN-CORRECT, and it is only safe because the guarantee
+ * moved rather than went away.** `VISION.md` line 230 — "The user should feel
+ * like they are speaking with a patient human coach, not operating a voice
+ * command interface" — is what four deliberate actions per question (press,
+ * speak, release, read-and-press-again) was failing. So the transcript is now
+ * graded the instant it arrives, and the correction happens AFTER the verdict
+ * instead of before it. What makes that fair is not this page: issue #285
+ * added `AttemptGradingService.recomputeMasteryForQuestion`, which REPLAYS a
+ * question's whole mastery history over its non-superseded attempts whenever a
+ * retry is written, so a corrected attempt costs the learner exactly zero —
+ * `voice-hands-free.md` §2 and its worked example in §2.1. Without that server
+ * change this file's auto-submit would be precisely the harm E9 forbade.
+ *
+ * Six decisions follow, and each prevents a specific failure:
  *
  *  1. **Voice and text are a toggle, and switching is free.** The session, the
  *     questions already answered and the progress counter all live on the
@@ -111,19 +120,32 @@
  *     model, no key and no admin (`docs/specs/voice.md` §2). It reports when
  *     audio ACTUALLY started, which is what makes `promptMode: 'heard'` a fact
  *     rather than a claim that a button was pressed.
- *  3. **Low confidence changes the WORDS, never the outcome.** Below the
- *     threshold the confirmation reads as an invitation to fix a probable
- *     mishearing instead of a plain "is this right?", and offers the recording
- *     again. The verdict is still the server's: it writes
- *     `failureCause: 'misheard'` from the confidence this page reported, after
- *     grading. THE RAW NUMBER IS NEVER SHOWN — "41% confident" is a diagnostic
- *     detail somebody studying for their naturalization interview has no way
- *     to act on, and every way to misread.
- *  4. **A misheard attempt can be answered again, once.** The retry is a NEW
- *     attempt carrying `retryOfAttemptId`; the original stays in the table as
- *     the evidence that a mishearing happened, and the server excludes it from
- *     `answered` so the pair counts as one question. This product does not
- *     delete evidence to make a number look better.
+ *  3. **Low confidence changes the WORDS, never the flow.** It reads as a
+ *     stronger invitation to check what was heard; it does not decide whether
+ *     grading happened, and it never did decide an outcome. The verdict is
+ *     still the server's: it writes `failureCause: 'misheard'` from the
+ *     confidence this page reported, after grading. THE RAW NUMBER IS NEVER
+ *     SHOWN — "41% confident" is a diagnostic detail somebody studying for
+ *     their naturalization interview has no way to act on, and every way to
+ *     misread.
+ *  4. **AN EMPTY TRANSCRIPT IS NEVER SUBMITTED, on either setting.** `text: ''`
+ *     is a `status: 'ok'` success (`ai-speech.dto.ts`) — it is what silence
+ *     sounds like — and auto-submitting it would record a failure at a question
+ *     the learner never actually answered.
+ *  5. **Any spoken attempt can be corrected, once.** Not only a misheard one:
+ *     `voice-hands-free.md` §2 is explicit that a confidently-wrong transcript
+ *     is exactly the case auto-submit creates and E9's `misheard` rule cannot
+ *     see. The correction is a NEW attempt carrying `retryOfAttemptId`; the
+ *     original stays in the table as evidence, the server excludes it from
+ *     `answered` so the pair counts as one question, and `requireRetryTarget`
+ *     caps the chain at two — so this page must not offer a second correction
+ *     of an attempt that is already a retry. This product does not delete
+ *     evidence to make a number look better.
+ *  6. **The confirm step is the OPT-OUT, not a deleted screen.**
+ *     `voice.autoSubmitSpoken` (default `true`, `useVoicePrefs`) governs one
+ *     branch of the transcription effect. Set to `false`, E9's flow runs
+ *     unchanged, byte for byte, which is the whole point of it being a
+ *     preference.
  *
  * The microphone is ABSENT, not disabled, when `transcribe` is unbound —
  * `VoiceUnavailableNotice` explains that state and is mounted unconditionally
@@ -257,6 +279,72 @@ interface SpokenDraft {
   confidence: number | null;
 }
 
+/**
+ * The voice fields for one attempt, assembled in ONE place.
+ *
+ * A MODULE-LEVEL PURE FUNCTION rather than a closure over the page's state,
+ * because since #286 there are three callers and one of them runs from inside
+ * an async continuation where the state has not been committed yet: the
+ * auto-submit branch grades the transcript in the same tick it arrives, so
+ * `response`/`spokenDraft` still hold what they held before it landed. A
+ * closure would read stale values there and post `inputMode: 'typed'` with no
+ * transcript for an answer the learner spoke.
+ *
+ * The server rejects a body whose fields contradict each other, and every one
+ * of those 400s would be a refusal the learner could not have avoided or
+ * understood. So the rules are mirrored here rather than left to three call
+ * sites to remember:
+ *
+ *   * `transcript` and `asrConfidence` ride ONLY with `inputMode: 'spoken'`
+ *   * a spoken attempt that was answered ALWAYS carries its `transcript`
+ *   * a skip carries neither, whichever control the learner was using
+ *   * `asrConfidence` is OMITTED when the recogniser reported none — ABSENT IS
+ *     UNKNOWN, and a `0` would be a confident-sounding false claim that the
+ *     recogniser was certain it heard nothing, which the server reads as a
+ *     mishearing and stamps on a perfectly good answer
+ *
+ * `promptMode` is sent on every attempt including a skip: how the question
+ * reached the learner is true whether or not they answered it.
+ */
+function voiceAttemptFields(args: {
+  /** Audio ACTUALLY played, not "the button was pressed". */
+  promptWasHeard: boolean;
+  /**
+   * The words about to be graded when they came from the microphone, or `null`
+   * for a typed answer and for every skip.
+   *
+   * NULL IS THE `typed` SIGNAL. A learner who spoke, read the transcript,
+   * cleared the box and typed something else is a TYPED attempt —
+   * `record-attempt.dto.ts` uses exactly that example to explain why
+   * `inputMode` is RECORDED rather than derived from "is there a transcript?".
+   */
+  spokenText: string | null;
+  /** 0..1 or `null`. Only ever sent with `spokenText`. */
+  confidence: number | null;
+  /** The attempt this one supersedes, or `null`. */
+  retryOf: string | null;
+}): Pick<
+  RecordPracticeAttemptInput,
+  'inputMode' | 'promptMode' | 'transcript' | 'asrConfidence' | 'retryOfAttemptId'
+> {
+  return {
+    promptMode: args.promptWasHeard ? 'heard' : 'read',
+    ...(args.spokenText
+      ? {
+          inputMode: 'spoken' as const,
+          // The text that was GRADED, exactly as the learner left it — which
+          // on the auto-submit path is the recogniser's own output (nothing
+          // edited it before grading ran) and on the confirm path is whatever
+          // they confirmed. `voice-hands-free.md` §3 narrows `transcript` to
+          // exactly that, on every path, with no second column to say which.
+          transcript: args.spokenText,
+          ...(args.confidence !== null ? { asrConfidence: args.confidence } : {}),
+        }
+      : { inputMode: 'typed' as const }),
+    ...(args.retryOf ? { retryOfAttemptId: args.retryOf } : {}),
+  };
+}
+
 /** `/practice/sessions/:id/summary` for one id, spelled once. */
 export function practiceSummaryPath(sessionId: string): string {
   return `/practice/sessions/${sessionId}/summary`;
@@ -300,7 +388,7 @@ export default function PracticeSessionPage() {
   // SAME `useUserSettings` the rest of the app uses — see `useVoicePrefs`.
   // Resolved to the built-in defaults until the settings read lands, so the
   // question is readable from the first paint rather than after a round trip.
-  const { voice: voicePrefs } = useVoicePrefs();
+  const { voice: voicePrefs, isLoading: voicePrefsLoading } = useVoicePrefs();
   /**
    * Optional on purpose, exactly as in `ExplainPanel`: this page must not blank
    * out when the status provider is absent (a test rendering it in isolation,
@@ -335,6 +423,19 @@ export default function PracticeSessionPage() {
   const [spokenDraft, setSpokenDraft] = useState<SpokenDraft | null>(null);
   /** The attempt the next submission supersedes, once a retry is taken up. */
   const [retryOf, setRetryOf] = useState<string | null>(null);
+  /**
+   * The learner is correcting what was heard, and this is what they have typed.
+   *
+   * `null` MEANS "NOT CORRECTING" — the correction card renders its invitation
+   * rather than its field. A separate boolean beside the text would be a second
+   * representation of the same fact, free to disagree with it.
+   *
+   * It is deliberately NOT `response`: after grading, the answer field above
+   * still holds (disabled) the words that were graded, and binding both to one
+   * state would leave two controls labelled for the same sentence with only one
+   * of them editable — which is where a learner's correction goes unnoticed.
+   */
+  const [correction, setCorrection] = useState<string | null>(null);
 
   const inputRef = useRef<HTMLInputElement | null>(null);
   /** When the question on screen was first shown, for an honest `durationMs`. */
@@ -361,6 +462,7 @@ export default function PracticeSessionPage() {
     setVoiceUnavailable(null);
     setTranscribing(false);
     setRetryOf(null);
+    setCorrection(null);
     releaseRecording();
   }, [releaseRecording]);
 
@@ -427,6 +529,34 @@ export default function PracticeSessionPage() {
    */
   const uploadedRef = useRef<Blob | null>(null);
 
+  /**
+   * Grade a transcript the moment it lands — or `null` while that is not what
+   * the learner asked for.
+   *
+   * A REF RATHER THAN A DEPENDENCY, for two reasons that are both about
+   * *when* the values are read:
+   *
+   *  1. The transcription effect's async continuation resolves a network round
+   *     trip after it was created, and it closes over whatever `promptWasHeard`,
+   *     `retryOf` and the voice preferences were when the RECORDING started.
+   *     `voice.autoSubmitSpoken` in particular arrives from
+   *     `GET /api/user-settings`, so a learner who has opted OUT and speaks
+   *     before that read lands would have their transcript graded against their
+   *     wish. Reading through a ref that a commit-time effect keeps current
+   *     means the branch is decided by what is true when the words arrive.
+   *  2. `submitAttempt` is defined below this effect, so naming it in a
+   *     dependency array here would be a temporal-dead-zone `ReferenceError` on
+   *     the first render — the array is evaluated during render, not after it.
+   *
+   * `null` covers BOTH "the learner turned auto-submit off" and "we do not know
+   * yet", and the fallback for both is E9's confirm step, which cannot grade
+   * anything without the learner pressing a button. Failing towards the flow
+   * that asks first is the only safe direction for this particular unknown.
+   */
+  const autoSubmitRef = useRef<
+    ((heard: string, confidence: number | null) => void) | null
+  >(null);
+
   const recording = capture.recording;
 
   useEffect(() => {
@@ -468,6 +598,16 @@ export default function PracticeSessionPage() {
             // said" about a transcript nothing was uncertain about.
             // `confidence.ts` has the whole argument.
             setSpokenDraft({ confidence: result.confidence });
+
+            // HANDS-FREE (issue #286, epic #280 / E12). Both `setResponse` and
+            // `setSpokenDraft` above still run on this path, and neither is
+            // redundant: the answer field is what keeps the graded words VISIBLE
+            // after the verdict, and the draft is what tells `isSpokenAnswer`
+            // that they came from a microphone.
+            //
+            // Reached only AFTER the empty-transcript return above — silence is
+            // never graded, on either setting.
+            autoSubmitRef.current?.(heard, result.confidence);
             return;
           }
 
@@ -591,6 +731,32 @@ export default function PracticeSessionPage() {
     [id, isMounted, question, refresh],
   );
 
+  // KEPT CURRENT AT EVERY COMMIT, deliberately with no dependency array: the
+  // transcription effect reads this on a continuation that outlives the render
+  // it was created in, so what it needs is the LATEST answer to "should this
+  // grade itself, and against which question state?" — not the one that was
+  // true when the learner pressed the microphone. See `autoSubmitRef`.
+  useEffect(() => {
+    autoSubmitRef.current =
+      voicePrefsLoading || !voicePrefs.autoSubmitSpoken
+        ? null
+        : (heard, confidence) => {
+            void submitAttempt(
+              {
+                responseText: heard,
+                durationMs: elapsedMs(),
+                ...voiceAttemptFields({
+                  promptWasHeard,
+                  spokenText: heard,
+                  confidence,
+                  retryOf,
+                }),
+              },
+              'answer',
+            );
+          };
+  });
+
   const trimmed = response.trim();
 
   /**
@@ -611,47 +777,30 @@ export default function PracticeSessionPage() {
   const lowConfidence = isLowConfidence(draftConfidence);
 
   /**
-   * The voice fields for one attempt, assembled in ONE place.
+   * The voice fields for the attempt the LEARNER is about to submit by hand —
+   * the manual Submit, the reveal, and the skip.
    *
-   * The server rejects a body whose fields contradict each other, and every
-   * one of those 400s would be a refusal the learner could not have avoided or
-   * understood. So the rules are mirrored here rather than left to four call
-   * sites to remember:
+   * A thin binding of the page's current state onto `voiceAttemptFields` above,
+   * which is the one place the server's mutually-exclusive-field rules live.
    *
-   *   * `transcript` and `asrConfidence` ride ONLY with `inputMode: 'spoken'`
-   *   * a spoken attempt that was answered ALWAYS carries its `transcript`
-   *   * a skip carries neither, whichever control the learner was using
-   *   * `asrConfidence` is OMITTED when the recogniser reported none — ABSENT
-   *     IS UNKNOWN, and a `0` would be a confident-sounding false claim that
-   *     the recogniser was certain it heard nothing, which the server reads as
-   *     a mishearing and stamps on a perfectly good answer
-   *
-   * `promptMode` is sent on every attempt including a skip: how the question
-   * reached the learner is true whether or not they answered it.
+   * A SKIP IS NEVER `spoken`. It produced no answer at all, so calling it
+   * spoken would claim a recognition step that never ran — and the server would
+   * reject the transcript that claim implies.
    */
   const voiceFields = (
     kind: 'answered' | 'skipped',
   ): Pick<
     RecordPracticeAttemptInput,
     'inputMode' | 'promptMode' | 'transcript' | 'asrConfidence' | 'retryOfAttemptId'
-  > => ({
-    promptMode: promptWasHeard ? 'heard' : 'read',
-    // A SKIP IS NEVER `spoken`. It produced no answer at all, so calling it
-    // spoken would claim a recognition step that never ran — and the server
-    // would reject the transcript that claim implies.
-    ...(kind === 'answered' && isSpokenAnswer
-      ? {
-          inputMode: 'spoken' as const,
-          // The CONFIRMED text, which is whatever is in the field now — edits
-          // included. That is what `transcript` means (`voice.md` §3), and it
-          // is the same string `responseText` carries, because what was
-          // graded and what was confirmed are the same words today.
-          transcript: trimmed,
-          ...(draftConfidence !== null ? { asrConfidence: draftConfidence } : {}),
-        }
-      : { inputMode: 'typed' as const }),
-    ...(retryOf ? { retryOfAttemptId: retryOf } : {}),
-  });
+  > =>
+    voiceAttemptFields({
+      promptWasHeard,
+      // The CONFIRMED text, which is whatever is in the field now — edits
+      // included.
+      spokenText: kind === 'answered' && isSpokenAnswer ? trimmed : null,
+      confidence: draftConfidence,
+      retryOf,
+    });
 
   const handleSubmit = (event: React.FormEvent) => {
     event.preventDefault();
@@ -726,22 +875,45 @@ export default function PracticeSessionPage() {
   };
 
   /**
-   * Another go at a question the recogniser may have misheard.
+   * Another go at a question whose spoken answer is not what the learner said.
    *
-   * THE CONDITION IS THE SERVER'S VERDICT, NOT OURS. `failureCause` is written
-   * by `PracticeService.recordAttempt` from the confidence this page reported,
-   * AFTER grading — so "was this misheard?" is answered by reading the
-   * recorded attempt back. Re-running the threshold here instead would be this
-   * page deciding an outcome, which is the one thing a client must never do.
+   * WIDENED BY #286 FROM "misheard" TO "any spoken attempt", which is the
+   * `voice.md` §3.3 amendment `voice-hands-free.md` §2 states outright. The old
+   * condition read `failureCause === 'misheard'` — the server's own verdict —
+   * and that was right for E9, where the ONLY attempt that could ever be
+   * superseded was one the learner had already confirmed, so a wrong-but-
+   * confirmed answer was theirs by construction. Auto-submit breaks that:
+   * **accented speech very often transcribes CONFIDENTLY and WRONGLY**, so the
+   * exact case that most needs correcting is the one `misheard` cannot see
+   * (`isMisheardAttempt` requires a confidence below 0.6). Offering a
+   * correction only where the recogniser admitted doubt would leave the
+   * learners this product is most for with no way to fix it.
    *
-   * Excluded when the attempt is ITSELF a retry: the server allows a chain of
-   * exactly two (a 409 beyond that, deliberately — see `requireRetryTarget`),
-   * so a third offer would be a button that cannot work.
+   * Three conditions, and each closes a specific hole:
+   *
+   *   * **`inputMode === 'spoken'`.** A typed answer was not misheard by
+   *     anything; a second go at every typed miss is the grinding loophole the
+   *     one-attempt rule exists to close, and nothing about E12 reopens it.
+   *   * **not already a retry.** `requireRetryTarget` allows a chain of exactly
+   *     two and 409s a third, so a second offer would be a button that cannot
+   *     work.
+   *   * **not `revealed`.** A learner who asked to see the accepted answer has
+   *     it on screen; "correcting" a transcript to match it afterwards would
+   *     turn a reveal into a free `correct`, and unlike the two above the
+   *     server does not refuse it — `requireRetryTarget` has no opinion on
+   *     `revealed`, so this gate is the only one there is.
    */
   const canAnswerAgain =
     result !== null &&
-    result.attempt.failureCause === 'misheard' &&
-    result.attempt.retryOfAttemptId === null;
+    result.attempt.inputMode === 'spoken' &&
+    result.attempt.retryOfAttemptId === null &&
+    !result.attempt.revealed;
+
+  /** What was graded, as it will be pre-filled into the correction field. */
+  const gradedTranscript =
+    result?.attempt.transcript ?? result?.attempt.responseText ?? '';
+  /** The doubt the RECOGNISER reported about the graded words. Copy only. */
+  const gradedLowConfidence = isLowConfidence(result?.attempt.asrConfidence);
 
   const handleAnswerAgain = () => {
     if (!result) return;
@@ -754,10 +926,69 @@ export default function PracticeSessionPage() {
     setResult(null);
     setResponse('');
     setSpokenDraft(null);
+    setCorrection(null);
     setVoiceError(null);
     setVoiceUnavailable(null);
     setActionError(null);
     if (transcribeBound) setAnswerMode('voice');
+  };
+
+  /**
+   * Type the correction instead of recording it again.
+   *
+   * The field opens PRE-FILLED with what was graded, so fixing one misheard
+   * word is one keystroke rather than retyping a sentence the learner already
+   * said correctly.
+   */
+  const handleStartCorrection = () => {
+    setCorrection(gradedTranscript);
+    setActionError(null);
+  };
+
+  /**
+   * Submit the correction as a NEW attempt superseding the graded one.
+   *
+   * `retryOfAttemptId` is read from the RESULT rather than from `retryOf`,
+   * because `retryOf` is the state the *next* recording would carry and the
+   * attempt being corrected is on screen right now. It is also written into
+   * `retryOf` so that a 404/409 refusal takes `submitAttempt`'s existing
+   * stale-session recovery, which keys on the submitted body rather than on
+   * this state — the state is what keeps the banner above the field honest if
+   * the learner records instead.
+   *
+   * THE TYPED TEXT IS NOT CLEARED HERE. A refusal leaves the correction card
+   * on screen, and clearing it optimistically would throw away the sentence
+   * the learner just fixed at the exact moment they have to send it again. On
+   * success the card unmounts anyway — the graded attempt is superseded, so
+   * `canAnswerAgain` is false — and `clearQuestionState` resets it at Next.
+   *
+   * The fields are `voiceAttemptFields`' own, exactly as an edited transcript
+   * has always sent them under the confirm flow: `inputMode: 'spoken'`, the
+   * corrected words as both `responseText` and `transcript`, and the ORIGINAL
+   * recogniser confidence — the measurement belongs to the recording, and the
+   * client never sends a verdict about it either way.
+   */
+  const handleSubmitCorrection = (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!result) return;
+    const corrected = (correction ?? '').trim();
+    if (!corrected) return;
+
+    const supersedes = result.attempt.id;
+    setRetryOf(supersedes);
+    void submitAttempt(
+      {
+        responseText: corrected,
+        durationMs: elapsedMs(),
+        ...voiceAttemptFields({
+          promptWasHeard,
+          spokenText: corrected,
+          confidence: result.attempt.asrConfidence,
+          retryOf: supersedes,
+        }),
+      },
+      'answer',
+    );
   };
 
   const handleSelfMark = async () => {
@@ -1095,57 +1326,69 @@ export default function PracticeSessionPage() {
                       </Alert>
                     )}
 
-                    {/* THE CONFIRMATION STEP. Nothing has been graded at this
-                        point and nothing will be until the learner presses the
-                        button themselves — see the file header for why that is
-                        a requirement rather than a nicety.
+                    {/* THE CONFIRMATION STEP — E9's flow, kept as the OPT-OUT
+                        (`voice.autoSubmitSpoken: false`, issue #286). Nothing
+                        has been graded at this point and nothing will be until
+                        the learner presses the button themselves.
+
+                        `pending === null` IS PART OF THE CONDITION, not
+                        housekeeping. On the auto-submit default this block's
+                        state (`response`, `spokenDraft`) is set in the same
+                        commit that starts the grading request, so without it
+                        the sentence "nothing is graded until you choose Use
+                        this answer" would render — briefly, and untruthfully —
+                        over an attempt already in flight.
 
                         The confidence decides the WORDS here and nothing else,
                         and the number itself is never rendered: "41%
                         confident" is a diagnostic detail somebody studying for
                         their naturalization interview has no way to act on. */}
-                    {!transcribing && !voiceError && spokenDraft && !result && (
-                      <Alert
-                        severity="info"
-                        icon={false}
-                        // Announced by the region above, not by itself — see
-                        // the warning alert's note.
-                        role="presentation"
-                      >
-                        <AlertTitle>
-                          {lowConfidence
-                            ? 'That may not be what you said.'
-                            : 'Is this what you said?'}
-                        </AlertTitle>
-                        <Typography variant="body2" sx={{ mb: 1.5 }}>
-                          {lowConfidence
-                            ? 'Your recording was hard to make out, so this is more likely our mistake than yours. Read it below, change anything that is wrong, or record it again — nothing has been graded yet.'
-                            : 'Read it below and change anything that is wrong. Nothing is graded until you choose Use this answer.'}
-                        </Typography>
-                        <Stack
-                          direction={{ xs: 'column', sm: 'row' }}
-                          spacing={1}
-                          sx={{ alignItems: { xs: 'stretch', sm: 'center' } }}
+                    {!transcribing &&
+                      !voiceError &&
+                      spokenDraft &&
+                      !result &&
+                      pending === null && (
+                        <Alert
+                          severity="info"
+                          icon={false}
+                          // Announced by the region above, not by itself — see
+                          // the warning alert's note.
+                          role="presentation"
                         >
-                          <Button
-                            size="small"
-                            variant="outlined"
-                            startIcon={<MicIcon />}
-                            onClick={handleRecordAgain}
-                            disabled={pending !== null}
+                          <AlertTitle>
+                            {lowConfidence
+                              ? 'That may not be what you said.'
+                              : 'Is this what you said?'}
+                          </AlertTitle>
+                          <Typography variant="body2" sx={{ mb: 1.5 }}>
+                            {lowConfidence
+                              ? 'Your recording was hard to make out, so this is more likely our mistake than yours. Read it below, change anything that is wrong, or record it again — nothing has been graded yet.'
+                              : 'Read it below and change anything that is wrong. Nothing is graded until you choose Use this answer.'}
+                          </Typography>
+                          <Stack
+                            direction={{ xs: 'column', sm: 'row' }}
+                            spacing={1}
+                            sx={{ alignItems: { xs: 'stretch', sm: 'center' } }}
                           >
-                            Record again
-                          </Button>
-                          <Button
-                            size="small"
-                            onClick={handleTypeInstead}
-                            disabled={pending !== null}
-                          >
-                            Type it instead
-                          </Button>
-                        </Stack>
-                      </Alert>
-                    )}
+                            <Button
+                              size="small"
+                              variant="outlined"
+                              startIcon={<MicIcon />}
+                              onClick={handleRecordAgain}
+                              disabled={pending !== null}
+                            >
+                              Record again
+                            </Button>
+                            <Button
+                              size="small"
+                              onClick={handleTypeInstead}
+                              disabled={pending !== null}
+                            >
+                              Type it instead
+                            </Button>
+                          </Stack>
+                        </Alert>
+                      )}
                   </Box>
                 </Box>
               )}
@@ -1169,9 +1412,16 @@ export default function PracticeSessionPage() {
                 // overwritten without warning.
                 disabled={pending !== null || result !== null || transcribing}
                 helperText={
-                  isSpokenAnswer
-                    ? 'This is what we heard. Change anything that is wrong — it is graded exactly as it reads here.'
-                    : 'Type it the way you would say it. Spelling and capitalisation are not judged.'
+                  isSpokenAnswer && result
+                    ? // ALREADY GRADED (#286): the field is disabled and these
+                      // are the words the verdict below is about. Telling the
+                      // learner to "change anything that is wrong" here would
+                      // point them at a control that cannot accept the change —
+                      // the correction card under the verdict is where it goes.
+                      'This is what we heard, and what was graded.'
+                    : isSpokenAnswer
+                      ? 'This is what we heard. Change anything that is wrong — it is graded exactly as it reads here.'
+                      : 'Type it the way you would say it. Spelling and capitalisation are not judged.'
                 }
               />
 
@@ -1241,30 +1491,114 @@ export default function PracticeSessionPage() {
           )}
         </Box>
 
-        {/* THE RETRY, OFFERED ONLY WHERE THE SERVER SAID IT WAS MISHEARD.
+        {/* THE CORRECTION, AFTER THE VERDICT (issue #286, epic #280 / E12).
+
+            This is E9's confirmation step, moved. It used to sit before grading
+            and ask "is this what you said?"; auto-submit means the answer to
+            that question arrives with a grade attached, so the same words, the
+            same editable text and the same "record it again" now sit BESIDE the
+            verdict instead of in front of it. What it protects is unchanged —
+            a learner is never left with a recorded miss they did not make.
+
+            THE TRANSCRIPT IS VISIBLE HERE FOR EVERY SPOKEN ATTEMPT, not only a
+            doubted one: the transcript a learner most needs to see is the
+            confidently-wrong one, which is exactly the one nothing flags.
+            `gradedLowConfidence` chooses the WORDS and nothing else, and the
+            confidence number itself is never rendered (`voice.md` §3.1).
 
             Outside the `role="status"` region above for the same reason the
             explain action below is: a control appended to a live region is
             re-announced as part of the verdict every time that region changes.
+            `role="presentation"` for the same reason — the `<Alert>` is wanted
+            for its LOOK, and a second `role="alert"` firing beside the
+            verdict's own announcement reads as two unrelated interruptions.
 
-            It posts a NEW attempt carrying `retryOfAttemptId`. The original is
-            not edited and not deleted — it is the evidence that a mishearing
-            happened — and the server leaves it out of `answered`, so the pair
-            counts as one question rather than as two. */}
+            Either route posts a NEW attempt carrying `retryOfAttemptId`. The
+            original is not edited and not deleted — it is the evidence of what
+            happened — the server leaves it out of `answered` so the pair counts
+            as one question, and `recomputeMasteryForQuestion` (#285) replays the
+            question's mastery without it, so the correction costs nothing. */}
         {canAnswerAgain && (
           <Box sx={{ mt: 3 }}>
-            <Button
-              variant="outlined"
-              startIcon={<MicIcon />}
-              onClick={handleAnswerAgain}
-            >
-              Answer again
-            </Button>
-            <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-              We may have misheard you rather than you getting it wrong. Trying
-              again replaces this attempt, and does not count as a second
-              question.
-            </Typography>
+            <Alert severity="info" icon={false} role="presentation">
+              <AlertTitle>
+                {gradedLowConfidence
+                  ? 'That may not be what you said.'
+                  : 'This is what we heard.'}
+              </AlertTitle>
+              <Typography variant="body2" sx={{ mb: 1, fontStyle: 'italic' }}>
+                &ldquo;{gradedTranscript}&rdquo;
+              </Typography>
+              <Typography variant="body2" sx={{ mb: 1.5 }}>
+                {gradedLowConfidence
+                  ? 'Your recording was hard to make out, so anything wrong above is more likely our mistake than yours. Please check it — putting it right replaces this attempt and costs you nothing.'
+                  : 'Those are the words that were graded. If they are not what you said, put it right — that replaces this attempt, does not count as a second question, and costs you nothing.'}
+              </Typography>
+
+              {correction === null ? (
+                <Stack
+                  direction={{ xs: 'column', sm: 'row' }}
+                  spacing={1}
+                  sx={{ alignItems: { xs: 'stretch', sm: 'center' } }}
+                >
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    onClick={handleStartCorrection}
+                    disabled={pending !== null}
+                  >
+                    That&rsquo;s not what I said
+                  </Button>
+                  <Button
+                    size="small"
+                    startIcon={<MicIcon />}
+                    onClick={handleAnswerAgain}
+                    disabled={pending !== null}
+                  >
+                    Record it again
+                  </Button>
+                </Stack>
+              ) : (
+                <Box component="form" onSubmit={handleSubmitCorrection}>
+                  <TextField
+                    // ITS OWN REAL `<label>`, and its own text. The "Your
+                    // answer" field above still holds the graded words and is
+                    // disabled; two controls bound to one string, one of them
+                    // dead, is where a correction goes unnoticed.
+                    label="What you actually said"
+                    value={correction}
+                    onChange={(event) => setCorrection(event.target.value)}
+                    fullWidth
+                    autoFocus
+                    autoComplete="off"
+                    spellCheck={false}
+                    disabled={pending !== null}
+                    helperText="Change only what is wrong. It is graded exactly as it reads here."
+                  />
+                  <Stack
+                    direction={{ xs: 'column', sm: 'row' }}
+                    spacing={1}
+                    sx={{ mt: 1.5, alignItems: { xs: 'stretch', sm: 'center' } }}
+                  >
+                    <Button
+                      type="submit"
+                      size="small"
+                      variant="contained"
+                      disabled={!correction.trim() || pending !== null}
+                    >
+                      {pending === 'answer' ? 'Checking…' : 'Use this instead'}
+                    </Button>
+                    <Button
+                      size="small"
+                      onClick={() => setCorrection(null)}
+                      disabled={pending !== null}
+                    >
+                      Keep what we heard
+                    </Button>
+                  </Stack>
+                </Box>
+              )}
+            </Alert>
           </Box>
         )}
 
