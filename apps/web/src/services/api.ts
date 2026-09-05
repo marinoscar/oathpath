@@ -303,6 +303,9 @@ import type {
   AiStatus,
   AiUsage,
   SynthesizeResponse,
+  CivicsAudioResponse,
+  CivicsAudioScope,
+  SpeechFailed,
   SpeechVoicesResponse,
   TranscribeResponse,
   NotificationEventDef,
@@ -935,20 +938,40 @@ export async function synthesizeSpeech(
     return { status: 'ok', audio: blob };
   }
 
-  return parseSynthesisEnvelope(blob);
+  const envelope = await parseSpeechEnvelope(blob);
+
+  // NARROWED, NOT CAST BLINDLY. This route resolves no civics answer, so it
+  // cannot answer `state_required`; if one ever arrived it would be a server
+  // that had changed contract, and the honest reading of a member this
+  // function's own type says is impossible is "unreadable body".
+  if (envelope.status === 'state_required') {
+    return {
+      status: 'failed',
+      errorCode: 'malformed_response',
+      error: 'The speech response could not be read.',
+    };
+  }
+
+  return envelope;
 }
 
 /**
- * Read a non-`ok` synthesis result back out of the JSON blob it arrived in.
+ * Read a non-`ok` speech result back out of the JSON blob it arrived in.
  *
- * Separate from its caller so the defensive branches are readable rather than
+ * Separate from its callers so the defensive branches are readable rather than
  * nested three deep inside a function whose happy path is one line. Every exit
- * is a `SynthesizeResponse`; there is no `throw` anywhere in it, deliberately —
- * see the caller's doc comment.
+ * is one of the union's members; there is no `throw` anywhere in it,
+ * deliberately — see the callers' doc comments.
+ *
+ * SHARED BY BOTH AUDIO ROUTES (#284) rather than copied for the second one.
+ * The return type is the wider union, and `synthesizeSpeech` narrows it: that
+ * route cannot receive `state_required` (it is handed its text and resolves no
+ * answer), so a member it can never see would be a branch its callers had to
+ * handle for no reason.
  */
-async function parseSynthesisEnvelope(blob: Blob): Promise<SynthesizeResponse> {
+async function parseSpeechEnvelope(blob: Blob): Promise<CivicsAudioResponse> {
   /** What a body we could not make sense of resolves to. */
-  const unreadable: SynthesizeResponse = {
+  const unreadable: SpeechFailed = {
     status: 'failed',
     // Not a code the API ever sends. It says where the confusion happened,
     // which is the only useful thing to log about a body like this — and it is
@@ -973,14 +996,78 @@ async function parseSynthesisEnvelope(blob: Blob): Promise<SynthesizeResponse> {
     // Only the two non-`ok` members can arrive as JSON — an `ok` synthesis is
     // audio, by definition. A JSON body claiming `ok` is therefore as
     // unreadable as one claiming nothing.
-    if (status === 'unavailable' || status === 'failed') {
-      return candidate as SynthesizeResponse;
+    if (
+      status === 'unavailable' ||
+      status === 'failed' ||
+      // `GET /ai/speech/audio` only. `synthesizeSpeech` narrows this away at
+      // its own call site rather than this reader having two shapes.
+      status === 'state_required'
+    ) {
+      return candidate as CivicsAudioResponse;
     }
 
     return unreadable;
   } catch {
     return unreadable;
   }
+}
+
+/**
+ * Play a civics question — or its answer — from the shared cache
+ * (`GET /api/ai/speech/audio`, #284).
+ *
+ * THE SAME PREMIUM UPGRADE {@link synthesizeSpeech} IS, WITH TWO DIFFERENCES
+ * THAT MATTER TO A CALLER.
+ *
+ * First, **it does not take the text**. It takes a scope and a
+ * `civics_questions.id`, and the API resolves the words itself — including
+ * which answer is current for THIS learner's state. That is what lets the
+ * result be cached across learners: the first request for a given question and
+ * voice synthesises on that learner's key, and every request after it, from
+ * anybody, is served from storage with no AI call at all. It is also why there
+ * is no `text` parameter to pass and no way to invent one.
+ *
+ * Second, the union has **one more member**: `state_required`, for a
+ * state-specific answer requested by a learner whose profile has no state. It
+ * is not an error and not an `AiNotReady` case — see {@link CivicsAudioScope}'s
+ * neighbours in `types/index.ts`.
+ *
+ * Everything else is {@link synthesizeSpeech}'s contract verbatim, including
+ * the parts most easily got wrong: bytes and JSON share HTTP 200 and are told
+ * apart by `Content-Type` alone; nothing here throws for an AI reason; and a
+ * non-`ok` member means fall back to the browser's own `speechSynthesis`
+ * (`docs/specs/voice.md` §2) rather than report anything as broken. A genuine
+ * transport failure — 401, a dropped connection, or a **404 for a question id
+ * that does not exist** — still rejects with `ApiError`.
+ */
+export async function fetchCivicsAudio(
+  params: { scope: CivicsAudioScope; refId: string; voice?: string; format?: string },
+  opts: { signal?: AbortSignal } = {},
+): Promise<CivicsAudioResponse> {
+  const search = new URLSearchParams({
+    scope: params.scope,
+    refId: params.refId,
+  });
+
+  // OMITTED, NEVER SENT EMPTY. The endpoint validates a voice id's shape, so
+  // `?voice=` is a 400 rather than "no preference" — and "no preference" is
+  // exactly what omitting it means: the learner's own saved voice, then the
+  // provider's default.
+  if (params.voice) search.set('voice', params.voice);
+  if (params.format) search.set('format', params.format);
+
+  const blob = await api.get<Blob>(`/ai/speech/audio?${search.toString()}`, {
+    responseType: 'blob',
+    signal: opts.signal,
+  });
+
+  if (!blob.type.toLowerCase().startsWith('application/json')) {
+    return { status: 'ok', audio: blob };
+  }
+
+  // The same reader the synthesis route uses, widened by one member — see
+  // `parseSynthesisEnvelope`, which is where every defensive branch lives.
+  return parseSpeechEnvelope(blob);
 }
 
 /**

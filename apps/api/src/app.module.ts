@@ -27,6 +27,7 @@ import { PatModule } from './pat/pat.module';
 import { CredentialsModule } from './credentials/credentials.module';
 import { EmailModule } from './email/email.module';
 import { AiModule } from './ai/ai.module';
+import { SpeechAudioModule } from './ai/speech-audio.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { AccountModule } from './account/account.module';
 import { LoggerModule } from './common/logger/logger.module';
@@ -172,6 +173,13 @@ import configuration from './config/configuration';
     // per-user BYOK surface (epic #25). Like EmailModule, it owns its own
     // `system_settings` row and its own credential purposes.
     AiModule,
+    // The speech HTTP surface (`/api/ai/speech/*`) and, behind its newest
+    // route, the shared civics audio cache (#284, epic #280). A module of its
+    // own only because `AiSpeechController` now needs BOTH `AiModule` and
+    // `CivicsModule`, and `CivicsModule` already imports `AiModule` — see
+    // `speech-audio.module.ts` for why that is a straight line here rather
+    // than a `forwardRef` cycle there.
+    SpeechAudioModule,
     // Notifications (#121/#124/#125, epic #109): the event registry endpoint,
     // and since #125 the dispatcher, preference resolution and delivery
     // records. Registered here even though no real event is wired yet (#128)
