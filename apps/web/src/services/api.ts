@@ -869,12 +869,37 @@ export async function getAiUsage(days?: number): Promise<AiUsage> {
  *   `audio.webm` that lies about an mp4.
  * @param opts.signal  aborts the upload. A learner who navigates away mid-send
  *   should not be billed for the transcription of an answer nobody will read.
+ * @param opts.questionId  the civics question this recording answers, when the
+ *   caller knows it (issue #348). AN ID, NEVER TEXT — see below.
  */
 export async function transcribeAudio(
   blob: Blob,
-  opts: { fileName?: string; signal?: AbortSignal } = {},
+  opts: { fileName?: string; signal?: AbortSignal; questionId?: string } = {},
 ): Promise<TranscribeResponse> {
   const form = new FormData();
+
+  // THE QUESTION ID, AND NOTHING DERIVED FROM IT (issue #348, epic #345). The
+  // server resolves this to the question and its accepted answers — from its
+  // own rows, for this caller, in this caller's own state — and uses those
+  // words to BIAS the recogniser toward the proper nouns a civics answer is
+  // full of ("the Bill of Rights", "Woodrow Wilson").
+  //
+  // There is deliberately NO field for the biasing text itself, and this client
+  // must never grow one even though it already has the question on screen. Text
+  // a browser chose is text a browser could choose differently: it would put
+  // arbitrary strings into a provider request, and it would let whoever is
+  // holding the microphone steer their own recogniser toward the words they
+  // wanted to be heard saying. `TranscribeUploadCarriesNoPrompt` in
+  // `apps/api/src/ai/ai-speech.service.ts` makes adding one a build failure on
+  // the other side of the wire; this comment is the reason it is there.
+  //
+  // APPENDED BEFORE THE FILE, because the server reads the form fields off the
+  // file part as it streams — a field sent after the audio has not been parsed
+  // by the time the upload is read.
+  if (opts.questionId !== undefined) {
+    form.append('questionId', opts.questionId);
+  }
+
   // One file part, named `audio`. NOT an arbitrary name: the endpoint iterates
   // the parts and REJECTS any file field it was not expecting (see
   // `AUDIO_FIELD` in `apps/api/src/ai/ai-speech.controller.ts`), rather than

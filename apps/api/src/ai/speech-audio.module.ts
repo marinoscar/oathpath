@@ -7,6 +7,7 @@ import { SettingsModule } from '../settings/settings.module';
 import { StorageProvidersModule } from '../storage/providers/storage-providers.module';
 import { AiSpeechController } from './ai-speech.controller';
 import { SpeechAudioService } from './speech-audio.service';
+import { TranscriptionContextService } from './transcription-context.service';
 
 /**
  * The speech HTTP surface, and the shared civics audio cache behind its newest
@@ -51,6 +52,12 @@ import { SpeechAudioService } from './speech-audio.service';
  * the namespace's own service rather than a hand-rolled read of the JSONB
  * column at a call site.
  *
+ * `TranscriptionContextService` (#348, epic #345) is declared here for exactly
+ * the same reason `SpeechAudioService` is: it reaches `CivicsService`, so it
+ * cannot live in `AiModule` without closing the cycle described above. It is the
+ * second consumer of that arrangement, not a new one — and note which way the
+ * dependency runs: the SPEECH side reads civics content, never the reverse.
+ *
  * `SpeechAudioService` is deliberately NOT exported. Nothing outside this
  * module should be able to spend a learner's key on synthesis without the
  * learner's own request in front of it — the same posture `CivicsModule` takes
@@ -70,6 +77,6 @@ import { SpeechAudioService } from './speech-audio.service';
     StorageProvidersModule,
   ],
   controllers: [AiSpeechController],
-  providers: [SpeechAudioService],
+  providers: [SpeechAudioService, TranscriptionContextService],
 })
 export class SpeechAudioModule {}
