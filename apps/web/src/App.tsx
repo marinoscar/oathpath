@@ -78,6 +78,10 @@ const UserAppearancePage = lazy(() => import("./pages/UserAppearancePage"));
 const UserNotificationsPage = lazy(
   () => import("./pages/UserNotificationsPage"),
 );
+// Issue #288, epic #280 — the six `user_settings.voice` preferences and the
+// voice picker. `VoiceSettingsPage` rather than `UserVoicePage`: there is no
+// admin counterpart to disambiguate it from, unlike Appearance.
+const VoiceSettingsPage = lazy(() => import("./pages/VoiceSettingsPage"));
 // Issue #77, epic #50 — the ongoing home for the six orientation answers,
 // rendering the SAME `JourneyProfileForm` `/setup/journey` above renders.
 const UserJourneyPage = lazy(() => import("./pages/UserJourneyPage"));
@@ -441,6 +445,18 @@ function AppRoutes() {
                         <Route
                           path="/settings/notifications"
                           element={<UserNotificationsPage />}
+                        />
+                        {/* Ungated like its siblings (#288, epic #280). Both endpoints
+                        behind it — `PATCH /api/user-settings` and
+                        `GET /api/ai/speech/voices` — are reachable by all three
+                        roles, so the `Voice` card declares no `permission` and
+                        there is no string a gate here could honestly mirror.
+
+                        INSIDE `RequireOrientation` with the rest of the shell,
+                        like every other `/settings/*` route in this block. */}
+                        <Route
+                          path="/settings/voice"
+                          element={<VoiceSettingsPage />}
                         />
                         {/* Ungated like its siblings (#77, epic #50). It edits the
                         caller's OWN journey profile through

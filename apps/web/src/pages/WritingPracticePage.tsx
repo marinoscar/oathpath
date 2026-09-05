@@ -166,6 +166,7 @@ import {
 } from '../components/voice/QuestionAudio';
 import { useIsMounted } from '../hooks/useIsMounted';
 import { useVoiceAvailability } from '../hooks/useVoiceAvailability';
+import { useVoicePrefs } from '../hooks/useVoicePrefs';
 import { getNextEnglishSentence, recordEnglishAttempt } from '../services/api';
 import type {
   EnglishAttemptScored,
@@ -232,6 +233,17 @@ export default function WritingPracticePage() {
   // this codebase — but here it is the difference between an exercise and an
   // apology, so `isLoading` below keeps the apology from being printed early.
   const { speakBound, isLoading: aiStatusLoading } = useVoiceAvailability();
+
+  /**
+   * The learner's own voice preferences (#288, epic #280).
+   *
+   * READ, but `preferPremiumVoice` DELIBERATELY NOT APPLIED — see the
+   * `premiumVoice` prop below and the file header. Only `preferredVoice` and
+   * `speechRate` are honoured here, because those describe HOW the sentence
+   * sounds, which is the learner's to choose on any screen. WHICH engine
+   * speaks it is this screen's own rule, and it is not a preference.
+   */
+  const { voice: voicePrefs } = useVoicePrefs();
 
   /** The browser can speak, or the deployment's premium voice can. */
   const canDictate = browserSpeech || speakBound;
@@ -521,6 +533,17 @@ export default function WritingPracticePage() {
                   // the paid route is the last way to hear it rather than the
                   // first. See the file header.
                   premiumVoice={!browserSpeech}
+                  // The learner's stored voice and speed (#288) DO apply — they
+                  // are about how the sentence sounds, not about which engine
+                  // says it. `preferPremiumVoice` is deliberately absent from
+                  // this list: turning the premium voice off on
+                  // `/settings/voice` while the browser has no voice at all
+                  // would leave nothing able to dictate, which turns this
+                  // screen into the apology it renders for a genuinely
+                  // unspeakable deployment — an exercise silently removed by a
+                  // preference that was never about removing it.
+                  voice={voicePrefs.preferredVoice}
+                  rate={voicePrefs.speechRate}
                   // ACTUALLY SPOKEN, not "play was pressed".
                   onPlayed={() => setPlayCount((n) => n + 1)}
                 />

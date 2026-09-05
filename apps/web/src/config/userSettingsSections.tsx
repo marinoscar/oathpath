@@ -22,6 +22,7 @@
 import PersonIcon from '@mui/icons-material/Person';
 import FlagIcon from '@mui/icons-material/Flag';
 import PaletteIcon from '@mui/icons-material/Palette';
+import RecordVoiceOverIcon from '@mui/icons-material/RecordVoiceOver';
 import NotificationsIcon from '@mui/icons-material/Notifications';
 import VpnKeyIcon from '@mui/icons-material/VpnKey';
 import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome';
@@ -91,6 +92,32 @@ export const USER_SETTINGS_SECTIONS: SettingsSectionDef[] = [
         description: 'Choose a light, dark, or system-matched theme for this account.',
         Icon: PaletteIcon,
         path: '/settings/appearance',
+      },
+      {
+        // Issue #288, epic #280. Every voice preference in that epic — the
+        // premium opt-in `QuestionAudio` used to take as a hard-coded `false`,
+        // which voice, how fast, whether a spoken answer submits itself —
+        // needed somewhere to live, and this is it.
+        //
+        // A REGISTRY CARD PLUS A ROUTE, never a tab on an existing settings
+        // page (CLAUDE.md's Settings UI Pattern, rule 2): this is a
+        // reachability question — its own destination — not a second view of
+        // Appearance's content. It sits NEXT TO Appearance because the two are
+        // the same kind of answer (how this account looks; how it sounds) and
+        // a learner looking for one will look where the other is.
+        //
+        // NO `permission`, like every card in this file.
+        // `PATCH /api/user-settings` grants `user_settings:write` to all three
+        // roles, and `GET /api/ai/speech/voices` is `@Auth()` with no
+        // permissions — there is no "may choose a voice" privilege in this
+        // product's authorization model to mirror, and inventing one would
+        // leave a Viewer, the default role, unable to slow down the voice
+        // reading them their questions.
+        title: 'Voice',
+        description:
+          'How questions are read to you, and what happens when you answer out loud.',
+        Icon: RecordVoiceOverIcon,
+        path: '/settings/voice',
       },
       {
         // Issue #126, epic #109. NO `permission`, like every card here: the

@@ -923,11 +923,25 @@ export async function transcribeAudio(
  */
 export async function synthesizeSpeech(
   text: string,
-  opts: { signal?: AbortSignal } = {},
+  opts: {
+    signal?: AbortSignal;
+    /**
+     * The PROVIDER's own voice id, e.g. `alloy` — from
+     * {@link listSpeechVoices}, or from the learner's stored
+     * `user_settings.voice.preferredVoice`.
+     *
+     * OMITTED, NEVER SENT EMPTY. `aiSynthesizeRequestSchema` is `.strict()`
+     * with `voice` optional, so an absent key means "let the provider choose"
+     * while `voice: ''` is a 400 — which is why the key is built conditionally
+     * below rather than always spread. A learner who has expressed no
+     * preference is the normal case, and it must not be a bad request.
+     */
+    voice?: string;
+  } = {},
 ): Promise<SynthesizeResponse> {
   const blob = await api.post<Blob>(
     '/ai/speech/synthesize',
-    { text },
+    { text, ...(opts.voice ? { voice: opts.voice } : {}) },
     { responseType: 'blob', signal: opts.signal },
   );
 
