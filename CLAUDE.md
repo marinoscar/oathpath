@@ -583,16 +583,32 @@ the endpoint's full design.
 ### Interviews (Per User)
 - `POST /api/interviews` - Start a mock interview; test version and senior accommodation resolved from `learner_profiles`, never the request; returns the officer's opening turn
 - `POST /api/interviews/{id}/turns` - Submit the applicant's reply and stream (SSE) the officer's response; the engine decides the question, grade and stop, the `tutor` role only supplies the acknowledgement wording
+- `POST /api/interviews/{id}/realtime-session` - Mint a short-lived, interview-scoped client secret for the spoken mock interview (E11, epic #60); the browser uses it to open its own realtime connection directly to the provider, never through this API
+- `POST /api/interviews/{id}/realtime/tool-calls` - Handle one `next_question`/`grade_answer`/`end_phase` tool call the realtime model makes; the engine decides what the model is told, exactly as it does for the text transport's turns
 - `POST /api/interviews/{id}/complete` - Finish the interview, compute the debrief, and trigger a readiness recompute; idempotent
 - `GET /api/interviews` - List the caller's own interviews, newest first, paginated
 - `GET /api/interviews/{id}` - Resume an in-progress interview or re-read a completed one's debrief
 
-All five are `@Auth()` with no permissions, and no route accepts a user
+All seven are `@Auth()` with no permissions, and no route accepts a user
 id — every authenticated learner owns their own interview history exactly
 as they own their own practice attempts, their own learner profile, and
 their own readiness snapshots. Another learner's interview id is a **404,
 not a 403**. See [`docs/specs/mock-interview.md`](docs/specs/mock-interview.md)
-§12 and [`docs/API.md`](docs/API.md#interviews).
+§12, [`docs/specs/realtime-interview.md`](docs/specs/realtime-interview.md)
+for the two realtime routes, and [`docs/API.md`](docs/API.md#interviews).
+
+**The spoken (realtime) interview is an addition, never a requirement.** The
+`realtime` AI model role (`apps/api/src/ai/ai-model-roles.ts`) is wired —
+something dispatches to it, the mint call above — but its capability is
+`'realtime'`, not `'text'`, so binding it is optional and leaving it unbound
+does not affect `systemReady` at all: a learner with no `realtime` binding
+gets a complete, fully working *text* mock interview over the existing
+`POST /api/interviews/{id}/turns` route, and the realtime screen simply
+never renders a "start voice interview" control. See
+[`docs/specs/realtime-interview.md`](docs/specs/realtime-interview.md) §1
+and §7, and
+[`docs/runbooks/configuring-realtime-interview.md`](docs/runbooks/configuring-realtime-interview.md)
+for the operator-facing walkthrough.
 
 ### Voice (Per User)
 - `POST /api/ai/speech/transcribe` - Turn one recording into text on the caller's own AI key; nothing is graded and nothing is stored (multipart, capped at 10 MB / 120 seconds, both enforced before any provider call)
@@ -714,12 +730,19 @@ attempts, and no route accepts a user id. See
 [`docs/specs/habit-streaks.md`](docs/specs/habit-streaks.md) §4.6.
 
 **Mock interview adds no permission strings either, for the same reason.**
-All five `/api/interviews*` routes are `@Auth()` with no permissions: every
+All seven `/api/interviews*` routes — the five text-transport routes and the
+two realtime routes E11 (epic #60) added, `realtime-session` and
+`realtime/tool-calls` — are `@Auth()` with no permissions: every
 authenticated learner owns their own interview history, exactly as they
 own their own practice attempts and their own readiness snapshots, and no
 route accepts a user id — `@CurrentUser('id')` is the only source of one,
 so there is no "read another learner's interview" permission to add in the
-first place. See [`docs/specs/mock-interview.md`](docs/specs/mock-interview.md) §12.
+first place. Gating the realtime mint specifically would leave a Viewer,
+the default role, unable to sit a spoken mock interview at all — there is
+no "use voice" or "use realtime" privilege in this product's authorization
+model, the identical posture the Voice paragraph below already states for
+`/api/ai/speech/*`. See [`docs/specs/mock-interview.md`](docs/specs/mock-interview.md)
+§12 and [`docs/specs/realtime-interview.md`](docs/specs/realtime-interview.md) §3.
 
 **Voice adds no permission strings either, for the same reason.** Both
 `/api/ai/speech/*` routes are `@Auth()` with no permissions: every
@@ -773,7 +796,7 @@ request. See [`docs/specs/english-test.md`](docs/specs/english-test.md) §7.
 - `readiness_snapshots` - One row per computed readiness score (E6, epic #55): `score` (0-100, structurally capped at 75 for a learner with none of `english`/`spoken`/`interview` — `spoken`/`interview` sum to 0.20 weight and are 0 with no spoken-answer or mock-interview evidence, and `english`, real since #141/E10, is earnable independently of either, so a `capReason: 'typed_only'` learner can still reach 80 with full `english` credit; `english` deliberately does not itself lift `capReason` — see `docs/specs/readiness-model.md` §2.9), the full `components`/`evidenceCounts` breakdown for all eight components, `cap_reason` (`'typed_only'`/`null`), `top_recommendation`, and the learner's `stage` at computation time, all frozen so a past snapshot stays self-explaining after the mastery rows it summarized move on. `narrative`/`narrative_generated_at` are nullable and filled in lazily, on the caller's own AI key, only from the request path (never the nightly cron). See `docs/specs/readiness-model.md` §4-§5
 - `daily_activity` - One row per `(user, local calendar day)` (E7, epic #56): `activity_date` (`@db.Date`, the learner's LOCAL day, not an instant), `tz_used` (the IANA zone that day was actually computed in, frozen at write time rather than re-derived from the learner's possibly-since-changed profile), `practice_seconds`/`attempts`/`correct`, `goal_met` (monotonic — once true, never flips back for the same row), `freeze_used` (true only when this row exists to record that a streak freeze covered a day with no practice at all). `@@unique([userId, activityDate])` is both the ordinary-accrual upsert key and the freeze-settlement idempotency key. Has no foreign key, relation, or column reachable from `readiness_snapshots` or the readiness engine — not an input to readiness, structurally, never merely by convention; see `docs/ARCHITECTURE.md` §5.6. See `docs/specs/habit-streaks.md` §2-§4
 - `learner_profiles.streak_freezes` / `learner_profiles.streak_freezes_granted_at` - The freeze budget (E7, epic #56): an integer ceiling of 2 (`STREAK_FREEZE_MAX`, `apps/api/src/engagement/streaks/freeze-settlement.ts`), replenished at most once per 7 days, and the timestamp of the last grant. Read and written only by `EngagementService`'s settlement pass (`GET /api/engagement/summary`'s own request path — engagement's sole recompute trigger, deliberately unlike readiness's two). See `docs/specs/habit-streaks.md` §4.3-§4.5
-- `mock_interviews` - One row per mock interview run (E8, epic #57): `mode` (`text`/`voice`, only `text` wired), `status` (`in_progress`/`completed`/`abandoned`), `test_version_code` and `senior_exemption` (frozen from `learner_profiles` at creation, never re-read), `civics_asked`/`civics_correct`/`passed_civics` (a derived running tally, not a second source of truth over the `practice_attempts` rows), `result` (the cached debrief JSON, written once at completion), and `transcript_retained` (`@default(false)` **at the database level** — the conservative retention default must survive a bug, not only a correctly-written call site). See `docs/specs/mock-interview.md` §8, §12
+- `mock_interviews` - One row per mock interview run (E8, epic #57): `mode` (`text`/`voice` — `text` on every `POST /api/interviews`, written explicitly rather than by column default, and flipped to `voice` by `InterviewsService` the moment the interview's first realtime-session mint succeeds, E11, epic #60 — a coarse, one-way "was this interview ever conducted by voice at all" summary, never reverted if the interview later falls back to text mid-way), `status` (`in_progress`/`completed`/`abandoned`), `test_version_code` and `senior_exemption` (frozen from `learner_profiles` at creation, never re-read), `civics_asked`/`civics_correct`/`passed_civics` (a derived running tally, not a second source of truth over the `practice_attempts` rows), `result` (the cached debrief JSON, written once at completion), and `transcript_retained` (`@default(false)` **at the database level** — the conservative retention default must survive a bug, not only a correctly-written call site). See `docs/specs/mock-interview.md` §8, §12 and `docs/specs/realtime-interview.md` §3, §6
 - `mock_interview_turns` - One row per line of an interview's conversation, in order (E8, epic #57): `role` (`officer`/`applicant`), `phase`, `question_id` (set only on a civics officer turn), `attempt_id` (set only on a civics applicant turn — the `practice_attempts` row it produced), and `text`, which is written empty (not null) for an applicant turn when the interview's `transcript_retained` is `false` — the turn's structure survives; the learner's words do not. See `docs/specs/mock-interview.md` §8.2
 - `english_sentences` - The composed reading/writing sentences a learner practises on (E10, epic #59): `kind` (`reading`/`writing`), `version`, `ordinal`, `text`, and `vocab_tags` — the official USCIS vocabulary categories this sentence's own words resolve to, **derived by the loader from the same word-by-word validation pass that enforces the content rule**, never hand-authored, so a tag set cannot drift from the words it describes. The provenance triple (`source_url`, `retrieved_at`, `content_sha256`) does **not** mean what it means on `civics_questions`: USCIS publishes vocabulary LISTS and no sentence list at all, so a sentence here is composed rather than transcribed and its authority is the list it was built from — the triple points at that list's official PDF and the exact bytes retrieved for it. Upserted on `(kind, version, ordinal)`. The sentences file's `composition.status` and each vocabulary file's `provenance.transcription.status` are read by the loader since #261, not merely carried: an untrusted status refuses the whole three-file bundle, and refuses it unconditionally under `NODE_ENV=production`. See `docs/specs/english-test.md` §1 (§1.2 on why the shipped 36 are `HUMAN_VERIFIED` rather than `HUMAN_COMPOSED_AND_REVIEWED`, §1.5 on the gate) and §5
 - `english_attempts` - One row per scored reading or writing attempt (E10, epic #59): `kind`, `response_text` (for writing exactly what the learner typed; for reading the learner-CONFIRMED transcript, never the recogniser's raw guess), `asr_confidence` (reading only, `null` means unknown and never low), `wer`, `diff_ops` (the word-level alignment, so a screen can show *which* word rather than only a number), `outcome` (`EnglishOutcome` — three values, no `skipped`), `replay_count`, `answered_at`. **A low-confidence reading attempt writes no row here at all** — `misheard` is the absence of a record, the one place this codebase diverges from `practice_attempts`, where `misheard` is a `failure_cause` on a row that IS written; `docs/specs/english-test.md` §3 gives the reason. No audio column, no `storage_objects` reference, and never will be. See `docs/specs/english-test.md` §5
@@ -851,7 +874,7 @@ Note: `DATABASE_URL` is constructed automatically from these variables at runtim
 - `SECRETS_ENCRYPTION_KEY` - Base64-encoded 32-byte AES-256 key (generate with `openssl rand -base64 32`) that encrypts runtime-configured credentials (e.g. an SMTP password an admin enters through the app) before they are stored in the `credentials` table. Optional until a credential is stored; see `docs/runbooks/rotate-secrets-encryption-key.md`. Note: credentials configured at runtime through the UI/API live encrypted in the database, not in the environment — unlike every other secret in this section.
 
 **AI (development/test only):**
-- `AI_PROVIDER_FAKE` - Set to exactly `true` to substitute a built-in `FakeAiProvider` for `OpenAiProvider` at the DI layer (`AiModule`'s `resolveAiProvider`), so the grading ladder, the tutor's stream, the admin model dropdowns, the usage table, and (E9, epic #58) transcription/synthesis can all be exercised with no OpenAI account, no API key, and no outbound network call. It does not add a new provider *kind* — `AI_PROVIDER_KINDS` stays `['openai']`, a test settings row still stores `provider: 'openai'`, and the substitution is invisible to every consumer that reads that value. **Inert under `NODE_ENV=production`** — the flag is ignored entirely there, so an inherited or copied `.env` cannot make a real deployment grade learners against a fixture while reporting itself healthy. See `docs/specs/ai-evaluation.md` §10.
+- `AI_PROVIDER_FAKE` - Set to exactly `true` to substitute a built-in `FakeAiProvider` for `OpenAiProvider` at the DI layer (`AiModule`'s `resolveAiProvider`), so the grading ladder, the tutor's stream, the admin model dropdowns, the usage table, (E9, epic #58) transcription/synthesis, and (E11, epic #60) the realtime session mint can all be exercised with no OpenAI account, no API key, and no outbound network call. It does not add a new provider *kind* — `AI_PROVIDER_KINDS` stays `['openai']`, a test settings row still stores `provider: 'openai'`, and the substitution is invisible to every consumer that reads that value. **Inert under `NODE_ENV=production`** — the flag is ignored entirely there, so an inherited or copied `.env` cannot make a real deployment grade learners against a fixture while reporting itself healthy. See `docs/specs/ai-evaluation.md` §10.
 
 **Content trust (development/test only):**
 - `CIVICS_ALLOW_UNVERIFIED_CONTENT` / `ENGLISH_ALLOW_UNVERIFIED_CONTENT` - Set to exactly `true` to let a seed load content whose recorded verification status this repository does not trust — `civics-2008.json`'s `UNVERIFIED_MODEL_DRAFT`, deliberately, being the live case. Each loader reads its own flag (`load-content.ts`'s `assertTrustedForLoad`, `load-english-content.ts`'s `assertEnglishTrustedForLoad`, issue #261), and **both are ignored under `NODE_ENV=production`**, which refuses untrusted content regardless — an inherited or copied `.env` must not be able to put unreviewed exam material in front of a learner. The flags themselves are documented in `infra/compose/.env.example`; see `docs/runbooks/updating-civics-content.md` §5 and `docs/runbooks/updating-english-content.md` §6.1 for what each file's status currently claims and what it does not.
@@ -985,10 +1008,12 @@ notification registry makes on its own axis (epic #25, `docs/specs/ai-settings.m
 A **model role** is one job this application asks a model to do. Six are
 declared; `tutor`, `grader`, `transcribe` and `speak` are wired (the last two
 since E9, epic #58 — see [`docs/specs/voice.md`](docs/specs/voice.md) §1),
-and `realtime`/`embed` are still declared and inert, so that wiring voice
-work did not need a settings-schema change or a migration over live admin
-configuration, and wiring the next role (realtime interviews, E11) will not
-either.
+and `realtime` is wired too, since E11, epic #60 — see
+[`docs/specs/realtime-interview.md`](docs/specs/realtime-interview.md) §1.
+`embed` is the only role still declared and inert, so that wiring voice and
+realtime work needed no settings-schema change and no migration over live
+admin configuration either time, and wiring `embed` when its own feature
+arrives will not need one either.
 
 1. **Declare the role** in `apps/api/src/ai/ai-model-roles.ts`
    (`AI_MODEL_ROLES`): a stable `key`, a `label` and `description` written as
@@ -1015,12 +1040,14 @@ either.
    unbound until an admin binds a model for a feature that does not exist —
    which is informational, not a block, **unless the role is also a `text`
    capability**: `systemReady` (the hard-blocking flag) is computed only over
-   the wired roles whose `capability` is `'text'` (`tutor`, `grader` today),
-   precisely so that wiring a non-text role like `transcribe`/`speak` cannot
-   flip an already-deployed installation's `systemReady` to `false` for a
-   capability nobody asked for. See
-   [`docs/specs/voice.md`](docs/specs/voice.md) §1 for the mechanism, spelled
-   out in full there rather than here.
+   the wired roles whose `capability` is `'text'` (`tutor`, `grader` today —
+   `transcribe`/`speak`/`realtime` are all wired and none of them is a text
+   capability, which is why wiring any of the three left `systemReady`
+   untouched), precisely so that wiring a non-text role cannot flip an
+   already-deployed installation's `systemReady` to `false` for a capability
+   nobody asked for. See [`docs/specs/voice.md`](docs/specs/voice.md) §1 and
+   [`docs/specs/realtime-interview.md`](docs/specs/realtime-interview.md) §1
+   for the mechanism, spelled out in full there rather than here.
 
    An unwired role still renders on `/admin/settings/ai`, inert, using the
    registry's `disabled` card idiom — an admin can see what is coming without

@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Release checklist: realtime and voice code
+
+This repository has no separate release-procedure document, so this note
+lives here — the place a release's own entry is already written, and
+therefore the one place a person compiling that entry cannot miss it.
+
+**Before any release whose diff touches voice or realtime code** —
+`apps/api/src/ai/providers/`'s `transcribe`/`synthesize`/`createRealtimeSession`
+paths, anything under `apps/api/src/interviews/realtime/`, or
+`apps/web/src/services/realtimeConnection.ts` — run the manual verification
+checklist in
+[`docs/specs/realtime-interview.md`](docs/specs/realtime-interview.md) §11:
+eight numbered items (barge-in in both directions, end-to-end latency, the
+end control under load, mid-session device switching, microphone denial,
+network loss, and secret expiry), each with its own pass criterion, run by a
+person against a real deployment, a real browser, and a real microphone. No
+suite in this codebase automates it, by design — §10 of that same document
+states why honestly rather than pretending otherwise — so this checklist is
+the only thing standing between a barge-in regression and a shipped release.
+
+**Record the result as a line in that release's own entry below**: pass/fail
+per item, who ran it, and when. A release note that changes realtime or
+voice code with no corresponding checklist line is incomplete, not merely
+undocumented — the identical standard `docs/specs/realtime-interview.md`
+§11 already states for this exact rule.
+
 ## [Unreleased]
 
 ### Changed

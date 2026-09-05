@@ -117,8 +117,12 @@ import { Link as RouterLink, Navigate, useParams } from 'react-router-dom';
 import { CivicsResultPanel } from '../components/interview/CivicsResultPanel';
 import { DebriefQuestion } from '../components/interview/DebriefQuestion';
 import { LoadingSpinner } from '../components/common/LoadingSpinner';
+import { NextStep } from '../components/interview/NextStep';
 import { PhaseCoverage } from '../components/interview/PhaseCoverage';
 import { ReadinessMovement } from '../components/interview/ReadinessMovement';
+import { SegmentResults } from '../components/interview/SegmentResults';
+import { SpokenSummary } from '../components/interview/SpokenSummary';
+import { TrustFooter } from '../components/journey/TrustFooter';
 import {
   focusAreasIntro,
   missedQuestionsIntro,
@@ -223,6 +227,16 @@ export default function InterviewDebriefPage() {
   const missedIntro = missedQuestionsIntro(debrief.civics.passed);
   const focusIntro = focusAreasIntro(debrief.focusAreas);
 
+  // ONLY FOR AN INTERVIEW THAT CARRIED BOTH TRANSPORTS — §7's dropped-
+  // connection fallback, which finishes over the text transport with the same
+  // interview id. On an all-spoken run the same "Answered aloud" label on every
+  // card is noise `SpokenSummary` has already said once, and on an all-typed
+  // one it is a distinction with nothing to distinguish. This is presentation
+  // derived from the server's own counts, never a measurement taken here.
+  const mixedTransports =
+    debrief.spoken.answers > 0 &&
+    debrief.spoken.answers < debrief.questions.length;
+
   return (
     <Container maxWidth="md" disableGutters>
       <Box sx={{ py: { xs: 1, sm: 2 } }}>
@@ -246,7 +260,20 @@ export default function InterviewDebriefPage() {
         />
 
         {/* ---------------------------------------------------------------
-            2. Where to focus — the server's own deterministic aggregation
+            2. How the spoken half went — counted off this interview's own
+               attempt rows, and absent entirely when nothing was spoken.
+            --------------------------------------------------------------- */}
+        {debrief.spoken.answers > 0 && (
+          <Box sx={{ mt: 4 }}>
+            <SpokenSummary
+              spoken={debrief.spoken}
+              headingId="debrief-spoken-heading"
+            />
+          </Box>
+        )}
+
+        {/* ---------------------------------------------------------------
+            3. Where to focus — the server's own deterministic aggregation
                of category names with at least one miss. Absent, rather than
                rendered empty, when there is nothing to point at.
             --------------------------------------------------------------- */}
@@ -279,7 +306,7 @@ export default function InterviewDebriefPage() {
         )}
 
         {/* ---------------------------------------------------------------
-            3. Question by question — what was asked, what passed, and what
+            4. Question by question — what was asked, what passed, and what
                would have been accepted.
             --------------------------------------------------------------- */}
         <Box
@@ -320,14 +347,32 @@ export default function InterviewDebriefPage() {
               sx={{ mt: 2, listStyle: 'none', m: 0, p: 0, pt: 2 }}
             >
               {debrief.questions.map((question) => (
-                <DebriefQuestion key={question.questionId} question={question} />
+                <DebriefQuestion
+                  key={question.questionId}
+                  question={question}
+                  showInputMode={mixedTransports}
+                />
               ))}
             </Stack>
           )}
         </Box>
 
         {/* ---------------------------------------------------------------
-            4. What this rehearsal covered — including, out loud, what it
+            5. The reading and writing tests, when this rehearsal conducted
+               them (E11 §5). Absent for every text interview — where a
+               rehearsal says what it did NOT include is the band below.
+            --------------------------------------------------------------- */}
+        {debrief.segments.length > 0 && (
+          <Box sx={{ mt: 4 }}>
+            <SegmentResults
+              segments={debrief.segments}
+              headingId="debrief-segments-heading"
+            />
+          </Box>
+        )}
+
+        {/* ---------------------------------------------------------------
+            6. What this rehearsal covered — including, out loud, what it
                did not. §2.4.
             --------------------------------------------------------------- */}
         <Box sx={{ mt: 4 }}>
@@ -338,7 +383,7 @@ export default function InterviewDebriefPage() {
         </Box>
 
         {/* ---------------------------------------------------------------
-            5. What this interview did to readiness — the server's numbers,
+            7. What this interview did to readiness — the server's numbers,
                rendered.
             --------------------------------------------------------------- */}
         <Box sx={{ mt: 4 }}>
@@ -348,22 +393,47 @@ export default function InterviewDebriefPage() {
           />
         </Box>
 
+        {/* ---------------------------------------------------------------
+            8. THE DEBRIEF ENDS ON THE ENGINE'S OWN RECOMMENDATION, not on a
+               generic prompt (issue #160). `PRD.md` requires the score above
+               to be explainable AND paired with a next action; the engine has
+               just worked out what that action is for this learner, and the
+               two links below are navigation rather than advice.
+            --------------------------------------------------------------- */}
+        <Box sx={{ mt: 4 }}>
+          <NextStep
+            readiness={debrief.readiness}
+            headingId="debrief-next-heading"
+          />
+        </Box>
+
         <Stack
           direction={{ xs: 'column', sm: 'row' }}
           spacing={1}
           sx={{ mt: 4, alignItems: { xs: 'stretch', sm: 'center' } }}
         >
-          {/* An INVITATION, never a push. No countdown, no streak, nothing
-              they could lose — `VISION.md` forbids manufacturing pressure by
-              name, and the screen a learner reads straight after a failed
-              rehearsal is the one most tempting to sell urgency on. */}
-          <Button component={RouterLink} to={INTERVIEWS_PATH} variant="contained">
+          {/* NAVIGATION, NOT A RECOMMENDATION — the recommendation is the card
+              above, and it is the engine's. Both are invitations rather than
+              pushes: no countdown, no streak, nothing a learner could lose,
+              because `VISION.md` forbids manufacturing pressure by name and
+              the screen read straight after a failed rehearsal is the one most
+              tempting to sell urgency on. */}
+          <Button component={RouterLink} to={INTERVIEWS_PATH} variant="outlined">
             Try another interview
           </Button>
           <Button component={RouterLink} to="/practice" variant="outlined">
             Back to Practice
           </Button>
         </Stack>
+
+        {/* THE STANDING DISCLAIMER, on the one screen in this product that
+            hands a learner a pass/fail verdict AND a readiness score in the
+            same view. `VISION.md`: "Trust is not legal copy buried in
+            settings. It is part of the user experience." `HomePage` and
+            `ProgressPage` already carry it wherever a readiness number is
+            rendered, and this page renders one — the identical component and
+            the identical sentence, never a second wording of it. */}
+        <TrustFooter />
       </Box>
     </Container>
   );

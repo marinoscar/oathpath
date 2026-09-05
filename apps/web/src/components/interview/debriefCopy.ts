@@ -79,7 +79,12 @@
  *     wondering whether one of the other two had happened quietly.
  */
 
-import type { InterviewCivicsResult, InterviewStopReason } from '../../types';
+import type {
+  InterviewCivicsResult,
+  InterviewReadinessSummary,
+  InterviewSpokenSummary,
+  InterviewStopReason,
+} from '../../types';
 
 /**
  * The one-line verdict on the civics section.
@@ -211,4 +216,150 @@ export function readinessChangeSentence(
   if (delta > 0) return `Up ${delta} from ${previousScore}.`;
   if (delta < 0) return `Down ${Math.abs(delta)} from ${previousScore}.`;
   return `Unchanged from ${previousScore}.`;
+}
+
+// =============================================================================
+// The spoken dimension (issue #160, epic #60 / E11)
+// =============================================================================
+//
+// `docs/specs/realtime-interview.md` §5, §6, §8. Rules 1-3 above apply to every
+// sentence below unchanged, and one of them does most of the work here:
+// **every number comes from the response**. `spoken.answers`, `spoken.correct`
+// and `spoken.misheard` are counted server-side over this interview's own
+// attempt rows, and nothing in this file counts a chip on screen or subtracts
+// one count from another.
+//
+// -----------------------------------------------------------------------------
+// RULE 4: A MISHEARING IS DESCRIBED, NEVER EXCUSED AND NEVER CHARGED
+// -----------------------------------------------------------------------------
+//
+// `voice.md` §3 is the whole argument: a nervous applicant misheard by the
+// recogniser mid-interview must not take a penalty for an accent or a noisy
+// connection rather than for anything they got wrong. The copy below therefore
+// says what happened — the recogniser was not confident — and says what follows
+// from it in this debrief, which is precisely that the question is left off the
+// list of sections to review.
+//
+// It deliberately does NOT say "this was not counted against you". That would
+// be a claim about the civics tally, and it would be false: the engine's stop
+// rule graded the words it was handed, so a mishearing does sit in
+// `civics.correct`'s denominator. Overstating the protection would be a
+// comforting sentence a learner could check and find wrong, which is worse than
+// the honest, narrower one.
+
+/**
+ * The one-sentence summary of the spoken half — or null when nothing was
+ * spoken, which is every text interview.
+ *
+ * `x of y` in the same shape {@link civicsCountsSentence} already uses, so the
+ * two bands read as one screen rather than two.
+ */
+export function spokenSummarySentence(
+  spoken: InterviewSpokenSummary,
+): string | null {
+  if (spoken.answers === 0) return null;
+
+  const answers = spoken.answers === 1 ? 'answer' : 'answers';
+  return (
+    `${spoken.answers} ${answers} spoken aloud, ` +
+    `${spoken.correct} accepted.`
+  );
+}
+
+/**
+ * The note about answers the recogniser could not make out — or null when there
+ * were none.
+ *
+ * The second sentence is the narrow, checkable claim described in Rule 4 above:
+ * a misheard question is genuinely absent from `focusAreas`, because
+ * `buildInterviewDebrief` excludes it there and nowhere else.
+ */
+export function misheardNote(spoken: InterviewSpokenSummary): string | null {
+  if (spoken.misheard === 0) return null;
+
+  const [answer, was] =
+    spoken.misheard === 1 ? ['answer', 'was'] : ['answers', 'were'];
+  return (
+    `${spoken.misheard} ${answer} ${was} not heard clearly. ` +
+    `Marked below, and left off the list of sections to look at again.`
+  );
+}
+
+/**
+ * What the reading and writing bands are called, and the one line under each.
+ *
+ * The reading sentence was on screen while it was read; the writing sentence
+ * was NOT — `english.service.ts` calls the post-attempt sentence "the REVEAL —
+ * the first time the learner sees the sentence they were dictated", and this
+ * screen is where that reveal happens for an interview. Naming that in the
+ * label is the difference between a learner reading "here is the sentence" and
+ * a learner understanding why they are only seeing it now.
+ */
+export function segmentLabel(kind: string): string {
+  if (kind === 'reading') return 'Reading test';
+  if (kind === 'writing') return 'Writing test';
+  // A segment kind this build has never heard of. Says only what is certainly
+  // true, the same open-set-on-the-wire discipline `phaseLabel` follows.
+  return 'This segment';
+}
+
+/** The line above the sentence itself. */
+export function segmentSentenceLabel(kind: string): string {
+  if (kind === 'reading') return 'The sentence to read aloud';
+  if (kind === 'writing') return 'The sentence that was dictated';
+  return 'The sentence';
+}
+
+/**
+ * Whether the score's structural ceiling still applies, said in terms of the
+ * evidence that lifted it — or null while it does apply.
+ *
+ * -----------------------------------------------------------------------------
+ * THIS IS NOT A SECOND COPY OF `capMessage`, AND MUST NEVER BECOME ONE
+ * -----------------------------------------------------------------------------
+ *
+ * `capMessage` is the server's own fixed sentence, quoted from `PRD.md` by way
+ * of `readiness-model.md` §3, and it is rendered verbatim while the cap
+ * applies. There is no server sentence for the other side of that boundary,
+ * because until this epic nothing on this screen could cross it and say
+ * anything useful: a learner who had just passed their first mock interview saw
+ * the capped sentence disappear and nothing take its place, which reads as the
+ * product losing interest rather than as a ceiling lifting.
+ *
+ * So this sentence is assembled here, from the server's own two evidence counts
+ * and no others — `readiness-engine.ts`'s cap reads exactly those two paths
+ * (`evidenceCounts.spoken.attempts` and `evidenceCounts.interview.attempts`),
+ * and naming a third would claim the cap responds to something it does not.
+ * `english` is deliberately not among them, for the reason the engine's own
+ * header spends a paragraph on: reading and writing English sentences is not
+ * evidence that a learner can answer a civics question aloud.
+ *
+ * Null while the cap applies, so the two sentences can never both be on screen.
+ */
+export function capLiftedSentence(
+  readiness: InterviewReadinessSummary,
+): string | null {
+  if (readiness.capReason !== null) return null;
+
+  const spoken = readiness.spokenComponent.evidenceCount;
+  const interviews = readiness.interviewComponent.evidenceCount;
+
+  const evidence: string[] = [];
+  if (spoken > 0) {
+    evidence.push(
+      `${spoken} civics ${spoken === 1 ? 'question' : 'questions'} answered aloud`,
+    );
+  }
+  if (interviews > 0) {
+    evidence.push(
+      `${interviews} mock ${interviews === 1 ? 'interview' : 'interviews'} passed`,
+    );
+  }
+
+  // Neither count above zero cannot happen — `capReason` is null precisely when
+  // one of them is — but a response is a response, and a sentence with an empty
+  // list in the middle of it is worse than no sentence at all.
+  if (evidence.length === 0) return null;
+
+  return `The score cap no longer applies: ${evidence.join(' and ')}.`;
 }

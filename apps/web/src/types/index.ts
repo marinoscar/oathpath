@@ -2367,6 +2367,60 @@ export interface InterviewDebriefQuestion {
   outcome: PracticeOutcome;
   /** From the FROZEN answer snapshot on the attempt row, never a live re-query. */
   acceptedAnswers: string[];
+
+  /**
+   * How this answer reached the officer — `practice_attempts.input_mode`
+   * (issue #160, epic #60 / E11).
+   *
+   * PER QUESTION, NOT PER INTERVIEW: a dropped realtime connection falls back
+   * to the text transport with the same interview id, so one interview can
+   * genuinely carry both.
+   */
+  inputMode: 'typed' | 'spoken';
+
+  /**
+   * The recogniser was not confident it heard what was said —
+   * `failure_cause: 'misheard'` on the row.
+   *
+   * A SEPARATE FACT FROM `outcome`, never a ninth outcome value. Both are
+   * rendered: the outcome is what the grading ladder concluded about the words
+   * it was given, and this is whether we believe those were the learner's.
+   */
+  misheard: boolean;
+
+  /** The recogniser's own confidence. Null means UNKNOWN, never low. */
+  asrConfidence: number | null;
+}
+
+/**
+ * How the spoken half of this interview went — three counts over its own
+ * `practice_attempts` rows (issue #160).
+ *
+ * `correct` is exactly what readiness's `spoken` component counts, which is
+ * what lets the readiness band and the question list on one screen explain
+ * each other.
+ */
+export interface InterviewSpokenSummary {
+  answers: number;
+  correct: number;
+  misheard: number;
+}
+
+/**
+ * One conducted English segment — the reading or the writing test, as scored
+ * (issue #160).
+ *
+ * A segment the interview did not conduct is ABSENT, never an entry with
+ * zeros: `phases` is where "this rehearsal did not include the reading test"
+ * is said.
+ */
+export interface InterviewSegmentResult {
+  kind: 'reading' | 'writing';
+  outcome: 'correct' | 'partial' | 'incorrect';
+  /** The sentence itself. For writing this is the reveal, read after the fact. */
+  sentence: string;
+  /** The word error rate the outcome was computed from. Never re-derived here. */
+  wer: number;
 }
 
 /** Whether this rehearsal conducted a phase, or named it and skipped it. */
@@ -2384,6 +2438,16 @@ export interface InterviewReadinessSummary {
   /** The fixed cap copy, server-written, or null. Rendered verbatim. */
   capMessage: string | null;
   interviewComponent: { value: number; evidenceCount: number };
+  /**
+   * The `spoken` component — `min(distinctQuestionsCorrectSpoken / 20, 1)`.
+   *
+   * `evidenceCount` is the learner's LIFETIME count across every source, not
+   * this interview's own. How many came from this interview is
+   * `InterviewDebrief.spoken.correct`, and the two answer different questions.
+   */
+  spokenComponent: { value: number; evidenceCount: number };
+  /** The snapshot's own next action, whole — never a subset chosen on screen. */
+  recommendation: ReadinessTopRecommendation;
 }
 
 /**
@@ -2398,6 +2462,10 @@ export interface InterviewReadinessSummary {
 export interface InterviewDebrief {
   civics: InterviewCivicsResult;
   questions: InterviewDebriefQuestion[];
+  /** How the spoken half went. All zeros on a text interview, never absent. */
+  spoken: InterviewSpokenSummary;
+  /** The segments this interview conducted, reading first. Empty in text mode. */
+  segments: InterviewSegmentResult[];
   phases: InterviewPhaseStatus[];
   /** Category names with at least one miss. Deterministic, never model-written. */
   focusAreas: string[];

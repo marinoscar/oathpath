@@ -58,7 +58,7 @@
 import { Alert, Box, Paper, Stack, Typography } from '@mui/material';
 
 import type { InterviewReadinessSummary } from '../../types';
-import { readinessChangeSentence } from './debriefCopy';
+import { capLiftedSentence, readinessChangeSentence } from './debriefCopy';
 
 export interface ReadinessMovementProps {
   readiness: InterviewReadinessSummary;
@@ -71,6 +71,10 @@ export function ReadinessMovement({ readiness, headingId }: ReadinessMovementPro
     readiness.delta,
     readiness.previousScore,
   );
+  // Exactly one of these two is ever a string — `capLiftedSentence` returns
+  // null while the cap applies, and `capMessage` is null once it has lifted —
+  // so the screen can never carry both readings of the same boundary.
+  const lifted = capLiftedSentence(readiness);
 
   return (
     <Paper
@@ -120,6 +124,20 @@ export function ReadinessMovement({ readiness, headingId }: ReadinessMovementPro
         <Typography variant="body2" color="text.secondary">
           Interview component: {readiness.interviewComponent.value} of 1
         </Typography>
+        {/* THE OTHER HALF OF WHY A SPOKEN REHEARSAL WEIGHS MORE (issue #160,
+            `realtime-interview.md` §8). `interview` above counts a pass
+            whatever the transport; this counts distinct civics questions
+            answered correctly ALOUD, so a realtime interview moves both and a
+            typed one moves only the first. Until this line existed, the
+            component that actually distinguishes them was the one the debrief
+            did not show — and `PRD.md` requires the score to be explainable.
+            Printed on its own scale for the same reason as its sibling. */}
+        <Typography variant="body2" color="text.secondary">
+          Questions answered aloud: {readiness.spokenComponent.evidenceCount}
+        </Typography>
+        <Typography variant="body2" color="text.secondary">
+          Spoken component: {readiness.spokenComponent.value} of 1
+        </Typography>
       </Stack>
 
       {/* VERBATIM, and only when the server says the cap applies. A
@@ -130,6 +148,19 @@ export function ReadinessMovement({ readiness, headingId }: ReadinessMovementPro
       {readiness.capReason !== null && readiness.capMessage && (
         <Alert severity="info" icon={false} role="status" sx={{ mt: 2 }}>
           <Typography variant="body2">{readiness.capMessage}</Typography>
+        </Alert>
+      )}
+
+      {/* THE OTHER SIDE OF THE SAME BOUNDARY (issue #160). Before this, a
+          learner who had just passed their first mock interview watched the
+          capped sentence vanish and nothing take its place — which reads as the
+          product losing interest rather than as a ceiling lifting. The sentence
+          names the two evidence counts the cap itself reads and no others; see
+          `capLiftedSentence` on why it is assembled here rather than sent, and
+          on why `english` is not one of them. */}
+      {lifted && (
+        <Alert severity="info" icon={false} role="status" sx={{ mt: 2 }}>
+          <Typography variant="body2">{lifted}</Typography>
         </Alert>
       )}
     </Paper>
