@@ -86,7 +86,7 @@ a v2.
 | E9 | Voice foundation | `transcribe`/`speak` wired, audio capture and playback, spoken practice mode with transcript confirmation, misheard-vs-wrong distinction — opens Milestone B | #25, E4, E6 | done<sup>¶</sup> | [#58](https://github.com/marinoscar/oathpath/issues/58) |
 | E10 | Reading and writing tests | Vocabulary-sourced sentences, word-error-rate reading scoring, dictated writing scoring, the readiness `english` component | E9 | done<sup>**</sup> | [#59](https://github.com/marinoscar/oathpath/issues/59) |
 | E11 | Realtime voice interview | `realtime` wired, ephemeral session tokens, the E8 engine driving a realtime model over tool calls — closes Milestone B and the MVP | #25, E8, E9, E10 | done<sup>††</sup> | [#60](https://github.com/marinoscar/oathpath/issues/60) |
-| E12 | Hands-free voice practice | Auto-submit replaces confirm-before-grade as the default (with a zero-cost correction via `recomputeMasteryForQuestion`), a shared content-addressed cache for civics question/answer audio, and a learner-chosen premium voice | E9, E5 | in progress | [#280](https://github.com/marinoscar/oathpath/issues/280) |
+| E12 | Hands-free voice practice | Auto-submit replaces confirm-before-grade as the default (with a zero-cost correction via `recomputeMasteryForQuestion`), a shared content-addressed cache for civics question/answer audio, and a learner-chosen premium voice | E9, E5 | done<sup>‡‡</sup> | [#280](https://github.com/marinoscar/oathpath/issues/280) |
 
 **E12 is the first epic filed after the MVP boundary.** E1–E11 closed
 Milestone A and Milestone B — the whole MVP, per [§2](#2-what-the-mvp-is) —
@@ -351,6 +351,40 @@ With E11 marked `done`, Milestone B (E9–E11) closes, and with it the MVP
 (E1–E11 plus the AI configuration foundation): done on paper across every
 epic, with the manual and end-to-end verification the legend requires still
 outstanding — see [§2](#2-what-the-mvp-is).
+
+<sup>‡‡</sup> **E12 is marked `done`, on the same convention this table has
+followed since E5**: an epic whose child issues are all merged and whose CI
+is green is `done`, and an unrun Playwright journey spec is a footnoted
+fact, not a status. All ten child issues are merged to `main`: #281 (the
+design spec, the `docs/specs/voice.md` §3 amendment, and this roadmap's own
+E12 row and dated decision-log entry, PR #292), #282
+(`speech_audio_assets` and the `voice` settings namespace, PR #293), #285
+(`recomputeMasteryForQuestion`, PR #294), #283 (`AiProvider.listVoices()`
+and `GET /api/ai/speech/voices`, PR #295), #284 (`GET /api/ai/speech/audio`,
+the content-addressed cache, PR #297), #288 (`/settings/voice`, PR #298),
+#286 (auto-submit and the post-grade correction, PR #299), #290 (`API.md`,
+`CLAUDE.md`, the runbook, and the learner page, PR #300), #287 (reading the
+accepted answer aloud, PR #301), and #289 (the epic-wide coverage and the
+Playwright journey, PR #302).
+
+One thing a later reader should not assume this footnote settles, on the
+identical terms E5's, E9's, E6/E7/E8's, E10's, and E11's footnotes above
+state it: **whether a human has actually run the hands-free acceptance
+journey #289 added to `tests/e2e/specs/voice.spec.ts` against the compose
+stack** — the §6 check this legend requires. It was written against the
+real, shipped selectors and endpoints, but `tests/e2e` suites are not run by
+CI, so nothing here confirms it has been executed end to end. Separately,
+and more pointedly for this epic than for any predecessor's footnote:
+`docs/specs/voice.md` §11 requires the voice manual checklist — each item
+run by a person, against a real microphone — before any release that
+changes voice code, with the pass/fail result recorded in `CHANGELOG.md`.
+That has not happened for E12. Both gaps are footnoted facts, not a status.
+
+At the product level, this epic replaces confirm-before-grade with
+auto-submit as the default spoken-practice flow, and moves the fairness
+guarantee `VISION.md` line 228 requires from that confirm step to
+`recomputeMasteryForQuestion`, which replays a question's mastery over its
+non-superseded attempts so a correction costs the learner nothing.
 
 ## 4. Why this order
 
