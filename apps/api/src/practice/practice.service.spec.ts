@@ -875,6 +875,179 @@ describe('PracticeService', () => {
   });
 
   // ===========================================================================
+  // recordAttempt — the spoken turn (issue #351, epic #345)
+  // ===========================================================================
+  //
+  // `spoken-turn.spec.ts` proves the composer itself, with no Nest and no
+  // Prisma. What can only be checked HERE is the WIRING: that the field reaches
+  // the response at all, that it is built from THIS row's own columns, that it
+  // costs no extra write, and — the epic's headline acceptance — that two
+  // learners answering the same question differently no longer get the same
+  // audio out of the real service.
+  // ===========================================================================
+
+  describe('recordAttempt — spokenTurn', () => {
+    beforeEach(() => {
+      mockOwnedSession(sessionRow());
+      prisma.civicsQuestion.findUnique.mockResolvedValue(question());
+      prisma.practiceAttempt.findFirst.mockResolvedValue(null);
+      prisma.practiceAttempt.findMany.mockResolvedValue([]);
+      prisma.civicsAnswer.findMany.mockResolvedValue([answerRow({ text: 'Congress' })]);
+      prisma.practiceAttempt.create.mockImplementation(async ({ data }: any) => ({
+        ...data,
+        id: 'new-attempt',
+        question: question(),
+      }));
+    });
+
+    it('a right answer and a wrong answer no longer sound identical', async () => {
+      // THE REGRESSION TEST ON E13'S EXISTING LOOP, over the real service
+      // rather than the composer. Before #351 the driver read
+      // `graded.acceptedAnswers[0].text` and nothing else, so both of these
+      // produced the single string "Congress".
+      const right = await service.recordAttempt(
+        USER_A,
+        SESSION_ID,
+        attemptInput({ responseText: 'Congress' }),
+      );
+      const wrong = await service.recordAttempt(
+        USER_A,
+        SESSION_ID,
+        attemptInput({ responseText: 'The Supreme Court of Nonsense' }),
+      );
+
+      expect(right.attempt.outcome).toBe('correct');
+      expect(wrong.attempt.outcome).toBe('incorrect');
+      expect(right.attempt.spokenTurn).not.toEqual(wrong.attempt.spokenTurn);
+
+      // Both say SOMETHING — the silent case is gone in either direction.
+      expect(right.attempt.spokenTurn.length).toBeGreaterThan(0);
+      expect(wrong.attempt.spokenTurn.length).toBeGreaterThan(0);
+
+      // And the accepted answer is owed to the learner who missed, not to the
+      // learner who just produced it.
+      expect(wrong.attempt.spokenTurn.join(' ')).toContain('Congress');
+      expect(right.attempt.spokenTurn.join(' ')).not.toContain('Congress');
+    });
+
+    it('ends on the coach line the SAME response already carries', async () => {
+      // One selection, not two. A second `reactionLine` call inside the
+      // composer would be free to disagree with the field beside it — the
+      // screen saying one thing and the speaker another about one answer.
+      const result = await service.recordAttempt(
+        USER_A,
+        SESSION_ID,
+        attemptInput({ responseText: 'Congress' }),
+      );
+
+      const line = result.attempt.coachReaction?.text;
+      expect(line).toEqual(expect.any(String));
+      expect(result.attempt.spokenTurn[result.attempt.spokenTurn.length - 1]).toBe(line);
+    });
+
+    it('defers the accepted answer past the retry boundary for a spoken miss', async () => {
+      const result = await service.recordAttempt(
+        USER_A,
+        SESSION_ID,
+        attemptInput({
+          responseText: 'The Supreme Court of Nonsense',
+          inputMode: 'spoken',
+          transcript: 'The Supreme Court of Nonsense',
+        }),
+      );
+
+      // The server would accept a retry of this attempt, so it says so — and
+      // holds the answer back until the retry is off the table.
+      expect(result.attempt.retryBoundary).not.toBeNull();
+
+      const boundary = result.attempt.retryBoundary as number;
+      expect(result.attempt.spokenTurn.slice(0, boundary).join(' ')).not.toContain(
+        'Congress',
+      );
+      expect(result.attempt.spokenTurn.slice(boundary).join(' ')).toContain('Congress');
+    });
+
+    it('arms no retry for a TYPED attempt — that loop has a text box', async () => {
+      const result = await service.recordAttempt(
+        USER_A,
+        SESSION_ID,
+        attemptInput({ responseText: 'The Supreme Court of Nonsense' }),
+      );
+
+      expect(result.attempt.inputMode).toBe('typed');
+      expect(result.attempt.retryBoundary).toBeNull();
+    });
+
+    it('is COMPUTED, never persisted — nothing new is written to the row', async () => {
+      // No column, no migration, no write. Asserted against what the service
+      // actually handed Prisma, so adding a column later would fail here rather
+      // than being discovered as a schema drift.
+      let created: any;
+      prisma.practiceAttempt.create.mockImplementation(async ({ data }: any) => {
+        created = data;
+        return { ...data, id: 'new-attempt', question: question() };
+      });
+
+      const result = await service.recordAttempt(
+        USER_A,
+        SESSION_ID,
+        attemptInput({ responseText: 'Congress' }),
+      );
+
+      expect(result.attempt.spokenTurn.length).toBeGreaterThan(0);
+      expect(created).not.toHaveProperty('spokenTurn');
+      expect(created).not.toHaveProperty('retryBoundary');
+      expect(created).not.toHaveProperty('coachReaction');
+    });
+
+    it('adds EXACTLY two keys to the attempt shape and changes no existing one', async () => {
+      // THE REGRESSION GUARD #351's "additive" requirement asks for, stated as
+      // the whole key set rather than as a count: a field silently renamed,
+      // dropped or retyped by this change fails here.
+      const result = await service.recordAttempt(
+        USER_A,
+        SESSION_ID,
+        attemptInput({ responseText: 'Congress' }),
+      );
+
+      expect(Object.keys(result.attempt).sort()).toEqual(
+        [
+          'aiFeedback',
+          'aiUsageEventId',
+          'answerSnapshot',
+          'answeredAt',
+          'asrConfidence',
+          'coachReaction',
+          'durationMs',
+          'failureCause',
+          'gradingMethod',
+          'hintUsed',
+          'id',
+          'inputMode',
+          'outcome',
+          'promptMode',
+          'question',
+          'questionId',
+          'responseText',
+          // The two this issue adds, and nothing else.
+          'retryBoundary',
+          'retryOfAttemptId',
+          'revealed',
+          'sessionId',
+          'source',
+          'spokenTurn',
+          'transcript',
+        ].sort(),
+      );
+
+      // And the wrapper around it is untouched.
+      expect(Object.keys(result).sort()).toEqual(
+        ['acceptedAnswers', 'attempt', 'nextQuestion', 'progress'].sort(),
+      );
+    });
+  });
+
+  // ===========================================================================
   // recordAttempt — answerSnapshot: exact shape, frozen at grading time
   // ===========================================================================
 
