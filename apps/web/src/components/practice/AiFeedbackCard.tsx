@@ -64,6 +64,39 @@
  * nothing: the accepted answers are `AttemptFeedback`'s to render, from the
  * attempt's own frozen snapshot, and they never come from anything a model
  * said.
+ *
+ * =============================================================================
+ * THE COACH REACTION IS OUTSIDE THE `graded` GATE, AND THAT IS NOT AN EXCEPTION
+ * =============================================================================
+ *
+ * Issue #321, epic #305. `coachReaction` renders regardless of
+ * `gradingMethod`, which looks at first glance like a hole in the rule above.
+ * It is not, and the difference is worth stating precisely.
+ *
+ * The `graded` gate exists because a cause and a coaching sentence are a
+ * DIAGNOSIS — a specific, memorable, confident story about this learner's own
+ * mind. Rendering one where no grader ran would be telling somebody a story
+ * nothing told us, which `ai-evaluation.md` §8 names the "manufactured
+ * diagnosis" and rejects.
+ *
+ * A reaction line is not a diagnosis and cannot become one. It comes from a
+ * fixed, human-reviewed bank (`apps/api/src/ai/coach/reaction-lines.ts`), it is
+ * selected by a pure function from facts the row already carries, it asserts
+ * nothing the row does not support, and it names no cause. It is the coach's
+ * VOICE, not the coach's verdict.
+ *
+ * And the deterministically-graded case is exactly the one E14 exists to
+ * cover: `gradingMethod: 'exact'` is the common outcome, it produces no AI
+ * call, and before this epic it left the card saying nothing but the verdict —
+ * so five right answers in a row read as five identical flat sentences. Gating
+ * the reaction on `graded` would keep the gap open in precisely the case that
+ * is the reason for closing it.
+ *
+ * WHAT DOES NOT MOVE: `outcomeDisplay`'s `label` and `color`. A learner who
+ * chose `unfiltered` reads `Not a match` in the same error colour they always
+ * did. `VISION.md` Principle #11 — "Trust Before Delight. A beautiful wrong
+ * answer is still wrong." The personality sits BESIDE the verdict; it never
+ * wears it.
  */
 
 import { Box, Chip, Stack, Typography } from '@mui/material';
@@ -110,6 +143,16 @@ export function AiFeedbackCard({
   const coaching = graded ? (attempt.aiFeedback?.feedback ?? '').trim() : '';
 
   /**
+   * The coach's line, if the learner has reactions on.
+   *
+   * NOT gated on `graded` — see the file header for why that is consistent
+   * with the rule rather than an exception to it. Trimmed for the same reason
+   * `coaching` is: an all-whitespace string must render nothing at all rather
+   * than an empty region with spacing around it.
+   */
+  const reaction = (attempt.coachReaction?.text ?? '').trim();
+
+  /**
    * Nothing to contribute at all.
    *
    * The ordinary `exact`-graded case on the summary screen, where the verdict
@@ -117,8 +160,15 @@ export function AiFeedbackCard({
    * matcher is the normal case and labelling every normal row is noise), no
    * cause, no coaching. Returning `null` rather than an empty `<Box>` keeps a
    * stray element and its margin out of a layout that has nothing to say.
+   *
+   * `reaction` JOINS THIS CONDITION rather than sitting outside it. A card
+   * whose only content is a reaction line is a card with something to say, and
+   * leaving it out here would drop the line silently on the summary review —
+   * the exact surface `AiFeedbackCard` is one component in order to keep in
+   * step with the live screen.
    */
-  if (!includeVerdict && !provenance && !cause && !coaching) return null;
+  if (!includeVerdict && !provenance && !cause && !coaching && !reaction)
+    return null;
 
   return (
     <Box sx={{ mt: includeVerdict ? 0 : 2 }}>
@@ -137,6 +187,36 @@ export function AiFeedbackCard({
             {verdict.detail}
           </Typography>
         </Stack>
+      )}
+
+      {reaction && (
+        // DIRECTLY UNDER THE VERDICT, above the provenance note and well above
+        // the cause. Placement is the whole difference between reading as the
+        // coach's voice and reading as a second verdict:
+        //
+        //   * `body1` in the default text colour, where the verdict's own
+        //     sentence beside the chip is `body2` in `text.secondary`. The
+        //     reaction is the line a learner actually reads; the verdict
+        //     sentence is the one they scan past once they have seen the chip.
+        //   * NO icon, NO chip, NO coloured surface. Anything that framed it
+        //     would make a joke look like a system message, and would give the
+        //     personality a visual weight the verdict deliberately keeps.
+        //   * `component="p"` — text, not a heading. The card's heading order
+        //     belongs to the cause block below, and a coach's aside must not
+        //     insert itself into the document outline a screen-reader user
+        //     navigates by.
+        //
+        // `role="status"` so assistive technology announces it when it
+        // appears: it arrives with the grade, at the moment focus is elsewhere,
+        // and a line nobody hears is a line that only sighted learners get.
+        <Typography
+          variant="body1"
+          component="p"
+          role="status"
+          sx={{ mt: 1.5 }}
+        >
+          {reaction}
+        </Typography>
       )}
 
       {provenance && (

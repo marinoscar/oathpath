@@ -2072,6 +2072,31 @@ export interface PracticeAttempt {
 
   answeredAt: string;
   answerSnapshot: PracticeAnswerSnapshot;
+
+  // ---------------------------------------------------------------------------
+  // The coach's voice (#320, epic #305 "The Coach's personality")
+  // ---------------------------------------------------------------------------
+
+  /**
+   * One short line in the learner's chosen coach voice, about what just
+   * happened — or null when they have turned reactions off.
+   *
+   * PRESENT ON EVERY ATTEMPT, INCLUDING `gradingMethod: 'exact'`, and that is
+   * the whole point of it. Every other coaching field on this row is null on a
+   * deterministically graded attempt, because no grader ran — which is correct,
+   * and which left the common case saying nothing beyond the verdict.
+   *
+   * COMPUTED SERVER-SIDE AT READ TIME AND NEVER PERSISTED. There is no column
+   * behind it. It is selected by a pure function seeded by this attempt's own
+   * id, so the same attempt carries the same line on the immediate response
+   * and on every later re-read — which is what lets the live screen and the
+   * summary review agree without anything being stored to make them.
+   *
+   * IT NEVER CARRIES A FACT. The verdict, the accepted answers and the failure
+   * cause are the fields above. A reaction states no answer and changes no
+   * judgement; render it beside the verdict, never in place of one.
+   */
+  coachReaction: { text: string; persona: CoachPersona } | null;
 }
 
 /**
