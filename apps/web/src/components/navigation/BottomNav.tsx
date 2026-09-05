@@ -77,6 +77,21 @@ export function BottomNav() {
         left: 0,
         right: 0,
         zIndex: theme.zIndex.appBar,
+        // SAFE AREA (issue #359, epic #345). This bar is `position: fixed;
+        // bottom: 0`, so on a gesture-bar or notched phone its bottom row of
+        // pixels — the tab LABELS — sits under the home indicator, and on a
+        // rounded display the outermost tabs sit under the corner radius. The
+        // padding is on the `Paper`, not on `BottomNavigation`, so the bar's
+        // surface still extends to the physical edge and the inset area is
+        // painted rather than showing the page through it.
+        //
+        // Requires `viewport-fit=cover` in `index.html`; without it every
+        // `env()` here resolves to `0px` and this is silently inert.
+        // Everywhere with no inset — every desktop browser — it already is
+        // `0px`, so this changes nothing there.
+        paddingBottom: 'env(safe-area-inset-bottom)',
+        paddingLeft: 'env(safe-area-inset-left)',
+        paddingRight: 'env(safe-area-inset-right)',
       }}
     >
       <BottomNavigation value={active} onChange={handleChange} showLabels>
