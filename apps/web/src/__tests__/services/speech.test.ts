@@ -36,6 +36,7 @@ import { server } from '../mocks/server';
 import {
   api,
   defaultAudioFileName,
+  fetchCivicsAudio,
   synthesizeSpeech,
   transcribeAudio,
 } from '../../services/api';
@@ -295,5 +296,169 @@ describe('synthesizeSpeech', () => {
     );
 
     await expect(synthesizeSpeech('Hello')).rejects.toMatchObject({ status: 401 });
+  });
+});
+
+// =============================================================================
+// fetchCivicsAudio — `GET /ai/speech/audio` (#284, epic #280 / E12)
+// =============================================================================
+//
+// THE SAME REGRESSION SHAPE `synthesizeSpeech` HAS ABOVE, for the SAME reason
+// (issue #277): this route shares `parseSpeechEnvelope` with `synthesizeSpeech`
+// and widens its union by exactly one member (`state_required`), so a bug that
+// dropped a branch of the switch here would fail exactly as quietly. As of
+// this test's own writing NOTHING in `apps/web/src` calls `fetchCivicsAudio` —
+// grep confirms it — so this is the only test standing between the function
+// and a silent regression; see this issue's own report for that finding.
+describe('fetchCivicsAudio', () => {
+  it('returns `{status: "ok", audio}` for real bytes, not a bare blob', async () => {
+    server.use(
+      http.get('*/api/ai/speech/audio', ({ request }) => {
+        const url = new URL(request.url);
+        expect(url.searchParams.get('scope')).toBe('civics_question');
+        expect(url.searchParams.get('refId')).toBe('question-1');
+        return HttpResponse.arrayBuffer(new ArrayBuffer(16), {
+          headers: { 'Content-Type': 'audio/mpeg' },
+        });
+      }),
+    );
+
+    const result = await fetchCivicsAudio({
+      scope: 'civics_question',
+      refId: 'question-1',
+    });
+
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') throw new Error('expected ok');
+    expect(result.audio.type).toBe('audio/mpeg');
+  });
+
+  it('resolves — never rejects — a 200 JSON `unavailable` body to the `unavailable` member', async () => {
+    server.use(
+      http.get('*/api/ai/speech/audio', () =>
+        HttpResponse.json({
+          data: { status: 'unavailable', cause: 'role_unbound', role: 'speak' },
+        }),
+      ),
+    );
+
+    const result = await fetchCivicsAudio({
+      scope: 'civics_question',
+      refId: 'question-1',
+    });
+
+    expect(result).toEqual({ status: 'unavailable', cause: 'role_unbound', role: 'speak' });
+  });
+
+  it('resolves — never rejects — a 200 JSON `failed` body to the `failed` member', async () => {
+    server.use(
+      http.get('*/api/ai/speech/audio', () =>
+        HttpResponse.json({
+          data: {
+            status: 'failed',
+            errorCode: 'no_resolved_text',
+            error: 'There is nothing to read aloud for that question yet.',
+          },
+        }),
+      ),
+    );
+
+    const result = await fetchCivicsAudio({
+      scope: 'civics_answer',
+      refId: 'question-1',
+    });
+
+    expect(result).toEqual({
+      status: 'failed',
+      errorCode: 'no_resolved_text',
+      error: 'There is nothing to read aloud for that question yet.',
+    });
+  });
+
+  it('resolves the FOURTH member — `state_required` — that `synthesizeSpeech` never sees', async () => {
+    server.use(
+      http.get('*/api/ai/speech/audio', () =>
+        HttpResponse.json({ data: { status: 'state_required' } }),
+      ),
+    );
+
+    const result = await fetchCivicsAudio({
+      scope: 'civics_answer',
+      refId: 'question-1',
+    });
+
+    expect(result).toEqual({ status: 'state_required' });
+  });
+
+  it('resolves a malformed/non-JSON-parseable body to `failed`, never throwing', async () => {
+    server.use(
+      http.get('*/api/ai/speech/audio', () =>
+        HttpResponse.text('not actually json', {
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      ),
+    );
+
+    const result = await fetchCivicsAudio({
+      scope: 'civics_question',
+      refId: 'question-1',
+    });
+
+    expect(result.status).toBe('failed');
+    if (result.status !== 'failed') throw new Error('expected failed');
+    expect(result.errorCode).toBe('malformed_response');
+  });
+
+  it('still REJECTS with `ApiError` on a genuine non-2xx transport failure (e.g. an unknown question id)', async () => {
+    server.use(
+      http.get('*/api/ai/speech/audio', () =>
+        HttpResponse.json({ message: 'Not Found' }, { status: 404 }),
+      ),
+    );
+
+    await expect(
+      fetchCivicsAudio({ scope: 'civics_question', refId: 'no-such-question' }),
+    ).rejects.toMatchObject({ status: 404 });
+  });
+
+  it.each([
+    ['unavailable', { status: 'unavailable', cause: 'role_unbound', role: 'speak' }],
+    ['failed', { status: 'failed', errorCode: 'no_resolved_text', error: 'no text' }],
+    ['state_required', { status: 'state_required' }],
+  ] as const)(
+    'THE REGRESSION TEST — a %s result carries no `audio` property at all',
+    async (_label, body) => {
+      // The #277 shape, widened by this route's fourth member. A caller that
+      // read `.audio` off any of these three without checking `status` first
+      // would crash exactly as the original bug did.
+      server.use(
+        http.get('*/api/ai/speech/audio', () => HttpResponse.json({ data: body })),
+      );
+
+      const result = await fetchCivicsAudio({
+        scope: 'civics_question',
+        refId: 'question-1',
+      });
+
+      expect(result.status).not.toBe('ok');
+      expect('audio' in result).toBe(false);
+    },
+  );
+
+  it('omits `voice` entirely rather than sending it empty — the API 400s an empty value', async () => {
+    let sawVoiceParam = false;
+
+    server.use(
+      http.get('*/api/ai/speech/audio', ({ request }) => {
+        sawVoiceParam = new URL(request.url).searchParams.has('voice');
+        return HttpResponse.arrayBuffer(new ArrayBuffer(4), {
+          headers: { 'Content-Type': 'audio/mpeg' },
+        });
+      }),
+    );
+
+    await fetchCivicsAudio({ scope: 'civics_question', refId: 'question-1' });
+
+    expect(sawVoiceParam).toBe(false);
   });
 });
