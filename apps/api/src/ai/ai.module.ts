@@ -5,7 +5,6 @@ import { PrismaModule } from '../prisma/prisma.module';
 import { CredentialsModule } from '../credentials/credentials.module';
 import { CredentialsService } from '../credentials/credentials.service';
 import { AiSettingsController } from './ai-settings.controller';
-import { AiSpeechController } from './ai-speech.controller';
 import { AiSpeechService } from './ai-speech.service';
 import { AiSettingsService } from './ai-settings.service';
 import { AiConnectionTestService } from './ai-connection-test.service';
@@ -154,12 +153,20 @@ export function resolveAiProvider(
     // history is a controller where a future "usage for user X" route looks
     // like it belongs.
     AiUsageController,
-    // The two speech routes (#95, epic #58). A THIRD controller on /api/ai for
-    // the same reason there is a second: these handlers move a learner's
-    // recorded voice through the process, and keeping them out of the file
-    // that holds credentials is what stops a future "transcribe for user X"
-    // route from looking like it belongs next to one.
-    AiSpeechController,
+    // `AiSpeechController` USED TO BE REGISTERED HERE (#95, epic #58) and now
+    // is not — it moved to `SpeechAudioModule` in #284, and only its
+    // REGISTRATION moved; the file is still `ai/ai-speech.controller.ts` and
+    // still resolves `AiSpeechService` out of this module.
+    //
+    // The reason is a module cycle, not a change of ownership. Its newest
+    // route resolves civics text through `CivicsService`, and `CivicsModule`
+    // already imports this module for `AiDispatchService`. Declaring the
+    // controller here would make the two import each other, which Nest
+    // survives only with `forwardRef` on both sides — and with
+    // `emitDecoratorMetadata`, a cycle got wrong leaves `design:paramtypes`
+    // holding `undefined` and Nest failing to resolve a dependency at boot,
+    // the same hazard this module's own constructor comment names below. See
+    // `speech-audio.module.ts`.
   ],
   providers: [
     AiSettingsService,
@@ -215,6 +222,12 @@ export function resolveAiProvider(
     AiUsageService,
     AiDispatchService,
     OpenAiProvider,
+    // Exported for `SpeechAudioModule` (#284), which declares
+    // `AiSpeechController` — see the note in `controllers` above. This adds no
+    // capability: the service resolves nothing a caller passes it and spends
+    // only the calling learner's own key, exactly as `AiDispatchService`
+    // (already exported, for the same reasoning) does.
+    AiSpeechService,
     // Exported for `AccountModule` (#270): `AccountResetService`'s
     // `data_and_key` scope calls `purgeForDeletedUser` directly, on the SAME
     // service every route in this module already resolves credentials

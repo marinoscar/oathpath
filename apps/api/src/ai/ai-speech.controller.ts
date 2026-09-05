@@ -6,6 +6,7 @@ import {
   HttpCode,
   HttpStatus,
   Post,
+  Query,
   Req,
   Res,
 } from '@nestjs/common';
@@ -15,6 +16,7 @@ import {
   ApiExtraModels,
   ApiOkResponse,
   ApiOperation,
+  ApiQuery,
   ApiResponse,
   ApiTags,
   getSchemaPath,
@@ -30,8 +32,11 @@ import {
   MAX_TRANSCRIBE_BYTES,
   MAX_TRANSCRIBE_SECONDS,
 } from './ai-speech.service';
+import { SpeechAudioService } from './speech-audio.service';
 import {
+  AiSpeechAudioQueryDto,
   AiSpeechFailedDto,
+  AiSpeechStateRequiredDto,
   AiSpeechUnavailableDto,
   AiSpeechVoicesResponseDto,
   AiSynthesizeRequestDto,
@@ -46,14 +51,17 @@ import {
 //   POST /api/ai/speech/transcribe   @Auth(), no permissions
 //   POST /api/ai/speech/synthesize   @Auth(), no permissions
 //   GET  /api/ai/speech/voices       @Auth(), no permissions   (#283, epic #280)
+//   GET  /api/ai/speech/audio        @Auth(), no permissions   (#284, epic #280)
 //
 // -----------------------------------------------------------------------------
 // `@Auth()` WITH NO PERMISSIONS, AND NO ROUTE ACCEPTS A USER ID
 // -----------------------------------------------------------------------------
 //
-// Both handlers resolve the learner from `@CurrentUser('id')` and from nowhere
-// else: no path parameter, no query parameter, no body field names a user. So
-// there is no "transcribe on someone else's behalf" action to gate, and
+// Every handler resolves the learner from `@CurrentUser('id')` and from nowhere
+// else: no path parameter, no query parameter, no body field names a user —
+// `GET audio`'s query string carries a civics question id and a voice, never a
+// learner and never a state. So there is no "transcribe on someone else's
+// behalf" (or "hear the answer resolved for someone else's state") action, and
 // widening that is a signature change with a visible diff rather than a
 // query-string edit — the identical structural rule the practice, journey,
 // readiness, engagement and interview controllers hold to, and that
@@ -77,7 +85,7 @@ import {
 // touches are visible per file.
 //
 // -----------------------------------------------------------------------------
-// NOTHING HERE PERSISTS, LOGS OR ECHOES THE AUDIO
+// NOTHING HERE PERSISTS, LOGS OR ECHOES A LEARNER'S RECORDING
 // -----------------------------------------------------------------------------
 //
 // The upload is read into a buffer, handed to `AiSpeechService`, and dropped
@@ -85,6 +93,13 @@ import {
 // write, no cache, no queue, and no `Blob` handed back. This controller
 // imports nothing from the storage module — `docs/specs/voice.md` §4 is
 // enforced by there being no path from here into it.
+//
+// #284'S CACHE IS NOT AN EXCEPTION TO THAT, and the distinction is the whole
+// reason one is allowed and the other never will be. What it retains is OUR
+// OWN civics content read aloud — a public question everybody hears the same
+// way — addressed by a hash of its own text. What §4 forbids is retaining
+// what a LEARNER said. No route on this controller stores a recording, and
+// the cache path is reached only by `GET audio`, which has no upload at all.
 // =============================================================================
 
 /** The form field carrying the recording. */
@@ -150,10 +165,23 @@ function envelopedOneOf(
 // `oneOf` schemas below, so nothing else in the document would pull them in.
 // Without this they would be dangling references to schemas that were never
 // published.
-@ApiExtraModels(AiTranscribeOkDto, AiSpeechUnavailableDto, AiSpeechFailedDto)
+@ApiExtraModels(
+  AiTranscribeOkDto,
+  AiSpeechUnavailableDto,
+  AiSpeechFailedDto,
+  AiSpeechStateRequiredDto,
+)
 @Controller('ai/speech')
 export class AiSpeechController {
-  constructor(private readonly speech: AiSpeechService) {}
+  constructor(
+    private readonly speech: AiSpeechService,
+    // The cached civics-clip path (#284). A SEPARATE SERVICE from
+    // `AiSpeechService`, not a fifth method on it: that class is deliberately
+    // free of any path into storage or the civics tables (a test asserts its
+    // source is), and the two answer different questions — one shapes what a
+    // caller sent, the other resolves what the database says and remembers it.
+    private readonly audio: SpeechAudioService,
+  ) {}
 
   /**
    * Turn one recording into text, on the caller's own key.
@@ -336,6 +364,172 @@ export class AiSpeechController {
     // The envelope by hand — see the doc comment. No `meta`: the envelope
     // documents it as optional, and the only thing this handler could put
     // there is a timestamp it would have to read a clock for.
+    reply
+      .status(HttpStatus.OK)
+      .header('Content-Type', 'application/json; charset=utf-8')
+      .send({ data: result });
+  }
+
+  /**
+   * Read one civics question — or its first accepted answer — aloud, from a
+   * SHARED, CONTENT-ADDRESSED CACHE (#284, epic #280).
+   *
+   * -------------------------------------------------------------------------
+   * THE CALLER NAMES CONTENT. THE SERVER DECIDES THE WORDS.
+   * -------------------------------------------------------------------------
+   *
+   * `POST synthesize` above takes a `text` field; this route takes a `scope`
+   * and a `civics_questions.id`, and resolves the sentence from the same rows
+   * `GET /api/civics/questions/{id}` serves — including the answer resolution
+   * against the caller's own state. That is what makes the cache shareable at
+   * all: two learners asking for the same question are asking for bytes that
+   * are identical by construction, not because they happened to send the same
+   * string. It is also `CLAUDE.md`'s grounding rule applied to synthesis — the
+   * audio says what the database says.
+   *
+   * -------------------------------------------------------------------------
+   * WHY THIS ROUTE MAY SET A REAL `Cache-Control` WHEN `synthesize` MAY NOT
+   * -------------------------------------------------------------------------
+   *
+   * `POST synthesize` sends `no-store` because it reads back arbitrary text a
+   * client sent, synthesized on that caller's own key: bytes with no shared
+   * meaning, which a cache holding them would hand from one learner to
+   * another. These bytes are a reading of PUBLIC civics content, identical for
+   * every learner on the deployment, addressed server-side by a hash of the
+   * very text they contain. Nothing personal is in them and — for a question
+   * whose prompt is fixed — nothing about them can go stale.
+   *
+   * `private` regardless, because the response requires an `Authorization`
+   * header. And the long max-age is claimed ONLY when the URL genuinely
+   * determines the bytes: a `national`/`state`-scope ANSWER can be corrected by
+   * an admin, and a request that named no `voice` resolves one from the
+   * learner's own settings, so either gets a short max-age instead. A browser
+   * cache is keyed by URL, not by the content hash the server-side key holds.
+   * See `speech-audio.service.ts`'s two constants.
+   *
+   * -------------------------------------------------------------------------
+   * FOUR OUTCOMES, ONE STATUS CODE
+   * -------------------------------------------------------------------------
+   *
+   * Audio, or JSON carrying `unavailable` / `failed` / `state_required`, all at
+   * HTTP 200 and told apart by `Content-Type` — the same contract `synthesize`
+   * has, plus the one member it has no need of. The exception is an unknown
+   * `refId`, which is a genuine **404**: the question does not exist, which is
+   * a different bug with a different owner than "an administrator has not
+   * configured speech".
+   */
+  @Get('audio')
+  @Auth()
+  @ApiOperation({
+    summary: 'Read a civics question or its answer aloud, from a shared cache',
+    description:
+      'Synthesises **our own civics content** — a question’s prompt, or its first accepted ' +
+      'answer — and serves it from a deployment-wide cache, so the same clip is paid for ' +
+      'once rather than once per learner per playback.\n\n' +
+      '**You do not send the text.** The words are resolved on the server from the same ' +
+      'rows `GET /civics/questions/{id}` returns, including the answer resolution for ' +
+      '**your own** state; there is no `text` parameter and no way to name another ' +
+      'learner or another state.\n\n' +
+      '**The first request for a given question, voice and model synthesises on your own ' +
+      'AI key.** Every request after that — from anybody — is served from storage with **no ' +
+      'AI call and no usage recorded**. A corrected dynamic answer is never served stale: ' +
+      'the cache is keyed by a hash of the exact text, so new wording is simply a new clip.\n\n' +
+      '**Read `Content-Type`.** Audio bytes are the success case. `application/json` carries ' +
+      '`status`: `unavailable` (no call was attempted — you have stored no AI key, or an ' +
+      'administrator has not bound the `speak` model), `failed` (the call was made and ' +
+      'produced nothing usable), or `state_required` (you asked for the answer to a ' +
+      'state-specific question and your profile has no state set — **nothing was ' +
+      'synthesised and nothing is wrong**; set your state). **All of them are HTTP 200.** ' +
+      'An unknown `refId` is a 404, because that question genuinely does not exist.\n\n' +
+      '`voice` defaults to your own `voice.preferredVoice` setting and then to the ' +
+      'provider’s default. There is no model parameter — the model is the one your ' +
+      'administrator bound to the `speak` role.\n\n' +
+      '**This is still an upgrade, never the only way to hear a question.** The browser’s ' +
+      'own `speechSynthesis` needs no configuration, no key and no network call; an unbound ' +
+      '`speak` is not a degraded state and nothing should be rendered as broken.',
+  })
+  @ApiQuery({
+    name: 'scope',
+    enum: ['civics_question', 'civics_answer'],
+    description:
+      'Read the question’s prompt, or its first accepted answer. The first answer, not all ' +
+      'of them joined: a question with several simultaneously-correct answers presents one ' +
+      'as canonical, and reading the list aloud would be a paragraph nobody asked to hear.',
+  })
+  @ApiQuery({
+    name: 'refId',
+    type: String,
+    format: 'uuid',
+    description:
+      'The `civics_questions.id` to read. A **question** id for both scopes — which answer ' +
+      'is current is resolved on the server against your own state and the clock.',
+  })
+  @ApiQuery({
+    name: 'voice',
+    required: false,
+    type: String,
+    description:
+      'A provider voice id from `GET /ai/speech/voices`. Omit to use your own saved ' +
+      'preference, then the provider’s default.',
+  })
+  @ApiQuery({
+    name: 'format',
+    required: false,
+    type: String,
+    description: 'The audio container, e.g. `mp3`. Omit for the default.',
+  })
+  @ApiOkResponse({
+    description:
+      'The audio, or — as JSON — a typed reason there is none. Read `Content-Type`.',
+    content: {
+      'audio/mpeg': { schema: { type: 'string', format: 'binary' } },
+      'application/json': {
+        schema: envelopedOneOf(
+          AiSpeechUnavailableDto,
+          AiSpeechFailedDto,
+          AiSpeechStateRequiredDto,
+        ),
+      },
+    },
+  })
+  @ApiResponse({
+    status: 400,
+    description:
+      'The query string was missing `scope`/`refId`, malformed, or carried an unknown key.',
+  })
+  @ApiResponse({
+    status: 404,
+    description: 'No civics question has that id.',
+  })
+  async civicsAudio(
+    @Query() query: AiSpeechAudioQueryDto,
+    @CurrentUser('id') userId: string,
+    @Res() reply: FastifyReply,
+  ): Promise<void> {
+    const result = await this.audio.getCivicsAudio(userId, query);
+
+    if (result.status === 'ok') {
+      reply
+        .status(HttpStatus.OK)
+        .header('Content-Type', result.contentType)
+        .header('Content-Length', result.audio.length)
+        // SET ON A MISS AS WELL AS ON A HIT, deliberately. The bytes are the
+        // same content either way, so whether a client may cache them is a
+        // question about the CONTENT — not about whether this particular
+        // deployment happened to have synthesised it already. A header that
+        // varied with server-side cache state would make a learner's browser
+        // caching depend on which learner they were.
+        .header(
+          'Cache-Control',
+          `private, max-age=${result.maxAgeSeconds}, immutable`,
+        )
+        .send(result.audio);
+
+      return;
+    }
+
+    // The `{ data: … }` envelope by hand — `@Res()` bypasses the global
+    // `TransformInterceptor`, exactly as on `synthesize` above.
     reply
       .status(HttpStatus.OK)
       .header('Content-Type', 'application/json; charset=utf-8')

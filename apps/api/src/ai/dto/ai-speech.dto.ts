@@ -322,6 +322,132 @@ export const aiSpeechVoicesResponseSchema = z.object({
   defaultVoice: z.string().nullable(),
 });
 
+// -----------------------------------------------------------------------------
+// GET /api/ai/speech/audio — the shared, content-addressed civics clip (#284)
+// -----------------------------------------------------------------------------
+//
+// THE REQUEST NAMES CONTENT, NEVER TEXT. `POST /ai/speech/synthesize` takes a
+// `text` field and reads back whatever the client sent; this route takes a
+// SCOPE and a civics question id, and resolves the words on the server from the
+// same rows `GET /api/civics/questions/{id}` already serves. That is the whole
+// reason the cache can be shared: two learners asking for the same question are
+// asking for bytes that are identical by construction rather than because they
+// happened to send the same string, and a client that could name its own text
+// could fill a shared, permanently-retained store with anything it liked.
+//
+// It is also `CLAUDE.md`'s grounding rule ("build the prompt from rows your
+// feature already reads") applied to synthesis: the audio says what the
+// database says.
+//
+// THE RESPONSE ADDS ONE MEMBER TO `synthesize`'s UNION, AND NO MORE. Success is
+// still audio bytes told apart by `Content-Type`; `unavailable` and `failed`
+// are still the same two envelopes at HTTP 200. The third member,
+// `state_required`, exists because this route resolves an ANSWER — and a
+// `state`-scope question asked by a learner with no state set has no correct
+// answer to read aloud. That is neither a configuration failure
+// (`unavailable`'s four causes are all about AI configuration) nor a call that
+// went wrong (`failed`), and guessing a state would have this application
+// confidently read a wrong governor's name to somebody memorising it. The
+// civics explain stream already answers exactly this state with a frame of its
+// own (`event: state_required`, `civics.controller.ts`); this is the same fact
+// on a non-streaming route.
+
+/** Which civics text a clip reads. Mirrors the `SpeechAudioScope` enum. */
+export const speechAudioScopeSchema = z.enum([
+  'civics_question',
+  'civics_answer',
+]);
+
+/**
+ * `GET /api/ai/speech/audio`'s query string.
+ *
+ * `z.strictObject`, so `?text=…` or `?modelId=…` is a 400 that NAMES the key
+ * rather than a parameter silently dropped. Both would be the same mistake
+ * `aiSynthesizeRequestSchema`'s own `.strict()` guards against, one worse: a
+ * `text` this route honoured would put caller-supplied words into a permanently
+ * cached, shared object store, and a `modelId` would let a caller bind itself
+ * to whatever the admin configured for a costlier role.
+ *
+ * THERE IS NO `userId` AND NO `stateCode`, for the reason
+ * `civics-question-query.dto.ts` states in full: the learner is
+ * `@CurrentUser('id')` and their state is their own `learner_profiles` row, so
+ * a parameter that could name another learner does not exist and there is
+ * nothing to forget to authorise.
+ */
+export const aiSpeechAudioQuerySchema = z.strictObject({
+  /** Read the question's prompt, or its first accepted answer. */
+  scope: speechAudioScopeSchema,
+
+  /**
+   * The `civics_questions.id` to read.
+   *
+   * A QUESTION ID FOR BOTH SCOPES, never a `civics_answers.id`: which answer
+   * is current is a server-side resolution against the caller's own state and
+   * the clock (`docs/specs/civics-content.md` §5), and a client naming an
+   * answer row directly could ask for a superseded one by id.
+   */
+  refId: z.uuid(),
+
+  /**
+   * The provider voice id. Omitted falls back to the learner's own
+   * `voice.preferredVoice` setting, and then to the provider's default.
+   *
+   * SHAPE VALIDATED, MEMBERSHIP NOT — the identical rule, for the identical
+   * reason, that {@link aiSynthesizeRequestSchema}'s own `voice` states. The
+   * two must accept the same charset: a value the voices picker offers and one
+   * of these two routes refuses would be a 400 a learner cannot explain.
+   */
+  voice: z
+    .string()
+    .trim()
+    .min(1)
+    .max(64)
+    .regex(/^[A-Za-z0-9_-]+$/)
+    .optional(),
+
+  /** The container, e.g. `mp3`. Same shape-not-membership rule as {@link voice}. */
+  format: z
+    .string()
+    .trim()
+    .min(1)
+    .max(16)
+    .regex(/^[A-Za-z0-9]+$/)
+    .optional(),
+});
+
+/**
+ * There is no answer to read aloud, because the caller has no state set.
+ *
+ * NOT `unavailable` AND NOT `failed`. `unavailable` means an administrator has
+ * not finished configuring AI — four closed causes, all about configuration —
+ * and `failed` means a call was made and produced nothing usable. This is
+ * neither: nothing is misconfigured, nothing was attempted, and the remedy
+ * belongs to the LEARNER (set your state), which is a different sentence on
+ * screen and a different affordance under it.
+ *
+ * Carries no `role`: no AI role was consulted, so naming one would invite a
+ * client to render "your administrator has not set up speech".
+ */
+export const aiSpeechStateRequiredSchema = z.object({
+  status: z.literal('state_required'),
+});
+
+/**
+ * `GET /api/ai/speech/audio`'s response WHEN THERE IS NO AUDIO.
+ *
+ * Same shape rule as {@link aiSynthesizeUnavailableResponseSchema}: the success
+ * case is not JSON at all, so this union has no `ok` member and a client tells
+ * the two apart by `Content-Type`.
+ */
+export const aiSpeechAudioUnavailableResponseSchema = z.discriminatedUnion(
+  'status',
+  [
+    aiSpeechUnavailableSchema,
+    aiSpeechFailedSchema,
+    aiSpeechStateRequiredSchema,
+  ],
+);
+
 export type AiSpeechUnavailableCause = z.infer<
   typeof aiSpeechUnavailableCauseSchema
 >;
@@ -340,6 +466,14 @@ export type AiSynthesizeRequestInput = z.infer<
 export type AiSpeechVoice = z.infer<typeof aiSpeechVoiceSchema>;
 export type AiSpeechVoicesResponse = z.infer<
   typeof aiSpeechVoicesResponseSchema
+>;
+export type SpeechAudioScope = z.infer<typeof speechAudioScopeSchema>;
+export type AiSpeechAudioQueryInput = z.infer<typeof aiSpeechAudioQuerySchema>;
+export type AiSpeechStateRequiredResponse = z.infer<
+  typeof aiSpeechStateRequiredSchema
+>;
+export type AiSpeechAudioUnavailableResponse = z.infer<
+  typeof aiSpeechAudioUnavailableResponseSchema
 >;
 
 // -----------------------------------------------------------------------------
@@ -364,6 +498,19 @@ export class AiSpeechUnavailableDto extends createZodDto(
 export class AiSpeechFailedDto extends createZodDto(aiSpeechFailedSchema) {}
 export class AiSynthesizeRequestDto extends createZodDto(
   aiSynthesizeRequestSchema,
+) {}
+
+/** `GET /api/ai/speech/audio`'s query string (#284). */
+export class AiSpeechAudioQueryDto extends createZodDto(
+  aiSpeechAudioQuerySchema,
+) {}
+
+/**
+ * The "set your state first" member of that route's union (#284). Its own
+ * class, one per union member, for the reason this section's header gives.
+ */
+export class AiSpeechStateRequiredDto extends createZodDto(
+  aiSpeechStateRequiredSchema,
 ) {}
 
 /**
@@ -402,6 +549,13 @@ type ForbiddenFieldNames =
   | 'url'
   | 'path'
   | 'filename'
+  // ADDED WITH THE AUDIO CACHE (#284). Unlike the recording, a cached clip
+  // genuinely HAS a durable object-storage address, so "just send the key and
+  // let the client fetch it" is a suggestion somebody will make in good faith.
+  // The bytes are served by this API or not at all: an address on the wire is
+  // an address that outlives the request, gets logged, and gets shared.
+  | 'storageKey'
+  | 'storageObjectId'
   | 'modelId'
   | 'apiKey'
   | 'key'
@@ -415,6 +569,14 @@ export type AiSpeechResponsesCarryNoAudioOrSecret =
     KeysOfUnion<
       | AiTranscribeResponse
       | AiSynthesizeUnavailableResponse
+      // The cached-audio route's own union (#284). It is the response with the
+      // most to gain from a convenience field and the most to lose by one: its
+      // bytes really do live at a stable object-storage address, so a `url`,
+      // `path`, `storageKey` or `filename` on the way back would hand a client
+      // a direct handle to a shared store this API is the only reader of — and
+      // `modelId` would publish which model an administrator bound to `speak`
+      // to every authenticated learner, including a Viewer.
+      | AiSpeechAudioUnavailableResponse
       // The voices response and, separately, ONE ENTRY OF ITS LIST (#283).
       // Both are needed: `KeysOfUnion` sees only the top level, so without
       // `AiSpeechVoice` here a `modelId` or an `apiKey` added to a voice
