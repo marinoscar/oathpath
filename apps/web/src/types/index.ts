@@ -72,6 +72,61 @@ export type StudySettingsPatch = {
 };
 
 // =============================================================================
+// Voice — how spoken practice sounds and behaves (issue #282, epic #280)
+// =============================================================================
+//
+// Mirrors `voiceSchema` / `voicePatchSchema` in
+// `apps/api/src/common/schemas/user-settings-namespaces.schema.ts`, and carries
+// that file's rule across the wire unchanged: EVERY FIELD IS OPTIONAL AND AN
+// ABSENT FIELD MEANS "use the built-in default", resolved at read time by
+// whoever is reading.
+//
+// So the web app must never materialise these. `/settings/voice` renders each
+// default without writing it, and sends a NULL-DELETE when a learner returns a
+// control to it — see `components/settings/VoiceSettings.tsx`, which states the
+// failure mode in full. `StudySettings` above is the same contract, decided the
+// same way, for the same reason.
+//
+// NONE OF THESE SIX IS A STATEMENT ABOUT WHAT THIS DEPLOYMENT CAN DO.
+// `preferPremiumVoice` is a WISH, not a capability: an unbound `speak` role
+// means the browser's own `speechSynthesis` reads everything regardless, which
+// `docs/specs/voice.md` §2 is explicit is the ordinary state of a fresh install
+// and not a degraded one. Whether premium audio is actually available is
+// `AiStatus.unboundRoles` / `SpeechVoicesResponse.speakBound`, never this.
+// =============================================================================
+
+/** The stored `voice` namespace. Absent, or an absent field, means the default. */
+export interface VoiceSettings {
+  /** A spoken answer grades itself on release, with no confirm step. */
+  autoSubmitSpoken?: boolean;
+  /** Prefer the provider-hosted voice over the browser's, WHEN one is bound. */
+  preferPremiumVoice?: boolean;
+  /**
+   * The provider's own voice id, e.g. `alloy`. Absent lets the provider choose.
+   *
+   * SHAPE, NOT MEMBERSHIP — the accepted set belongs to the provider and
+   * arrives over `GET /api/ai/speech/voices`, never from a constant in this
+   * bundle. See `SpeechVoicesResponse`.
+   */
+  preferredVoice?: string;
+  /** Playback speed as a multiplier of normal. Bounded 0.5-2 by the API. */
+  speechRate?: number;
+  /** Read a question aloud automatically when it appears. */
+  readQuestionsAloud?: boolean;
+  /** Read an answer aloud automatically when it appears. */
+  readAnswersAloud?: boolean;
+}
+
+/**
+ * PATCH form of `voice`: each field may additionally be `null`, meaning "delete
+ * this field and fall back to the built-in default" — the same shape, for the
+ * same reason, as `StudySettingsPatch` above.
+ */
+export type VoiceSettingsPatch = {
+  [K in keyof VoiceSettings]?: VoiceSettings[K] | null;
+};
+
+// =============================================================================
 // Notifications — the registry (#124) and the stored preferences (#126, epic #109)
 // =============================================================================
 //
@@ -318,6 +373,15 @@ export interface UserSettings {
    * absent resolves to the built-in defaults (hour 9, enabled). Never backfill.
    */
   study?: StudySettings;
+  /**
+   * How spoken practice sounds and behaves (#282, epic #280).
+   *
+   * OPTIONAL, AND ABSENT IS THE NORMAL CASE, exactly as `study` above: no
+   * account has this key until the learner moves one of the six controls on
+   * `/settings/voice`, and absent resolves to the built-in defaults. Never
+   * backfill it with a materialised object.
+   */
+  voice?: VoiceSettings;
   updatedAt: string;
   version: number;
 }
@@ -372,6 +436,12 @@ export interface UserSettingsUpdate {
    * `null` for it when the learner has moved back to the built-in default.
    */
   study?: StudySettingsPatch | null;
+  /**
+   * Voice preferences (#282). Field-wise merged server-side like `study`, so a
+   * control sends only the one field it changed — and sends `null` for it when
+   * the learner has moved back to the built-in default.
+   */
+  voice?: VoiceSettingsPatch | null;
 }
 
 export interface SystemSettings {
