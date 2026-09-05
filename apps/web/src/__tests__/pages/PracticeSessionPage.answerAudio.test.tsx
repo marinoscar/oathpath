@@ -195,8 +195,12 @@ function renderSession(options: Options = {}) {
     enabled: true,
     providerConfigured: true,
     // `speak` UNBOUND, deliberately: the ordinary state of a fresh install.
-    // Everything below therefore runs on the browser's own voice.
-    unboundRoles: ['speak'],
+    // Everything below therefore runs on the browser's own voice. `realtime`
+    // is unbound for a different reason (#355, epic #345 / E15): the ladder in
+    // `PracticeSessionPage.tsx` resolves Voice to the LIVE transport when a
+    // `realtime` model is bound, and this file is about the answer audio of
+    // the request/response one.
+    unboundRoles: ['speak', 'realtime'],
   };
 
   server.use(
