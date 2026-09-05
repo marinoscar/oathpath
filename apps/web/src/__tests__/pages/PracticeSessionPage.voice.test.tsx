@@ -6,21 +6,31 @@
  * assertion in it exists because of a specific way the loop could quietly stop
  * being fair:
  *
- *  1. **NOTHING A MICROPHONE PRODUCED IS GRADED BEFORE THE LEARNER CONFIRMS
- *     IT.** This is the load-bearing one. Auto-submitting the transcript is
- *     the obvious "one less click" simplification, and it would turn every
- *     mishearing into a permanent `incorrect` row in the one table E5, E6, E7
- *     and E8 all read as fact — for a learner who knew the answer, because of
- *     their accent. `VISION.md` line 228 forbids exactly that, and the confirm
- *     step is the only thing in the product enforcing it. So: no POST until
- *     the learner presses the button, and the transcript is editable first.
- *  2. **A low-confidence transcription invites a correction and records
- *     nothing on its own.** The copy changes; the outcome does not, and the
- *     raw number is never shown to anybody.
+ *  1. **EVERY SPOKEN ATTEMPT CAN BE CORRECTED, AND THE CORRECTION COSTS
+ *     NOTHING.** This is the load-bearing one, and issue #286 (epic #280 /
+ *     E12) is where it moved. E9 kept `VISION.md` line 228's promise — a
+ *     learner is never "unfairly penalized for accent or speech-recognition
+ *     errors" — with a confirm-before-grade step, and this file's first
+ *     assertion used to be that nothing was POSTed until the learner pressed a
+ *     button. E12 grades the transcript on release instead (line 230: "a
+ *     patient human coach, not operating a voice command interface") and moves
+ *     the same protection to AFTER the verdict: the words that were graded stay
+ *     visible and editable, a correction posts a superseding attempt, and
+ *     `recomputeMasteryForQuestion` (#285, server-side) replays the question's
+ *     mastery without the corrected row. So what is asserted here now is that
+ *     the correction is ALWAYS REACHABLE and the counter never double-counts —
+ *     not that grading waited. `docs/specs/voice-hands-free.md` §1-§2.
+ *  1b. **The confirm step is the OPT-OUT, not a deletion.** With
+ *     `voice.autoSubmitSpoken: false` every E9 assertion above still holds,
+ *     byte for byte, and the suites below prove it rather than assume it.
+ *  2. **A low-confidence transcription changes the COPY, not the flow.** It
+ *     never decided an outcome and now does not decide whether grading
+ *     happened either; the raw number is never shown to anybody.
  *  3. **A retry names the attempt it supersedes.** `retryOfAttemptId` is what
- *     keeps a mishearing and its correction from counting as two questions,
- *     and its two refusals (409, 404) must leave the learner somewhere they
- *     can act rather than on a dead question.
+ *     keeps an answer and its correction from counting as two questions, and
+ *     its two refusals (409, 404) must leave the learner somewhere they can act
+ *     rather than on a dead question. A second correction of the same attempt
+ *     is never offered, because the server 409s it.
  *  4. **All four `inputMode` × `promptMode` combinations are sent correctly.**
  *     Nothing on the server can reconstruct either after the fact — the
  *     recording is transcribed and discarded at the point of capture — so a
@@ -54,7 +64,11 @@ import type {
   PracticeSession,
   PracticeSessionDetail,
   RecordPracticeAttemptInput,
+  VoiceSettings,
 } from '../../types';
+
+/** The opt-out: E9's confirm-then-grade flow, kept as a preference (#286). */
+const CONFIRM_FIRST: VoiceSettings = { autoSubmitSpoken: false };
 
 // -----------------------------------------------------------------------------
 // The microphone, under this test's control
@@ -288,6 +302,23 @@ interface Options {
   transcriptionFailed?: { errorCode: string; error: string };
   /** `transcribe` bound on this deployment? Defaults to yes. */
   transcribeBound?: boolean;
+  /**
+   * Bound when the page loads, unbound on the next read — the state the page's
+   * own re-read effect exists for. `docs/specs/voice.md` §1: an administrator
+   * unbinding `transcribe` mid-session is an ordinary deployment change, and
+   * the page has to move from "the call came back unavailable" to "this
+   * deployment has no transcription" rather than leaving a dead microphone up.
+   */
+  unbindTranscribeOnRefresh?: boolean;
+  /**
+   * The stored `voice` namespace, or nothing at all (every field absent, so
+   * every default applies — `autoSubmitSpoken` included, which is `true`).
+   *
+   * THE SAME `GET /api/user-settings` THE APP ALREADY READS. `useVoicePrefs`
+   * adds no endpoint and no second fetch, so a test that wants a different
+   * preference changes the settings document, exactly as a learner would.
+   */
+  voice?: VoiceSettings;
   theme?: typeof lightTheme;
 }
 
@@ -304,8 +335,29 @@ function renderSession(options: Options = {}) {
     unboundRoles: options.transcribeBound === false ? ['transcribe'] : [],
   };
 
+  let statusReads = 0;
+
   server.use(
-    http.get(`${API_BASE}/ai/status`, () => HttpResponse.json({ data: status })),
+    http.get(`${API_BASE}/user-settings`, () =>
+      HttpResponse.json({
+        data: {
+          theme: 'system',
+          profile: { useProviderImage: true, customImageUrl: null },
+          ...(options.voice ? { voice: options.voice } : {}),
+          updatedAt: '2026-03-01T00:00:00.000Z',
+          version: 1,
+        },
+      }),
+    ),
+    http.get(`${API_BASE}/ai/status`, () => {
+      statusReads += 1;
+      if (options.unbindTranscribeOnRefresh && statusReads > 1) {
+        return HttpResponse.json({
+          data: { ...status, unboundRoles: ['transcribe'] },
+        });
+      }
+      return HttpResponse.json({ data: status });
+    }),
     http.post(`${API_BASE}/ai/speech/transcribe`, async () => {
       transcribeCalls += 1;
       if (options.transcriptionFails) {
@@ -451,14 +503,112 @@ afterEach(() => {
 });
 
 // -----------------------------------------------------------------------------
-// 1. THE LOAD-BEARING ONE
+// 1. THE LOAD-BEARING ONE: GRADE ON RELEASE, CORRECT AFTERWARDS (#286)
 // -----------------------------------------------------------------------------
 
-describe('nothing is graded before the learner confirms the transcript', () => {
-  it('shows the transcript and records NO attempt until the learner submits it', async () => {
+/** The correction card's opening control, once a spoken attempt is graded. */
+function correctionButton() {
+  return screen.queryByRole('button', { name: /that.s not what i said/i });
+}
+
+/** The editable transcript, once the correction card is opened. */
+function correctionField(): HTMLInputElement {
+  return screen.getByLabelText(/what you actually said/i) as HTMLInputElement;
+}
+
+describe('a spoken answer grades itself the moment it lands', () => {
+  it('grades on release with NO further interaction, and shows the result', async () => {
     const posted: RecordPracticeAttemptInput[] = [];
     const user = userEvent.setup();
     renderSession({ onAttempt: (input) => posted.push(input) });
+
+    await startSpeaking(user);
+    finishRecording();
+
+    // ONE HOLD, ONE RELEASE, ONE VERDICT. No transcript to read, no button to
+    // press: `VISION.md` line 230's "patient human coach" rather than four
+    // deliberate actions per question.
+    expect(await screen.findByText('Not a match')).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: /next question/i }),
+    ).toBeInTheDocument();
+
+    expect(transcribeCalls).toBe(1);
+    expect(posted).toHaveLength(1);
+    // Everything `voiceFields()` assembled before still rides with it.
+    expect(posted[0].responseText).toBe('the Constitution');
+    expect(posted[0].transcript).toBe('the Constitution');
+    expect(posted[0].inputMode).toBe('spoken');
+    expect(posted[0].promptMode).toBe('read');
+    expect(posted[0].asrConfidence).toBe(0.94);
+    expect(posted[0].retryOfAttemptId).toBeUndefined();
+  });
+
+  it('NEVER submits an empty transcript, and says so instead', async () => {
+    const posted: RecordPracticeAttemptInput[] = [];
+    const user = userEvent.setup();
+    renderSession({
+      // `text: ''` is a `status: 'ok'` SUCCESS (`ai-speech.dto.ts`) — it is what
+      // silence, or a tap instead of a hold, sounds like.
+      transcription: { text: '   ', confidence: 0.9 },
+      onAttempt: (input) => posted.push(input),
+    });
+
+    await startSpeaking(user);
+    finishRecording();
+
+    expect(
+      await screen.findByText(/nothing was picked up in that recording/i),
+    ).toBeInTheDocument();
+    // Auto-submitting this would record a failure at a question the learner
+    // never answered — the one thing worse than making them press a button.
+    expect(posted).toHaveLength(0);
+    expect(screen.queryByText('Not a match')).toBeNull();
+
+    // And they can simply go again: the microphone is live, not blocked.
+    expect(
+      screen.getByRole('button', { name: /hold to record/i }),
+    ).toBeEnabled();
+    await user.type(answerField(), 'the Constitution');
+    await user.click(screen.getByRole('button', { name: /^submit$/i }));
+    await waitFor(() => expect(posted).toHaveLength(1));
+    expect(posted[0].inputMode).toBe('typed');
+  });
+
+  it('leaves typing available immediately after an auto-submitted answer', async () => {
+    const posted: RecordPracticeAttemptInput[] = [];
+    const user = userEvent.setup();
+    renderSession({ onAttempt: (input) => posted.push(input) });
+
+    await startSpeaking(user);
+    finishRecording();
+    await screen.findByRole('button', { name: /next question/i });
+
+    // On to question 2, and the field is usable with no toggle, no reload and
+    // no recovery step. `voice.md` §5: the text path is unconditional, and an
+    // auto-submitted answer is not allowed to be the end of the session.
+    await user.click(screen.getByRole('button', { name: /next question/i }));
+    await screen.findByRole('heading', { level: 2, name: QUESTION_2.prompt });
+    expect(answerField()).toBeEnabled();
+    expect(answerField().value).toBe('');
+
+    await user.type(answerField(), 'it sets up the government');
+    await user.click(screen.getByRole('button', { name: /^submit$/i }));
+    await waitFor(() => expect(posted).toHaveLength(2));
+    expect(posted[1].inputMode).toBe('typed');
+    expect(posted[1].questionId).toBe(QUESTION_2.id);
+  });
+});
+
+// -----------------------------------------------------------------------------
+// 1a. THE OPT-OUT: E9's CONFIRM-THEN-GRADE FLOW, UNCHANGED (#286)
+// -----------------------------------------------------------------------------
+
+describe('with `voice.autoSubmitSpoken: false`, nothing is graded before the learner confirms', () => {
+  it('shows the transcript and records NO attempt until the learner submits it', async () => {
+    const posted: RecordPracticeAttemptInput[] = [];
+    const user = userEvent.setup();
+    renderSession({ voice: CONFIRM_FIRST, onAttempt: (input) => posted.push(input) });
 
     await startSpeaking(user);
     finishRecording();
@@ -467,9 +617,8 @@ describe('nothing is graded before the learner confirms the transcript', () => {
     await waitFor(() => expect(answerField().value).toBe('the Constitution'));
     expect(transcribeCalls).toBe(1);
 
-    // AND NOTHING HAS BEEN RECORDED. This is the assertion the whole feature
-    // rests on: an auto-submit here would grade words the learner has not yet
-    // agreed they said.
+    // AND NOTHING HAS BEEN RECORDED. This is what the learner asked for by
+    // turning auto-submit off, and it is E9's flow byte for byte.
     expect(posted).toHaveLength(0);
     expect(
       screen.getByText(/nothing is graded until you choose use this answer/i),
@@ -484,6 +633,7 @@ describe('nothing is graded before the learner confirms the transcript', () => {
     const posted: RecordPracticeAttemptInput[] = [];
     const user = userEvent.setup();
     renderSession({
+      voice: CONFIRM_FIRST,
       // What a mishearing looks like: close, and wrong.
       transcription: { text: 'the constipation', confidence: 0.91 },
       onAttempt: (input) => posted.push(input),
@@ -505,6 +655,29 @@ describe('nothing is graded before the learner confirms the transcript', () => {
     expect(posted[0].inputMode).toBe('spoken');
   });
 
+  it('still refuses to submit an empty transcript', async () => {
+    const posted: RecordPracticeAttemptInput[] = [];
+    const user = userEvent.setup();
+    renderSession({
+      voice: CONFIRM_FIRST,
+      transcription: { text: '', confidence: 0.9 },
+      onAttempt: (input) => posted.push(input),
+    });
+
+    await startSpeaking(user);
+    finishRecording();
+
+    expect(
+      await screen.findByText(/nothing was picked up in that recording/i),
+    ).toBeInTheDocument();
+    expect(posted).toHaveLength(0);
+    // Not dropped into a confirmation step over an empty box, which reads as
+    // the product having lost their answer.
+    expect(screen.queryByText(/is this what you said\?/i)).toBeNull();
+  });
+});
+
+describe('a transcription that never produced words', () => {
   it('records nothing at all when the transcription fails, and keeps typing open', async () => {
     const posted: RecordPracticeAttemptInput[] = [];
     const user = userEvent.setup();
@@ -601,6 +774,43 @@ describe('when the transcription call answers something other than `ok`', () => 
     expect(posted[0].inputMode).toBe('typed');
   });
 
+  it('renders the ROLE-SCOPED not-ready state once the status agrees the role is gone', async () => {
+    const posted: RecordPracticeAttemptInput[] = [];
+    const user = userEvent.setup();
+    renderSession({
+      // Bound when the page loaded — which is why the microphone was there to
+      // press — and unbound by the time the page re-reads the status after the
+      // `unavailable` frame. That re-read is the page's own effect, and this is
+      // the case it exists for.
+      transcriptionUnavailable: { cause: 'role_unbound', role: 'transcribe' },
+      unbindTranscribeOnRefresh: true,
+      onAttempt: (input) => posted.push(input),
+    });
+
+    await startSpeaking(user);
+    finishRecording();
+
+    // THE SHARED `AiNotReady`, role-scoped to `transcribe` — never a message
+    // written on this page, and never the amber retry alert. Its signature
+    // sentence is the assertion, because that sentence is the whole reason the
+    // component exists and the first thing a local rewrite would drop. (The
+    // role NAME is admin-only copy, so a learner never sees it.)
+    expect(await screen.findByText(/not available yet/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/this is not a problem with your key/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/hold the button and say it again, or type your answer below/i),
+    ).toBeNull();
+    expect(posted).toHaveLength(0);
+
+    // And the session is still a complete, working, text-mode session.
+    await user.type(answerField(), 'the Constitution');
+    await user.click(screen.getByRole('button', { name: /^submit$/i }));
+    await waitFor(() => expect(posted).toHaveLength(1));
+    expect(posted[0].inputMode).toBe('typed');
+  });
+
   it('renders the "add your key" message, not `AiNotReady`, for `no_user_key`', async () => {
     const posted: RecordPracticeAttemptInput[] = [];
     const user = userEvent.setup();
@@ -641,10 +851,42 @@ describe('when the transcription call answers something other than `ok`', () => 
 // -----------------------------------------------------------------------------
 
 describe('a low-confidence transcription', () => {
-  it('reads as a likely mishearing, offers the recording again, and records nothing', async () => {
+  it('is still GRADED, and the result reads as a likely mishearing', async () => {
     const posted: RecordPracticeAttemptInput[] = [];
     const user = userEvent.setup();
     renderSession({
+      transcription: { text: 'the constitutional', confidence: 0.41 },
+      onAttempt: (input) => posted.push(input),
+    });
+
+    await startSpeaking(user);
+    finishRecording();
+
+    // GRADING HAPPENED. The confidence never decided an outcome and, since
+    // #286, does not decide whether the answer is graded either — it decides
+    // the WORDS beside the verdict and nothing else.
+    expect(await screen.findByText('Not a match')).toBeInTheDocument();
+    await waitFor(() => expect(posted).toHaveLength(1));
+    expect(posted[0].asrConfidence).toBe(0.41);
+
+    // …and the invitation to check it is the stronger one.
+    expect(
+      screen.getByText(/that may not be what you said/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/more likely our mistake than yours/i),
+    ).toBeInTheDocument();
+    expect(correctionButton()).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: /record it again/i }),
+    ).toBeInTheDocument();
+  });
+
+  it('with the opt-out, invites the correction BEFORE grading, exactly as E9 did', async () => {
+    const posted: RecordPracticeAttemptInput[] = [];
+    const user = userEvent.setup();
+    renderSession({
+      voice: CONFIRM_FIRST,
       transcription: { text: 'the constitutional', confidence: 0.41 },
       onAttempt: (input) => posted.push(input),
     });
@@ -662,10 +904,9 @@ describe('a low-confidence transcription', () => {
       screen.getByRole('button', { name: /record again/i }),
     ).toBeInTheDocument();
 
-    // NO OUTCOME. The confidence changed the words on screen and nothing else;
-    // whether this counts as a miss is the server's call, made after grading.
+    // NO OUTCOME. Nothing is graded until the learner says so on this setting.
     expect(posted).toHaveLength(0);
-    expect(screen.queryByText(/not a match/i)).toBeNull();
+    expect(screen.queryByText('Not a match')).toBeNull();
   });
 
   it('NEVER shows the learner the confidence number', async () => {
@@ -686,14 +927,14 @@ describe('a low-confidence transcription', () => {
     }
   });
 
-  it('reads as an ordinary check when the recogniser was confident', async () => {
+  it('reads as an ordinary "this is what we heard" when the recogniser was confident', async () => {
     const user = userEvent.setup();
     renderSession({ transcription: { text: 'the Constitution', confidence: 0.94 } });
 
     await startSpeaking(user);
     finishRecording();
 
-    expect(await screen.findByText(/is this what you said\?/i)).toBeInTheDocument();
+    expect(await screen.findByText('This is what we heard.')).toBeInTheDocument();
     expect(screen.queryByText(/that may not be what you said/i)).toBeNull();
   });
 
@@ -708,7 +949,7 @@ describe('a low-confidence transcription', () => {
     await startSpeaking(user);
     finishRecording();
 
-    expect(await screen.findByText(/is this what you said\?/i)).toBeInTheDocument();
+    expect(await screen.findByText('This is what we heard.')).toBeInTheDocument();
     expect(screen.queryByText(/that may not be what you said/i)).toBeNull();
   });
 
@@ -727,7 +968,7 @@ describe('a low-confidence transcription', () => {
     await startSpeaking(user);
     finishRecording();
 
-    expect(await screen.findByText(/is this what you said\?/i)).toBeInTheDocument();
+    expect(await screen.findByText('This is what we heard.')).toBeInTheDocument();
     expect(screen.queryByText(/that may not be what you said/i)).toBeNull();
   });
 
@@ -741,8 +982,6 @@ describe('a low-confidence transcription', () => {
 
     await startSpeaking(user);
     finishRecording();
-    await waitFor(() => expect(answerField().value).toBe('the Constitution'));
-    await user.click(screen.getByRole('button', { name: /use this answer/i }));
 
     await waitFor(() => expect(posted).toHaveLength(1));
     // ABSENT, NEVER `0`. A `0` is below the server's threshold, so it would
@@ -760,8 +999,6 @@ describe('a low-confidence transcription', () => {
 
     await startSpeaking(user);
     finishRecording();
-    await waitFor(() => expect(answerField().value).toBe('the Constitution'));
-    await user.click(screen.getByRole('button', { name: /use this answer/i }));
 
     await waitFor(() => expect(posted).toHaveLength(1));
     expect(posted[0].asrConfidence).toBe(0.41);
@@ -773,120 +1010,160 @@ describe('a low-confidence transcription', () => {
 });
 
 // -----------------------------------------------------------------------------
-// 3. THE RETRY
+// 3. THE CORRECTION (E9's retry, widened by #286 to any spoken attempt)
 // -----------------------------------------------------------------------------
 
-describe('answering again after a mishearing', () => {
-  const misheard = makeAttempt({
-    id: 'attempt-misheard',
+describe('correcting a graded spoken answer', () => {
+  const graded = makeAttempt({
+    id: 'attempt-graded',
     inputMode: 'spoken',
     outcome: 'incorrect',
-    failureCause: 'misheard',
+    responseText: 'the constitutional',
     transcript: 'the constitutional',
     asrConfidence: 0.41,
+    failureCause: 'misheard',
   });
 
-  function misheardThenRetry() {
-    let call = 0;
-    return (): PracticeAttemptResult => {
-      call += 1;
-      return call === 1
-        ? {
-            attempt: misheard,
-            acceptedAnswers: misheard.answerSnapshot.answers,
-            nextQuestion: QUESTION_1,
-            progress: { answered: 0, planned: 5 },
-          }
-        : {
-            attempt: makeAttempt({
-              id: 'attempt-retry',
-              inputMode: 'spoken',
-              outcome: 'correct',
-              retryOfAttemptId: misheard.id,
-            }),
-            acceptedAnswers: misheard.answerSnapshot.answers,
-            nextQuestion: QUESTION_2,
-            progress: { answered: 1, planned: 5 },
-          };
+  const corrected = makeAttempt({
+    id: 'attempt-retry',
+    inputMode: 'spoken',
+    outcome: 'correct',
+    responseText: 'the Constitution',
+    transcript: 'the Constitution',
+    asrConfidence: 0.41,
+    retryOfAttemptId: graded.id,
+  });
+
+  function resultFor(attempt: PracticeAttempt): PracticeAttemptResult {
+    return {
+      attempt,
+      acceptedAnswers: attempt.answerSnapshot.answers,
+      nextQuestion: QUESTION_2,
+      // THE SERVER'S NUMBER, AND IT DOES NOT MOVE. A superseded attempt is
+      // excluded from `answered`, so an answer and its correction are ONE
+      // answered question — which is what the counter has to keep saying.
+      progress: { answered: 1, planned: 5 },
     };
   }
 
-  it('posts a NEW attempt naming the original in `retryOfAttemptId`', async () => {
+  /** The graded attempt, then its correction. */
+  function gradedThenCorrection() {
+    let call = 0;
+    return (): PracticeAttemptResult => {
+      call += 1;
+      return resultFor(call === 1 ? graded : corrected);
+    };
+  }
+
+  it('pre-fills the graded transcript, posts `retryOfAttemptId`, and re-renders the result', async () => {
     const posted: RecordPracticeAttemptInput[] = [];
     const user = userEvent.setup();
     renderSession({
-      attemptResult: misheardThenRetry(),
+      transcription: { text: 'the constitutional', confidence: 0.41 },
+      attemptResult: gradedThenCorrection(),
       onAttempt: (input) => posted.push(input),
     });
 
     await startSpeaking(user);
     finishRecording();
-    await waitFor(() => expect(answerField().value).toBe('the Constitution'));
-    await user.click(screen.getByRole('button', { name: /use this answer/i }));
-
-    // The server said `misheard`, so the offer appears. It is the SERVER'S
-    // verdict that opens it — this page never re-runs the threshold.
-    const again = await screen.findByRole('button', { name: /answer again/i });
-    await user.click(again);
-
-    // Same question, and the counter has NOT moved: a superseded attempt is
-    // excluded from `answered`, so the pair is one question, not two.
-    expect(
-      screen.getByRole('heading', { level: 2, name: QUESTION_1.prompt }),
-    ).toBeInTheDocument();
+    expect(await screen.findByText('Not a match')).toBeInTheDocument();
     expect(screen.getByText('Question 1 of 5')).toBeInTheDocument();
 
-    finishRecording();
-    await waitFor(() => expect(answerField().value).toBe('the Constitution'));
-    await user.click(screen.getByRole('button', { name: /use this answer/i }));
+    // The words that were graded are on screen, and one control away from
+    // being editable — pre-filled, so fixing one misheard word is one
+    // keystroke rather than retyping the sentence.
+    await user.click(correctionButton() as HTMLElement);
+    expect(correctionField().value).toBe('the constitutional');
+
+    await user.clear(correctionField());
+    await user.type(correctionField(), 'the Constitution');
+    await user.click(screen.getByRole('button', { name: /use this instead/i }));
 
     await waitFor(() => expect(posted).toHaveLength(2));
     expect(posted[0].retryOfAttemptId).toBeUndefined();
-    expect(posted[1].retryOfAttemptId).toBe('attempt-misheard');
+    expect(posted[1].retryOfAttemptId).toBe('attempt-graded');
     expect(posted[1].inputMode).toBe('spoken');
+    expect(posted[1].responseText).toBe('the Constitution');
+    expect(posted[1].transcript).toBe('the Constitution');
+    // The measurement belongs to the RECORDING, so it rides with the
+    // correction unchanged — exactly as an edited transcript always sent it
+    // under the confirm flow. The client never sends a verdict about it.
+    expect(posted[1].asrConfidence).toBe(0.41);
+
+    // The card re-renders from the retry's own grading…
+    expect(await screen.findByText('Correct')).toBeInTheDocument();
+    // …and the counter still reads ONE answered question, not two.
+    expect(screen.getByText('Question 1 of 5')).toBeInTheDocument();
+
+    // ONE CORRECTION PER ATTEMPT. `requireRetryTarget` 409s a second, so
+    // offering it would be offering something that cannot work.
+    expect(correctionButton()).toBeNull();
+    expect(
+      screen.queryByRole('button', { name: /record it again/i }),
+    ).toBeNull();
   });
 
   it('offers nothing when the attempt is ALREADY a retry — the chain stops at two', async () => {
     const user = userEvent.setup();
-    renderSession({
-      attemptResult: {
-        attempt: makeAttempt({
-          id: 'attempt-retry',
-          inputMode: 'spoken',
-          failureCause: 'misheard',
-          retryOfAttemptId: 'attempt-misheard',
-        }),
-        acceptedAnswers: misheard.answerSnapshot.answers,
-        nextQuestion: QUESTION_2,
-        progress: { answered: 1, planned: 5 },
-      },
-    });
+    renderSession({ attemptResult: resultFor(corrected) });
 
     await startSpeaking(user);
     finishRecording();
-    await waitFor(() => expect(answerField().value).toBe('the Constitution'));
-    await user.click(screen.getByRole('button', { name: /use this answer/i }));
 
-    // The server would 409 a third link, so offering the button would be
-    // offering something that cannot work.
     await screen.findByRole('button', { name: /next question/i });
-    expect(screen.queryByRole('button', { name: /answer again/i })).toBeNull();
+    expect(correctionButton()).toBeNull();
   });
 
-  it('offers nothing for an ordinary wrong answer', async () => {
+  it('offers the correction for a CONFIDENTLY wrong answer too, not only a doubted one', async () => {
     const user = userEvent.setup();
     renderSession({ transcription: { text: 'the big rules', confidence: 0.97 } });
 
     await startSpeaking(user);
     finishRecording();
-    await waitFor(() => expect(answerField().value).toBe('the big rules'));
-    await user.click(screen.getByRole('button', { name: /use this answer/i }));
+    await screen.findByRole('button', { name: /next question/i });
+
+    // THE CASE AUTO-SUBMIT CREATED. Accented speech very often transcribes
+    // confidently and wrongly, so `failureCause: 'misheard'` — which needs a
+    // confidence below 0.6 — cannot see the transcript that most needs fixing
+    // (`voice-hands-free.md` §2). The copy stays ordinary; the offer does not
+    // depend on doubt.
+    expect(screen.getByText('This is what we heard.')).toBeInTheDocument();
+    expect(screen.queryByText(/that may not be what you said/i)).toBeNull();
+    expect(correctionButton()).toBeInTheDocument();
+  });
+
+  it('offers nothing for a TYPED answer', async () => {
+    const user = userEvent.setup();
+    renderSession();
+
+    await screen.findByRole('heading', { level: 2, name: QUESTION_1.prompt });
+    await user.type(answerField(), 'the big rules');
+    await user.click(screen.getByRole('button', { name: /^submit$/i }));
 
     await screen.findByRole('button', { name: /next question/i });
-    // Wrong is wrong. A retry here would be a second go at every question a
-    // learner missed, which is the grinding loophole the one-attempt rule
-    // exists to close.
-    expect(screen.queryByRole('button', { name: /answer again/i })).toBeNull();
+    // Nothing misheard a keyboard. A second go at every typed miss is the
+    // grinding loophole the one-attempt rule exists to close, and E12 widened
+    // the correction to spoken attempts only.
+    expect(correctionButton()).toBeNull();
+  });
+
+  it('offers nothing after "Show me the answer" — the accepted answer is on screen', async () => {
+    const user = userEvent.setup();
+    // The reveal path needs a transcript that has NOT been graded yet, which
+    // is the confirm flow — with auto-submit there is no window in which to
+    // press it.
+    renderSession({ voice: CONFIRM_FIRST });
+
+    await startSpeaking(user);
+    finishRecording();
+    await waitFor(() => expect(answerField().value).toBe('the Constitution'));
+    await user.click(screen.getByRole('button', { name: /show me the answer/i }));
+
+    await screen.findByRole('button', { name: /next question/i });
+    // `requireRetryTarget` has no opinion on `revealed`, so this gate is the
+    // only one there is: "correcting" a transcript to match an answer already
+    // on screen would turn a reveal into a free `correct`.
+    expect(correctionButton()).toBeNull();
   });
 
   it.each([
@@ -895,34 +1172,29 @@ describe('answering again after a mishearing', () => {
   ])('explains a %s refusal in words a learner can act on', async (_name, status) => {
     const user = userEvent.setup();
     renderSession({
-      attemptResult: {
-        attempt: misheard,
-        acceptedAnswers: misheard.answerSnapshot.answers,
-        nextQuestion: QUESTION_1,
-        progress: { answered: 0, planned: 5 },
-      },
+      transcription: { text: 'the constitutional', confidence: 0.41 },
+      attemptResult: resultFor(graded),
     });
 
     await startSpeaking(user);
     finishRecording();
-    await waitFor(() => expect(answerField().value).toBe('the Constitution'));
-    await user.click(screen.getByRole('button', { name: /use this answer/i }));
-    await user.click(await screen.findByRole('button', { name: /answer again/i }));
+    await screen.findByText('Not a match');
 
-    // The retry itself is refused: the server has since recorded a supersession
+    // The correction is refused: the server has since recorded a supersession
     // (409), or the attempt id names nothing this learner owns here (404).
     server.use(
       http.post(`${API_BASE}/practice/sessions/${SESSION_ID}/attempts`, () =>
         HttpResponse.json(
-          { error: { code: 'CONFLICT', message: 'Practice attempt "attempt-misheard" has already been retried' } },
+          { error: { code: 'CONFLICT', message: 'Practice attempt "attempt-graded" has already been retried' } },
           { status },
         ),
       ),
     );
 
-    finishRecording();
-    await waitFor(() => expect(answerField().value).toBe('the Constitution'));
-    await user.click(screen.getByRole('button', { name: /use this answer/i }));
+    await user.click(correctionButton() as HTMLElement);
+    await user.clear(correctionField());
+    await user.type(correctionField(), 'the Constitution');
+    await user.click(screen.getByRole('button', { name: /use this instead/i }));
 
     // NOT the raw server sentence, which names a row id and a rule about
     // chains — neither of which a learner can do anything with.
@@ -930,6 +1202,34 @@ describe('answering again after a mishearing', () => {
       await screen.findByText(/already recorded, so it could not be replaced/i),
     ).toBeInTheDocument();
     expect(screen.queryByText(/has already been retried/i)).toBeNull();
+  });
+
+  it('can be answered again out loud instead of typed', async () => {
+    const posted: RecordPracticeAttemptInput[] = [];
+    const user = userEvent.setup();
+    renderSession({
+      transcription: { text: 'the constitutional', confidence: 0.41 },
+      attemptResult: gradedThenCorrection(),
+      onAttempt: (input) => posted.push(input),
+    });
+
+    await startSpeaking(user);
+    finishRecording();
+    await screen.findByText('Not a match');
+
+    await user.click(screen.getByRole('button', { name: /record it again/i }));
+
+    // Back on the same question, with the counter unmoved — moving it and
+    // moving it back is a flicker that reads as a lost answer.
+    expect(
+      screen.getByRole('heading', { level: 2, name: QUESTION_1.prompt }),
+    ).toBeInTheDocument();
+    expect(screen.getByText('Question 1 of 5')).toBeInTheDocument();
+
+    finishRecording();
+    await waitFor(() => expect(posted).toHaveLength(2));
+    expect(posted[1].retryOfAttemptId).toBe('attempt-graded');
+    expect(posted[1].inputMode).toBe('spoken');
   });
 });
 
@@ -976,8 +1276,6 @@ describe('`inputMode` and `promptMode`', () => {
 
     await startSpeaking(user);
     finishRecording();
-    await waitFor(() => expect(answerField().value).toBe('the Constitution'));
-    await user.click(screen.getByRole('button', { name: /use this answer/i }));
 
     await waitFor(() => expect(posted).toHaveLength(1));
     expect(posted[0].inputMode).toBe('spoken');
@@ -994,18 +1292,21 @@ describe('`inputMode` and `promptMode`', () => {
     await user.click(screen.getByRole('button', { name: /read the question aloud/i }));
     await startSpeaking(user);
     finishRecording();
-    await waitFor(() => expect(answerField().value).toBe('the Constitution'));
-    await user.click(screen.getByRole('button', { name: /use this answer/i }));
 
     await waitFor(() => expect(posted).toHaveLength(1));
     expect(posted[0].inputMode).toBe('spoken');
+    // `promptMode` is read through the same ref the auto-submit branch uses, so
+    // a question that was ACTUALLY played is still recorded as heard even
+    // though nothing between the release and the POST re-rendered.
     expect(posted[0].promptMode).toBe('heard');
   });
 
   it('a SKIP is never `spoken`, and carries neither transcript nor confidence', async () => {
     const posted: RecordPracticeAttemptInput[] = [];
     const user = userEvent.setup();
-    renderSession({ onAttempt: (input) => posted.push(input) });
+    // The confirm flow, because a skip after a transcript only exists there:
+    // with auto-submit the words are graded before Skip can be pressed.
+    renderSession({ voice: CONFIRM_FIRST, onAttempt: (input) => posted.push(input) });
 
     await startSpeaking(user);
     finishRecording();
@@ -1028,7 +1329,9 @@ describe('`inputMode` and `promptMode`', () => {
     // the transcript and typed something else instead is a TYPED attempt.
     const posted: RecordPracticeAttemptInput[] = [];
     const user = userEvent.setup();
-    renderSession({ onAttempt: (input) => posted.push(input) });
+    // "Type it instead" belongs to the confirm step, so this is the opt-out's
+    // behaviour — unchanged by #286.
+    renderSession({ voice: CONFIRM_FIRST, onAttempt: (input) => posted.push(input) });
 
     await startSpeaking(user);
     finishRecording();
@@ -1136,7 +1439,10 @@ describe('switching between speaking and typing mid-session', () => {
 describe('the confirmation step is reachable and announced', () => {
   it('is announced in a live region and edited through a real `<label>`', async () => {
     const user = userEvent.setup();
-    renderSession({ transcription: { text: 'the constitutional', confidence: 0.41 } });
+    renderSession({
+      voice: CONFIRM_FIRST,
+      transcription: { text: 'the constitutional', confidence: 0.41 },
+    });
 
     await startSpeaking(user);
     finishRecording();
@@ -1160,7 +1466,7 @@ describe('the confirmation step is reachable and announced', () => {
   it('is reachable and operable from the keyboard alone', async () => {
     const user = userEvent.setup();
     const posted: RecordPracticeAttemptInput[] = [];
-    renderSession({ onAttempt: (input) => posted.push(input) });
+    renderSession({ voice: CONFIRM_FIRST, onAttempt: (input) => posted.push(input) });
 
     await startSpeaking(user);
     finishRecording();
@@ -1196,6 +1502,7 @@ describe('the confirmation step is reachable and announced', () => {
     setViewportWidth(PHONE);
     const user = userEvent.setup();
     renderSession({
+      voice: CONFIRM_FIRST,
       theme,
       transcription: { text: 'the constitutional', confidence: 0.41 },
     });
@@ -1209,5 +1516,50 @@ describe('the confirmation step is reachable and announced', () => {
     expect(screen.getByRole('button', { name: /record again/i })).toBeVisible();
     expect(screen.getByRole('button', { name: /use this answer/i })).toBeVisible();
     expect(answerField()).toBeVisible();
+  });
+
+  it.each([
+    ['light', lightTheme],
+    ['dark', darkTheme],
+  ] as const)('renders the CORRECTION at 360px in %s', async (_name, theme) => {
+    setViewportWidth(PHONE);
+    const user = userEvent.setup();
+    renderSession({
+      theme,
+      transcription: { text: 'the constitutional', confidence: 0.41 },
+    });
+
+    await startSpeaking(user);
+    finishRecording();
+
+    expect(
+      await screen.findByText(/that may not be what you said/i),
+    ).toBeVisible();
+    expect(correctionButton()).toBeVisible();
+    expect(screen.getByRole('button', { name: /record it again/i })).toBeVisible();
+
+    await user.click(correctionButton() as HTMLElement);
+    // A REAL `<label>` of its own, not a placeholder and not a second control
+    // bound to the disabled "Your answer" field above it.
+    const field = correctionField();
+    expect(field).toBeVisible();
+    const label = document.querySelector(`label[for="${field.id}"]`);
+    expect(label?.textContent).toMatch(/what you actually said/i);
+    expect(screen.getByRole('button', { name: /use this instead/i })).toBeVisible();
+  });
+
+  it('does not announce the correction twice — the verdict region owns that', async () => {
+    const user = userEvent.setup();
+    renderSession({ transcription: { text: 'the constitutional', confidence: 0.41 } });
+
+    await startSpeaking(user);
+    finishRecording();
+    const heading = await screen.findByText(/that may not be what you said/i);
+
+    // OUTSIDE the verdict's `role="status"` region, and carrying no live region
+    // of its own: an `<Alert>`'s default `role="alert"` firing beside the
+    // verdict's own announcement reads as two unrelated interruptions.
+    expect(heading.closest('[role="status"]')).toBeNull();
+    expect(heading.closest('[role="alert"]')).toBeNull();
   });
 });
