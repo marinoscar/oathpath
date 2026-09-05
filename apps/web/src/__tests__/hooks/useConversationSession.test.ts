@@ -25,6 +25,27 @@
  *   5. THE LEARNER'S OWN CONTROLS WORK FROM EVERY PHASE. Stop, Type instead
  *      and Next never wait for a timer or a threshold.
  *
+ * Issue #314 added three more claims, each because the child issues above
+ * left it uncovered rather than because it changed:
+ *
+ *   6. THE FOUR HOOKS COMPOSE AS ONE CHAIN, IN ORDER. Every test for claim 1
+ *      above proves one edge of `endOfTurn → capture.stop() → transcribe()
+ *      → submit()` in isolation; the "one composed chain" describe block
+ *      drives all four as a single sequence and asserts on
+ *      `mock.invocationCallOrder`, which no single-transition test does.
+ *   7. THE RETRY BUDGET IS A PROPERTY, NOT AN EXAMPLE. Claim 3's own tests
+ *      are specific sequences (wrong-then-wrong, empty-then-wrong); "the
+ *      retry budget as a PROPERTY" drives every ordered pair of the five
+ *      miss kinds this hook recognises (25 sequences) and asserts the one
+ *      invariant that must hold for all of them.
+ *   8. UNMOUNT RELEASES THE STREAM, THE WAKE LOCK, THE VOICE **AND THE
+ *      SHARED AUDIOCONTEXT**, IN EVERY STATE. The unmount describe block's
+ *      own `PHASES` array was missing `speakingAnswer` before this issue —
+ *      every other phase-enumerated block in this file already lists all
+ *      five — and none of its tests asserted `closeSharedAudioContext()`
+ *      (`../../lib/earcons`, now spied at the top of this file) was ever
+ *      called at all.
+ *
  * =============================================================================
  * WHAT THIS SUITE DOES NOT TEST — AND CANNOT
  * =============================================================================
@@ -65,6 +86,27 @@ import {
 } from '../../hooks/useAudioCapture';
 import type { TranscribeResponse } from '../../types';
 import type { VoiceActivityEvent } from '../../hooks/useVoiceActivity';
+
+// ---------------------------------------------------------------------------
+// `../../lib/earcons`, spied rather than left real. jsdom has no `AudioContext`
+// at all, so `closeSharedAudioContext()` is already a no-op there — a green
+// suite proves the CALL happens on every way out, never that a context was
+// genuinely closed (that half is `earcons.test.ts`'s own job, against a fake
+// `AudioContext` it installs). `vi.hoisted` is what lets these spies exist
+// before `vi.mock`'s factory runs, the same device
+// `PracticeSessionPage.conversation.test.tsx` uses for its own capture/VAD
+// mocks.
+// ---------------------------------------------------------------------------
+
+const earconsSpies = vi.hoisted(() => ({
+  closeSharedAudioContext: vi.fn(),
+  playCapturedEarcon: vi.fn(),
+  playListeningEarcon: vi.fn(),
+  startProcessingPulse: vi.fn(),
+  stopProcessingPulse: vi.fn(),
+}));
+
+vi.mock('../../lib/earcons', () => earconsSpies);
 
 // ---------------------------------------------------------------------------
 // `navigator.wakeLock`, faked — enough of it to prove the lock is taken while
@@ -415,6 +457,117 @@ describe('useConversationSession — the happy loop, transition by transition', 
 });
 
 // ---------------------------------------------------------------------------
+//
+// CROSS-HOOK COMPOSITION, AS ONE CHAIN (issue #314). Every test above this
+// point proves ONE transition in isolation — "end of turn stops the
+// recorder" is its own `it`, and "processing ends with `submit` called" is a
+// different one. Neither, on its own, proves the four stages are actually
+// COUPLED in the right order: a regression that let `submit` race ahead of
+// `capture.stop()` (say, a dropped `await`) would still pass both of those
+// tests, because each only checks its own edge of the chain. The two tests
+// below drive the whole thing — VAD `endOfTurn` → recorder `stop()` →
+// `transcribe(blob)` → `submit(transcript, confidence)` — as one sequence and
+// assert on ORDER (`mock.invocationCallOrder`) and on VALUE FLOW (the exact
+// blob reaching `transcribe`, the exact text/confidence reaching `submit`),
+// neither of which any single-transition test above establishes.
+// ---------------------------------------------------------------------------
+
+describe('useConversationSession — one composed chain: end of turn → recorder stop → transcribe → submit', () => {
+  it('the four stages fire in order, each fed the value the one before it produced', async () => {
+    const harness = makeHarness();
+    harness.transcribe.mockResolvedValue({
+      status: 'ok',
+      text: 'the constitution',
+      confidence: 0.87,
+    });
+    const view = mount(harness);
+    await startToListening(harness, view);
+
+    fire(view, ONSET);
+    fire(view, END_OF_TURN);
+    // END OF TURN -> RECORDER STOP, before anything downstream runs.
+    expect(phaseOf(view)).toBe('processing');
+    expect(harness.capture.stop).toHaveBeenCalledTimes(1);
+    expect(harness.transcribe).not.toHaveBeenCalled();
+    expect(harness.submit).not.toHaveBeenCalled();
+
+    const blob = new Blob(['spoken']);
+    await act(async () => {
+      harness.deliverRecording(blob);
+      view.rerender(harness.props());
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    // RECORDER STOP -> TRANSCRIBE, fed the EXACT blob the recorder delivered.
+    // (Both mocks resolve on already-settled promises, so by the time this
+    // `act` returns TRANSCRIBE has already run and fed straight into SUBMIT
+    // in the same microtask flush — asserted on below by VALUE and by
+    // ORDER, which is the honest way to prove the coupling here rather than
+    // an intermediate "not yet called" this fake's synchronicity cannot
+    // support.)
+    expect(harness.transcribe).toHaveBeenCalledTimes(1);
+    expect(harness.transcribe).toHaveBeenCalledWith(blob);
+
+    view.rerender(harness.props());
+    await settle();
+    view.rerender(harness.props());
+
+    // TRANSCRIBE -> SUBMIT, fed the EXACT text and confidence transcribe
+    // resolved — not a value the driver invented, and not the raw blob.
+    expect(harness.submit).toHaveBeenCalledTimes(1);
+    expect(harness.submit).toHaveBeenCalledWith('the constitution', 0.87);
+
+    // AND IN THAT ORDER. A race that let `submit` fire before the recorder
+    // had genuinely stopped would satisfy every assertion above this line
+    // and fail only this one.
+    const stopOrder = harness.capture.stop.mock.invocationCallOrder[0];
+    const transcribeOrder = harness.transcribe.mock.invocationCallOrder[0];
+    const submitOrder = harness.submit.mock.invocationCallOrder[0];
+    expect(stopOrder).toBeLessThan(transcribeOrder);
+    expect(transcribeOrder).toBeLessThan(submitOrder);
+  });
+
+  it('a retry composes the SAME four-stage chain again, from a fresh onset — never a replay of turn 1', async () => {
+    const harness = makeHarness();
+    harness.submit.mockResolvedValueOnce({
+      outcome: 'incorrect',
+      spokenAnswer: 'the Constitution',
+    });
+    const view = mount(harness);
+    await startToListening(harness, view);
+    await speakAnswer(harness, view); // turn 1: a miss, one retry offered
+    expect(phaseOf(view)).toBe('listening');
+
+    const startsBefore = harness.capture.start.mock.calls.length;
+    const stopsBefore = harness.capture.stop.mock.calls.length;
+    const transcribesBefore = harness.transcribe.mock.calls.length;
+    const submitsBefore = harness.submit.mock.calls.length;
+
+    fire(view, ONSET);
+    expect(harness.capture.start.mock.calls.length).toBe(startsBefore + 1);
+    fire(view, END_OF_TURN);
+    expect(harness.capture.stop.mock.calls.length).toBe(stopsBefore + 1);
+
+    const retryBlob = new Blob(['retry']);
+    await act(async () => {
+      harness.deliverRecording(retryBlob);
+      view.rerender(harness.props());
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    view.rerender(harness.props());
+    await settle();
+    view.rerender(harness.props());
+
+    // A SECOND, INDEPENDENT run of the chain — its own `transcribe(blob)`
+    // call on the retry's own bytes, its own `submit`, not turn 1's cached
+    // result replayed.
+    expect(harness.transcribe.mock.calls.length).toBe(transcribesBefore + 1);
+    expect(harness.transcribe).toHaveBeenLastCalledWith(retryBlob);
+    expect(harness.submit.mock.calls.length).toBe(submitsBefore + 1);
+  });
+});
+
+// ---------------------------------------------------------------------------
 
 describe('useConversationSession — the recorder never runs while the app talks', () => {
   it('does not start the recorder in speakingQuestion, even on an onset', async () => {
@@ -707,6 +860,146 @@ describe('useConversationSession — the retry budget is exactly one', () => {
     ).length;
     expect(retriesAfter).toBe(retriesBefore + 1);
   });
+});
+
+// ---------------------------------------------------------------------------
+//
+// THE RETRY BUDGET AS A PROPERTY (issue #314), over a RANGE of miss
+// sequences — not the handful of hand-picked examples above. Each test
+// above this line drives one specific sequence chosen because it reads
+// well (wrong-then-wrong, empty-then-wrong), not because the set was
+// checked for coverage. The invariant `useConversationSession.ts`'s own
+// header states is broader than any one example: "a single budget shared
+// by every reason a turn can miss" — REGARDLESS of which two reasons, or
+// in which order. `MissKind` below is every way a turn can miss that this
+// hook recognises (`onsetTimeout`, an empty transcript, a `failed`
+// transcription, a wrong answer, and a low-confidence "correct" — the
+// `misheard` case), and the test drives EVERY ORDERED PAIR of them
+// (5×5 = 25 sequences), asserting the one property that must hold for all
+// twenty-five: `listening` is entered at most twice for one question, and
+// after the second miss it is never entered a third time.
+// ---------------------------------------------------------------------------
+
+type MissKind = 'onsetTimeout' | 'empty' | 'failed' | 'wrong' | 'lowConfidenceCorrect';
+
+const MISS_KINDS: MissKind[] = [
+  'onsetTimeout',
+  'empty',
+  'failed',
+  'wrong',
+  'lowConfidenceCorrect',
+];
+
+/** Does this miss kind ever reach `submit` (and so set `gradedRef`)? */
+function gradesOnMiss(kind: MissKind): boolean {
+  return kind === 'wrong' || kind === 'lowConfidenceCorrect';
+}
+
+/** Configure the mocks for ONE turn's miss, of the given kind, then drive it. */
+async function driveOneMiss(
+  harness: Harness,
+  view: Mounted,
+  kind: MissKind,
+): Promise<void> {
+  switch (kind) {
+    case 'onsetTimeout':
+      // Fired directly: nobody spoke, so there is no onset/end-of-turn pair
+      // to drive through `speakAnswer` at all.
+      await act(async () => {
+        view.result.current.onVoiceActivityEvent({
+          type: 'onsetTimeout',
+          at: 9_000,
+          waitedMs: 8_000,
+        });
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      return;
+    case 'empty':
+      harness.transcribe.mockResolvedValueOnce({
+        status: 'ok',
+        text: '   ',
+        confidence: 0.5,
+      });
+      await speakAnswer(harness, view);
+      return;
+    case 'failed':
+      harness.transcribe.mockResolvedValueOnce({
+        status: 'failed',
+        errorCode: 'provider_error',
+        error: 'redacted',
+      });
+      await speakAnswer(harness, view);
+      return;
+    case 'wrong':
+      harness.transcribe.mockResolvedValueOnce({
+        status: 'ok',
+        text: 'not it',
+        confidence: 0.9,
+      });
+      harness.submit.mockResolvedValueOnce({
+        outcome: 'incorrect',
+        spokenAnswer: 'the Constitution',
+      });
+      await speakAnswer(harness, view);
+      return;
+    case 'lowConfidenceCorrect':
+      harness.transcribe.mockResolvedValueOnce({
+        status: 'ok',
+        text: 'the constitution',
+        confidence: 0.3,
+      });
+      harness.submit.mockResolvedValueOnce({
+        outcome: 'correct',
+        spokenAnswer: 'the Constitution',
+        misheard: true,
+      });
+      await speakAnswer(harness, view);
+      return;
+  }
+}
+
+describe('useConversationSession — the retry budget as a PROPERTY over a range of miss sequences', () => {
+  const PAIRS: Array<[MissKind, MissKind]> = MISS_KINDS.flatMap((first) =>
+    MISS_KINDS.map((second): [MissKind, MissKind] => [first, second]),
+  );
+
+  it.each(PAIRS)(
+    'after %s then %s: at most one retry, and never a third listen',
+    async (first, second) => {
+      const harness = makeHarness();
+      const view = mount(harness);
+      await startToListening(harness, view);
+
+      await driveOneMiss(harness, view, first);
+      // ONE retry, always offered after the FIRST miss, whatever kind it was.
+      expect(phaseOf(view)).toBe('listening');
+
+      const listeningArmsBefore = harness.voiceActivity.arm.mock.calls.filter(
+        (call) => call[0] === 'listening',
+      ).length;
+
+      await driveOneMiss(harness, view, second);
+
+      // THE INVARIANT: `arm('listening')` must NOT have been called again —
+      // regardless of which two kinds of miss composed this sequence, the
+      // budget is spent and the loop does not re-listen a third time.
+      const listeningArmsAfter = harness.voiceActivity.arm.mock.calls.filter(
+        (call) => call[0] === 'listening',
+      ).length;
+      expect(listeningArmsAfter).toBe(listeningArmsBefore);
+      expect(phaseOf(view)).not.toBe('listening');
+
+      if (gradesOnMiss(first) || gradesOnMiss(second)) {
+        // Something was graded across the two turns — the loop moves ON.
+        expect(phaseOf(view)).toBe('advancing');
+      } else {
+        // Nothing was EVER graded across either turn — there is no question
+        // to advance past, so the session ends rather than looping forever.
+        expect(phaseOf(view)).toBe('idle');
+        expect(view.result.current.notice?.reason).toBe('no_answer');
+      }
+    },
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -1003,6 +1296,28 @@ describe('useConversationSession — unmount', () => {
       },
     },
     {
+      // Issue #314: missing from this array before this issue — every OTHER
+      // phase-enumerated describe block in this file (`the learner is never
+      // held`, above) already lists all five, and unmount is exactly the one
+      // place a missing phase is easy to not notice, because nothing here
+      // would have failed without it.
+      name: 'speakingAnswer',
+      reach: async (harness, view) => {
+        await startToListening(harness, view);
+        harness.speech.hold = true;
+        fire(view, ONSET);
+        fire(view, END_OF_TURN);
+        await act(async () => {
+          harness.deliverRecording();
+          view.rerender(harness.props());
+          await vi.advanceTimersByTimeAsync(0);
+        });
+        view.rerender(harness.props());
+        await settle();
+        view.rerender(harness.props());
+      },
+    },
+    {
       name: 'advancing',
       reach: async (harness, view) => {
         await startToListening(harness, view);
@@ -1012,7 +1327,7 @@ describe('useConversationSession — unmount', () => {
   ];
 
   it.each(PHASES)(
-    'releases the stream, the wake lock and the voice when unmounted in $name',
+    'releases the stream, the wake lock, the voice AND the shared AudioContext when unmounted in $name',
     async ({ name, reach }) => {
       const harness = makeHarness();
       const view = mount(harness);
@@ -1026,6 +1341,11 @@ describe('useConversationSession — unmount', () => {
       expect(harness.voiceActivity.disarm).toHaveBeenCalled();
       expect(harness.speech.stop).toHaveBeenCalled();
       expect(sentinels[0].release).toHaveBeenCalled();
+      // Issue #314: the fourth thing unmount must release, alongside the
+      // stream, the wake lock and the voice — `closeSharedAudioContext()`
+      // (`../../lib/earcons`, spied at the top of this file) is called on
+      // EVERY one of the five phases, not merely asserted not to crash.
+      expect(earconsSpies.closeSharedAudioContext).toHaveBeenCalled();
     },
   );
 
@@ -1037,6 +1357,11 @@ describe('useConversationSession — unmount', () => {
 
     expect(harness.capture.releaseStream).not.toHaveBeenCalled();
     expect(harness.capture.acquireStream).not.toHaveBeenCalled();
+    // Nothing was ever borrowed, so nothing here closes the SHARED context
+    // either — a hook that mounted and never started must not tear down an
+    // `AudioContext` some other, unrelated part of the page might be
+    // playing through (`hasRunRef`'s own reason, `useConversationSession.ts`).
+    expect(earconsSpies.closeSharedAudioContext).not.toHaveBeenCalled();
   });
 
   it('an unmount mid-flight still drops the recording', async () => {
