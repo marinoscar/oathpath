@@ -43,6 +43,7 @@ import { darkTheme, lightTheme } from '../../theme';
 import ReadingPracticePage from '../../pages/ReadingPracticePage';
 import type {
   AiStatus,
+  AiUnavailableCause,
   EnglishAttemptResult,
   EnglishDiffOp,
   EnglishSentence,
@@ -246,8 +247,12 @@ interface Options {
   onAttempt?: (input: RecordEnglishAttemptInput) => void;
   /** `POST /english/attempts` answers with this. */
   attemptResult?: (input: RecordEnglishAttemptInput) => EnglishAttemptResult;
-  /** `POST /api/ai/speech/transcribe` answers with this. */
+  /** `POST /api/ai/speech/transcribe` answers `{status:'ok', ...}` with this. */
   transcription?: { text: string; confidence: number | null };
+  /** The 200 `{status:'unavailable', ...}` member — nothing was attempted. */
+  transcriptionUnavailable?: { cause: AiUnavailableCause; role?: 'transcribe' | 'speak' };
+  /** The 200 `{status:'failed', ...}` member — attempted, and it didn't work. */
+  transcriptionFailed?: { errorCode: string; error: string };
   /** `transcribe` bound on this deployment? Defaults to yes. */
   transcribeBound?: boolean;
   /** Signed in as an admin, who is the only one shown the role's name. */
@@ -275,15 +280,35 @@ function renderReading(options: Options = {}) {
         : (options.sentence !== undefined ? options.sentence : SENTENCE);
       return HttpResponse.json({ data: { sentence } });
     }),
-    http.post(`${API_BASE}/ai/speech/transcribe`, () =>
-      HttpResponse.json({
-        data:
-          options.transcription ?? {
+    http.post(`${API_BASE}/ai/speech/transcribe`, () => {
+      if (options.transcriptionUnavailable) {
+        return HttpResponse.json({
+          data: {
+            status: 'unavailable',
+            cause: options.transcriptionUnavailable.cause,
+            role: options.transcriptionUnavailable.role ?? 'transcribe',
+          },
+        });
+      }
+      if (options.transcriptionFailed) {
+        return HttpResponse.json({
+          data: {
+            status: 'failed',
+            errorCode: options.transcriptionFailed.errorCode,
+            error: options.transcriptionFailed.error,
+          },
+        });
+      }
+      return HttpResponse.json({
+        data: {
+          status: 'ok',
+          ...(options.transcription ?? {
             text: 'George Washington was the first President',
             confidence: 0.94,
-          },
-      }),
-    ),
+          }),
+        },
+      });
+    }),
     http.post(`${API_BASE}/english/attempts`, async ({ request }) => {
       const input = (await request.json()) as RecordEnglishAttemptInput;
       options.onAttempt?.(input);
@@ -469,6 +494,118 @@ describe('confirm before scoring', () => {
 
     await waitFor(() => expect(posted).toHaveLength(1));
     expect(posted[0]).not.toHaveProperty('replayCount');
+  });
+});
+
+// -----------------------------------------------------------------------------
+// 2b. THE SERVER'S OWN 200-WITH-A-CAUSE ANSWERS (issue #277 — the regression)
+//
+// This page had the identical bug: `transcribeAudio` used to be typed
+// `{ text, confidence }`, so `text.trim()` threw on any non-`ok` result. These
+// are the fixtures that would have caught it — every one is HTTP 200.
+// -----------------------------------------------------------------------------
+
+describe('when the transcription call answers something other than `ok`', () => {
+  it('shows the amber retry alert for `failed`, and never the raw error or a JS diagnostic', async () => {
+    const posted: RecordEnglishAttemptInput[] = [];
+    renderReading({
+      transcriptionFailed: {
+        errorCode: 'provider_timeout',
+        error: 'upstream request to the provider timed out',
+      },
+      onAttempt: (input) => posted.push(input),
+    });
+
+    expect(
+      await screen.findByRole('heading', { name: SENTENCE.text }),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByRole('button', { name: /hold to read aloud/i }),
+    ).toBeInTheDocument();
+    finishRecording();
+
+    expect(
+      await screen.findByText(/that recording could not be turned into text/i),
+    ).toBeInTheDocument();
+    expect(posted).toHaveLength(0);
+
+    // THE REGRESSION ITSELF.
+    expect(document.body.textContent).not.toMatch(/cannot read propert/i);
+    expect(document.body.textContent).not.toContain('provider_timeout');
+    expect(document.body.textContent).not.toContain(
+      'upstream request to the provider timed out',
+    );
+
+    // Typing is still the unconditional fallback.
+    const field = screen.getByRole('textbox', { name: /what you read/i });
+    expect(field).toBeEnabled();
+  });
+
+  it('does NOT show the amber retry alert for `unavailable` — there is nothing to retry', async () => {
+    const posted: RecordEnglishAttemptInput[] = [];
+    renderReading({
+      transcriptionUnavailable: { cause: 'role_unbound', role: 'transcribe' },
+      onAttempt: (input) => posted.push(input),
+    });
+
+    expect(
+      await screen.findByRole('heading', { name: SENTENCE.text }),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByRole('button', { name: /hold to read aloud/i }),
+    ).toBeInTheDocument();
+    finishRecording();
+
+    // Give the (rejected) transcription a moment to settle before asserting an
+    // absence.
+    await waitFor(() =>
+      expect(
+        screen.queryByText(/writing down what you read/i),
+      ).not.toBeInTheDocument(),
+    );
+
+    expect(
+      screen.queryByText(/that recording could not be turned into text/i),
+    ).toBeNull();
+    expect(document.body.textContent).not.toMatch(/cannot read propert/i);
+    expect(posted).toHaveLength(0);
+
+    // Typing still works.
+    const field = screen.getByRole('textbox', { name: /what you read/i });
+    expect(field).toBeEnabled();
+  });
+
+  it('renders the "add your key" message, not `AiNotReady`, for `no_user_key`', async () => {
+    renderReading({
+      transcriptionUnavailable: { cause: 'no_user_key', role: 'transcribe' },
+    });
+
+    expect(
+      await screen.findByRole('heading', { name: SENTENCE.text }),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByRole('button', { name: /hold to read aloud/i }),
+    ).toBeInTheDocument();
+    finishRecording();
+
+    expect(
+      await screen.findByText(/add your ai key to read out loud/i),
+    ).toBeInTheDocument();
+    const link = screen.getByRole('link', { name: /add your key/i });
+    expect(link).toHaveAttribute('href', '/settings/ai');
+
+    // `AiNotReady`'s own copy must NOT be what renders for this cause.
+    expect(
+      screen.queryByText(/checking your reading out loud is not available yet/i),
+    ).toBeNull();
+    expect(screen.queryByText(/not a problem with your key/i)).toBeNull();
+    expect(
+      screen.queryByText(/that recording could not be turned into text/i),
+    ).toBeNull();
+
+    // Typing still works.
+    const field = screen.getByRole('textbox', { name: /what you read/i });
+    expect(field).toBeEnabled();
   });
 });
 

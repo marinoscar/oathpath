@@ -47,6 +47,7 @@ import { darkTheme, lightTheme } from '../../theme';
 import PracticeSessionPage from '../../pages/PracticeSessionPage';
 import type {
   AiStatus,
+  AiUnavailableCause,
   PracticeAttempt,
   PracticeAttemptResult,
   PracticeQuestion,
@@ -273,10 +274,18 @@ interface Options {
   attemptResult?: PracticeAttemptResult | (() => PracticeAttemptResult);
   /** Refuse the POST with this status — the retry refusals. */
   attemptStatus?: number;
-  /** `POST /api/ai/speech/transcribe` answers with this. */
+  /** `POST /api/ai/speech/transcribe` answers `{status:'ok', ...}` with this. */
   transcription?: { text: string; confidence: number | null };
-  /** …or fails outright. */
+  /**
+   * …or a genuine transport failure (a real non-2xx, which still rejects).
+   * Distinct from `transcriptionUnavailable`/`transcriptionFailed` below,
+   * which are both HTTP 200 (issue #277).
+   */
   transcriptionFails?: boolean;
+  /** The 200 `{status:'unavailable', ...}` member — nothing was attempted. */
+  transcriptionUnavailable?: { cause: AiUnavailableCause; role?: 'transcribe' | 'speak' };
+  /** The 200 `{status:'failed', ...}` member — attempted, and it didn't work. */
+  transcriptionFailed?: { errorCode: string; error: string };
   /** `transcribe` bound on this deployment? Defaults to yes. */
   transcribeBound?: boolean;
   theme?: typeof lightTheme;
@@ -305,8 +314,29 @@ function renderSession(options: Options = {}) {
           { status: 503 },
         );
       }
+      if (options.transcriptionUnavailable) {
+        return HttpResponse.json({
+          data: {
+            status: 'unavailable',
+            cause: options.transcriptionUnavailable.cause,
+            role: options.transcriptionUnavailable.role ?? 'transcribe',
+          },
+        });
+      }
+      if (options.transcriptionFailed) {
+        return HttpResponse.json({
+          data: {
+            status: 'failed',
+            errorCode: options.transcriptionFailed.errorCode,
+            error: options.transcriptionFailed.error,
+          },
+        });
+      }
       return HttpResponse.json({
-        data: options.transcription ?? { text: 'the Constitution', confidence: 0.94 },
+        data: {
+          status: 'ok',
+          ...(options.transcription ?? { text: 'the Constitution', confidence: 0.94 }),
+        },
       });
     }),
     http.get(`${API_BASE}/practice/sessions/${SESSION_ID}`, () =>
@@ -495,6 +525,114 @@ describe('nothing is graded before the learner confirms the transcript', () => {
     await waitFor(() => expect(posted).toHaveLength(1));
     expect(posted[0].inputMode).toBe('typed');
     expect(posted[0].transcript).toBeUndefined();
+  });
+});
+
+// -----------------------------------------------------------------------------
+// 1b. THE SERVER'S OWN 200-WITH-A-CAUSE ANSWERS (issue #277 — the regression)
+//
+// `transcribeAudio` resolves a union on `status`, and all three members are
+// HTTP 200. This is the suite that would have caught #277: the old fixtures
+// never sent anything but `{ text, confidence }`, so nothing here ever
+// exercised `text.trim()` on an `undefined` `text`.
+// -----------------------------------------------------------------------------
+
+describe('when the transcription call answers something other than `ok`', () => {
+  it('shows the amber retry alert for `failed`, and never the raw error or a JS diagnostic', async () => {
+    const posted: RecordPracticeAttemptInput[] = [];
+    const user = userEvent.setup();
+    renderSession({
+      transcriptionFailed: {
+        errorCode: 'provider_timeout',
+        error: 'upstream request to the provider timed out',
+      },
+      onAttempt: (input) => posted.push(input),
+    });
+
+    await startSpeaking(user);
+    finishRecording();
+
+    expect(
+      await screen.findByText(/hold the button and say it again, or type your answer below/i),
+    ).toBeInTheDocument();
+    expect(posted).toHaveLength(0);
+
+    // THE REGRESSION ITSELF: this used to be a `TypeError` rendered verbatim
+    // in this very alert, on a deployment where nothing had gone wrong.
+    expect(document.body.textContent).not.toMatch(/cannot read propert/i);
+    expect(document.body.textContent).not.toContain('provider_timeout');
+    expect(document.body.textContent).not.toContain(
+      'upstream request to the provider timed out',
+    );
+
+    // Typing is still the unconditional fallback.
+    await user.type(answerField(), 'the Constitution');
+    await user.click(screen.getByRole('button', { name: /^submit$/i }));
+    await waitFor(() => expect(posted).toHaveLength(1));
+    expect(posted[0].inputMode).toBe('typed');
+  });
+
+  it('does NOT show the amber retry alert for `unavailable` — there is nothing to retry', async () => {
+    const posted: RecordPracticeAttemptInput[] = [];
+    const user = userEvent.setup();
+    renderSession({
+      transcriptionUnavailable: { cause: 'role_unbound', role: 'transcribe' },
+      onAttempt: (input) => posted.push(input),
+    });
+
+    await startSpeaking(user);
+    finishRecording();
+
+    // Give the (rejected) transcription a moment to resolve before asserting
+    // an absence.
+    await waitFor(() => expect(transcribeCalls).toBe(1));
+
+    expect(
+      screen.queryByText(/hold the button and say it again, or type your answer below/i),
+    ).toBeNull();
+    // Not a JS diagnostic either — nothing here should ever surface one.
+    expect(document.body.textContent).not.toMatch(/cannot read propert/i);
+    expect(posted).toHaveLength(0);
+
+    // Typing still works — the unconditional fallback survives every path.
+    await user.type(answerField(), 'the Constitution');
+    await user.click(screen.getByRole('button', { name: /^submit$/i }));
+    await waitFor(() => expect(posted).toHaveLength(1));
+    expect(posted[0].inputMode).toBe('typed');
+  });
+
+  it('renders the "add your key" message, not `AiNotReady`, for `no_user_key`', async () => {
+    const posted: RecordPracticeAttemptInput[] = [];
+    const user = userEvent.setup();
+    renderSession({
+      transcriptionUnavailable: { cause: 'no_user_key', role: 'transcribe' },
+      onAttempt: (input) => posted.push(input),
+    });
+
+    await startSpeaking(user);
+    finishRecording();
+
+    expect(
+      await screen.findByText(/add your ai key to answer out loud/i),
+    ).toBeInTheDocument();
+    const link = screen.getByRole('link', { name: /add your key/i });
+    expect(link).toHaveAttribute('href', '/settings/ai');
+
+    // `AiNotReady`'s own "not available yet" / "not a problem with your key"
+    // copy must NOT be what renders for this cause — that message is for a
+    // deployment fact, and this cause is the learner's own.
+    expect(screen.queryByText(/not available yet/i)).toBeNull();
+    expect(screen.queryByText(/not a problem with your key/i)).toBeNull();
+    expect(
+      screen.queryByText(/hold the button and say it again, or type your answer below/i),
+    ).toBeNull();
+    expect(posted).toHaveLength(0);
+
+    // Typing still works.
+    await user.type(answerField(), 'the Constitution');
+    await user.click(screen.getByRole('button', { name: /^submit$/i }));
+    await waitFor(() => expect(posted).toHaveLength(1));
+    expect(posted[0].inputMode).toBe('typed');
   });
 });
 

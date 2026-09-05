@@ -231,13 +231,16 @@ describe('the premium voice is opt-in, on top', () => {
     expect(spoken).toHaveLength(0);
   });
 
-  it('falls back to the browser voice, silently, when synthesis fails', async () => {
+  it('falls back to the browser voice, silently, on a genuine transport failure', async () => {
     installSpeechSynthesis();
     mockStatus({ unboundRoles: [] });
     server.use(
-      // The `speak`-unbound shape from voice.md §9: "not available", never a 500.
+      // A REAL non-2xx (401, a dropped connection, …) — `synthesizeSpeech`
+      // still rejects with `ApiError` for one of these, unchanged by issue
+      // #277. This is the `catch` branch's job now, not the `speak`-unbound
+      // shape, which is JSON at HTTP 200 and is covered separately below.
       http.post('*/api/ai/speech/synthesize', () =>
-        HttpResponse.json({ message: 'Not available' }, { status: 404 }),
+        HttpResponse.json({ message: 'Unauthorized' }, { status: 401 }),
       ),
     );
 
@@ -250,6 +253,39 @@ describe('the premium voice is opt-in, on top', () => {
     // Nothing went wrong from the learner's side: they asked to hear the
     // question and they heard it.
     expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('falls back to the browser voice, silently, on a 200 JSON `unavailable` body', async () => {
+    // Issue #277: this is the path that used to be "right for the wrong
+    // reason" — a JSON envelope handed straight to an `<audio>` element,
+    // reaching this same fallback only because the resulting play error
+    // landed in a `catch`. It is now reached by decision: `synthesizeSpeech`
+    // inspects `Content-Type`, resolves to the `unavailable` member, and
+    // `QuestionAudio` branches on `result.status` before ever touching
+    // `playBlob`. Nothing is shown to the learner either way — an unbound
+    // `speak` is not a degraded state (`docs/specs/voice.md` §2).
+    installSpeechSynthesis();
+    mockStatus({ unboundRoles: [] });
+    server.use(
+      http.post('*/api/ai/speech/synthesize', () =>
+        HttpResponse.json({
+          data: { status: 'unavailable', cause: 'role_unbound', role: 'speak' },
+        }),
+      ),
+    );
+
+    renderIt({ text: QUESTION, premiumVoice: true });
+    await waitFor(() => expect(statusCalls).toBe(1));
+
+    fireEvent.click(screen.getByRole('button', { name: /read the question aloud/i }));
+
+    await waitFor(() => expect(spoken).toHaveLength(1));
+    expect(spoken[0].text).toBe(QUESTION);
+    // NO MESSAGE TO THE LEARNER — the whole point of the union reaching this
+    // component at all rather than the play() call failing on its own.
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.queryByText(/not available yet/i)).toBeNull();
+    expect(screen.queryByText(/administrator/i)).toBeNull();
   });
 });
 
