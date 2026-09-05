@@ -5,7 +5,12 @@ import {
   type AiUnavailableCause,
 } from '../ai/ai-dispatch.service';
 import type { AiStreamEvent, AiUsage } from '../ai/ai.types';
+import {
+  resolveCoachPersona,
+  type CoachPersonaDef,
+} from '../ai/coach/personas';
 import { PrismaService } from '../prisma/prisma.service';
+import { UserSettingsService } from '../settings/user-settings/user-settings.service';
 import { CivicsService } from './civics.service';
 import type { CivicsExplainInput } from './dto/civics-explain.dto';
 import { buildExplainPrompt } from './explain-prompt';
@@ -166,6 +171,19 @@ export class CivicsExplainService {
     // The one door (`ai-evaluation.md` §3). No provider, no model id, no key
     // is reachable from this file.
     private readonly dispatch: AiDispatchService,
+    // ONE READ, ONE FIELD (issue #319, epic #305 / E14): the learner's own
+    // `coach.persona`, which colours the WORDING of the explanation and
+    // nothing about the answers it explains — see {@link resolvePersona} and
+    // `explain-prompt.ts`'s `EXPLAIN_PERSONA_SCOPE_NOTICE`.
+    //
+    // Through the namespace's own service rather than a second cast of
+    // `user_settings.value` beside this file's existing `learner_profiles`
+    // read: the sparse-namespace contract (absent means "use the built-in
+    // default", never "off") belongs to `UserSettingsService`, and a consumer
+    // interpreting it here would be the first to get it wrong the day the
+    // shape moves. `SpeechAudioService` reaches `voice.preferredVoice` exactly
+    // this way.
+    private readonly userSettings: UserSettingsService,
   ) {}
 
   /**
@@ -214,6 +232,12 @@ export class CivicsExplainService {
       answers: question.answers.map((answer) => answer.text),
       explanationLanguage: await this.readExplanationLanguage(userId),
       focus: input.focus,
+      // THE VOICE, NEVER THE MATERIAL. Reaches the system message only; the
+      // user message — this question and these resolved answers — is
+      // byte-identical across all four personas, and `explain-prompt.spec.ts`
+      // asserts that. Degraded to the default rather than allowed to fail the
+      // stream: see {@link resolvePersona}.
+      persona: await this.resolvePersona(userId),
     });
 
     const run = await this.dispatch.runStream(
@@ -261,6 +285,59 @@ export class CivicsExplainService {
     });
 
     return profile?.explanationLanguage ?? null;
+  }
+
+  /**
+   * The coach persona to write this explanation in.
+   *
+   * ---------------------------------------------------------------------------
+   * A FAILURE TO READ SETTINGS MUST NEVER FAIL THE STREAM
+   * ---------------------------------------------------------------------------
+   *
+   * The same rule `AttemptGradingService.resolvePersona` states for the grader,
+   * and it is written out here rather than referenced because the consequence
+   * differs. There, a settings failure that propagated would cost a learner
+   * their GRADE. Here it would cost them the explanation entirely — and it
+   * would do it by throwing from `explain()` BEFORE the generator is returned,
+   * which is the one place in this service an exception becomes a 5xx rather
+   * than a terminal frame the client can render (see this method's caller: the
+   * only thing deliberately propagated from there is `NotFoundException` for an
+   * unknown question id).
+   *
+   * So the read is wrapped, and a failure degrades to `supportive` — which is
+   * not a partial result but exactly the prompt this file emitted before E14
+   * existed, byte for byte (`explain-prompt.ts`'s `systemMessage`). A
+   * preference is never a reason to withhold the thing the learner asked for.
+   *
+   * `readCoachPreferences` and not `getSettings`, for the reason that method's
+   * own comment gives: `getSettings` CREATES a row on a miss, and a
+   * `user_settings` row written because somebody pressed "explain this" is a
+   * write nobody asked for — the identical argument this service's own
+   * {@link readExplanationLanguage} makes above about not creating a
+   * `learner_profiles` row on a read-shaped request.
+   *
+   * LOGGED AT DEBUG, matching the `state_required` line above: a deployment
+   * where this fails has a database problem that announces itself far more
+   * loudly elsewhere, and a warning per explanation would train whoever reads
+   * these logs to ignore them.
+   */
+  private async resolvePersona(userId: string): Promise<CoachPersonaDef> {
+    try {
+      const coach = await this.userSettings.readCoachPreferences(userId);
+
+      // `resolveCoachPersona` owns "absent means supportive" for the whole
+      // codebase: an absent namespace, an absent field, and a key written by a
+      // newer build all resolve there rather than at each call site.
+      return resolveCoachPersona(coach?.persona);
+    } catch (err) {
+      this.logger.debug(
+        `Could not read coach preferences for user ${userId}; explaining in the default voice (${
+          err instanceof Error ? err.message : 'unknown error'
+        })`,
+      );
+
+      return resolveCoachPersona(undefined);
+    }
   }
 }
 

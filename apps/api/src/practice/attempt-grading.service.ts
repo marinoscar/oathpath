@@ -4,6 +4,10 @@ import { Prisma } from '@prisma/client';
 import { AiDispatchService } from '../ai/ai-dispatch.service';
 import type { AiModelRole } from '../ai/ai-model-roles';
 import {
+  resolveCoachPersona,
+  type CoachPersonaDef,
+} from '../ai/coach/personas';
+import {
   currentAnswerWhere,
   resolveAnswerScope,
   selectAnswers,
@@ -12,6 +16,7 @@ import {
 } from '../civics/answer-resolution';
 import { nextStageOnMasteryEvent } from '../journey/stage-transitions';
 import { PrismaService } from '../prisma/prisma.service';
+import { UserSettingsService } from '../settings/user-settings/user-settings.service';
 import { matchAnswer, type AnswerMatch } from './answer-matching';
 import {
   buildGradingPrompt,
@@ -173,6 +178,18 @@ export class AttemptGradingService {
     // THE ONE DOOR TO A MODEL. Injected as the dispatcher, never as a provider:
     // see the header, and `ai-evaluation.md` §3.
     private readonly dispatch: AiDispatchService,
+    // ONE READ, ONE FIELD (issue #319, epic #305 / E14): the learner's own
+    // `coach.persona`, which colours the WORDING of the grader's `feedback`
+    // sentence and nothing else — see {@link resolvePersona} and
+    // `grading.ts`'s `GRADING_PERSONA_SCOPE_NOTICE`.
+    //
+    // The namespace's own service rather than a hand-rolled read of the JSONB
+    // column here: `user_settings.value`'s sparse shape (absent means "use the
+    // built-in default", never "off") is `UserSettingsService`'s contract, and
+    // a consumer casting the column would be the second place that contract is
+    // interpreted and the first to get it wrong when the shape moves. This is
+    // the same posture `SpeechAudioService` takes toward `readVoicePreferences`.
+    private readonly userSettings: UserSettingsService,
   ) {}
 
   /**
@@ -291,6 +308,77 @@ export class AttemptGradingService {
   }
 
   /**
+   * The coach persona to write this learner's `feedback` sentence in.
+   *
+   * ---------------------------------------------------------------------------
+   * A FAILURE TO READ SETTINGS MUST NEVER FAIL A GRADING CALL
+   * ---------------------------------------------------------------------------
+   *
+   * That is the whole reason this is a method with a `try` around it rather
+   * than an inline `await` in the argument list above. The two things this
+   * request does are not equally important: the GRADE is what the learner
+   * asked for, what `practice_attempts` records, and what mastery, readiness
+   * and the session summary are all computed from. The TONE is a preference.
+   * A `user_settings` read that times out, or a row a hand-edit left
+   * unparseable, must therefore cost a learner their chosen voice for one
+   * sentence — never their answer.
+   *
+   * So the catch is deliberately broad and deliberately silent about its
+   * subject: `resolveCoachPersona(undefined)` is `supportive`, which is the
+   * SAME prompt this file emitted before E14 existed, byte for byte
+   * (`grading.ts`'s `buildGradingSystemMessage`). Degrading here is not a
+   * partial result — it is exactly the behaviour every learner had a week ago.
+   *
+   * This is the identical shape rung 3 already takes one method down: an
+   * unconfigured key, an exhausted account and a malformed reply all keep the
+   * deterministic verdict rather than becoming a 500 on a practice screen. A
+   * settings read is a weaker reason to break a session than any of those, so
+   * it gets the same answer.
+   *
+   * ---------------------------------------------------------------------------
+   * WHY THE READ HAPPENS AT ALL ON A PATH THAT ALREADY MISSED
+   * ---------------------------------------------------------------------------
+   *
+   * It is one indexed lookup on the caller's own row, and it happens ONLY on
+   * rung 2 — after `matchAnswer` has already missed and immediately before a
+   * network call to a model, which is several orders of magnitude more
+   * expensive. Every attempt a learner gets right on the ordinary
+   * deterministic path reaches neither this read nor the grader
+   * (`practice.service.ts`'s "RUNG 2, AND ONLY WHEN RUNG 1 MISSED"), so the
+   * hot path is untouched.
+   *
+   * `readCoachPreferences` and not `getSettings`, for the reason that method's
+   * own comment gives at length: `getSettings` CREATES a row on a miss, and a
+   * `user_settings` row written because somebody answered a civics question is
+   * a write nobody asked for, on the product's hottest path.
+   *
+   * LOGGED AT DEBUG, not warn. A deployment where this fails is a deployment
+   * with a database problem that will announce itself far more loudly
+   * elsewhere; warning per missed answer would train whoever reads these logs
+   * to ignore them, which is the same argument the rung-3 log line below makes
+   * for itself.
+   */
+  private async resolvePersona(userId: string): Promise<CoachPersonaDef> {
+    try {
+      const coach = await this.userSettings.readCoachPreferences(userId);
+
+      // `resolveCoachPersona` owns "absent means supportive" for the whole
+      // codebase — an absent namespace, an absent field and a key written by a
+      // newer build all resolve there rather than at four call sites that
+      // could each answer it differently.
+      return resolveCoachPersona(coach?.persona);
+    } catch (err) {
+      this.logger.debug(
+        `Could not read coach preferences for user ${userId}; grading in the default voice (${
+          err instanceof Error ? err.message : 'unknown error'
+        })`,
+      );
+
+      return resolveCoachPersona(undefined);
+    }
+  }
+
+  /**
    * Rung 2 of the ladder: ask the `grader` role whether the response MEANS one
    * of the accepted answers.
    *
@@ -367,6 +455,12 @@ export class AttemptGradingService {
         // key — see `ai-evaluation.md` §3 and this file's header.
         messages: buildGradingPrompt({
           questionPrompt,
+          // THE TONE, NEVER THE GRADE. Resolved from the caller's own settings
+          // row, and degraded to the default rather than allowed to fail the
+          // call — see {@link resolvePersona}. It reaches the SYSTEM message
+          // only; the user message this builder emits is byte-identical across
+          // all four personas, and `grading.spec.ts` asserts that.
+          persona: await this.resolvePersona(userId),
           // The frozen snapshot's answers, which are the answers this attempt
           // was graded against a few lines ago. Not a second query: a
           // `national`/`state` question's answer can change, and a prompt built

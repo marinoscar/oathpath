@@ -8,6 +8,7 @@ import { EngagementService } from '../engagement/engagement.service';
 import { ReadinessService } from '../readiness/readiness.service';
 import { EnglishService } from '../english/english.service';
 import { AttemptGradingService } from '../practice/attempt-grading.service';
+import { UserSettingsService } from '../settings/user-settings/user-settings.service';
 import { planCivicsQuestions, selectPassRule } from './engine';
 import {
   InterviewsService,
@@ -480,6 +481,31 @@ describe('InterviewsService', () => {
   let readiness: { recomputeSnapshot: jest.Mock };
   let engagement: { recordInterviewAttemptActivity: jest.Mock };
 
+
+  /**
+   * The coach-persona read `AttemptGradingService` makes on rung 2 (issue
+   * #319, epic #305 / E14), stubbed at its ORDINARY answer.
+   *
+   * `undefined` is what `readCoachPreferences` returns for a learner with no
+   * `user_settings` row — most learners — and `resolveCoachPersona` maps it to
+   * `supportive`, whose prompt fragment is deliberately the empty string. So
+   * the grading prompt every assertion in this file exercises is byte for byte
+   * the one it was before E14, which is the point: a mock interview's grading
+   * must no more depend on a tone preference than a practice session's does.
+   *
+   * A FACTORY RATHER THAN A SHARED OBJECT, because three testing modules in
+   * this file stand the ladder up (the ordinary one, and the two cold-service
+   * rebuilds that prove a resumed interview re-derives everything from the
+   * rows). A single `jest.fn()` shared between them would carry call counts
+   * across a rebuild, which is exactly the state those two tests exist to
+   * prove is not being carried.
+   */
+  function coachSettingsProvider() {
+    return {
+      provide: UserSettingsService,
+      useValue: { readCoachPreferences: jest.fn(async () => undefined) },
+    };
+  }
   async function build(): Promise<void> {
     store = makeStore();
     prisma = makePrisma(store);
@@ -526,6 +552,7 @@ describe('InterviewsService', () => {
         { provide: AiDispatchService, useValue: dispatch },
         { provide: ReadinessService, useValue: readiness },
         { provide: EngagementService, useValue: engagement },
+        coachSettingsProvider(),
         // THE REAL E10 SERVICE, over the same store (#158). See the note on
         // `AttemptGradingService` above; the argument is identical one segment
         // over.
@@ -1321,6 +1348,7 @@ describe('InterviewsService', () => {
           { provide: AiDispatchService, useValue: dispatch },
           { provide: ReadinessService, useValue: readiness },
           { provide: EngagementService, useValue: engagement },
+          coachSettingsProvider(),
           EnglishService,
         ],
       }).compile();
@@ -2321,6 +2349,7 @@ describe('InterviewsService', () => {
           { provide: AiDispatchService, useValue: dispatch },
           { provide: ReadinessService, useValue: readiness },
           { provide: EngagementService, useValue: engagement },
+          coachSettingsProvider(),
           EnglishService,
         ],
       }).compile();

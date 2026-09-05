@@ -10,8 +10,19 @@ import { Clock } from '../common/clock/clock';
 import { PrismaService } from '../prisma/prisma.service';
 import { EngagementService } from '../engagement/engagement.service';
 import { ReadinessService } from '../readiness/readiness.service';
+import { COACH_INVARIANT_FLOOR } from '../ai/coach/invariants';
+import {
+  findCoachPersona,
+  type CoachPersonaDef,
+} from '../ai/coach/personas';
+import { UserSettingsService } from '../settings/user-settings/user-settings.service';
 import { AttemptGradingService } from './attempt-grading.service';
-import { GRADING_SCHEMA_NAME } from './grading';
+import {
+  GRADING_SCHEMA_NAME,
+  GRADING_SYSTEM_MESSAGE,
+  buildGradingPrompt,
+  buildGradingSystemMessage,
+} from './grading';
 // MOVED BY ISSUE #245. The rule is shared with `InterviewsService` now, so it
 // lives beside the scheduler that reads it rather than on one of its callers.
 import { isMisheardAttempt } from './mastery/mastery-skip';
@@ -208,6 +219,20 @@ describe('PracticeService', () => {
     recordSessionCompletionActivity: jest.Mock;
   };
 
+  /**
+   * The coach-persona read (issue #319, epic #305 / E14), as a double.
+   *
+   * `AttemptGradingService` asks this ONE question on rung 2 — which voice to
+   * write the grader's `feedback` sentence in — and the answer reaches the
+   * system message and nothing else. The default stub returns `undefined`,
+   * which `resolveCoachPersona` maps to `supportive`, so every pre-existing
+   * assertion in this file grades against exactly the prompt it always did.
+   *
+   * Two tests below reach past that default: one to prove a persona reaches
+   * the prompt at all, and one to prove a REJECTED read still grades.
+   */
+  let userSettings: { readCoachPreferences: jest.Mock };
+
   beforeEach(async () => {
     prisma = {
       civicsCategory: { findFirst: jest.fn().mockResolvedValue(null) },
@@ -281,6 +306,13 @@ describe('PracticeService', () => {
       recordSessionCompletionActivity: jest.fn().mockResolvedValue(undefined),
     };
 
+    userSettings = {
+      // UNDEFINED IS THE ORDINARY ANSWER, not an error case: it is what
+      // `readCoachPreferences` returns for a learner with no `user_settings`
+      // row, which is most learners, and it resolves to `supportive`.
+      readCoachPreferences: jest.fn().mockResolvedValue(undefined),
+    };
+
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         PracticeService,
@@ -304,6 +336,13 @@ describe('PracticeService', () => {
         { provide: AiDispatchService, useValue: dispatch },
         { provide: ReadinessService, useValue: readiness },
         { provide: EngagementService, useValue: engagement },
+        // THE NAMESPACE'S OWN SERVICE, STUBBED — never a fake `user_settings`
+        // row in the Prisma double. What `AttemptGradingService` depends on is
+        // the METHOD's contract ("undefined means the learner expressed no
+        // preference"), not the JSONB shape behind it, and a test that
+        // reproduced the column here would be asserting against a shape this
+        // module deliberately does not know (see `readCoachPreferences`).
+        { provide: UserSettingsService, useValue: userSettings },
       ],
     }).compile();
 
@@ -653,6 +692,156 @@ describe('PracticeService', () => {
         service.recordAttempt(USER_A, SESSION_ID, attemptInput()),
       ).rejects.toThrow(ConflictException);
       expect(prisma.civicsQuestion.findUnique).not.toHaveBeenCalled();
+    });
+  });
+
+  // ===========================================================================
+  // recordAttempt — the coach persona (issue #319, epic #305 / E14)
+  // ===========================================================================
+  //
+  // WHAT THIS BLOCK IS FOR, and what it deliberately is not. `grading.spec.ts`
+  // already proves the prompt-level property directly — that the user message
+  // is byte-identical across all four personas and the system message differs
+  // only by an appended block. What can only be checked HERE is the WIRING
+  // either side of that builder: that the persona reaching it is the caller's
+  // OWN stored preference, and that a settings read which fails costs a learner
+  // their voice and never their grade.
+  //
+  // The dispatcher is a stub in this file, so nothing here asserts what a model
+  // does with the persona'd prompt. `test/practice/*.integration.spec.ts`, over
+  // `FakeAiProvider`, is where a verdict is observed end to end.
+  // ===========================================================================
+
+  describe('recordAttempt — the coach persona', () => {
+    beforeEach(() => {
+      mockOwnedSession(sessionRow());
+      prisma.civicsQuestion.findUnique.mockResolvedValue(question());
+      prisma.practiceAttempt.findFirst.mockResolvedValue(null);
+      prisma.practiceAttempt.findMany.mockResolvedValue([]);
+      prisma.civicsAnswer.findMany.mockResolvedValue([answerRow({ text: 'Congress' })]);
+      prisma.practiceAttempt.create.mockImplementation(async ({ data }: any) => ({
+        ...data,
+        id: 'new-attempt',
+        question: question(),
+      }));
+
+      // Rung 2 has to actually run for a persona to be resolved at all, so the
+      // grader answers rather than reporting itself unavailable.
+      dispatch.runStructured.mockResolvedValue({
+        status: 'ok',
+        data: {
+          verdict: 'incorrect',
+          failureCause: 'not_known',
+          feedback: 'Not quite.',
+        },
+        usageEventId: 'usage-1',
+      });
+    });
+
+    /** A miss, which is the only path that reaches the grader. */
+    async function missOnce() {
+      return service.recordAttempt(
+        USER_A,
+        SESSION_ID,
+        attemptInput({ responseText: 'The Supreme Court of Nonsense' }),
+      );
+    }
+
+    /** The system and user turns the dispatcher was actually handed. */
+    function sentMessages(): { system: string; user: string } {
+      const [, , request] = dispatch.runStructured.mock.calls[0];
+
+      return {
+        system: request.messages[0].content,
+        user: request.messages[1].content,
+      };
+    }
+
+    it('reads the CALLER’s own preference, and never a user id from the request', async () => {
+      userSettings.readCoachPreferences.mockResolvedValue({ persona: 'unfiltered' });
+
+      await missOnce();
+
+      // One read, for the authenticated caller. There is no route parameter,
+      // body field or DTO on this path that could name a different learner —
+      // `@CurrentUser('id')` is the only source of a user id in this module
+      // (CLAUDE.md's Practice paragraph), and this assertion is what keeps a
+      // future "grade as user X" convenience from being added quietly.
+      expect(userSettings.readCoachPreferences).toHaveBeenCalledTimes(1);
+      expect(userSettings.readCoachPreferences).toHaveBeenCalledWith(USER_A);
+    });
+
+    it('puts the chosen persona in the SYSTEM turn and leaves the user turn alone', async () => {
+      userSettings.readCoachPreferences.mockResolvedValue({ persona: 'unfiltered' });
+
+      await missOnce();
+
+      const { system, user } = sentMessages();
+      const unfiltered = findCoachPersona('unfiltered') as CoachPersonaDef;
+
+      expect(system).toBe(buildGradingSystemMessage(unfiltered));
+      expect(system).toContain(unfiltered.promptFragment);
+      expect(system).toContain(COACH_INVARIANT_FLOOR);
+
+      // THE EVIDENCE IS UNTOUCHED. Byte for byte the user message a learner
+      // with no preference at all would have been graded on.
+      expect(user).toBe(
+        buildGradingPrompt({
+          questionPrompt: question().prompt,
+          acceptedAnswers: [{ text: 'Congress' }],
+          responseText: 'The Supreme Court of Nonsense',
+        })[1].content,
+      );
+    });
+
+    it('grades in the default voice when the learner has expressed no preference', async () => {
+      // The ordinary case — most learners have no `user_settings` row at all —
+      // and it must produce the prompt this service sent before E14 existed.
+      await missOnce();
+
+      expect(sentMessages().system).toBe(GRADING_SYSTEM_MESSAGE);
+    });
+
+    it('grades in the default voice when the settings read REJECTS — the grade survives', async () => {
+      // THE RULE THAT MATTERS MOST HERE. The two things this request does are
+      // not equally important: the grade is what the learner asked for and what
+      // mastery, readiness and the session summary are computed from; the tone
+      // is a preference. A database blip must cost the second and never the
+      // first.
+      userSettings.readCoachPreferences.mockRejectedValue(new Error('settings unavailable'));
+
+      const result = await missOnce();
+
+      expect(result.attempt.outcome).toBe('incorrect');
+      expect(result.attempt.gradingMethod).toBe('ai');
+      expect(result.attempt.failureCause).toBe('not_known');
+      expect(sentMessages().system).toBe(GRADING_SYSTEM_MESSAGE);
+    });
+
+    it('grades in the default voice for a persona key this build does not know', async () => {
+      // A JSONB column a NEWER build wrote a fifth key into. `findCoachPersona`
+      // is total by contract for exactly this, and the fallback belongs to
+      // `resolveCoachPersona` rather than to four call sites that could each
+      // answer it differently.
+      userSettings.readCoachPreferences.mockResolvedValue({ persona: 'sardonic' });
+
+      await missOnce();
+
+      expect(sentMessages().system).toBe(GRADING_SYSTEM_MESSAGE);
+    });
+
+    it('does not read settings at all when rung 1 matched — the hot path is untouched', async () => {
+      // A correct answer short-circuits before the grader, so it must also
+      // short-circuit before the persona read: every attempt a learner gets
+      // right on the ordinary deterministic path pays for neither.
+      await service.recordAttempt(
+        USER_A,
+        SESSION_ID,
+        attemptInput({ responseText: 'Congress' }),
+      );
+
+      expect(dispatch.runStructured).not.toHaveBeenCalled();
+      expect(userSettings.readCoachPreferences).not.toHaveBeenCalled();
     });
   });
 
