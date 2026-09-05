@@ -135,6 +135,61 @@ export type VoiceSettingsPatch = {
 };
 
 // =============================================================================
+// Coach — how the app talks to this learner (issue #317, epic #305)
+// =============================================================================
+//
+// Mirrors `coachSchema` / `coachPatchSchema` in
+// `apps/api/src/common/schemas/user-settings-namespaces.schema.ts`, and carries
+// that file's rule across the wire unchanged: BOTH FIELDS ARE OPTIONAL AND AN
+// ABSENT FIELD MEANS "use the built-in default", resolved at read time by
+// whoever is reading — the server, when it composes the coach's words.
+//
+// So the web app must never materialise these. A page that renders the default
+// and saves it has pinned a learner to today's `supportive` forever, including
+// after a future release moves the default — the same failure
+// `StudySettings` and `VoiceSettings` above state in full, and the remedy is
+// the same: render the default without writing it, and send a NULL-DELETE when
+// a learner returns a control to it.
+//
+// DELIBERATELY NOT PART OF `VoiceSettings`. `persona` governs WRITTEN feedback
+// — the grader's sentence on a practice attempt, the tutor's civics
+// explanation — exactly as much as spoken feedback, so a learner who never
+// plays audio still has a coach and still reads its words. Grouping it under
+// `voice` would hide a preference that applies to everybody behind a namespace
+// named for a feature many accounts never touch.
+// =============================================================================
+
+/** The four personas the coach can speak in. Mirrors `COACH_PERSONAS`. */
+export type CoachPersona =
+  | 'supportive'
+  | 'academic'
+  | 'playful'
+  | 'unfiltered';
+
+/** The stored `coach` namespace. Absent, or an absent field, means the default. */
+export interface CoachSettings {
+  /** The voice the coach's written and spoken feedback is composed in. */
+  persona?: CoachPersona;
+  /**
+   * Whether the coach adds a short reaction line beyond the bare verdict.
+   *
+   * A SEPARATE SWITCH FROM `persona`, not a fifth persona value: turning this
+   * off silences the per-answer chatter and leaves the chosen persona shaping
+   * the grader's feedback and the tutor's explanations as before.
+   */
+  reactions?: boolean;
+}
+
+/**
+ * PATCH form of `coach`: each field may additionally be `null`, meaning "delete
+ * this field and fall back to the built-in default" — the same shape, for the
+ * same reason, as `VoiceSettingsPatch` above.
+ */
+export type CoachSettingsPatch = {
+  [K in keyof CoachSettings]?: CoachSettings[K] | null;
+};
+
+// =============================================================================
 // Notifications — the registry (#124) and the stored preferences (#126, epic #109)
 // =============================================================================
 //
@@ -390,6 +445,17 @@ export interface UserSettings {
    * backfill it with a materialised object.
    */
   voice?: VoiceSettings;
+  /**
+   * How the coach talks to this learner (#317, epic #305).
+   *
+   * OPTIONAL, AND ABSENT IS THE NORMAL CASE, exactly as `voice` above: no
+   * account has this key until the learner changes a persona or silences
+   * reactions, and absent resolves to the built-in defaults (`supportive`,
+   * reactions on). Never backfill it with a materialised object — that is
+   * what would turn "this learner has no opinion yet" into "this learner
+   * chose today's default", permanently.
+   */
+  coach?: CoachSettings;
   updatedAt: string;
   version: number;
 }
@@ -450,6 +516,12 @@ export interface UserSettingsUpdate {
    * the learner has moved back to the built-in default.
    */
   voice?: VoiceSettingsPatch | null;
+  /**
+   * Coach preferences (#317). Field-wise merged server-side like `voice`, so a
+   * control sends only the one field it changed — and sends `null` for it when
+   * the learner has moved back to the built-in default.
+   */
+  coach?: CoachSettingsPatch | null;
 }
 
 export interface SystemSettings {

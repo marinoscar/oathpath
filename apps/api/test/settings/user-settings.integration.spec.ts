@@ -1434,4 +1434,226 @@ describe('User Settings Integration', () => {
       });
     });
   });
+
+  // ===========================================================================
+  // coach namespace (issue #317, epic #305 "The Coach's personality")
+  // ===========================================================================
+  //
+  // Same "eight-file change, one silent symptom" reasoning the `voice` and
+  // `study` blocks above state in full: a write returns 200,
+  // `userSettingsSchema.parse()` strips any namespace key it does not know
+  // about, and the next GET simply reports nothing changed. Every write below
+  // is followed by a real GET for that reason, never by an assertion on what
+  // was passed to Prisma.
+  //
+  // Same placement rule too: outside `describe('PATCH ...')`, whose
+  // `beforeEach` replaces `findUnique` with a one-shot value and breaks the
+  // stateful registry a round trip needs.
+  describe('coach namespace', () => {
+    it('round-trips a persona through PATCH and a subsequent GET', async () => {
+      const user = await createMockTestUser(context);
+      setupMockUserSettings(user.id, DEFAULT_USER_SETTINGS);
+
+      await request(context.app.getHttpServer())
+        .patch('/api/user-settings')
+        .set(authHeader(user.accessToken))
+        .send({ coach: { persona: 'playful' } })
+        .expect(200);
+
+      const response = await request(context.app.getHttpServer())
+        .get('/api/user-settings')
+        .set(authHeader(user.accessToken))
+        .expect(200);
+
+      expect(response.body.data.coach).toEqual({ persona: 'playful' });
+    });
+
+    it('persists coach through PUT and returns it on a subsequent GET', async () => {
+      const user = await createMockTestUser(context);
+      setupMockUserSettings(user.id, DEFAULT_USER_SETTINGS);
+
+      await request(context.app.getHttpServer())
+        .put('/api/user-settings')
+        .set(authHeader(user.accessToken))
+        .send({
+          theme: 'system',
+          profile: { useProviderImage: true },
+          coach: { persona: 'academic', reactions: false },
+        })
+        .expect(200);
+
+      const response = await request(context.app.getHttpServer())
+        .get('/api/user-settings')
+        .set(authHeader(user.accessToken))
+        .expect(200);
+
+      expect(response.body.data.coach).toEqual({
+        persona: 'academic',
+        reactions: false,
+      });
+    });
+
+    it('patches one field without discarding the other', async () => {
+      // The reason `mergeCoach` is field-wise rather than replace-wholesale:
+      // the two fields answer different questions, so a learner who silences
+      // the per-answer chatter must keep the persona they chose, and a
+      // learner who changes persona must stay silenced.
+      const user = await createMockTestUser(context);
+      setupMockUserSettings(user.id, DEFAULT_USER_SETTINGS);
+
+      await request(context.app.getHttpServer())
+        .patch('/api/user-settings')
+        .set(authHeader(user.accessToken))
+        .send({ coach: { reactions: false } })
+        .expect(200);
+
+      await request(context.app.getHttpServer())
+        .patch('/api/user-settings')
+        .set(authHeader(user.accessToken))
+        .send({ coach: { persona: 'academic' } })
+        .expect(200);
+
+      const response = await request(context.app.getHttpServer())
+        .get('/api/user-settings')
+        .set(authHeader(user.accessToken))
+        .expect(200);
+
+      expect(response.body.data.coach).toEqual({
+        persona: 'academic',
+        reactions: false,
+      });
+    });
+
+    it('patching a field to null restores the built-in default by deleting it', async () => {
+      const user = await createMockTestUser(context);
+      setupMockUserSettings(user.id, DEFAULT_USER_SETTINGS);
+
+      await request(context.app.getHttpServer())
+        .patch('/api/user-settings')
+        .set(authHeader(user.accessToken))
+        .send({ coach: { persona: 'unfiltered', reactions: false } })
+        .expect(200);
+
+      await request(context.app.getHttpServer())
+        .patch('/api/user-settings')
+        .set(authHeader(user.accessToken))
+        .send({ coach: { persona: null } })
+        .expect(200);
+
+      const response = await request(context.app.getHttpServer())
+        .get('/api/user-settings')
+        .set(authHeader(user.accessToken))
+        .expect(200);
+
+      // The persona is GONE, not stored as `'supportive'` — which is what
+      // lets a future change to DEFAULT_COACH_PERSONA reach this learner.
+      expect(response.body.data.coach).toEqual({ reactions: false });
+    });
+
+    it('emptying the namespace collapses it back to absent', async () => {
+      const user = await createMockTestUser(context);
+      setupMockUserSettings(user.id, DEFAULT_USER_SETTINGS);
+
+      await request(context.app.getHttpServer())
+        .patch('/api/user-settings')
+        .set(authHeader(user.accessToken))
+        .send({ coach: { persona: 'playful' } })
+        .expect(200);
+
+      await request(context.app.getHttpServer())
+        .patch('/api/user-settings')
+        .set(authHeader(user.accessToken))
+        .send({ coach: { persona: null } })
+        .expect(200);
+
+      const response = await request(context.app.getHttpServer())
+        .get('/api/user-settings')
+        .set(authHeader(user.accessToken))
+        .expect(200);
+
+      // Absent, never `{}` — two spellings of "no opinion" is how a settings
+      // page and the code composing the coach's words would end up
+      // disagreeing about whether a learner has one.
+      expect(response.body.data.coach).toBeUndefined();
+      expect(response.body.data).not.toHaveProperty('coach');
+    });
+
+    it('an untouched account persists no coach namespace at all', async () => {
+      // The sparse contract, end to end. `DEFAULT_USER_SETTINGS` carries no
+      // `coach` key, and touching an unrelated preference must not
+      // materialise one — a stored `persona: 'supportive'` would pin this
+      // learner to today's default persona forever, silently, for an account
+      // that never expressed an opinion about one.
+      const user = await createMockTestUser(context);
+      setupMockUserSettings(user.id, DEFAULT_USER_SETTINGS);
+
+      await request(context.app.getHttpServer())
+        .patch('/api/user-settings')
+        .set(authHeader(user.accessToken))
+        .send({ theme: 'dark' })
+        .expect(200);
+
+      const response = await request(context.app.getHttpServer())
+        .get('/api/user-settings')
+        .set(authHeader(user.accessToken))
+        .expect(200);
+
+      expect(response.body.data.theme).toBe('dark');
+      expect(response.body.data).not.toHaveProperty('coach');
+    });
+
+    describe('validation', () => {
+      it.each([
+        ['an unknown persona', 'sarcastic'],
+        ['a near-miss of a real one', 'Supportive'],
+        ['an empty string', ''],
+      ])('rejects %s with a 400', async (_label, persona) => {
+        const user = await createMockTestUser(context);
+        setupMockUserSettings(user.id, DEFAULT_USER_SETTINGS);
+
+        await request(context.app.getHttpServer())
+          .patch('/api/user-settings')
+          .set(authHeader(user.accessToken))
+          .send({ coach: { persona } })
+          .expect(400);
+      });
+
+      it('rejects an unknown persona on PUT as well as PATCH', async () => {
+        const user = await createMockTestUser(context);
+        setupMockUserSettings(user.id, DEFAULT_USER_SETTINGS);
+
+        await request(context.app.getHttpServer())
+          .put('/api/user-settings')
+          .set(authHeader(user.accessToken))
+          .send({
+            theme: 'system',
+            profile: { useProviderImage: true },
+            coach: { persona: 'sarcastic' },
+          })
+          .expect(400);
+      });
+
+      it('rejects a misspelled coach key', async () => {
+        const user = await createMockTestUser(context);
+        setupMockUserSettings(user.id, DEFAULT_USER_SETTINGS);
+
+        await request(context.app.getHttpServer())
+          .patch('/api/user-settings')
+          .set(authHeader(user.accessToken))
+          .send({ coach: { personality: 'playful' } })
+          .expect(400);
+      });
+
+      it('rejects a non-boolean reactions', async () => {
+        const user = await createMockTestUser(context);
+        setupMockUserSettings(user.id, DEFAULT_USER_SETTINGS);
+
+        await request(context.app.getHttpServer())
+          .patch('/api/user-settings')
+          .set(authHeader(user.accessToken))
+          .send({ coach: { reactions: 'yes' } })
+          .expect(400);
+      });
+    });
+  });
 });

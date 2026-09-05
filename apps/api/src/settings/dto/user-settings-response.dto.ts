@@ -1,6 +1,7 @@
 import { createZodDto } from 'nestjs-zod';
 import { z } from 'zod';
 import {
+  coachSchema,
   dataTablesSchema,
   navigationSchema,
   notificationsSchema,
@@ -31,6 +32,11 @@ export const userSettingsResponseSchema = z.object({
   // learner has expressed no spoken-audio preference, so every control
   // renders its built-in default rather than a stored value.
   voice: voiceSchema.optional(),
+  // Absent here is INFORMATION too: it tells a coach-settings page that this
+  // learner has chosen neither a persona nor a reactions state, so both
+  // controls render the built-in default rather than a stored value — and, as
+  // above, a control that saved the rendered default would pin them to it.
+  coach: coachSchema.optional(),
   updatedAt: z.iso.datetime(),
   version: z.number(),
 });
