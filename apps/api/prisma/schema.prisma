@@ -26,29 +26,30 @@ model User {
   updatedAt               DateTime @updatedAt @map("updated_at") @db.Timestamptz
 
   // Relations
-  identities             UserIdentity[]
-  userRoles              UserRole[]
-  userSettings           UserSettings?
-  auditEvents            AuditEvent[]           @relation("ActorEvents")
-  settingsUpdates        SystemSettings[]       @relation("SettingsUpdater")
-  refreshTokens          RefreshToken[]         @relation("UserRefreshTokens")
-  allowlistEntriesAdded  AllowedEmail[]         @relation("AllowlistAddedBy")
-  allowlistEntry         AllowedEmail?          @relation("AllowlistClaimedBy")
-  deviceCodes            DeviceCode[]           @relation("UserDeviceCodes")
-  storageObjects         StorageObject[]        @relation("UserStorageObjects")
-  personalAccessTokens   PersonalAccessToken[]  @relation("UserPersonalAccessTokens")
-  credentialUpdates      Credential[]           @relation("CredentialUpdatedBy")
-  notificationDeliveries NotificationDelivery[] @relation("UserNotificationDeliveries")
-  notifications          Notification[]         @relation("UserNotifications")
-  aiUsageEvents          AiUsageEvent[]         @relation("UserAiUsageEvents")
-  learnerProfile         LearnerProfile?
-  practiceSessions       PracticeSession[]      @relation("UserPracticeSessions")
-  practiceAttempts       PracticeAttempt[]      @relation("UserPracticeAttempts")
-  questionMastery        QuestionMastery[]      @relation("UserQuestionMastery")
-  readinessSnapshots     ReadinessSnapshot[]    @relation("UserReadinessSnapshots")
-  dailyActivity          DailyActivity[]        @relation("UserDailyActivity")
-  mockInterviews         MockInterview[]        @relation("UserMockInterviews")
-  englishAttempts        EnglishAttempt[]
+  identities                 UserIdentity[]
+  userRoles                  UserRole[]
+  userSettings               UserSettings?
+  auditEvents                AuditEvent[]           @relation("ActorEvents")
+  settingsUpdates            SystemSettings[]       @relation("SettingsUpdater")
+  refreshTokens              RefreshToken[]         @relation("UserRefreshTokens")
+  allowlistEntriesAdded      AllowedEmail[]         @relation("AllowlistAddedBy")
+  allowlistEntry             AllowedEmail?          @relation("AllowlistClaimedBy")
+  deviceCodes                DeviceCode[]           @relation("UserDeviceCodes")
+  storageObjects             StorageObject[]        @relation("UserStorageObjects")
+  personalAccessTokens       PersonalAccessToken[]  @relation("UserPersonalAccessTokens")
+  credentialUpdates          Credential[]           @relation("CredentialUpdatedBy")
+  notificationDeliveries     NotificationDelivery[] @relation("UserNotificationDeliveries")
+  notifications              Notification[]         @relation("UserNotifications")
+  aiUsageEvents              AiUsageEvent[]         @relation("UserAiUsageEvents")
+  learnerProfile             LearnerProfile?
+  practiceSessions           PracticeSession[]      @relation("UserPracticeSessions")
+  practiceAttempts           PracticeAttempt[]      @relation("UserPracticeAttempts")
+  questionMastery            QuestionMastery[]      @relation("UserQuestionMastery")
+  readinessSnapshots         ReadinessSnapshot[]    @relation("UserReadinessSnapshots")
+  dailyActivity              DailyActivity[]        @relation("UserDailyActivity")
+  mockInterviews             MockInterview[]        @relation("UserMockInterviews")
+  englishAttempts            EnglishAttempt[]
+  speechAudioAssetsGenerated SpeechAudioAsset[]     @relation("SpeechAudioGeneratedBy")
 
   @@map("users")
 }
@@ -2528,4 +2529,151 @@ model EnglishAttempt {
   // attempts of a given kind within the trailing 30-day window.
   @@index([userId, kind, answeredAt])
   @@map("english_attempts")
+}
+
+// =============================================================================
+// Speech audio cache (issue #282, epic #280 "Spoken Civics Audio")
+// =============================================================================
+//
+// Epic #280 synthesizes audio for civics questions and answers so a learner
+// can hear them read aloud. Synthesis costs money and runs on the CALLER's
+// own AI key (`docs/specs/voice.md` §6; the server key at `('ai', 'openai')`
+// is never used for inference — see CLAUDE.md's "Adding an AI feature"). A
+// clip is therefore generated and paid for ONCE, by whichever learner asks
+// for it first, and cached here so every learner after them gets the same
+// bytes for free. THIS ISSUE ADDS THE TABLE ONLY — nothing writes to it yet;
+// #284 adds the endpoint that reads and populates it.
+//
+// -----------------------------------------------------------------------------
+// NO FOREIGN KEY TO `storage_objects`, AND NO `storage_objects` ROW IS EVER
+// CREATED FOR THIS — DELIBERATELY
+// -----------------------------------------------------------------------------
+// `storage_objects` enforces OWNER-ONLY reads with NO ADMIN BYPASS
+// (`objects.service.ts`'s `getObjectWithAuthCheck`, ~line 572: "Check
+// ownership ... You do not have access to this object"). That rule is
+// correct for a learner's own upload, which has exactly one legitimate
+// reader, and it is the WRONG rule for a shared reading of a public civics
+// question, which has none — every authenticated learner is meant to read
+// the same clip. CLAUDE.md's own Storage section warns explicitly against
+// threading a second permission through that shared helper, because doing so
+// "would become a read AND write bypass in the same edit"; giving this table
+// an owner column and asking `getObjectWithAuthCheck` to special-case it
+// would be exactly that edit. The audio bytes live behind the
+// `StorageProvider` port instead
+// (`apps/api/src/storage/providers/storage-provider.interface.ts`), addressed
+// by `storageKey` below, with no `storage_objects` row and no per-object
+// ownership check standing between a learner and a question they are already
+// entitled to study.
+//
+// -----------------------------------------------------------------------------
+// `refId` HAS NO FOREIGN KEY TO `civics_questions` EITHER — DELIBERATELY
+// -----------------------------------------------------------------------------
+// This row is a CACHE ENTRY keyed by content, not a child record of the
+// question it was generated from. An FK with `onDelete: Cascade` would
+// delete this row the moment its question was, even though the audio bytes
+// it names would still sit in object storage, now orphaned with nothing left
+// to say they exist — a storage leak with no code path back to it. An FK
+// with `onDelete: Restrict` would be worse: it would make a content reload
+// that legitimately retires a question fail because a cache row happens to
+// reference it. Neither behavior is one this table should own; a genuine
+// "delete the orphaned bytes when their question goes away" job belongs to
+// whatever process retires civics content, called explicitly, not inferred
+// from a constraint. (If a future reviewer judges an FK is actually the
+// right call here, that is a deliberate, documented reversal of this
+// reasoning — not a default to fall back into silently.)
+//
+// -----------------------------------------------------------------------------
+// WHY `contentSha256` IS PART OF THE UNIQUE KEY, NOT JUST A CHECKSUM COLUMN
+// -----------------------------------------------------------------------------
+// A dynamic civics answer CHANGES OVER TIME —
+// `civics_answers.effective_to IS NULL` is the currency rule
+// (docs/specs/civics-content.md §3) — so the text a `civics_answer` scope
+// asset was generated from can become stale without this table's own schema
+// changing at all. Hashing the EXACT synthesized text and folding that hash
+// into the cache lookup key (`@@unique([scope, refId, voice, modelId,
+// format, contentSha256])`) makes a changed answer resolve to a DIFFERENT
+// asset automatically: the lookup for the new text simply misses and
+// synthesizes fresh, while the old row stays exactly what it always was — a
+// correct recording of text that used to be correct. There is no expiry
+// path to write, no invalidation job to run, and no version counter to bump
+// on the answer; it is structurally impossible to serve a learner audio of a
+// superseded answer, because the only way to reach a row is to name the
+// text it actually contains.
+//
+// -----------------------------------------------------------------------------
+// `generatedByUserId` IS ATTRIBUTION, NOT OWNERSHIP
+// -----------------------------------------------------------------------------
+// Synthesis always runs on the CALLER's own AI key, never the admin's
+// (docs/specs/voice.md §6), so the first learner to ask for a given clip is
+// the one whose account paid for it — this column records who that was, for
+// support/cost questions, not for access control: every learner who can
+// already read the underlying civics question may read this cached asset,
+// with no ownership check of any kind (see the `storage_objects` section
+// above). `onDelete: SetNull`, matching every other "who happened to trigger
+// this shared content" column in this schema
+// (`SystemSettings.updatedByUserId`, `Credential.updatedByUserId`), because
+// the asset is CONTENT other learners still rely on and must survive the
+// deletion of the account that happened to generate it.
+enum SpeechAudioScope {
+  civics_question
+  civics_answer
+}
+
+model SpeechAudioAsset {
+  id String @id @default(uuid()) @db.Uuid
+
+  scope SpeechAudioScope
+
+  // The `civics_questions.id` this clip was synthesized for. No FK — see
+  // "NO FOREIGN KEY ... EITHER" above.
+  refId String @map("ref_id") @db.Uuid
+
+  // The provider's voice id, e.g. `alloy`. Part of the cache key: two voices
+  // reading the same text are two different assets, not one.
+  voice String
+
+  // The bound `speak` model AT GENERATION TIME (`AI_MODEL_ROLES`, "speak").
+  // Part of the cache key for the identical reason `voice` is: an admin
+  // rebinding `speak` to a different model must not silently serve a clip
+  // synthesized by the model that used to be bound.
+  modelId String @map("model_id")
+
+  // The audio container, e.g. `mp3`. Part of the cache key — see `voice`.
+  format String
+
+  // sha256 of the EXACT text synthesized. See "WHY `contentSha256` IS PART
+  // OF THE UNIQUE KEY" above — this is what makes a changed dynamic civics
+  // answer resolve to a new asset with no expiry path to write.
+  contentSha256 String @map("content_sha256")
+
+  // The object-storage key the bytes live under, behind the `StorageProvider`
+  // port — see "NO FOREIGN KEY TO `storage_objects`" above. Unique: one
+  // storage object never backs two cache rows.
+  storageKey String @unique @map("storage_key")
+
+  byteSize Int @map("byte_size")
+
+  // What was billed for this synthesis call — kept alongside `byteSize`
+  // (what the bytes cost to store) rather than only in `ai_usage_events`,
+  // so a cache row is self-explaining without a join.
+  charCount Int @map("char_count")
+
+  // Attribution, not ownership — see "`generatedByUserId` IS ATTRIBUTION,
+  // NOT OWNERSHIP" above. onDelete: SetNull: the asset is shared content and
+  // must outlive the account that happened to generate it.
+  generatedByUserId String? @map("generated_by_user_id") @db.Uuid
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+
+  // Relations
+  generatedByUser User? @relation("SpeechAudioGeneratedBy", fields: [generatedByUserId], references: [id], onDelete: SetNull)
+
+  // The cache lookup key (#284's `GET`-or-generate path): the same
+  // question/answer, voice, model, format and exact text always resolve to
+  // the same row.
+  @@unique([scope, refId, voice, modelId, format, contentSha256])
+  // Supports a "which cached assets exist for this exact text, regardless of
+  // scope/voice/model" lookup without forcing a scan of the full unique key.
+  @@index([contentSha256])
+  @@map("speech_audio_assets")
 }
