@@ -82,6 +82,9 @@ const UserNotificationsPage = lazy(
 // voice picker. `VoiceSettingsPage` rather than `UserVoicePage`: there is no
 // admin counterpart to disambiguate it from, unlike Appearance.
 const VoiceSettingsPage = lazy(() => import("./pages/VoiceSettingsPage"));
+// Issue #322, epic #305. Lazy like its siblings — a settings destination a
+// learner reaches deliberately, never on the critical path to practising.
+const CoachSettingsPage = lazy(() => import("./pages/CoachSettingsPage"));
 // Issue #77, epic #50 — the ongoing home for the six orientation answers,
 // rendering the SAME `JourneyProfileForm` `/setup/journey` above renders.
 const UserJourneyPage = lazy(() => import("./pages/UserJourneyPage"));
@@ -457,6 +460,16 @@ function AppRoutes() {
                         <Route
                           path="/settings/voice"
                           element={<VoiceSettingsPage />}
+                        />
+                        {/* Issue #322, epic #305. Ungated like every other
+                        `/settings/*` route in this block: it edits the
+                        caller's OWN coach preference through
+                        `PATCH /api/user-settings`, which all three roles
+                        hold, and reads a persona list that is `@Auth()` with
+                        no permissions. */}
+                        <Route
+                          path="/settings/coach"
+                          element={<CoachSettingsPage />}
                         />
                         {/* Ungated like its siblings (#77, epic #50). It edits the
                         caller's OWN journey profile through

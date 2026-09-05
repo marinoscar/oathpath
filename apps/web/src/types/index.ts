@@ -189,6 +189,44 @@ export type CoachSettingsPatch = {
   [K in keyof CoachSettings]?: CoachSettings[K] | null;
 };
 
+/**
+ * One persona as `GET /api/ai/coach/personas` serves it (#320, epic #305).
+ *
+ * FOUR FIELDS, NEVER FIVE. Each registry entry server-side also carries a
+ * `promptFragment` — the paragraph appended to a grader's or a tutor's system
+ * message — and it is never on the wire. Neither is the reaction bank:
+ * selection from it is deterministic and happens on the server, so a client
+ * holding it could pick its own line, which is precisely the "two reactions
+ * to one event" defect that determinism exists to prevent.
+ *
+ * THE WEB DECLARES NO PERSONA LIST OF ITS OWN. The registry lives in the API
+ * and is read over this endpoint — the same rule `ai-model-roles.ts` states
+ * for the model-role registry, for the same reason: a duplicate in
+ * `config/` with a test asserting the two agree is detection rather than
+ * prevention.
+ */
+export interface CoachPersonaOption {
+  /** The value to store in `coach.persona`. Persisted, and therefore stable. */
+  key: CoachPersona;
+  /** The name on the card. */
+  label: string;
+  /** What choosing it changes, in the learner's terms. */
+  description: string;
+  /**
+   * One line in that voice, so a learner can read what they are picking.
+   *
+   * Reading it costs nothing and it is always visible. HEARING it costs one
+   * synthesis on the learner's own key, which is why that is a button and
+   * never something focus or hover triggers.
+   */
+  sampleLine: string;
+}
+
+/** The body of `GET /api/ai/coach/personas`. */
+export interface CoachPersonasResponse {
+  personas: CoachPersonaOption[];
+}
+
 // =============================================================================
 // Notifications — the registry (#124) and the stored preferences (#126, epic #109)
 // =============================================================================
