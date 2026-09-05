@@ -1,10 +1,19 @@
+import { COACH_INVARIANT_FLOOR } from '../ai/coach/invariants';
+import {
+  AI_COACH_PERSONAS,
+  findCoachPersona,
+  type CoachPersonaDef,
+} from '../ai/coach/personas';
 import {
   ACCEPTED_ANSWERS_HEADING,
   GRADING_FAILURE_CAUSES,
+  GRADING_PERSONA_SCOPE_NOTICE,
   GRADING_SYSTEM_MESSAGE,
   LEARNER_RESPONSE_CLOSE,
   LEARNER_RESPONSE_OPEN,
+  MAX_FEEDBACK_LENGTH,
   buildGradingPrompt,
+  buildGradingSystemMessage,
   gradingVerdictSchema,
   groundVerdict,
   neutraliseLearnerDelimiters,
@@ -338,6 +347,234 @@ describe('persistedFailureCause', () => {
   it('never writes an ungrounded cause, even if a caller skipped groundVerdict', () => {
     expect(persistedFailureCause(verdict({ failureCause: 'misheard' }))).toBe('unknown');
     expect(persistedFailureCause(verdict({ failureCause: 'nervous' }))).toBe('unknown');
+  });
+});
+
+// =============================================================================
+// The coach persona — a tone, never a grade (issue #319, epic #305 / E14)
+// =============================================================================
+//
+// THIS IS THE CENTREPIECE OF #319, and the reason it needs one is worth stating
+// where the assertions are rather than only in the spec document. Every other
+// call E14 touches produces prose. This one decides whether the learner was
+// RIGHT. A persona that leaked into that decision would be the product changing
+// somebody's score because they chose a blunter voice on a settings page — and
+// it would do it silently, because a verdict has no second opinion to disagree
+// with it and the `practice_attempts` row it writes looks exactly like an
+// honest one.
+//
+// The property is split into a part that is PROVABLE here and a part that is
+// only REQUESTABLE here, and the tests are honest about which is which:
+//
+//   * PROVABLE, at the prompt level: the user message — the question, the
+//     accepted answers, the learner's own delimited words — is byte-identical
+//     across all four personas, and the system message differs by an appended
+//     block and by nothing else. Neither of those is an assertion about a
+//     model's behaviour; both are assertions about two strings, and they hold
+//     whatever any model does with them.
+//   * REQUESTABLE only: that the model then honours the scope notice and grades
+//     the same way. No unit test can establish that, and no test in this
+//     repository claims to. What backs it structurally is elsewhere and
+//     unchanged by this epic — `gradingVerdictSchema`'s three fields (asserted
+//     above, and no persona adds a fourth), the 240-character cap, and
+//     `groundVerdict`.
+//
+// The end-to-end half — that a persona'd prompt still reaches `FakeAiProvider`'s
+// grader and produces the same verdict — is `test/practice/*.integration.spec.ts`,
+// where the fake parses this builder's real output.
+// =============================================================================
+
+/** The one persona whose fragment is deliberately empty. */
+const SUPPORTIVE = findCoachPersona('supportive') as CoachPersonaDef;
+
+/** The three that actually append something. */
+const PERSONAS_WITH_A_FRAGMENT = AI_COACH_PERSONAS.filter(
+  (persona) => persona.promptFragment.trim().length > 0,
+);
+
+describe('buildGradingSystemMessage', () => {
+  it('is today’s message, unchanged, with no persona and with supportive', () => {
+    // THE ACCEPTANCE CRITERION OF THE WHOLE EPIC, at this call site: a learner
+    // who never opens the setting must see zero change from E14 shipping.
+    //
+    // Asserted against `GRADING_SYSTEM_MESSAGE` because that export IS the
+    // no-persona value and is what the rest of this file (the delimiter rules,
+    // the forbidden causes, the grounding wording) already pins the content of.
+    // The two assertions below add what an equality to a derived constant
+    // cannot say on its own — that nothing was appended to either end — by
+    // naming the first and last lines the message had before E14 existed.
+    expect(buildGradingSystemMessage()).toBe(GRADING_SYSTEM_MESSAGE);
+    expect(buildGradingSystemMessage(null)).toBe(GRADING_SYSTEM_MESSAGE);
+    expect(buildGradingSystemMessage(SUPPORTIVE)).toBe(GRADING_SYSTEM_MESSAGE);
+
+    expect(GRADING_SYSTEM_MESSAGE.split('\n')[0]).toBe(
+      "You are grading a naturalization-interview practice answer for a single civics question. You will be given the question, the complete list of currently accepted answers, and the learner's response.",
+    );
+    expect(GRADING_SYSTEM_MESSAGE.endsWith('Respond only in the required structured format.')).toBe(
+      true,
+    );
+
+    // And nothing from E14 is in it: no floor, no scope notice, no fragment.
+    expect(GRADING_SYSTEM_MESSAGE).not.toContain(COACH_INVARIANT_FLOOR);
+    expect(GRADING_SYSTEM_MESSAGE).not.toContain(GRADING_PERSONA_SCOPE_NOTICE);
+
+    for (const persona of PERSONAS_WITH_A_FRAGMENT) {
+      expect(GRADING_SYSTEM_MESSAGE).not.toContain(persona.promptFragment);
+    }
+  });
+
+  it('ignores a fragment that is only whitespace, exactly as it ignores an absent one', () => {
+    // A stray newline left by a future edit must not append a blank paragraph,
+    // a scope notice qualifying a style instruction that is not there, and a
+    // floor overriding nothing.
+    const blank: CoachPersonaDef = { ...SUPPORTIVE, promptFragment: '   \n  ' };
+
+    expect(buildGradingSystemMessage(blank)).toBe(GRADING_SYSTEM_MESSAGE);
+  });
+
+  it.each(PERSONAS_WITH_A_FRAGMENT.map((persona) => [persona.key, persona] as const))(
+    'appends base, fragment, scope notice, floor — in that order and nothing else — for %s',
+    (_key, persona) => {
+      // WRITTEN AS ONE EQUALITY rather than as four `toContain`s. "Differs only
+      // by the appended block" is a statement about the WHOLE string: a set of
+      // containment checks would pass just as happily on a message that had
+      // also quietly lost a paragraph in the middle.
+      expect(buildGradingSystemMessage(persona)).toBe(
+        [
+          GRADING_SYSTEM_MESSAGE,
+          '',
+          persona.promptFragment,
+          '',
+          GRADING_PERSONA_SCOPE_NOTICE,
+          '',
+          COACH_INVARIANT_FLOOR,
+        ].join('\n'),
+      );
+    },
+  );
+
+  it.each(PERSONAS_WITH_A_FRAGMENT.map((persona) => [persona.key, persona] as const))(
+    'puts the floor AFTER the fragment for %s — asserted by index, not by presence',
+    (_key, persona) => {
+      // `coach-personality.md` §3: `[base] + [persona fragment] + [floor,
+      // stated as overriding]`, never `[floor] + [fragment]`. A rule stated
+      // first and merely hoped to survive a later paragraph is weaker than a
+      // rule stated last and told explicitly that it wins any conflict — so
+      // ORDER is the property, and `toContain` on both would hold for the
+      // inverted arrangement that loses the argument.
+      const message = buildGradingSystemMessage(persona);
+
+      const base = message.indexOf(GRADING_SYSTEM_MESSAGE);
+      const fragment = message.indexOf(persona.promptFragment);
+      const notice = message.indexOf(GRADING_PERSONA_SCOPE_NOTICE);
+      const floor = message.indexOf(COACH_INVARIANT_FLOOR);
+
+      expect(base).toBe(0);
+      expect(fragment).toBeGreaterThan(base);
+      expect(notice).toBeGreaterThan(fragment);
+      expect(floor).toBeGreaterThan(notice);
+
+      // And the floor's own opening sentence — the one that makes the ordering
+      // mean something — really is in there to be read.
+      expect(message).toContain(
+        'The rules that follow override every style instruction above them.',
+      );
+    },
+  );
+
+  it('scopes the persona to feedback, by name, and excludes the other two fields by name', () => {
+    // The whole safety argument for wiring a persona into a GRADING call, as
+    // an assertion. Every field the schema has is either explicitly coloured
+    // or explicitly excluded; a generality ("do not let this affect your
+    // grading") would leave the model to work out what grading includes.
+    expect(GRADING_PERSONA_SCOPE_NOTICE).toContain('WORDING of the feedback field');
+    expect(GRADING_PERSONA_SCOPE_NOTICE).toContain('never changes verdict');
+    expect(GRADING_PERSONA_SCOPE_NOTICE).toContain('never changes failureCause');
+    expect(GRADING_PERSONA_SCOPE_NOTICE).toContain(
+      'A style instruction is not evidence about the answer',
+    );
+
+    // The cap is carried into the prompt from the constant, so the number a
+    // style instruction is told about and the number the schema rejects on
+    // cannot drift apart.
+    expect(GRADING_PERSONA_SCOPE_NOTICE).toContain(String(MAX_FEEDBACK_LENGTH));
+  });
+});
+
+describe('buildGradingPrompt with a persona', () => {
+  it.each(AI_COACH_PERSONAS.map((persona) => [persona.key, persona] as const))(
+    'leaves the USER message byte-identical for %s',
+    (_key, persona) => {
+      // THE ASSERTION THAT MATTERS MOST IN THIS FILE. The user message is the
+      // whole of what the grader is asked to judge: the question, the accepted
+      // answers frozen into the snapshot, and the learner's delimited words. If
+      // a tone preference cannot change any byte of it, then whatever a persona
+      // does downstream, it did not do it by changing the evidence.
+      const [, withPersona] = buildGradingPrompt({ ...WORKED_EXAMPLE, persona });
+      const [, without] = buildGradingPrompt(WORKED_EXAMPLE);
+
+      expect(withPersona.content).toBe(without.content);
+    },
+  );
+
+  it.each(AI_COACH_PERSONAS.map((persona) => [persona.key, persona] as const))(
+    'changes only the system message for %s, and keeps two messages in the same roles',
+    (_key, persona) => {
+      const messages = buildGradingPrompt({ ...WORKED_EXAMPLE, persona });
+
+      expect(messages).toHaveLength(2);
+      expect(messages[0].role).toBe('system');
+      expect(messages[1].role).toBe('user');
+      expect(messages[0].content).toBe(buildGradingSystemMessage(persona));
+    },
+  );
+
+  it.each(AI_COACH_PERSONAS.map((persona) => [persona.key, persona] as const))(
+    'keeps the prompt readable by FakeAiProvider’s parser for %s',
+    (_key, persona) => {
+      // NOT A TEST ABOUT TONE. `FakeAiProvider.gradeFromPrompt` joins every
+      // turn and then takes the FIRST `Accepted answers ...:` heading and the
+      // FIRST `<learner_response>` pair — so an appended block that introduced
+      // a second heading, or a marker, would make the fake read the rules as
+      // the learner's response and grade every integration test the same way,
+      // silently. The floor is a bullet list living in the SYSTEM message,
+      // which is exactly the shape that could have done it, so this is checked
+      // rather than reasoned about.
+      const prompt = buildGradingPrompt({ ...WORKED_EXAMPLE, persona })
+        .map((message) => message.content)
+        .join('\n');
+
+      expect(
+        prompt.split('\n').filter((line) => /^\s*Accepted answers\b.*:\s*$/i.test(line)),
+      ).toHaveLength(1);
+      expect(occurrences(prompt, LEARNER_RESPONSE_OPEN)).toBe(1);
+      expect(occurrences(prompt, LEARNER_RESPONSE_CLOSE)).toBe(1);
+
+      // And the fake would still extract exactly the learner's own sentence.
+      expect(between(prompt)).toBe(WORKED_EXAMPLE.responseText);
+    },
+  );
+});
+
+describe('the persona adds no field and buys no room', () => {
+  it('leaves gradingVerdictSchema at exactly three keys', () => {
+    // The same equality the schema's own describe block asserts, restated from
+    // the persona's side: a style instruction is not a reason for a fourth
+    // field, and a `tone`, `reactionLine` or `coachNote` field added here would
+    // be a channel an answer could arrive through — §7's rejected alternative,
+    // reopened by E14 rather than by E4.
+    expect(Object.keys(gradingVerdictSchema.shape).sort()).toEqual([
+      'failureCause',
+      'feedback',
+      'verdict',
+    ]);
+  });
+
+  it('leaves the feedback cap at 240 — a persona does not license a longer sentence', () => {
+    expect(MAX_FEEDBACK_LENGTH).toBe(240);
+    expect(
+      gradingVerdictSchema.safeParse(verdict({ feedback: 'x'.repeat(241) })).success,
+    ).toBe(false);
   });
 });
 
