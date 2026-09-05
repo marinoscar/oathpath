@@ -10,6 +10,7 @@ import { Clock } from '../common/clock/clock';
 import { PrismaService } from '../prisma/prisma.service';
 import { EngagementService } from '../engagement/engagement.service';
 import { ReadinessService } from '../readiness/readiness.service';
+import { UserSettingsService } from '../settings/user-settings/user-settings.service';
 import { AttemptGradingService } from './attempt-grading.service';
 import { GRADING_SCHEMA_NAME } from './grading';
 // MOVED BY ISSUE #245. The rule is shared with `InterviewsService` now, so it
@@ -208,6 +209,20 @@ describe('PracticeService', () => {
     recordSessionCompletionActivity: jest.Mock;
   };
 
+  /**
+   * The coach-persona read (issue #319, epic #305 / E14), as a double.
+   *
+   * `AttemptGradingService` asks this ONE question on rung 2 — which voice to
+   * write the grader's `feedback` sentence in — and the answer reaches the
+   * system message and nothing else. The default stub returns `undefined`,
+   * which `resolveCoachPersona` maps to `supportive`, so every pre-existing
+   * assertion in this file grades against exactly the prompt it always did.
+   *
+   * Two tests below reach past that default: one to prove a persona reaches
+   * the prompt at all, and one to prove a REJECTED read still grades.
+   */
+  let userSettings: { readCoachPreferences: jest.Mock };
+
   beforeEach(async () => {
     prisma = {
       civicsCategory: { findFirst: jest.fn().mockResolvedValue(null) },
@@ -281,6 +296,13 @@ describe('PracticeService', () => {
       recordSessionCompletionActivity: jest.fn().mockResolvedValue(undefined),
     };
 
+    userSettings = {
+      // UNDEFINED IS THE ORDINARY ANSWER, not an error case: it is what
+      // `readCoachPreferences` returns for a learner with no `user_settings`
+      // row, which is most learners, and it resolves to `supportive`.
+      readCoachPreferences: jest.fn().mockResolvedValue(undefined),
+    };
+
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         PracticeService,
@@ -304,6 +326,13 @@ describe('PracticeService', () => {
         { provide: AiDispatchService, useValue: dispatch },
         { provide: ReadinessService, useValue: readiness },
         { provide: EngagementService, useValue: engagement },
+        // THE NAMESPACE'S OWN SERVICE, STUBBED — never a fake `user_settings`
+        // row in the Prisma double. What `AttemptGradingService` depends on is
+        // the METHOD's contract ("undefined means the learner expressed no
+        // preference"), not the JSONB shape behind it, and a test that
+        // reproduced the column here would be asserting against a shape this
+        // module deliberately does not know (see `readCoachPreferences`).
+        { provide: UserSettingsService, useValue: userSettings },
       ],
     }).compile();
 

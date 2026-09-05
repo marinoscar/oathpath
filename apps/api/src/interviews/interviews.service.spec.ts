@@ -8,6 +8,7 @@ import { EngagementService } from '../engagement/engagement.service';
 import { ReadinessService } from '../readiness/readiness.service';
 import { EnglishService } from '../english/english.service';
 import { AttemptGradingService } from '../practice/attempt-grading.service';
+import { UserSettingsService } from '../settings/user-settings/user-settings.service';
 import { planCivicsQuestions, selectPassRule } from './engine';
 import {
   InterviewsService,
@@ -526,6 +527,18 @@ describe('InterviewsService', () => {
         { provide: AiDispatchService, useValue: dispatch },
         { provide: ReadinessService, useValue: readiness },
         { provide: EngagementService, useValue: engagement },
+        // The coach-persona read `AttemptGradingService` makes on rung 2
+        // (issue #319, epic #305 / E14), stubbed at its ordinary answer:
+        // `undefined` is what a learner with no `user_settings` row has, and
+        // it resolves to `supportive`, whose prompt fragment is empty. So the
+        // grading prompt every assertion in this file exercises is byte for
+        // byte the one it was before E14 — which is the point, since a mock
+        // interview's grading must not depend on a tone preference any more
+        // than a practice session's does.
+        {
+          provide: UserSettingsService,
+          useValue: { readCoachPreferences: jest.fn(async () => undefined) },
+        },
         // THE REAL E10 SERVICE, over the same store (#158). See the note on
         // `AttemptGradingService` above; the argument is identical one segment
         // over.
