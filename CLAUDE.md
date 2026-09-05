@@ -639,6 +639,21 @@ for the operator-facing walkthrough. See
 [`docs/specs/voice-hands-free.md`](docs/specs/voice-hands-free.md) §4-§5
 (epic #280) and [`docs/API.md`](docs/API.md#ai-speech).
 
+**Conversation mode (E13, epic #304) adds no route of its own — it is a
+client-only driver built entirely on the four routes above plus
+`POST /api/practice/sessions/{id}/attempts`.** `voice.conversationMode`
+(the seventh field on the `voice` namespace, issue #307, `false` by
+default) only decides what a practice session *loads* with: on, the
+session-wide `Text | Voice` control starts on Voice; off, it starts on
+Text, exactly as before this epic. Either way, choosing Voice by itself
+does not arm the hands-free loop — that is a separate **Start hands-free**
+tap (`PracticeSessionPage.tsx`), and Voice with the loop idle is still
+E9/E12's ordinary hand-driven push-to-talk flow. So the preference buys a
+learner one tap instead of two, not a zero-tap session. See
+[`docs/specs/conversation-mode.md`](docs/specs/conversation-mode.md) for
+the persistent-stream voice-activity detector, the barge-in and earcon
+design, and the wake lock.
+
 ### Account (Per User)
 - `GET /api/account/data-summary` - Per-table row counts a reset would erase, plus the exact confirmation phrase each scope requires
 - `POST /api/account/reset` - Erase your own data (`scope: 'data'`) or your data and stored AI key (`scope: 'data_and_key'`); requires the matching typed phrase, verified server-side
@@ -813,6 +828,15 @@ id — `@CurrentUser('id')` is the only source of one, so there is no "reset
 another learner's data" action for a permission to gate in the first place.
 See [`docs/specs/account-reset.md`](docs/specs/account-reset.md) §11.
 
+**Conversation mode adds no permission string either, for the same
+reason.** E13 (epic #304) has no controller and no route of its own — see
+the Voice paragraph above — so it inherits whatever gate `POST
+/api/ai/speech/transcribe`, `POST /api/ai/speech/synthesize`, and `POST
+/api/practice/sessions/{id}/attempts` already have. There is no "walk while
+practising" privilege in this product's authorization model, for the
+identical reason there is no "use voice" one. See
+[`docs/specs/conversation-mode.md`](docs/specs/conversation-mode.md) §12.
+
 ## Database Tables
 
 - `users` - User accounts with profile info
@@ -954,14 +978,18 @@ migration either. `study` (epic #56 / E7 "Habit") — `reminderHour` and
 `reminderEnabled`, read by the hourly `PracticeReminderTask` — is the
 newest worked example, alongside the pre-existing `dataTables` and
 `navigation`. `voice` (E12, epic #280, issue #282) is the next one after
-it — six independent scalar preferences (`autoSubmitSpoken`,
+it — seven independent scalar preferences (`autoSubmitSpoken`,
 `preferPremiumVoice`, `preferredVoice`, `speechRate`, `readQuestionsAloud`,
-`readAnswersAloud`) governing how a learner experiences spoken questions and
-answers, on the identical no-`.default()` pattern. Do not re-derive the list
-of files a new namespace touches here: `docs/specs/habit-streaks.md` §7
-names the six explicitly, as a checklist rather than a count to take on
-faith, and that document is the one to extend if a seventh namespace ever
-needs the same walk-through.
+`readAnswersAloud`, and, since E13/epic #304/issue #307,
+`conversationMode`) governing how a learner experiences spoken questions
+and answers, on the identical no-`.default()` pattern. Do not re-derive the
+list of files a new *namespace* touches here: `docs/specs/habit-streaks.md`
+§7 names that six-file checklist explicitly, as a checklist rather than a
+count to take on faith, and that document is the one to extend if a
+seventh namespace ever needs the same walk-through. Adding
+`conversationMode` to the *existing* `voice` namespace was narrower still —
+a four-file change, walked through in full in
+[`docs/specs/conversation-mode.md`](docs/specs/conversation-mode.md) §6.
 
 ### Using the Clock
 
