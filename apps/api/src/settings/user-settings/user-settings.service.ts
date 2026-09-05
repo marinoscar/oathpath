@@ -93,6 +93,56 @@ export class UserSettingsService {
   }
 
   /**
+   * The caller's own `voice` namespace, or `undefined` if they have never set
+   * one (issue #284, epic #280).
+   *
+   * ---------------------------------------------------------------------------
+   * A PURE READ, DELIBERATELY NOT `getSettings`
+   * ---------------------------------------------------------------------------
+   *
+   * `getSettings` CREATES a `user_settings` row on a miss, which is right for
+   * the settings screen (a learner who opened it is about to save something)
+   * and wrong for every other reader: `GET /api/ai/speech/audio` asks this
+   * question on a playback path, and a route that writes a row because somebody
+   * pressed play is a write nobody asked for on a request that should be able
+   * to serve entirely from cache. `NotificationsService` avoids `getSettings`
+   * for the same reason and reads the column itself.
+   *
+   * ---------------------------------------------------------------------------
+   * BUT IT LIVES HERE, RATHER THAN THE COLUMN BEING READ AT THE CALL SITE
+   * ---------------------------------------------------------------------------
+   *
+   * The shape of `user_settings.value` — a JSONB blob whose namespaces are
+   * SPARSE, where absent means "use the built-in default" and never "off" — is
+   * this service's own contract (see
+   * `common/schemas/user-settings-namespaces.schema.ts`'s header on why no
+   * namespace carries a `.default()`). A consumer casting the column and
+   * reaching for `.voice` would be a second place that contract is
+   * interpreted, and the first to get it wrong the day the shape moves.
+   *
+   * Returns `undefined` — never a materialised object of defaults — so the
+   * caller keeps the three-way distinction the namespace is built on: set,
+   * unset, and unset-because-there-is-no-row.
+   */
+  async readVoicePreferences(userId: string): Promise<VoiceValue | undefined> {
+    const row = await this.prisma.userSettings.findUnique({
+      where: { userId },
+      select: { value: true },
+    });
+
+    if (!row) return undefined;
+
+    const value = row.value as unknown as UserSettingsValue | null;
+    const voice = value?.voice;
+
+    // A SHAPE CHECK, NOT A PARSE. The stored blob was validated on the way in;
+    // this guards against a hand-edited or older row making a caller read a
+    // property off a string. An unreadable namespace is `undefined`, which the
+    // caller already handles as "the learner has expressed no preference".
+    return voice && typeof voice === 'object' ? voice : undefined;
+  }
+
+  /**
    * Replace user settings (PUT)
    */
   async replaceSettings(userId: string, dto: UpdateUserSettingsDto) {

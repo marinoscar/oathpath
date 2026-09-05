@@ -1140,6 +1140,49 @@ export type SynthesizeResponse =
   | SpeechFailed;
 
 /**
+ * The caller has no state set, so there is no answer to read aloud (#284).
+ *
+ * ONLY `GET /api/ai/speech/audio` CAN ANSWER THIS, and only for
+ * `scope: 'civics_answer'`: it is the one speech route that resolves an ANSWER
+ * rather than being handed its text, and a `state`-scope question
+ * ("Who is your state's governor?") has no correct answer for somebody whose
+ * profile does not say where they live.
+ *
+ * NOT AN ERROR AND NOT AN `unavailable`. Nothing is misconfigured, no key was
+ * spent, and — unlike every `SpeechUnavailable` cause but `no_user_key` — the
+ * remedy belongs to the LEARNER, not an administrator. So `AiNotReady` is the
+ * wrong rendering: the right one is the same "set your state" prompt
+ * `GET /api/civics/questions/{id}` already asks for when it answers
+ * `answerResolution: 'state_required'`.
+ */
+export interface SpeechStateRequired {
+  status: 'state_required';
+}
+
+/**
+ * Everything `fetchCivicsAudio` can resolve to. SWITCH ON `status`.
+ *
+ * `SynthesizeResponse` PLUS ONE MEMBER — see {@link SpeechStateRequired} for
+ * the state only this route can be in. Everything else is identical, including
+ * the rule that a non-`ok` member means "use the browser's own
+ * `speechSynthesis`" and, for all but `state_required`, say nothing at all.
+ */
+export type CivicsAudioResponse =
+  | { status: 'ok'; audio: Blob }
+  | SpeechUnavailable
+  | SpeechFailed
+  | SpeechStateRequired;
+
+/**
+ * Which civics text `GET /api/ai/speech/audio` reads aloud.
+ *
+ * `civics_answer` is the FIRST accepted answer, not all of them joined: a
+ * question with several simultaneously-correct answers presents one as
+ * canonical, and any single one of them is a pass.
+ */
+export type CivicsAudioScope = 'civics_question' | 'civics_answer';
+
+/**
  * One voice a learner can choose, from `GET /api/ai/speech/voices` (#283).
  *
  * `id` is the PROVIDER's own id, and it goes back out unchanged as the `voice`

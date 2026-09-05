@@ -12,6 +12,10 @@ import {
 import type { AiCapabilityFamily } from '../ai-model-roles';
 import type { AiProviderKind } from '../ai-settings.schema';
 import { AiUsageService } from '../ai-usage.service';
+import {
+  DEFAULT_SPEECH_FORMAT,
+  speechContentType,
+} from '../speech-format';
 import type {
   AiCompletionRequest,
   AiCompletionResult,
@@ -238,25 +242,11 @@ const OPENAI_TTS_VOICES: readonly AiVoiceDescriptor[] = [
   },
 ];
 
-/** The container used when a caller names none. Widely playable, small. */
-const DEFAULT_SPEECH_FORMAT = 'mp3';
-
-/**
- * Container -> MIME type, for the audio this provider returns.
- *
- * A LOOKUP, NOT `audio/${format}`. `mp3` is served as `audio/mpeg`, and a
- * browser handed `audio/mp3` may simply refuse to play it — the failure lands
- * in an audio element with no error anyone can see. Unknown formats fall back
- * to the octet-stream default rather than to a guess.
- */
-const SPEECH_CONTENT_TYPES: Readonly<Record<string, string>> = {
-  mp3: 'audio/mpeg',
-  opus: 'audio/ogg',
-  aac: 'audio/aac',
-  flac: 'audio/flac',
-  wav: 'audio/wav',
-  pcm: 'audio/L16',
-};
+// The default container and the container -> MIME map moved to
+// `../speech-format.ts` in #284, when a SECOND path started needing the same
+// answer: `GET /api/ai/speech/audio` serves cached bytes with no provider call
+// to derive a content type from, and a copy of the map there would drift from
+// this one. Nothing about the values changed — see that file's header.
 
 /**
  * Usage for a speech call.
@@ -1557,10 +1547,6 @@ function transcriptionResult(
   };
 }
 
-/** The MIME type for a synthesised container. See {@link SPEECH_CONTENT_TYPES}. */
-function speechContentType(format: string): string {
-  return SPEECH_CONTENT_TYPES[format] ?? 'application/octet-stream';
-}
 
 /**
  * The model a minted realtime session reports, or `null` when it reports none.

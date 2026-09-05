@@ -1236,11 +1236,12 @@ chart's data source.
 ### AI Speech
 
 Issue #95, epic #58 (E9 "Voice foundation"), plus `GET /ai/speech/voices`
-(issue #283, epic #280). Three routes, all `@Auth()` with **no permissions and
-no user-id parameter** — the caller is always resolved from
-`@CurrentUser('id')`, exactly like every other route in this section: every
-authenticated learner speaks with their own voice on their own key, and gating
-any of them would leave a Viewer unable to practice at all.
+(issue #283) and `GET /ai/speech/audio` (issue #284), both epic #280. Four
+routes, all `@Auth()` with **no permissions and no user-id parameter** — the
+caller is always resolved from `@CurrentUser('id')`, exactly like every other
+route in this section: every authenticated learner speaks with their own voice
+on their own key, and gating any of them would leave a Viewer unable to practice
+at all.
 
 **Binding `transcribe` or `speak` is entirely optional and never affects
 `systemReady`.** See
@@ -1250,10 +1251,11 @@ each role costs and controls. Both routes run inference on the **caller's**
 own key, so usage lands on that learner's own `GET /ai/usage`, under
 `roleKey: 'transcribe'` / `roleKey: 'speak'` — never on the server credential.
 
-**The two POST responses are discriminated unions on `status`, and both are
-always HTTP 200** — `ok` (transcribe only), `unavailable` (`{ cause, role }`), or
-`failed` (`{ errorCode, error }`). A non-2xx here would discard the one fact
-either response exists to carry: *why* no answer or no audio was produced,
+**The two POST responses and `GET /ai/speech/audio` are discriminated unions on
+`status`, and all three are always HTTP 200** — `ok` (transcribe only),
+`unavailable` (`{ cause, role }`), `failed` (`{ errorCode, error }`), or — on
+`GET /ai/speech/audio` alone — `state_required`. A non-2xx here would discard
+the one fact either response exists to carry: *why* no answer or no audio was produced,
 which a caller (`AiNotReady`-style UI) needs to render correctly. `cause` is
 one of `no_user_key` / `ai_disabled` / `role_unbound` /
 `capability_unsupported` — the same four values every other AI feature in
@@ -1348,6 +1350,76 @@ a voice. This is the same reasoning `GET /ai-settings/models` serves the
 model-role registry for, and the reason
 `POST /ai/speech/synthesize` validates a voice id's *shape* but never its
 membership.
+
+#### GET /ai/speech/audio
+Issue #284, epic #280. A civics question — or its first accepted answer — read
+aloud, served from a **deployment-wide, content-addressed cache** so the same
+clip is paid for once rather than once per learner per playback.
+
+**Query parameters:**
+
+| Parameter | Required | Meaning |
+| --- | --- | --- |
+| `scope` | yes | `civics_question` (the prompt) or `civics_answer` (the **first** accepted answer — not all of them joined; a question with several simultaneously-correct answers presents one as canonical, and any one of them is a pass). |
+| `refId` | yes | The `civics_questions.id` to read. A **question** id for both scopes — which answer is current is resolved on the server. |
+| `voice` | no | A voice id from `GET /ai/speech/voices`. Omit to use your own saved `voice.preferredVoice`, then the provider's default. |
+| `format` | no | The audio container, e.g. `mp3`. Omit for the default. |
+
+Any other query key is a **400 naming it**, never a silently dropped parameter.
+There is no `text` parameter, no `modelId`, no `userId` and no `stateCode`.
+
+**You do not send the text.** The words are resolved server-side from the same
+rows `GET /civics/questions/{id}` returns — including the answer resolution
+against **your own** state — which is what makes the cache shareable at all: two
+learners asking for the same question are asking for bytes that are identical by
+construction, not because they happened to send the same string.
+
+**The first request for a given question, voice and model synthesises on your
+own AI key** and records one `ai_usage_events` row under `roleKey: 'speak'`,
+exactly as `POST /ai/speech/synthesize` does. **Every request after that — from
+anybody — is served from storage with no AI call and no usage row at all.** The
+first caller's cross-subsidy of everyone else is deliberate and recorded
+(`generated_by_user_id`), never refunded, and never charged to the server
+credential.
+
+**A corrected dynamic answer is never served stale.** The cache is keyed by a
+hash of the exact text, so an admin's correction
+(`PUT /civics/dynamic-answers`) simply resolves to a different clip: the lookup
+for the new wording misses and synthesises, and the row for the old wording
+stops being addressed by anything. There is no invalidation to run.
+
+**Response — read `Content-Type`, not the status code.** Audio bytes with the
+container's own type (e.g. `audio/mpeg`) are the success case. Anything else is
+`application/json` in the usual `{ data: … }` envelope carrying `status`:
+
+| `status` | Meaning |
+| --- | --- |
+| `unavailable` | No call was attempted: `{ cause, role: 'speak' }`. You have stored no AI key, or an administrator has not bound the `speak` model. **Not an error** — the browser's own `speechSynthesis` reads the question aloud on every deployment. |
+| `failed` | The call was made and produced nothing usable: `{ errorCode, error }`. Worth a retry; never show `error` to a learner. |
+| `state_required` | You asked for the answer to a **state-specific** question and your profile has no state set. **Nothing was synthesised and nothing is wrong** — the same fact `GET /civics/questions/{id}` reports as `answerResolution: "state_required"` and the explain stream reports as its `state_required` frame. Prompt the learner to set their state; do **not** render `AiNotReady`. |
+
+**All of those are HTTP 200.** The one non-2xx this route produces for a
+well-formed request is **404**, for a `refId` no civics question has — that
+question genuinely does not exist, which is a different problem with a different
+owner than "an administrator has not configured speech".
+
+**Unlike `POST /ai/speech/synthesize`, this route sets a real `Cache-Control`.**
+That one sends `no-store` because it reads back arbitrary text a client sent;
+these bytes are a reading of public civics content, identical for every learner.
+The long lifetime (`private, max-age=31536000, immutable`) is claimed **only
+when the URL genuinely determines the bytes** — a `civics_question` scope, whose
+prompt cannot change, requested with an explicit `voice`. A
+`national`/`state`-scope **answer** can be corrected by an admin, and a request
+that named no `voice` resolves one from your own saved preference; either gets a
+short max-age instead, because a browser cache is keyed by URL rather than by the
+text's hash. `private` in every case — the response requires an `Authorization`
+header. **None of this affects the server-side cache**, which is content-addressed
+and never serves stale audio regardless.
+
+**Still an upgrade, never the only way to hear a question**
+([`docs/specs/voice.md`](specs/voice.md#2-browser-speechsynthesis-is-the-default-text-to-speech)
+§2). Design record:
+[`docs/specs/voice-hands-free.md`](specs/voice-hands-free.md) §4.
 
 ---
 

@@ -1,6 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { Readable } from 'node:stream';
 
+import { Prisma } from '@prisma/client';
 import request from 'supertest';
 
 import {
@@ -33,6 +35,7 @@ import {
 import { MAX_SYNTHESIS_TEXT_LENGTH } from '../src/ai/dto/ai-speech.dto';
 import type { AiCapabilityFamily } from '../src/ai/ai-model-roles';
 import type { AiCapabilitySet } from '../src/ai/providers/ai-provider.interface';
+import { STORAGE_PROVIDER } from '../src/storage/providers/storage-provider.interface';
 import type { PrismaService } from '../src/prisma/prisma.service';
 
 // =============================================================================
@@ -1032,5 +1035,724 @@ describe('GET /api/ai/speech/voices — on a provider with no tts capability', (
 
     expect(response.body.data.voices).toEqual([]);
     expect(response.body.data.defaultVoice).toBeNull();
+  });
+});
+
+// =============================================================================
+// The shared civics audio cache — GET /api/ai/speech/audio (#284, epic #280)
+// =============================================================================
+//
+// WIRED OVER THE REAL DISPATCHER AND A REAL `BaseAiProvider`, like the block
+// above and unlike the two-dozen tests below the first one — because the
+// property this route exists for is not "the dispatcher was called with the
+// right arguments". It is that the SECOND request for a clip writes no
+// `ai_usage_events` row at all, and a usage row is written inside
+// `BaseAiProvider`, below the dispatcher a double would replace. Asserting on a
+// mock's call count instead would prove the code did not call a function; the
+// row is what proves nobody's key was spent.
+//
+// The storage provider is a fake that keeps objects in a `Map`. The
+// `StorageProvider` PORT is what this cache injects (`STORAGE_PROVIDER`), never
+// the storage module's object service, so the fake is a complete stand-in for
+// the only storage surface this code path can reach.
+//
+// No test in this repository touches a database (docs/TESTING.md).
+// =============================================================================
+
+/** A question whose prompt never changes. */
+const Q_BRANCH = '11111111-1111-4111-8111-111111111111';
+/** A `state`-scope question: no answer at all without a state on the profile. */
+const Q_GOVERNOR = '22222222-2222-4222-8222-222222222222';
+/** A `national`-scope question whose answer an admin can correct. */
+const Q_PRESIDENT = '33333333-3333-4333-8333-333333333333';
+
+const CIVICS_CATEGORY = {
+  id: '44444444-4444-4444-8444-444444444444',
+  testVersionCode: 'v2008',
+  section: 'American Government',
+  code: 'A',
+  name: 'Principles of American Democracy',
+  sortOrder: 0,
+};
+
+const CIVICS_QUESTIONS = [
+  {
+    id: Q_BRANCH,
+    number: 13,
+    prompt: 'Name one branch or part of the government.',
+    categoryId: CIVICS_CATEGORY.id,
+    testVersionCode: 'v2008',
+    seniorEligible: true,
+    dynamicScope: 'none',
+  },
+  {
+    id: Q_GOVERNOR,
+    number: 43,
+    prompt: 'Who is the Governor of your state now?',
+    categoryId: CIVICS_CATEGORY.id,
+    testVersionCode: 'v2008',
+    seniorEligible: false,
+    dynamicScope: 'state',
+  },
+  {
+    id: Q_PRESIDENT,
+    number: 28,
+    prompt: 'What is the name of the President of the United States now?',
+    categoryId: CIVICS_CATEGORY.id,
+    testVersionCode: 'v2008',
+    seniorEligible: true,
+    dynamicScope: 'national',
+  },
+];
+
+/**
+ * The `civics_answers` rows, MUTABLE for the duration of one test.
+ *
+ * One test corrects the President's answer mid-flight, which is the whole point
+ * of hashing the text into the cache key: the corrected wording must resolve to
+ * a different asset with no invalidation code anywhere.
+ */
+let civicsAnswers: Array<{
+  id: string;
+  questionId: string;
+  text: string;
+  sort: number;
+  stateCode: string | null;
+  verifiedAt: Date;
+  effectiveFrom: Date;
+  effectiveTo: Date | null;
+  sourceNote: string | null;
+}>;
+
+/** The `learner_profiles` table, for the duration of one test. */
+let civicsProfiles: Map<string, { stateCode: string | null; testVersionCode: string | null }>;
+
+/** The object store, for the duration of one test. */
+let storedObjects: Map<string, Buffer>;
+
+/** The `speech_audio_assets` table, for the duration of one test. */
+let speechAssets: Map<string, Record<string, unknown>>;
+
+/** The unique key `@@unique([scope, refId, voice, modelId, format, contentSha256])` names. */
+function assetKey(row: {
+  scope: string;
+  refId: string;
+  voice: string;
+  modelId: string;
+  format: string;
+  contentSha256: string;
+}): string {
+  return [
+    row.scope,
+    row.refId,
+    row.voice,
+    row.modelId,
+    row.format,
+    row.contentSha256,
+  ].join('|');
+}
+
+/**
+ * An in-memory `StorageProvider`.
+ *
+ * Only four of the interface's methods can be reached from this code path, and
+ * the rest throw rather than returning a plausible-looking value: a cache that
+ * started calling `initMultipartUpload` for a 12-byte clip would be a change
+ * worth failing a test over, not one to absorb silently.
+ */
+function createFakeStorage() {
+  const unreachable = (name: string) => async () => {
+    throw new Error(`The audio cache must not call StorageProvider.${name}`);
+  };
+
+  return {
+    upload: jest.fn(async (key: string, stream: any) => {
+      const chunks: Buffer[] = [];
+      for await (const chunk of stream) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      }
+      storedObjects.set(key, Buffer.concat(chunks));
+      return { key, bucket: 'test', location: `memory://${key}` };
+    }),
+    download: jest.fn(async (key: string) => {
+      const found = storedObjects.get(key);
+      if (!found) throw new Error(`No object at ${key}`);
+      return Readable.from(found);
+    }),
+    exists: jest.fn(async (key: string) => storedObjects.has(key)),
+    getBucket: () => 'test',
+    delete: jest.fn(async (key: string) => {
+      storedObjects.delete(key);
+    }),
+    initMultipartUpload: unreachable('initMultipartUpload'),
+    getSignedUploadUrl: unreachable('getSignedUploadUrl'),
+    completeMultipartUpload: unreachable('completeMultipartUpload'),
+    abortMultipartUpload: unreachable('abortMultipartUpload'),
+    getSignedDownloadUrl: unreachable('getSignedDownloadUrl'),
+    getMetadata: unreachable('getMetadata'),
+    setMetadata: unreachable('setMetadata'),
+  };
+}
+
+/** Wire the civics tables and the asset table into the shared Prisma mock. */
+function setupCivicsAudioMocks(): void {
+  civicsProfiles = new Map();
+  storedObjects = new Map();
+  speechAssets = new Map();
+  civicsAnswers = [
+    {
+      id: 'aaaaaaaa-0001-4000-8000-000000000001',
+      questionId: Q_BRANCH,
+      text: 'Congress',
+      sort: 0,
+      stateCode: null,
+      verifiedAt: new Date('2026-05-01T00:00:00Z'),
+      effectiveFrom: new Date('2020-01-01T00:00:00Z'),
+      effectiveTo: null,
+      sourceNote: null,
+    },
+    {
+      id: 'aaaaaaaa-0002-4000-8000-000000000002',
+      questionId: Q_BRANCH,
+      text: 'the President',
+      sort: 1,
+      stateCode: null,
+      verifiedAt: new Date('2026-05-01T00:00:00Z'),
+      effectiveFrom: new Date('2020-01-01T00:00:00Z'),
+      effectiveTo: null,
+      sourceNote: null,
+    },
+    {
+      id: 'aaaaaaaa-0003-4000-8000-000000000003',
+      questionId: Q_GOVERNOR,
+      text: 'The Governor of Texas',
+      sort: 0,
+      stateCode: 'TX',
+      verifiedAt: new Date('2026-05-01T00:00:00Z'),
+      effectiveFrom: new Date('2023-01-17T00:00:00Z'),
+      effectiveTo: null,
+      sourceNote: null,
+    },
+    {
+      id: 'aaaaaaaa-0004-4000-8000-000000000004',
+      questionId: Q_PRESIDENT,
+      text: 'The current President',
+      sort: 0,
+      stateCode: null,
+      verifiedAt: new Date('2026-05-01T00:00:00Z'),
+      effectiveFrom: new Date('2021-01-20T00:00:00Z'),
+      effectiveTo: null,
+      sourceNote: null,
+    },
+  ];
+
+  (prismaMock.learnerProfile.findUnique as jest.Mock).mockImplementation(
+    async ({ where }: any) => civicsProfiles.get(where.userId) ?? null,
+  );
+
+  (prismaMock.civicsQuestion.findUnique as jest.Mock).mockImplementation(
+    async ({ where }: any) => {
+      const found = CIVICS_QUESTIONS.find((q) => q.id === where.id);
+
+      return found ? { ...found, category: CIVICS_CATEGORY } : null;
+    },
+  );
+
+  (prismaMock.civicsAnswer.findMany as jest.Mock).mockImplementation(
+    async ({ where }: any) => {
+      const now: Date = where.effectiveFrom.lte;
+
+      return civicsAnswers
+        .filter((a) => {
+          if (a.questionId !== where.questionId) return false;
+          if ((a.stateCode ?? null) !== (where.stateCode ?? null)) return false;
+          if (a.effectiveFrom.getTime() > now.getTime()) return false;
+          if (a.effectiveTo !== null && a.effectiveTo.getTime() <= now.getTime()) {
+            return false;
+          }
+          return true;
+        })
+        .sort((x, y) => x.sort - y.sort);
+    },
+  );
+
+  (prismaMock.speechAudioAsset.findUnique as jest.Mock).mockImplementation(
+    async ({ where }: any) =>
+      speechAssets.get(
+        assetKey(where.scope_refId_voice_modelId_format_contentSha256),
+      ) ?? null,
+  );
+
+  (prismaMock.speechAudioAsset.create as jest.Mock).mockImplementation(
+    async ({ data }: any) => {
+      const key = assetKey(data);
+
+      if (speechAssets.has(key)) {
+        throw new Prisma.PrismaClientKnownRequestError(
+          'Unique constraint failed',
+          { code: 'P2002', clientVersion: 'test' },
+        );
+      }
+
+      speechAssets.set(key, data);
+
+      return { id: `asset-${speechAssets.size}`, ...data };
+    },
+  );
+}
+
+describe('Civics audio cache — GET /api/ai/speech/audio', () => {
+  let context: TestContext;
+  let learner: TestUser;
+  let otherLearner: TestUser;
+
+  const getSecret = jest.fn();
+  const storage = createFakeStorage();
+
+  const server = () => context.app.getHttpServer();
+
+  /** How many `ai_usage_events` rows have been written so far. */
+  const usageRows = () =>
+    (prismaMock.aiUsageEvent.create as jest.Mock).mock.calls.length;
+
+  beforeAll(async () => {
+    context = await createTestApp({
+      useMockDatabase: true,
+      overrideProviders: [
+        {
+          provide: OpenAiProvider,
+          useValue: new FakeAiProvider(
+            new AiUsageService(prismaMock as unknown as PrismaService),
+          ),
+        },
+        { provide: CredentialsService, useValue: { getSecret } },
+        // THE PORT, which is the only storage surface this cache can reach.
+        { provide: STORAGE_PROVIDER, useValue: storage },
+      ],
+    });
+  });
+
+  afterAll(async () => {
+    await closeTestApp(context);
+  });
+
+  beforeEach(async () => {
+    resetPrismaMock();
+    setupBaseMocks();
+    setupAiSettings();
+    setupCivicsAudioMocks();
+
+    storage.upload.mockClear();
+    storage.download.mockClear();
+
+    getSecret.mockReset();
+    getSecret.mockResolvedValue('sk-learner-abcdefghijklmnopqrst');
+
+    (prismaMock.aiUsageEvent.create as jest.Mock).mockResolvedValue({
+      id: 'usage-row-1',
+    });
+
+    learner = await createMockViewerUser(context, 'learner@example.com');
+    otherLearner = await createMockViewerUser(context, 'second@example.com');
+
+    civicsProfiles.set(learner.id, { stateCode: 'TX', testVersionCode: 'v2008' });
+    civicsProfiles.set(otherLearner.id, {
+      stateCode: 'TX',
+      testVersionCode: 'v2008',
+    });
+  });
+
+  const play = (user: TestUser, query: string) =>
+    request(server())
+      .get(`/api/ai/speech/audio?${query}`)
+      .set(authHeader(user.accessToken))
+      .responseType('blob');
+
+  // ---------------------------------------------------------------------------
+  // The permission posture — unchanged by this route
+  // ---------------------------------------------------------------------------
+
+  it('rejects an unauthenticated request', async () => {
+    await request(server())
+      .get(`/api/ai/speech/audio?scope=civics_question&refId=${Q_BRANCH}`)
+      .expect(401);
+
+    expect(usageRows()).toBe(0);
+  });
+
+  it('lets a Viewer play a question — this route adds no permission string', async () => {
+    await play(learner, `scope=civics_question&refId=${Q_BRANCH}`).expect(200);
+  });
+
+  // ---------------------------------------------------------------------------
+  // The cache itself
+  // ---------------------------------------------------------------------------
+
+  it('synthesises once, stores the bytes, and writes one asset row and one usage row', async () => {
+    const response = await play(
+      learner,
+      `scope=civics_question&refId=${Q_BRANCH}`,
+    )
+      .expect(200)
+      .expect('Content-Type', 'audio/mpeg');
+
+    expect(Buffer.from(response.body).length).toBeGreaterThan(0);
+
+    expect(speechAssets.size).toBe(1);
+    expect(storedObjects.size).toBe(1);
+    expect(usageRows()).toBe(1);
+
+    // On the CALLER's own key, under the `speak` role — the same accounting
+    // `POST /ai/speech/synthesize` produces, because it is the same dispatch.
+    expect(prismaMock.aiUsageEvent.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          userId: learner.id,
+          roleKey: 'speak',
+          model: 'gpt-4o-mini-tts',
+          success: true,
+        }),
+      }),
+    );
+
+    const [row] = [...speechAssets.values()] as any[];
+    expect(row.scope).toBe('civics_question');
+    expect(row.refId).toBe(Q_BRANCH);
+    expect(row.generatedByUserId).toBe(learner.id);
+    // The key is a pure function of the cache key — see `buildStorageKey`.
+    expect(row.storageKey).toContain('speech/civics/civics_question/');
+    expect([...storedObjects.keys()]).toEqual([row.storageKey]);
+  });
+
+  it('serves a second learner the same bytes with NO ai_usage_events row', async () => {
+    const first = await play(learner, `scope=civics_question&refId=${Q_BRANCH}`)
+      .expect(200);
+
+    expect(usageRows()).toBe(1);
+
+    // THE ASSERTION THAT MATTERS. Not "the dispatcher was not called" — the
+    // absence of a usage row is what says no key was spent, and it is the fact
+    // a learner would otherwise be billed for.
+    (prismaMock.aiUsageEvent.create as jest.Mock).mockClear();
+
+    const second = await play(
+      otherLearner,
+      `scope=civics_question&refId=${Q_BRANCH}`,
+    )
+      .expect(200)
+      .expect('Content-Type', 'audio/mpeg');
+
+    expect(usageRows()).toBe(0);
+    expect(Buffer.from(second.body)).toEqual(Buffer.from(first.body));
+    // Still one row and one object: the second learner read the first's.
+    expect(speechAssets.size).toBe(1);
+    expect(storedObjects.size).toBe(1);
+  });
+
+  it('treats a different voice as a different clip', async () => {
+    await play(learner, `scope=civics_question&refId=${Q_BRANCH}`).expect(200);
+    await play(
+      learner,
+      `scope=civics_question&refId=${Q_BRANCH}&voice=fake-bright`,
+    ).expect(200);
+
+    // Two assets, two objects, two synthesis calls: two voices reading the same
+    // sentence are two different recordings, not one.
+    expect(speechAssets.size).toBe(2);
+    expect(storedObjects.size).toBe(2);
+    expect(usageRows()).toBe(2);
+  });
+
+  it('misses after a corrected answer, and leaves the old asset untouched', async () => {
+    await play(learner, `scope=civics_answer&refId=${Q_PRESIDENT}`).expect(200);
+
+    expect(speechAssets.size).toBe(1);
+    const beforeKeys = [...speechAssets.keys()];
+
+    // The admin correction (`PUT /api/civics/dynamic-answers`) as this test can
+    // express it: the currently-open row now says something else.
+    civicsAnswers = civicsAnswers.map((answer) =>
+      answer.questionId === Q_PRESIDENT
+        ? { ...answer, text: 'The newly sworn-in President' }
+        : answer,
+    );
+
+    await play(learner, `scope=civics_answer&refId=${Q_PRESIDENT}`).expect(200);
+
+    // A NEW row for the new wording, and the old one still exactly where it
+    // was — nothing expires it, because nothing addresses it any more.
+    expect(speechAssets.size).toBe(2);
+    expect([...speechAssets.keys()]).toEqual(
+      expect.arrayContaining(beforeKeys),
+    );
+    expect(usageRows()).toBe(2);
+  });
+
+  it('reads the first accepted answer, not all of them joined', async () => {
+    await play(learner, `scope=civics_answer&refId=${Q_BRANCH}`).expect(200);
+
+    const [row] = [...speechAssets.values()] as any[];
+    // "Congress" — 8 characters. The three-answer question would be far longer
+    // if every alternative were read aloud.
+    expect(row.charCount).toBe('Congress'.length);
+  });
+
+  // ---------------------------------------------------------------------------
+  // The states that synthesise nothing
+  // ---------------------------------------------------------------------------
+
+  it('reports state_required for a state answer with no state set, and synthesises nothing', async () => {
+    civicsProfiles.set(learner.id, { stateCode: null, testVersionCode: 'v2008' });
+
+    const response = await request(server())
+      .get(`/api/ai/speech/audio?scope=civics_answer&refId=${Q_GOVERNOR}`)
+      .set(authHeader(learner.accessToken))
+      .expect(200);
+
+    expect(response.headers['content-type']).toMatch(/application\/json/);
+    expect(response.body.data).toEqual({ status: 'state_required' });
+
+    expect(usageRows()).toBe(0);
+    expect(speechAssets.size).toBe(0);
+    expect(storedObjects.size).toBe(0);
+  });
+
+  it('still reads the QUESTION aloud for a learner with no state', async () => {
+    // The prompt is not state-specific — only the answer is. Refusing both
+    // would withhold something we can perfectly well say.
+    civicsProfiles.set(learner.id, { stateCode: null, testVersionCode: 'v2008' });
+
+    await play(learner, `scope=civics_question&refId=${Q_GOVERNOR}`).expect(200);
+
+    expect(speechAssets.size).toBe(1);
+  });
+
+  it('reports an unbound `speak` role as a 200 with the cause, and writes nothing', async () => {
+    setupAiSettings({
+      ...READY_AI_SETTINGS,
+      models: { ...READY_AI_SETTINGS.models, speak: null },
+    });
+
+    const response = await request(server())
+      .get(`/api/ai/speech/audio?scope=civics_question&refId=${Q_BRANCH}`)
+      .set(authHeader(learner.accessToken))
+      .expect(200);
+
+    expect(response.headers['content-type']).toMatch(/application\/json/);
+    expect(response.body.data).toEqual({
+      status: 'unavailable',
+      cause: 'role_unbound',
+      role: 'speak',
+    });
+
+    expect(speechAssets.size).toBe(0);
+    expect(storedObjects.size).toBe(0);
+    expect(usageRows()).toBe(0);
+  });
+
+  it('answers 404 for a question id that does not exist', async () => {
+    // NOT a `status` member. The question genuinely is not there, which is a
+    // different problem with a different owner than "AI is not configured".
+    await request(server())
+      .get(
+        '/api/ai/speech/audio?scope=civics_question&refId=99999999-9999-4999-8999-999999999999',
+      )
+      .set(authHeader(learner.accessToken))
+      .expect(404);
+
+    expect(speechAssets.size).toBe(0);
+    expect(usageRows()).toBe(0);
+  });
+
+  // ---------------------------------------------------------------------------
+  // The double-miss race
+  // ---------------------------------------------------------------------------
+
+  it('serves the loser of a double miss its audio, leaving one asset row', async () => {
+    // The other request won between this one's lookup and its insert: the row
+    // now exists, so the `create` raises `P2002`.
+    (prismaMock.speechAudioAsset.create as jest.Mock).mockImplementation(
+      async ({ data }: any) => {
+        speechAssets.set(assetKey(data), data);
+
+        throw new Prisma.PrismaClientKnownRequestError(
+          'Unique constraint failed',
+          { code: 'P2002', clientVersion: 'test' },
+        );
+      },
+    );
+
+    const response = await play(
+      learner,
+      `scope=civics_question&refId=${Q_BRANCH}`,
+    )
+      .expect(200)
+      .expect('Content-Type', 'audio/mpeg');
+
+    // The learner still hears their question — the synthesis was paid for
+    // either way, and failing on top of that would take their money and their
+    // answer.
+    expect(Buffer.from(response.body).length).toBeGreaterThan(0);
+    expect(speechAssets.size).toBe(1);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Caching headers
+  // ---------------------------------------------------------------------------
+
+  it('lets a browser keep a fixed question, in a named voice, for a long time', async () => {
+    const response = await play(
+      learner,
+      `scope=civics_question&refId=${Q_BRANCH}&voice=fake-warm`,
+    ).expect(200);
+
+    // What `POST /ai/speech/synthesize` may not do, and why — see the route's
+    // own doc comment.
+    expect(response.headers['cache-control']).toMatch(/^private, max-age=\d+/);
+    expect(response.headers['cache-control']).not.toContain('no-store');
+
+    const maxAge = Number(
+      /max-age=(\d+)/.exec(response.headers['cache-control'] ?? '')?.[1],
+    );
+    expect(maxAge).toBeGreaterThan(60 * 60 * 24);
+  });
+
+  it('will not claim a long life for a URL that did not name its voice', async () => {
+    // Without `voice` the URL resolves through the learner's own preference, so
+    // it does not address these bytes: changing that preference must not leave
+    // them hearing last month's voice out of their own cache.
+    const response = await play(
+      learner,
+      `scope=civics_question&refId=${Q_BRANCH}`,
+    ).expect(200);
+
+    const maxAge = Number(
+      /max-age=(\d+)/.exec(response.headers['cache-control'] ?? '')?.[1],
+    );
+    expect(maxAge).toBeLessThanOrEqual(3600);
+  });
+
+  it('keeps a correctable answer out of a long-lived browser cache', async () => {
+    const response = await play(
+      learner,
+      `scope=civics_answer&refId=${Q_PRESIDENT}&voice=fake-warm`,
+    ).expect(200);
+
+    const maxAge = Number(
+      /max-age=(\d+)/.exec(response.headers['cache-control'] ?? '')?.[1],
+    );
+
+    // Minutes, not a year, even with the voice pinned: the server-side key is
+    // content-addressed, a browser cache is URL-addressed, and this URL names a
+    // question rather than the answer's text.
+    expect(maxAge).toBeGreaterThan(0);
+    expect(maxAge).toBeLessThanOrEqual(3600);
+  });
+
+  // ---------------------------------------------------------------------------
+  // What the request may not say
+  // ---------------------------------------------------------------------------
+
+  it('refuses a caller-supplied text rather than dropping it', async () => {
+    // The one input that would break the shared cache: text a client chose,
+    // stored permanently under a hash it also chose.
+    await request(server())
+      .get(
+        `/api/ai/speech/audio?scope=civics_question&refId=${Q_BRANCH}&text=say%20anything`,
+      )
+      .set(authHeader(learner.accessToken))
+      .expect(400);
+
+    expect(usageRows()).toBe(0);
+  });
+
+  it('refuses a caller-supplied model id', async () => {
+    await request(server())
+      .get(
+        `/api/ai/speech/audio?scope=civics_question&refId=${Q_BRANCH}&modelId=gpt-4o`,
+      )
+      .set(authHeader(learner.accessToken))
+      .expect(400);
+
+    expect(usageRows()).toBe(0);
+  });
+
+  it('has no state parameter — the state is the caller`s own profile', async () => {
+    civicsProfiles.set(learner.id, { stateCode: null, testVersionCode: 'v2008' });
+
+    await request(server())
+      .get(
+        `/api/ai/speech/audio?scope=civics_answer&refId=${Q_GOVERNOR}&stateCode=TX`,
+      )
+      .set(authHeader(learner.accessToken))
+      .expect(400);
+  });
+
+  it('reads only the caller`s own credential, never the organisation`s', async () => {
+    await play(learner, `scope=civics_question&refId=${Q_BRANCH}`).expect(200);
+
+    expect(getSecret).toHaveBeenCalledWith(
+      AI_USER_CREDENTIAL_PURPOSE,
+      expect.stringContaining(learner.id),
+    );
+    expect(getSecret).not.toHaveBeenCalledWith(
+      AI_SYSTEM_CREDENTIAL_PURPOSE,
+      AI_SYSTEM_CREDENTIAL_NAME,
+    );
+  });
+
+  it('creates no storage_objects row for a cached clip', async () => {
+    await play(learner, `scope=civics_question&refId=${Q_BRANCH}`).expect(200);
+
+    // The bytes live behind the port, addressed by `storageKey`. A row here
+    // would drag in the ownership model that refuses every learner but the one
+    // who generated the clip.
+    expect(prismaMock.storageObject.create).not.toHaveBeenCalled();
+    expect(prismaMock.storageObject.upsert).not.toHaveBeenCalled();
+  });
+});
+
+// =============================================================================
+// The cache reaches object storage through the PORT, and nothing else
+// =============================================================================
+//
+// A source assertion, for the reason `ai-dispatch.service.spec.ts`'s own last
+// block gives about the server credential: a behavioural test proves only that
+// the paths it happens to run did not reach the object service, and the reach
+// that matters would be added on the path nobody wrote a test for.
+//
+// The failure this forbids is specific. `ObjectsService.getObjectWithAuthCheck`
+// refuses any caller who did not upload the object, with no admin bypass — the
+// correct rule for a learner's own file and the exact wrong one for a civics
+// clip every learner must be able to hear. `CLAUDE.md` warns that threading a
+// second rule through that shared helper "would make it a read and write bypass
+// in the same edit", so the cache must not be able to arrive there at all.
+
+const AUDIO_CACHE_SOURCE = readFileSync(
+  join(__dirname, '..', 'src', 'ai', 'speech-audio.service.ts'),
+  'utf8',
+);
+
+describe('the audio cache cannot reach the storage object service', () => {
+  it('imports the provider port and nothing else from storage', () => {
+    expect(AUDIO_CACHE_SOURCE).toMatch(
+      /from '\.\.\/storage\/providers\/storage-provider\.interface'/,
+    );
+
+    // Every OTHER storage import, by path. The objects subtree is where the
+    // ownership model lives; the module barrel would drag it in wholesale.
+    expect(AUDIO_CACHE_SOURCE).not.toMatch(
+      /from '[^']*storage\/objects[^']*'/,
+    );
+    expect(AUDIO_CACHE_SOURCE).not.toMatch(/from '[^']*storage\/storage\.module'/);
+  });
+
+  it('never names the object service or its table', () => {
+    // An IDENTIFIER, not the words: this file discusses the object service at
+    // length in its header, saying precisely what it does not do with it, and a
+    // test that failed on the prose would be deleted rather than obeyed.
+    expect(AUDIO_CACHE_SOURCE).not.toContain('StorageObjectsService');
+    expect(AUDIO_CACHE_SOURCE).not.toMatch(/prisma\.storageObject\b/);
+    expect(AUDIO_CACHE_SOURCE).not.toMatch(/getObjectWithAuthCheck/);
   });
 });
