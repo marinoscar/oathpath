@@ -303,6 +303,7 @@ import type {
   AiStatus,
   AiUsage,
   SynthesizeResponse,
+  SpeechVoicesResponse,
   TranscribeResponse,
   NotificationEventDef,
   AppNotification,
@@ -980,6 +981,35 @@ async function parseSynthesisEnvelope(blob: Blob): Promise<SynthesizeResponse> {
   } catch {
     return unreadable;
   }
+}
+
+/**
+ * The voices this deployment can speak in — `GET /api/ai/speech/voices` (#283).
+ *
+ * WHY THIS IS FETCHED RATHER THAN IMPORTED FROM A CONSTANT. The accepted voice
+ * ids belong to the AI provider, so a copy in `src/config` would be correct the
+ * day it was written and silently wrong the day the provider added or renamed a
+ * voice — and a test asserting the copy matches the server is DETECTION rather
+ * than prevention, since the two can still disagree in a working tree, in a
+ * branch, and in any build where the test is not run. That is the same argument
+ * `ai-model-roles.ts` makes for serving the model-role registry over an
+ * endpoint.
+ *
+ * NOT A UNION, AND NOT AN AI CALL. Unlike {@link transcribeAudio} and
+ * {@link synthesizeSpeech} there is no `status` to switch on: this reads static
+ * provider data, spends no key, and has no `unavailable` state to report.
+ *
+ * AN EMPTY `voices`, OR `speakBound: false`, IS NOT AN ERROR — see
+ * `SpeechVoicesResponse`. Offer the browser's own voices and say nothing about
+ * what is missing; a learner hears the question either way. A genuine transport
+ * failure (401, a dropped connection) still rejects with `ApiError`.
+ */
+export async function listSpeechVoices(
+  opts: { signal?: AbortSignal } = {},
+): Promise<SpeechVoicesResponse> {
+  return api.get<SpeechVoicesResponse>('/ai/speech/voices', {
+    signal: opts.signal,
+  });
 }
 
 /**
