@@ -1,4 +1,5 @@
 import type {
+  CoachValue,
   DataTablesValue,
   NavigationValue,
   NotificationsValue,
@@ -69,6 +70,23 @@ export interface UserSettingsValue {
    * change.
    */
   voice?: VoiceValue;
+  /**
+   * How the coach talks to this learner (issue #317, epic #305): which of the
+   * four personas its written and spoken feedback is composed in, and whether
+   * it adds a per-answer reaction line at all.
+   *
+   * NOT PART OF `voice`, and not a subset of it — `persona` governs the
+   * grader's feedback sentence and the tutor's civics explanation, both of
+   * which a learner who never plays audio reads on every session. See the
+   * `coach` block in user-settings-namespaces.schema.ts.
+   *
+   * SPARSE, like its neighbours. Absent namespace and absent field both mean
+   * "use the built-in default" (`DEFAULT_COACH_PERSONA` /
+   * `DEFAULT_COACH_REACTIONS`), resolved at generation time — never
+   * materialised into a row, so a learner who never chose a persona keeps
+   * moving with the default if it changes.
+   */
+  coach?: CoachValue;
 }
 
 /**
@@ -86,13 +104,14 @@ export interface SystemSettingsValue {
 /**
  * Default user settings
  */
-// NOTE: `dataTables`, `navigation`, `notifications`, `study` and `voice` are
-// intentionally NOT listed here.
+// NOTE: `coach`, `dataTables`, `navigation`, `notifications`, `study` and
+// `voice` are intentionally NOT listed here.
 // Seeding them would turn "absent" into "explicitly empty", which is exactly
 // the failure mode the namespaces are designed to avoid (a frozen column set
 // that silently hides every column added later, a notification preference map
-// that freezes a user at the defaults of the day they first saved, or a
-// reminder hour nobody ever chose).
+// that freezes a user at the defaults of the day they first saved, a reminder
+// hour nobody ever chose, or a persona pinned to today's default for every
+// account that never expressed an opinion about one).
 export const DEFAULT_USER_SETTINGS: UserSettingsValue = {
   theme: 'system',
   profile: {

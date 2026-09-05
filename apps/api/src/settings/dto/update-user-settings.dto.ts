@@ -1,6 +1,8 @@
 import { createZodDto } from 'nestjs-zod';
 import { z } from 'zod';
 import {
+  coachSchema,
+  coachPatchSchema,
   dataTablesSchema,
   dataTablesPatchSchema,
   navigationSchema,
@@ -28,6 +30,7 @@ export const updateUserSettingsSchema = z.object({
   notifications: notificationsSchema.optional(),
   study: studySchema.optional(),
   voice: voiceSchema.optional(),
+  coach: coachSchema.optional(),
 });
 
 export class UpdateUserSettingsDto extends createZodDto(
@@ -69,6 +72,14 @@ export const patchUserSettingsSchema = z.object({
   //      built-in default. Writing `0.95` instead would pin the learner to
   //      today's default rate forever.
   voice: voicePatchSchema.nullable().optional(),
+  // `coach` deletes at two levels (issue #317, epic #305), identically to
+  // `voice`:
+  //   `coach: null`                  -> clear the namespace
+  //   `coach: { persona: null }`     -> delete one field, restoring the
+  //      built-in default. Writing `'supportive'` instead would pin the
+  //      learner to today's default persona forever, including after a later
+  //      release moved it.
+  coach: coachPatchSchema.nullable().optional(),
 });
 
 export class PatchUserSettingsDto extends createZodDto(

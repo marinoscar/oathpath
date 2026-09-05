@@ -3,8 +3,8 @@ import { NOTIFICATION_CHANNELS } from '../../notifications/notification-events';
 import type { NotificationPreferences } from '../../notifications/notification-preferences';
 
 // =============================================================================
-// User Settings Namespaces: `dataTables`, `navigation`, `notifications`,
-// `study`, `voice`
+// User Settings Namespaces: `coach`, `dataTables`, `navigation`,
+// `notifications`, `study`, `voice`
 // =============================================================================
 //
 // WHY THIS FILE EXISTS
@@ -417,6 +417,166 @@ export const voicePatchSchema = z
 
 export type VoiceValue = z.infer<typeof voiceSchema>;
 export type VoicePatchValue = z.infer<typeof voicePatchSchema>;
+
+// =============================================================================
+// User Settings Namespace: `coach` (issue #317, epic #305 "The Coach's personality")
+// =============================================================================
+//
+// Two fields, both about ONE question: what the coach sounds like when it
+// speaks to this learner, and whether it speaks at all beyond the verdict.
+//
+// -----------------------------------------------------------------------------
+// WHY THIS IS ITS OWN NAMESPACE AND NOT A FIELD ON `voice`
+// -----------------------------------------------------------------------------
+//
+// `voice` above is about AUDIO: whether a spoken answer auto-submits, which
+// synthesized voice reads a question, how fast it speaks. Every one of its six
+// fields is inert for a learner who never presses play. The coach is not:
+// `persona` governs WRITTEN feedback exactly as much as spoken feedback — the
+// grader's `feedback` sentence on a practice attempt, the tutor's civics
+// explanation stream, the on-screen reaction line after an answer — and a
+// learner who has never used voice at all still has a coach, still reads its
+// sentences, and still has an opinion about their tone.
+//
+// Folding `persona` into `voice` would therefore put a preference that applies
+// to every learner behind a namespace named for a feature many of them never
+// touch. Two concrete consequences, neither cosmetic: `/settings/voice` would
+// own a control that has nothing to do with audio, and a deployment with no
+// `speak` binding at all — which `docs/specs/voice.md` §1 is explicit is an
+// ordinary, fully-working install and not a degraded one — would present its
+// entire coach configuration on a page whose other controls do nothing. The
+// grouping a settings page reaches for is the grouping a learner reasons in,
+// and "how does this thing talk to me" is not "how does this thing sound".
+//
+// `docs/specs/coach-personality.md` §8 is the design record for that split.
+//
+// SAME SHAPE, SAME MERGE STRATEGY AS `voice` AND `study`. Two independently
+// optional scalar fields with no nested map to deep-merge, so `mergeCoach`
+// (`user-settings.service.ts`) is field-wise like `mergeVoice` and
+// `mergeStudy`, never `mergeDataTables`' replace-wholesale.
+//
+// THE BUILT-IN DEFAULTS ARE CONSTANTS BELOW, NOT `.default()` CALLS — the
+// identical rule this file's header states for every namespace above, and it
+// matters here for a reason specific to this namespace: `persona` is the one
+// field in the file whose default is a deliberate statement that NOTHING
+// CHANGES for an existing learner (see `DEFAULT_COACH_PERSONA`). A
+// `.default('supportive')` would materialise that statement into storage the
+// first time a learner touched an unrelated preference, pinning them to it
+// even after a later release moved the default — turning "nothing changes yet"
+// into "nothing ever changes", silently, for exactly the accounts that never
+// asked for either.
+// =============================================================================
+
+/**
+ * The four personas the coach can speak in.
+ *
+ * -----------------------------------------------------------------------------
+ * DECLARED HERE TODAY; ISSUE #318 WILL INVERT THIS
+ * -----------------------------------------------------------------------------
+ *
+ * Epic #305 puts the persona REGISTRY — label, description, `promptFragment`,
+ * `sampleLine` — in `apps/api/src/ai/coach/personas.ts`, which #318 ships and
+ * which does not exist yet. When it lands, this list stops being a literal and
+ * becomes `AI_COACH_PERSONAS`' own keys, exactly as `aiSettingsSchema`'s
+ * `models` map is derived from `AI_MODEL_ROLES` rather than restating it.
+ *
+ * The reason to invert it rather than leave two lists agreeing by inspection is
+ * the one `ai-model-roles.ts` already argues at length for role keys, and it
+ * applies verbatim: a persona `key` is PERSISTED — it is a property value in a
+ * `user_settings` row — so the two lists disagreeing is not a compile error but
+ * a learner whose stored persona silently stops resolving. A duplicate plus a
+ * test asserting the two match is *detection*, not prevention: the copies can
+ * still disagree in a working tree, in a branch, and in any build where that
+ * test is not run.
+ *
+ * Declaring the values here first is deliberate sequencing, not a shortcut —
+ * this issue ships the settings plumbing with no AI module dependency at all,
+ * and #318 replaces four string literals with one import in a single edit.
+ */
+export const COACH_PERSONAS = [
+  'supportive',
+  'academic',
+  'playful',
+  'unfiltered',
+] as const;
+
+/** The persona enum. Closed: an unknown persona is a 400, never a stored value. */
+export const coachPersonaSchema = z.enum(COACH_PERSONAS);
+
+export type CoachPersona = z.infer<typeof coachPersonaSchema>;
+
+/**
+ * The persona a learner who has expressed no preference hears.
+ *
+ * READ AT GENERATION TIME by whatever is composing the coach's words, never
+ * written into a `user_settings` row — the same contract every constant above
+ * carries, and see this namespace's block for why materialising it would be
+ * worse here than elsewhere.
+ *
+ * `'supportive'` because it is EXACTLY TODAY'S VOICE. The grader's feedback
+ * sentence and the tutor's explanation already read as an encouraging,
+ * plain-spoken helper; naming that tone and making it the default means a
+ * learner who never opens the setting — which is every existing account, since
+ * the namespace is absent for all of them — experiences precisely zero change
+ * when E14 ships. A persona epic whose default alters how the app talks to
+ * people who did not ask for it would be shipping a rewrite of every existing
+ * learner's experience under the heading of a preference.
+ */
+export const DEFAULT_COACH_PERSONA: CoachPersona = 'supportive';
+
+/**
+ * Whether the coach adds a short reaction line to an answer, beyond the verdict.
+ *
+ * `true`, and this is the one default in the file that is deliberately NOT the
+ * conservative choice. The coverage gap epic #305 exists to close is that most
+ * attempts today say nothing at all beyond correct/incorrect: a learner grinds
+ * through a session and the app never once responds to them as a person.
+ * Defaulting reactions OFF would ship the entire epic dark, reachable only by
+ * learners who went looking for a setting whose value they cannot see until
+ * they turn it on.
+ *
+ * It is a SEPARATE field from `persona` rather than a fifth persona value
+ * (`'none'`) because the two answer different questions: `persona` is *how* the
+ * coach speaks and applies to the grader's feedback and the tutor's
+ * explanations regardless of this flag, while `reactions` is only about the
+ * per-answer chatter. A learner who wants the playful coach's explanations
+ * without a quip after every single answer must be able to say so, and a
+ * `'none'` persona would silence the explanations too.
+ */
+export const DEFAULT_COACH_REACTIONS = true;
+
+/**
+ * Full `coach` namespace.
+ *
+ * Both fields optional, NEITHER with a `.default()` — see the block above.
+ */
+export const coachSchema = z
+  .object({
+    persona: coachPersonaSchema.optional(),
+    reactions: z.boolean().optional(),
+  })
+  .strict();
+
+/**
+ * PATCH form of the `coach` namespace: each field may additionally be `null`,
+ * meaning "delete this field and fall back to the built-in default" — the same
+ * restore-the-default semantics `voicePatchSchema`, `studyPatchSchema` and
+ * `navigationPatchSchema` already give their own fields.
+ *
+ * The delete is the operation that RESTORES the default rather than pinning
+ * one: a learner returning to the supportive coach sends `persona: null`, not
+ * `persona: 'supportive'`, and keeps moving with the default if it ever
+ * changes.
+ */
+export const coachPatchSchema = z
+  .object({
+    persona: coachPersonaSchema.nullable().optional(),
+    reactions: z.boolean().nullable().optional(),
+  })
+  .strict();
+
+export type CoachValue = z.infer<typeof coachSchema>;
+export type CoachPatchValue = z.infer<typeof coachPatchSchema>;
 
 // =============================================================================
 // User Settings Namespace: `notifications` (issue #126, epic #109)

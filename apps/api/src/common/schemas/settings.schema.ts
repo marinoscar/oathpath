@@ -1,5 +1,7 @@
 import { z } from 'zod';
 import {
+  coachSchema,
+  coachPatchSchema,
   dataTablesSchema,
   dataTablesPatchSchema,
   navigationSchema,
@@ -41,6 +43,11 @@ export const userSettingsSchema = z.object({
   // means the built-in defaults (`DEFAULT_VOICE_*`) resolved at read time,
   // and every existing account is absent.
   voice: voiceSchema.optional(),
+  // `coach` (issue #317, epic #305) is optional for the same reason: absent
+  // means the built-in defaults (`DEFAULT_COACH_PERSONA` / `_REACTIONS`)
+  // resolved at generation time, and every existing account is absent — which
+  // is exactly why a `supportive` default changes nothing for anybody.
+  coach: coachSchema.optional(),
 });
 
 export type UserSettingsDto = z.infer<typeof userSettingsSchema>;
@@ -67,6 +74,9 @@ export const userSettingsPatchSchema = z.object({
   // `voice: null` clears the namespace; `voice: { speechRate: null }` deletes
   // one field and restores its built-in default.
   voice: voicePatchSchema.nullable().optional(),
+  // `coach: null` clears the namespace; `coach: { persona: null }` deletes one
+  // field and restores its built-in default.
+  coach: coachPatchSchema.nullable().optional(),
 });
 
 // =============================================================================

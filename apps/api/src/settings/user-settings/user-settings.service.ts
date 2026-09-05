@@ -14,6 +14,8 @@ import {
 } from '../../common/types/settings.types';
 import { userSettingsSchema } from '../../common/schemas/settings.schema';
 import {
+  CoachPatchValue,
+  CoachValue,
   DATA_TABLE_MAX_TABLES,
   DataTablesPatchValue,
   DataTablesValue,
@@ -62,6 +64,7 @@ export class UserSettingsService {
         : {}),
       ...(value.study !== undefined ? { study: value.study } : {}),
       ...(value.voice !== undefined ? { voice: value.voice } : {}),
+      ...(value.coach !== undefined ? { coach: value.coach } : {}),
       updatedAt,
       version,
     };
@@ -140,6 +143,61 @@ export class UserSettingsService {
     // property off a string. An unreadable namespace is `undefined`, which the
     // caller already handles as "the learner has expressed no preference".
     return voice && typeof voice === 'object' ? voice : undefined;
+  }
+
+  /**
+   * The caller's own `coach` namespace, or `undefined` if they have never set
+   * one (issue #317, epic #305).
+   *
+   * ---------------------------------------------------------------------------
+   * A PURE READ, DELIBERATELY NOT `getSettings` — AND HERE IT MATTERS MOST
+   * ---------------------------------------------------------------------------
+   *
+   * `getSettings` CREATES a `user_settings` row on a miss, which is right for
+   * the settings screen (a learner who opened it is about to save something)
+   * and wrong for this caller in particular. The persona is resolved on the
+   * GRADING path: issues #319 and #320 ask this question while composing the
+   * feedback for a practice attempt and the tutor's explanation stream. A row
+   * written because somebody answered a civics question is a write nobody
+   * asked for, on the hottest path in the product, and it would land inside
+   * (or alongside) the transaction that records the attempt. `readVoicePreferences`
+   * above and `NotificationsService` avoid `getSettings` for the same reason.
+   *
+   * ---------------------------------------------------------------------------
+   * BUT IT LIVES HERE, RATHER THAN THE COLUMN BEING READ AT THE CALL SITE
+   * ---------------------------------------------------------------------------
+   *
+   * The shape of `user_settings.value` — a JSONB blob whose namespaces are
+   * SPARSE, where absent means "use the built-in default" and never "off" — is
+   * this service's own contract (see
+   * `common/schemas/user-settings-namespaces.schema.ts`'s header on why no
+   * namespace carries a `.default()`). A consumer casting the column and
+   * reaching for `.coach` would be a second place that contract is
+   * interpreted, and the first to get it wrong the day the shape moves.
+   *
+   * Returns `undefined` — never a materialised object of defaults — so the
+   * caller keeps the three-way distinction the namespace is built on: set,
+   * unset, and unset-because-there-is-no-row. Resolving `undefined` to
+   * `DEFAULT_COACH_PERSONA` / `DEFAULT_COACH_REACTIONS` is the CALLER's job,
+   * at the point of use, which is what lets a future change to either default
+   * reach every learner who never chose.
+   */
+  async readCoachPreferences(userId: string): Promise<CoachValue | undefined> {
+    const row = await this.prisma.userSettings.findUnique({
+      where: { userId },
+      select: { value: true },
+    });
+
+    if (!row) return undefined;
+
+    const value = row.value as unknown as UserSettingsValue | null;
+    const coach = value?.coach;
+
+    // A SHAPE CHECK, NOT A PARSE. The stored blob was validated on the way in;
+    // this guards against a hand-edited or older row making a caller read a
+    // property off a string. An unreadable namespace is `undefined`, which the
+    // caller already handles as "the learner has expressed no preference".
+    return coach && typeof coach === 'object' ? coach : undefined;
   }
 
   /**
@@ -259,6 +317,11 @@ export class UserSettingsService {
     const mergedVoice = this.mergeVoice(current.voice, dto.voice);
     if (mergedVoice !== undefined) {
       merged.voice = mergedVoice;
+    }
+
+    const mergedCoach = this.mergeCoach(current.coach, dto.coach);
+    if (mergedCoach !== undefined) {
+      merged.coach = mergedCoach;
     }
 
     // Enforce the caps AFTER the merge — see assertDataTableLimit.
@@ -502,6 +565,67 @@ export class UserSettingsService {
       delete merged.readAnswersAloud;
     } else if (patch.readAnswersAloud !== undefined) {
       merged.readAnswersAloud = patch.readAnswersAloud;
+    }
+
+    return Object.keys(merged).length > 0 ? merged : undefined;
+  }
+
+  /**
+   * Merge the `coach` namespace (issue #317, epic #305) field-wise.
+   *
+   * Two independent scalar choices, neither of them a nested map — the
+   * identical shape `mergeVoice` and `mergeStudy` already establish, and
+   * merged the same way for the same reason: the two fields answer different
+   * questions (`persona` is HOW the coach speaks, `reactions` is WHETHER it
+   * says anything beyond the verdict), so a learner who PATCHes
+   * `{ coach: { reactions: false } }` must keep the persona they picked.
+   * Replacing the namespace wholesale (`mergeDataTables`' strategy) would
+   * silently drop it back to `DEFAULT_COACH_PERSONA` the moment they silenced
+   * the chatter — a preference lost with no error anywhere.
+   *
+   * - patch absent           -> keep the stored namespace untouched
+   * - patch is `null`        -> clear the whole namespace
+   * - field omitted          -> stored value untouched
+   * - field set to a value   -> replaces the stored value
+   * - field set to `null`    -> deletes the field, so the learner falls back
+   *   to `DEFAULT_COACH_PERSONA` / `DEFAULT_COACH_REACTIONS` rather than to a
+   *   hard-coded stored copy of today's default
+   *
+   * A SEPARATE METHOD RATHER THAN A SHARED GENERIC HELPER, for the identical
+   * reason `mergeVoice`'s and `mergeStudy`'s own comments give: each method
+   * names its namespace's fields explicitly, so a field added to the schema
+   * without a matching line here fails to compile instead of being silently
+   * accepted and dropped. A generic "merge a flat object" helper would have to
+   * accept any key, which is exactly the check the field-wise form performs
+   * for free.
+   *
+   * As with its neighbours, an empty result collapses to `undefined` so the
+   * namespace disappears rather than persisting as `{}`.
+   */
+  private mergeCoach(
+    current: CoachValue | undefined,
+    patch: CoachPatchValue | null | undefined,
+  ): CoachValue | undefined {
+    if (patch === undefined) {
+      return current;
+    }
+
+    if (patch === null) {
+      return undefined;
+    }
+
+    const merged: CoachValue = { ...(current ?? {}) };
+
+    if (patch.persona === null) {
+      delete merged.persona;
+    } else if (patch.persona !== undefined) {
+      merged.persona = patch.persona;
+    }
+
+    if (patch.reactions === null) {
+      delete merged.reactions;
+    } else if (patch.reactions !== undefined) {
+      merged.reactions = patch.reactions;
     }
 
     return Object.keys(merged).length > 0 ? merged : undefined;
