@@ -158,6 +158,7 @@ import RecordVoiceOverOutlinedIcon from '@mui/icons-material/RecordVoiceOverOutl
 import { Link as RouterLink, useNavigate } from 'react-router-dom';
 
 import { LoadingSpinner } from '../components/common/LoadingSpinner';
+import { MicrophoneReadinessNotice } from '../components/voice/MicrophoneReadinessNotice';
 import { PracticeQueueSummary } from '../components/practice/PracticeQueueSummary';
 import { RecentSessions } from '../components/practice/RecentSessions';
 import { INTERVIEWS_PATH } from '../components/interview/paths';
@@ -171,6 +172,8 @@ import {
 import { SET_STATE_PATH as PLAN_PATH } from '../components/civics/StateRequiredNotice';
 import { useCivicsCategories } from '../hooks/useCivicsCategories';
 import { useIsMounted } from '../hooks/useIsMounted';
+import { useMediaReadiness } from '../hooks/useMediaReadiness';
+import { useVoiceAvailability } from '../hooks/useVoiceAvailability';
 import { useLearnerProfile } from '../contexts/LearnerProfileContext';
 import { usePracticeQueue } from '../hooks/usePracticeQueue';
 import { usePracticeSessions } from '../hooks/usePracticeSessions';
@@ -206,6 +209,28 @@ export default function PracticePage() {
     error: queueError,
     refresh: refreshQueue,
   } = usePracticeQueue(testVersionCode);
+
+  /**
+   * The device preflight, at the FIRST of its two moments (#349, epic #345).
+   *
+   * BEFORE THE SESSION STARTS, which is the whole point: until this, a learner
+   * with a blocked microphone or no input device discovered it after tapping
+   * "Start hands-free" inside a session they had already committed to — often
+   * with the phone already in a pocket. Here they are told while both hands are
+   * still on the device and the one-step remedy is something they can act on.
+   *
+   * It observes and never prompts, so merely opening this picker raises no
+   * browser dialogue — see `useMediaReadiness`'s header, and
+   * `PracticePage.readiness.test.tsx`, which asserts `getUserMedia` is not
+   * called by rendering.
+   */
+  const mediaReadiness = useMediaReadiness();
+  // Safe with no `AiStatusProvider` above this page — the hook's own header
+  // says so. With `transcribe` unbound there is no spoken session on this
+  // deployment at all, so a microphone problem is not a fact about anything a
+  // learner here could choose, and saying it would be noise about a feature
+  // that is not on offer.
+  const { transcribeBound } = useVoiceAvailability();
 
   // Same gate `study-coach.ts`'s `recommendStudyAction` fires its `review`
   // rung on (`memory-model.md` §6) — reused here so the Quick 5 action reads
@@ -341,6 +366,29 @@ export default function PracticePage() {
                 <PracticeQueueSummary queue={queue} headingId="practice-queue-heading" />
               ) : null}
             </Box>
+
+            {/* -----------------------------------------------------------
+                0b. Can this device run a spoken session? (#349, epic #345)
+
+                    Between the queue and the actions, because it qualifies
+                    the actions rather than reporting on the evidence above
+                    — and this is where issue #350's mode choice lands, so
+                    the answer sits immediately beside the question it is
+                    about. #350 owns that control; nothing here builds it.
+
+                    IT NEVER BLOCKS ANYTHING. Every button on this page still
+                    works: a Quick 5 is a typed session unless a learner
+                    chooses otherwise, `docs/specs/voice.md` §5 keeps typing
+                    available on every screen, and this is a warning about one
+                    optional way to answer, not a gate on practising.
+                ----------------------------------------------------------- */}
+            {transcribeBound && (
+              <MicrophoneReadinessNotice
+                problem={mediaReadiness.problem}
+                audioSuspended={mediaReadiness.isAudioOutputSuspended}
+                sx={{ mb: 3 }}
+              />
+            )}
 
             {/* -----------------------------------------------------------
                 1. Quick 5 — the one prominent action on this page. Its copy

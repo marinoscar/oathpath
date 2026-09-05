@@ -224,12 +224,15 @@ import { LoadingSpinner } from '../components/common/LoadingSpinner';
 import { PushToTalkButton } from '../components/voice/PushToTalkButton';
 import { QuestionAudio } from '../components/voice/QuestionAudio';
 import type { QuestionAudioHandle } from '../components/voice/QuestionAudio';
+import { MicrophoneReadinessNotice } from '../components/voice/MicrophoneReadinessNotice';
 import { VoiceUnavailableNotice } from '../components/voice/VoiceUnavailableNotice';
 import { isLowConfidence } from '../components/voice/confidence';
 import { useOptionalAiStatus } from '../contexts/AiStatusContext';
 import { usePracticeSession } from '../hooks/usePracticeSession';
 import { useAudioCapture } from '../hooks/useAudioCapture';
+import type { AudioCaptureProblem } from '../hooks/useAudioCapture';
 import { useIsMounted } from '../hooks/useIsMounted';
+import { useMediaReadiness } from '../hooks/useMediaReadiness';
 import { useVoiceActivity } from '../hooks/useVoiceActivity';
 import type { VoiceActivityLevelSource } from '../hooks/useVoiceActivity';
 import { useVoiceAvailability } from '../hooks/useVoiceAvailability';
@@ -376,6 +379,14 @@ function voiceAttemptFields(args: {
  */
 const CONVERSATION_PHASE_TEXT: Record<ConversationPhase, string> = {
   idle: '',
+  // ISSUE #349's LINE, AND THE ONE THIS TABLE EXISTS TO GET RIGHT. Between the
+  // tap and the first word of the question sits the browser's permission
+  // dialogue and the device round-trip, and until #349 this span rendered as
+  // "Asking you the question." — a sentence that was false in the one moment a
+  // learner is most likely to be looking at the screen, waiting to be told what
+  // the modal in front of them is for. It names the microphone, because that is
+  // what the dialogue is asking about.
+  preparing: 'Opening your microphone.',
   // DELIBERATELY NOT `QuestionAudio`'s own "Reading the question aloud." — the
   // loop mounts that component, so the two lines sit on the same screen at the
   // same moment, and two live regions saying the identical sentence is one
@@ -1319,8 +1330,66 @@ export default function PracticeSessionPage() {
   const conversationNotice =
     answerMode === 'voice' && transcribeBound ? conversation.notice : null;
 
-  /** One tap: the gesture that arms audio, and the loop. */
+  /**
+   * The device preflight (issue #349, epic #345).
+   *
+   * Mounted unconditionally — the hook observes and never prompts (see its
+   * header), so there is no cost to having it running on a screen whose learner
+   * never chooses Voice, and no `getUserMedia` is reachable from it. What is
+   * RENDERED from it is gated on the voice panel below, because a deployment
+   * with `transcribe` unbound has no spoken session for a microphone problem to
+   * be about.
+   */
+  const mediaReadiness = useMediaReadiness();
+
+  /**
+   * The problem the loop's own panel shows, or `null`.
+   *
+   * Held as state rather than read straight off `mediaReadiness.problem` so the
+   * pre-Start re-check has somewhere to put a verdict that the rendered state
+   * has not caught up with yet: `recheck()` is synchronous by design and its
+   * asynchronous half settles a tick later, so a Start refused on a permission
+   * that was revoked one second ago must not render nothing while it waits.
+   */
+  const [startBlockedBy, setStartBlockedBy] = useState<AudioCaptureProblem | null>(
+    null,
+  );
+
+  /**
+   * The observed preflight caught up and says everything is fine.
+   *
+   * Without this, a refusal recorded by `recheck()` would OUTLIVE the problem
+   * it described: a learner told "your browser is blocking the microphone",
+   * who allows it in another tab, gets `PermissionStatus`'s `change` — which
+   * clears `mediaReadiness.problem` — and would still be reading the refused
+   * message, because `startBlockedBy` takes precedence over it. That is the
+   * "still blocked after I fixed it" failure `useMediaReadiness`'s own header
+   * calls out, reintroduced one layer up.
+   */
+  const observedProblem = mediaReadiness.problem;
+  useEffect(() => {
+    if (!observedProblem) setStartBlockedBy(null);
+  }, [observedProblem]);
+
+  /**
+   * One tap: the gesture that arms audio, and the loop.
+   *
+   * THE FAST RE-CHECK (#349). Permission can be revoked between the picker and
+   * this tap — in another tab, or from the browser's own site-settings panel —
+   * so the preflight is re-read here rather than trusted from whenever the page
+   * mounted. It is deliberately SYNCHRONOUS: this tap is the user gesture that
+   * lets the page play audio at all, and awaiting a device enumeration before
+   * `conversation.start()` would spend it on a promise. See
+   * `useMediaReadiness`'s header.
+   *
+   * A blocked microphone stops here, with `describeCaptureProblem`'s own copy,
+   * and typing is one control away on the same screen — nothing about the
+   * session is lost.
+   */
   const handleStartConversation = () => {
+    const problem = mediaReadiness.recheck();
+    setStartBlockedBy(problem);
+    if (problem) return;
     setHasUserGesture(true);
     conversation.start();
   };
@@ -1674,6 +1743,27 @@ export default function PracticeSessionPage() {
                     your answer, and moves on by itself. You can stop, or go back
                     to typing, at any moment.
                   </Typography>
+
+                  {/* THE PREFLIGHT, BESIDE THE CONTROL IT IS ABOUT (#349,
+                      epic #345). Two things reach it, and they are the same
+                      shape by design: whatever the observed preflight already
+                      knows, and whatever the Start tap's own re-check found a
+                      moment ago. The re-check wins when it has an answer,
+                      because it is the newer read of the two.
+
+                      It is NOT rendered while the loop is running: a session
+                      that is under way has a live microphone by definition, and
+                      a stale warning above it would contradict the phase line
+                      right underneath. A device lost MID-session arrives as a
+                      capture failure and exits the loop with the same copy —
+                      see `useConversationSession`'s own failure effect. */}
+                  {!conversation.isRunning && (
+                    <MicrophoneReadinessNotice
+                      problem={startBlockedBy ?? mediaReadiness.problem}
+                      audioSuspended={mediaReadiness.isAudioOutputSuspended}
+                      sx={{ mt: 2 }}
+                    />
+                  )}
 
                   <Stack
                     direction={{ xs: 'column', sm: 'row' }}
