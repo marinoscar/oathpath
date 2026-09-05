@@ -269,7 +269,7 @@ describe('synthesizeSpeech', () => {
 
   it('resolves a malformed/non-JSON-parseable body to `failed`, never throwing', async () => {
     // Not valid JSON at all, but still labelled `application/json` — the
-    // defensive branch `parseSynthesisEnvelope` exists for. Nothing in
+    // defensive branch `parseSpeechEnvelope` exists for. Nothing in
     // `synthesizeSpeech` may throw for an AI reason; every caller treats any
     // non-`ok` member the same way (fall back to the browser voice).
     server.use(
