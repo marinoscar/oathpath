@@ -218,7 +218,7 @@ describe('UserDataResetPage — scope "data_and_key": refresh order then navigat
       await screen.findByLabelText(/Type DELETE EVERYTHING to confirm/),
       'DELETE EVERYTHING',
     );
-    await user.click(screen.getByRole('button', { name: 'Erase my data' }));
+    await user.click(screen.getByRole('button', { name: 'Erase everything' }));
 
     await waitFor(() => expect(mockNavigate).toHaveBeenCalled());
 
