@@ -4,6 +4,7 @@ import {
   decideNextQuestion,
   decideRepeatQuestion,
   decideSkipQuestion,
+  emptyTranscriptRejection,
   type PracticeRealtimeToolCall,
   type PracticeRealtimeTurnContext,
 } from './practice-realtime-tool-calls';
@@ -107,6 +108,22 @@ function run(
           break;
         }
 
+        // THE BLANK-TRANSCRIPT REFUSAL, IN THE HANDLER'S OWN ORDER (issue
+        // #354): admissibility first, content second. A blank answer to the
+        // WRONG question is refused as the wrong question — the call was never
+        // admissible, and telling the model about its transcript would send it
+        // looking in the wrong place.
+        //
+        // It consumes nothing, exactly like every other refusal here: the
+        // question stays outstanding, so the coach can ask the learner to say
+        // it again.
+        if (call.tool === 'grade_answer' && call.transcript.trim() === '') {
+          steps.push(
+            `grade_answer:rejected:${emptyTranscriptRejection().reason}`,
+          );
+          break;
+        }
+
         // ONE ROW IS WRITTEN HERE, in the real handler. The driver records
         // only that the question was consumed — what the row SAYS is the
         // grading ladder's business and reaches neither the rules nor the
@@ -190,11 +207,34 @@ describe('a scripted realtime practice session', () => {
     // question and step for step.
     const confident = run(3, walk(3, 'the constitution'));
     const hopeless = run(3, walk(3, 'i do not know'));
-    const silent = run(3, walk(3, ''));
 
     expect(confident.steps).toEqual(hopeless.steps);
-    expect(confident.steps).toEqual(silent.steps);
     expect(confident.asked).toEqual(hopeless.asked);
+
+    // "I do not know" and "the constitution" are the same path. A BLANK
+    // transcript is NOT, and that is the point of the difference rather than a
+    // hole in the property above: `i do not know` is something the learner
+    // said, and is recorded as the wrong answer it is. An empty string is
+    // nothing they said at all, and recording it as `incorrect` would be a
+    // claim about a person nothing observed (issue #354).
+    const nothing = run(3, walk(3, ''));
+
+    expect(nothing.steps).not.toEqual(confident.steps);
+    expect(nothing.steps).toEqual([
+      'next_question:ok',
+      'grade_answer:rejected:empty_transcript',
+      // AND THE SESSION DOES NOT MOVE. The question is still outstanding, so
+      // every later call in the script is refused too — which is the correct
+      // and safe shape: a coach whose learner has not answered gets told to
+      // wait, over and over, rather than walking the bank while nobody speaks.
+      'next_question:rejected:answer_outstanding',
+      'grade_answer:rejected:wrong_question',
+      'next_question:rejected:answer_outstanding',
+      'grade_answer:rejected:wrong_question',
+    ]);
+    // ONE QUESTION ASKED, NOTHING RECORDED, nothing consumed.
+    expect(nothing.asked).toEqual([Q(1)]);
+    expect(nothing.context.questionsRemaining).toBe(3);
   });
 
   it('refuses a second question while the first is unanswered, and recovers', () => {
@@ -373,5 +413,112 @@ describe('a scripted realtime practice session', () => {
 
     expect([...exercised].sort()).toEqual([...PRACTICE_REALTIME_TOOL_NAMES].sort());
     expect(result.steps.filter((step) => step.includes('rejected'))).toEqual([]);
+  });
+});
+
+// =============================================================================
+// A whole session, tool call by tool call (issue #354, epic #345 / E15)
+// =============================================================================
+//
+// The suite the acceptance criterion asks for: a session driven end to end with
+// no database, no network, no provider and no audio — the same driver as above,
+// now covering the refusals a real conversation actually produces and the
+// recoveries that follow each one.
+// =============================================================================
+
+describe('a whole realtime practice session, with the recoveries', () => {
+  it('survives every wrong turn a model can take and still finishes', () => {
+    const result = run(3, [
+      // The model gets ahead of itself before anything has been asked.
+      { tool: 'grade_answer', questionId: Q(1), transcript: 'an answer' },
+      // Question one.
+      { tool: 'next_question' },
+      // The learner asks to hear it again. Free, and consumes nothing.
+      { tool: 'repeat_question' },
+      // A pause the model read as an answer. Refused, so the learner keeps
+      // their turn instead of having an empty attempt recorded against them.
+      { tool: 'grade_answer', questionId: Q(1), transcript: '   ' },
+      // Then they actually answer.
+      { tool: 'grade_answer', questionId: Q(1), transcript: 'the constitution' },
+      // Question two, which the learner asks to move past.
+      { tool: 'next_question' },
+      { tool: 'skip_question', questionId: Q(2) },
+      // The model tries to run ahead of the session.
+      { tool: 'end_session', reason: 'no_questions_left' },
+      // Question three, answered out of order first.
+      { tool: 'next_question' },
+      { tool: 'grade_answer', questionId: Q(2), transcript: 'stale' },
+      { tool: 'grade_answer', questionId: Q(3), transcript: 'washington' },
+      // And now it really is over.
+      { tool: 'end_session', reason: 'no_questions_left' },
+    ]);
+
+    expect(result.steps).toEqual([
+      'grade_answer:rejected:no_answer_outstanding',
+      'next_question:ok',
+      'repeat_question:ok',
+      'grade_answer:rejected:empty_transcript',
+      'grade_answer:ok:ask_next_question',
+      'next_question:ok',
+      'skip_question:ok:ask_next_question',
+      'end_session:rejected:questions_remain',
+      'next_question:ok',
+      'grade_answer:rejected:wrong_question',
+      'grade_answer:ok:session_complete',
+      'end_session:ok:no_questions_left',
+    ]);
+
+    // THREE QUESTIONS ASKED, THREE ANSWERED, and every refusal above consumed
+    // nothing — which is the property that makes a refusal safe to send into a
+    // live conversation in the first place.
+    expect(result.asked).toEqual([Q(1), Q(2), Q(3)]);
+    expect(result.context.questionsRemaining).toBe(0);
+    expect(result.context.sessionStatus).toBe('completed');
+  });
+
+  it('never lets a blank answer become a recorded miss', () => {
+    // Stated on its own because it is the one refusal in the set that protects
+    // the learner rather than the session's bookkeeping: an empty string graded
+    // is `outcome: 'incorrect'`, evidence that somebody answered and missed,
+    // written about somebody who said nothing — and `nextSchedule` would lapse
+    // the question on the strength of it.
+    const result = run(2, [
+      { tool: 'next_question' },
+      { tool: 'grade_answer', questionId: Q(1), transcript: '' },
+      { tool: 'grade_answer', questionId: Q(1), transcript: '\n\t ' },
+      { tool: 'grade_answer', questionId: Q(1), transcript: 'i do not know' },
+    ]);
+
+    expect(result.steps).toEqual([
+      'next_question:ok',
+      'grade_answer:rejected:empty_transcript',
+      'grade_answer:rejected:empty_transcript',
+      // "I do not know" IS an answer, and is recorded as the miss it is.
+      'grade_answer:ok:ask_next_question',
+    ]);
+    expect(result.context.questionsRemaining).toBe(1);
+  });
+
+  it('leaves already_answered to the one place that can produce it', () => {
+    // THE ONE REFUSAL THIS FILE DELIBERATELY DOES NOT SCRIPT, and saying so is
+    // better than faking it. `already_answered` is not a state a sequential
+    // driver can reach: by the time a question is recorded the session is
+    // waiting on the NEXT one, so a second `grade_answer` naming it is
+    // `wrong_question` — which this file does cover, twice.
+    //
+    // The real case is a RACE — two tool calls whose `getSession` reads both
+    // land before either write commits, a re-mint replaying the last turn —
+    // and it surfaces as `PracticeService.recordAttempt`'s own
+    // `ConflictException`, one layer below any rule in this module.
+    // `practice-realtime.service.spec.ts` reaches it the only honest way, by
+    // making `recordAttempt` throw, and asserts it becomes a 200 rejection
+    // rather than a 5xx into a live connection.
+    const result = run(2, [
+      { tool: 'next_question' },
+      { tool: 'grade_answer', questionId: Q(1), transcript: 'an answer' },
+      { tool: 'grade_answer', questionId: Q(1), transcript: 'an answer' },
+    ]);
+
+    expect(result.steps[2]).toBe('grade_answer:rejected:no_answer_outstanding');
   });
 });

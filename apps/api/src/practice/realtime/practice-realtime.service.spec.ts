@@ -328,9 +328,23 @@ describe('PracticeRealtimeService', () => {
     //     mode on `practice_sessions` because it could disagree with the
     //     per-row `inputMode` that records what actually happened;
     //   * no attempt row — minting a credential is not evidence of anything.
+    //
+    // SCOPED TO THE MINT METHOD SINCE #354, and the narrowing is the honest
+    // move rather than a weakening. This class gained a second half — the
+    // tool-call engine — which DOES call `recordAttempt`, on a different route,
+    // for an answer a learner actually gave. A file-wide search would now be
+    // asserting something false about the file to keep saying something true
+    // about the mint, and the first person to make it pass again would have
+    // been tempted to delete a name from the list instead. The list is intact;
+    // it is the haystack that shrank to the method the claim is about.
+    //
+    // Nothing is lost: `practice-realtime-purity.spec.ts` holds the same
+    // absences (`prisma`, `PrismaService`, direct table access, the grading
+    // ladder) across EVERY file in this directory, and it is a stronger check
+    // than this one was.
     await service.createRealtimeSession(USER_A, SESSION_ID);
 
-    const source = strippedSource();
+    const source = mintMethodSource();
 
     for (const write of [
       'auditEvent',
@@ -339,6 +353,7 @@ describe('PracticeRealtimeService', () => {
       'update(',
       'create(',
       'recordAttempt',
+      'completeSession',
       "mode: 'voice'",
     ]) {
       expect(source).not.toContain(write);
@@ -352,6 +367,28 @@ describe('PracticeRealtimeService', () => {
     expect(practice.getSession).toHaveBeenCalledWith(USER_A, SESSION_ID);
   });
 });
+
+/**
+ * Just `createRealtimeSession`'s body, with comments removed.
+ *
+ * The mint runs from its own signature to `handleToolCall`'s, which is the
+ * first line of the tool-call half of the class (issue #354). Sliced between
+ * two SIGNATURES rather than by brace counting, and deliberately not by a
+ * comment marker: comments are stripped before this runs, and a clever brace
+ * parser that silently matched the wrong closing one would make the assertion
+ * above pass over an empty string. Both bounds are asserted, so a rename makes
+ * this fail loudly instead.
+ */
+function mintMethodSource(): string {
+  const source = strippedSource();
+  const start = source.indexOf('async createRealtimeSession(');
+  const end = source.indexOf('async handleToolCall(');
+
+  expect(start).toBeGreaterThan(-1);
+  expect(end).toBeGreaterThan(start);
+
+  return source.slice(start, end);
+}
 
 /** This service's own source, with comments removed. */
 function strippedSource(): string {
@@ -452,5 +489,540 @@ describe('a realtime binding and system readiness', () => {
 
     expect(result.systemReady).toBe(false);
     expect(result.unboundRoles).toContain('tutor');
+  });
+});
+
+// =============================================================================
+// PracticeRealtimeService.handleToolCall — tests (issue #354, epic #345 / E15)
+// =============================================================================
+//
+// `PracticeService` is a DOUBLE here, and for this half of the service that is
+// not a convenience — it is the only way to assert the property the whole issue
+// is about. "This handler calls `recordAttempt` rather than re-implementing its
+// ladder" is a statement about a CALL, and a call is only observable on
+// something that records being called. What `recordAttempt` then does with the
+// arguments is `practice.service.spec.ts`' subject and `practice.integration.
+// spec.ts`' equivalence test, not this file's.
+//
+// So what is asserted here is: which method was called, with exactly which
+// arguments, in which situations it was NOT called, and what the model is told
+// in each case.
+// =============================================================================
+
+const Q1 = 'q1111111-1111-4111-8111-111111111111';
+const Q2 = 'q2222222-2222-4222-8222-222222222222';
+
+describe('PracticeRealtimeService.handleToolCall', () => {
+  let service: PracticeRealtimeService;
+  let practice: {
+    getSession: jest.Mock;
+    recordAttempt: jest.Mock;
+    completeSession: jest.Mock;
+  };
+
+  /** A session detail with one question outstanding and `answered` recorded. */
+  function detail({
+    status = 'in_progress',
+    question = { id: Q1, number: 1, prompt: 'Who is the Chief Justice?' },
+    answered = 0,
+    planned = 5,
+  }: {
+    status?: string;
+    question?: { id: string; number: number; prompt: string } | null;
+    answered?: number;
+    planned?: number;
+  } = {}) {
+    return {
+      session: { id: SESSION_ID, status, plannedCount: planned },
+      attempts: [],
+      nextQuestion: question,
+      progress: { answered, planned },
+    };
+  }
+
+  /** What `recordAttempt` hands back: an attempt with its composed turn. */
+  function recorded(overrides: Record<string, unknown> = {}) {
+    return {
+      attempt: {
+        id: 'attempt-1',
+        outcome: 'correct',
+        spokenTurn: ['That’s right.', 'Nice one.'],
+        retryBoundary: null,
+        ...overrides,
+      },
+      acceptedAnswers: [{ text: 'John Roberts' }],
+      nextQuestion: null,
+      progress: { answered: 1, planned: 5 },
+    };
+  }
+
+  beforeEach(async () => {
+    practice = {
+      getSession: jest.fn().mockResolvedValue(detail()),
+      recordAttempt: jest.fn().mockResolvedValue(recorded()),
+      completeSession: jest.fn().mockResolvedValue({ id: SESSION_ID }),
+    };
+
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        PracticeRealtimeService,
+        { provide: PracticeService, useValue: practice },
+        {
+          provide: AiDispatchService,
+          // NEVER REACHED ON THIS PATH, and asserted below. A tool call spends
+          // nothing: the connection is already open and already billing, and
+          // this application is not in its data path.
+          useValue: { createRealtimeSession: jest.fn() },
+        },
+      ],
+    }).compile();
+
+    service = module.get(PracticeRealtimeService);
+  });
+
+  const call = (tool: any) => service.handleToolCall(USER_A, SESSION_ID, tool);
+
+  /** Ask for a question, so something is outstanding in the ledger. */
+  const ask = () => call({ tool: 'next_question' });
+
+  // ---------------------------------------------------------------------------
+  // next_question
+  // ---------------------------------------------------------------------------
+
+  it('serves the question’s own prompt, verbatim and alone', async () => {
+    await expect(ask()).resolves.toEqual({
+      status: 'ok',
+      tool: 'next_question',
+      say: ['Who is the Chief Justice?'],
+      then: 'await_answer',
+      questionId: Q1,
+    });
+  });
+
+  it('returns no verdict-shaped field, ever', async () => {
+    // The runtime half of `OK_RESULT_DECLARES_NO_VERDICT`: a model that cannot
+    // SEND a grade must not be TOLD one either.
+    const result: any = await ask();
+
+    for (const forbidden of ['outcome', 'correct', 'score', 'failureCause']) {
+      expect(result).not.toHaveProperty(forbidden);
+    }
+  });
+
+  it('refuses a second question while the first is unanswered', async () => {
+    await ask();
+
+    const result: any = await call({ tool: 'next_question' });
+
+    expect(result.status).toBe('rejected');
+    expect(result.reason).toBe('answer_outstanding');
+    expect(result.instruction).toContain('grade_answer');
+  });
+
+  it('serves the question again for a connection that never heard it', async () => {
+    // THE FORGETFUL CASE, which is what a re-mint after a dropped connection
+    // looks like: nothing was recorded, so the same question is served again.
+    // Redundant speech, never a lost answer.
+    await expect(ask()).resolves.toMatchObject({ questionId: Q1 });
+  });
+
+  it('refuses every tool once the session is closed', async () => {
+    practice.getSession.mockResolvedValue(
+      detail({ status: 'completed', question: null }),
+    );
+
+    for (const tool of [
+      { tool: 'next_question' },
+      { tool: 'repeat_question' },
+      { tool: 'grade_answer', questionId: Q1, transcript: 'x' },
+      { tool: 'skip_question', questionId: Q1 },
+      { tool: 'end_session', reason: 'learner_asked' },
+    ]) {
+      const result: any = await call(tool);
+      expect(result.status).toBe('rejected');
+      expect(result.reason).toBe('session_not_in_progress');
+    }
+
+    expect(practice.recordAttempt).not.toHaveBeenCalled();
+    expect(practice.completeSession).not.toHaveBeenCalled();
+  });
+
+  it('refuses next_question once the planned count is reached, pointing at end_session', async () => {
+    practice.getSession.mockResolvedValue(
+      detail({ question: null, answered: 5, planned: 5 }),
+    );
+
+    const result: any = await call({ tool: 'next_question' });
+
+    expect(result.reason).toBe('no_questions_left');
+    expect(result.instruction).toContain('end_session');
+  });
+
+  it('refuses next_question when the bank is exhausted short of the planned count', async () => {
+    // The case that would DEADLOCK if `questionsRemaining` were plain
+    // arithmetic: nothing left to serve, but four of five answered. Both the
+    // refusal here and the honoured `end_session` below depend on the same
+    // derivation.
+    practice.getSession.mockResolvedValue(
+      detail({ question: null, answered: 4, planned: 5 }),
+    );
+
+    await expect(call({ tool: 'next_question' })).resolves.toMatchObject({
+      reason: 'no_questions_left',
+    });
+    await expect(
+      call({ tool: 'end_session', reason: 'no_questions_left' }),
+    ).resolves.toMatchObject({ status: 'ok' });
+  });
+
+  // ---------------------------------------------------------------------------
+  // repeat_question
+  // ---------------------------------------------------------------------------
+
+  it('repeats the SAME words, not a fresh draw', async () => {
+    await ask();
+
+    // The selector shuffles, so `getSession` can legitimately name a different
+    // question on the next read. A repeat that re-read it would hand the
+    // learner a different question while the coach said it was the same one.
+    practice.getSession.mockResolvedValue(
+      detail({
+        question: { id: Q2, number: 2, prompt: 'A completely different one?' },
+      }),
+    );
+
+    const result: any = await call({ tool: 'repeat_question' });
+
+    expect(result).toEqual({
+      status: 'ok',
+      tool: 'repeat_question',
+      say: ['Who is the Chief Justice?'],
+      then: 'await_answer',
+      questionId: Q1,
+    });
+    expect(practice.recordAttempt).not.toHaveBeenCalled();
+  });
+
+  it('refuses a repeat when nothing has been asked on this connection', async () => {
+    // A re-minted connection after a drop: the model has lost the conversation
+    // and so has this process. There is genuinely nothing to repeat, and the
+    // instruction sends it to `next_question` rather than inventing one.
+    const result: any = await call({ tool: 'repeat_question' });
+
+    expect(result.status).toBe('rejected');
+    expect(result.reason).toBe('no_answer_outstanding');
+    expect(result.instruction).toContain('next_question');
+  });
+
+  it('a repeat still blocks the next question', async () => {
+    await ask();
+    await call({ tool: 'repeat_question' });
+
+    await expect(call({ tool: 'next_question' })).resolves.toMatchObject({
+      reason: 'answer_outstanding',
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // grade_answer
+  // ---------------------------------------------------------------------------
+
+  it('records an answer through recordAttempt, spoken and heard', async () => {
+    await ask();
+    await call({ tool: 'grade_answer', questionId: Q1, transcript: 'John Roberts' });
+
+    expect(practice.recordAttempt).toHaveBeenCalledTimes(1);
+    expect(practice.recordAttempt).toHaveBeenCalledWith(USER_A, SESSION_ID, {
+      questionId: Q1,
+      // BOTH COLUMNS, THE SAME STRING — what was graded, and what came back
+      // from recognition.
+      responseText: 'John Roberts',
+      transcript: 'John Roberts',
+      skipped: false,
+      // NO NEW ENUM VALUE. A `realtime` input mode would drop every attempt
+      // from this transport out of readiness's `spoken` filter.
+      inputMode: 'spoken',
+      promptMode: 'heard',
+      revealed: false,
+      hintUsed: false,
+    });
+  });
+
+  it('passes no confidence, no duration and no retry link', async () => {
+    // ABSENT MEANS UNKNOWN. `grade_answer` carries no confidence argument (a
+    // model's certainty about its own hearing is not a recogniser's
+    // measurement), and this application is not in the connection's data path,
+    // so it cannot time an answer either. A zero or a null-as-a-claim would be
+    // a specific, false statement.
+    await ask();
+    await call({ tool: 'grade_answer', questionId: Q1, transcript: 'x' });
+
+    const input = practice.recordAttempt.mock.calls[0][2];
+
+    expect(input).not.toHaveProperty('asrConfidence');
+    expect(input).not.toHaveProperty('durationMs');
+    expect(input).not.toHaveProperty('retryOfAttemptId');
+  });
+
+  it('speaks the composed turn, verbatim and in order', async () => {
+    await ask();
+
+    const result: any = await call({
+      tool: 'grade_answer',
+      questionId: Q1,
+      transcript: 'John Roberts',
+    });
+
+    expect(result).toEqual({
+      status: 'ok',
+      tool: 'grade_answer',
+      say: ['That’s right.', 'Nice one.'],
+      then: 'ask_next_question',
+      // Nothing is outstanding now — the next question is served by the next
+      // `next_question`, which is the only thing that makes one outstanding.
+      questionId: null,
+    });
+  });
+
+  it('says the session is complete when the last question is answered', async () => {
+    practice.getSession.mockResolvedValue(detail({ answered: 4, planned: 5 }));
+
+    await ask();
+
+    const result: any = await call({
+      tool: 'grade_answer',
+      questionId: Q1,
+      transcript: 'John Roberts',
+    });
+
+    // AN ACTION, NOT AN OUTCOME. It says this because the COUNT ran out, and
+    // would say the identical thing for a wrong answer.
+    expect(result.then).toBe('session_complete');
+  });
+
+  it('refuses an answer naming a question the session is not waiting on', async () => {
+    await ask();
+
+    const result: any = await call({
+      tool: 'grade_answer',
+      questionId: Q2,
+      transcript: 'something',
+    });
+
+    expect(result.reason).toBe('wrong_question');
+    // NEVER SILENTLY ATTRIBUTED. On this path a mis-attribution is not a
+    // confusing sentence — it is a row and a mastery update about a question
+    // the learner was never asked.
+    expect(practice.recordAttempt).not.toHaveBeenCalled();
+  });
+
+  it('refuses an answer when nothing is outstanding', async () => {
+    practice.getSession.mockResolvedValue(
+      detail({ question: null, answered: 5 }),
+    );
+
+    const result: any = await call({
+      tool: 'grade_answer',
+      questionId: Q1,
+      transcript: 'something',
+    });
+
+    expect(result.reason).toBe('no_answer_outstanding');
+    expect(practice.recordAttempt).not.toHaveBeenCalled();
+  });
+
+  it('refuses a blank transcript rather than recording a wrong answer', async () => {
+    // THE FALSE CLAIM THIS PREVENTS: graded, an empty string is `incorrect` —
+    // evidence that the learner answered and missed, about somebody who said
+    // nothing — and the question lapses on the strength of it.
+    await ask();
+
+    for (const transcript of ['', '   ', '\n\t ']) {
+      practice.recordAttempt.mockClear();
+
+      const result: any = await call({
+        tool: 'grade_answer',
+        questionId: Q1,
+        transcript,
+      });
+
+      expect(result.reason).toBe('empty_transcript');
+      expect(practice.recordAttempt).not.toHaveBeenCalled();
+    }
+  });
+
+  it('converts the already-answered conflict into a rejection, never a 5xx', async () => {
+    // A DUPLICATE TOOL CALL IS ROUTINE HERE — a retry after a slow
+    // acknowledgement, two calls racing a connection hiccup, a re-mint
+    // replaying the last turn. A non-2xx would be flattened by the relay in
+    // the middle of a live, per-minute-billing conversation.
+    await ask();
+
+    practice.recordAttempt.mockRejectedValue(
+      new ConflictException('Question "x" has already been answered in this session'),
+    );
+
+    const result: any = await call({
+      tool: 'grade_answer',
+      questionId: Q1,
+      transcript: 'John Roberts',
+    });
+
+    expect(result).toEqual({
+      status: 'rejected',
+      tool: 'grade_answer',
+      reason: 'already_answered',
+      error: expect.any(String),
+      instruction: expect.stringContaining('next_question'),
+    });
+  });
+
+  it('lets a NotFound out rather than dressing it up as a refusal', async () => {
+    // The question this service derived from the session's own `nextQuestion`
+    // not existing is a programming error, not something the model did wrong,
+    // and telling it to carry on would hide a broken deployment behind a
+    // conversation that keeps going.
+    await ask();
+
+    practice.recordAttempt.mockRejectedValue(new NotFoundException('gone'));
+
+    await expect(
+      call({ tool: 'grade_answer', questionId: Q1, transcript: 'x' }),
+    ).rejects.toBeInstanceOf(NotFoundException);
+  });
+
+  // ---------------------------------------------------------------------------
+  // skip_question
+  // ---------------------------------------------------------------------------
+
+  it('records a skip as a skip, with nothing revealed', async () => {
+    await ask();
+    await call({ tool: 'skip_question', questionId: Q1 });
+
+    expect(practice.recordAttempt).toHaveBeenCalledWith(USER_A, SESSION_ID, {
+      questionId: Q1,
+      // NO RESPONSE AND NO TRANSCRIPT — the shape that produces
+      // `outcome: 'skipped'`. A skip is the learner declining to answer, not an
+      // answer that missed.
+      responseText: undefined,
+      transcript: undefined,
+      skipped: true,
+      inputMode: 'spoken',
+      promptMode: 'heard',
+      // FALSE, DELIBERATELY: the accepted answer is spoken AFTER the row is
+      // written, so `true` would be a false claim about when they saw it — and
+      // `revealed` is the precondition for self-marking.
+      revealed: false,
+      hintUsed: false,
+    });
+  });
+
+  it('refuses a skip naming a question that is not outstanding', async () => {
+    await ask();
+
+    const result: any = await call({ tool: 'skip_question', questionId: Q2 });
+
+    expect(result.reason).toBe('wrong_question');
+    expect(practice.recordAttempt).not.toHaveBeenCalled();
+  });
+
+  it('converts an already-answered skip too', async () => {
+    await ask();
+
+    practice.recordAttempt.mockRejectedValue(new ConflictException('dup'));
+
+    await expect(
+      call({ tool: 'skip_question', questionId: Q1 }),
+    ).resolves.toMatchObject({
+      status: 'rejected',
+      tool: 'skip_question',
+      reason: 'already_answered',
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // end_session
+  // ---------------------------------------------------------------------------
+
+  it('believes the learner and completes the session', async () => {
+    const result: any = await call({
+      tool: 'end_session',
+      reason: 'learner_asked',
+    });
+
+    expect(practice.completeSession).toHaveBeenCalledWith(USER_A, SESSION_ID);
+    expect(result).toEqual({
+      status: 'ok',
+      tool: 'end_session',
+      say: [expect.stringContaining('end of this practice session')],
+      then: 'session_complete',
+      questionId: null,
+    });
+  });
+
+  it('refuses "no questions left" while the session still has questions', async () => {
+    // A model deciding the session is over. Believed, it would cut the session
+    // short and the summary screen would agree with it.
+    const result: any = await call({
+      tool: 'end_session',
+      reason: 'no_questions_left',
+    });
+
+    expect(result.reason).toBe('questions_remain');
+    expect(result.instruction).toContain('next_question');
+    expect(practice.completeSession).not.toHaveBeenCalled();
+  });
+
+  it('is idempotent under a double end_session', async () => {
+    // `completeSession` is idempotent by its own contract — the stored summary
+    // comes back unchanged and `completedAt` is not re-stamped — so a re-mint
+    // racing the original ends the session once however many times it is
+    // asked.
+    const first: any = await call({ tool: 'end_session', reason: 'learner_asked' });
+    const second: any = await call({ tool: 'end_session', reason: 'learner_asked' });
+
+    expect(practice.completeSession).toHaveBeenCalledTimes(2);
+    expect(second).toEqual(first);
+  });
+
+  it('answers a session closed underneath it with a refusal, not an exception', async () => {
+    practice.completeSession.mockRejectedValue(
+      new ConflictException('Session "x" is abandoned and cannot be completed'),
+    );
+
+    const result: any = await call({
+      tool: 'end_session',
+      reason: 'learner_asked',
+    });
+
+    expect(result.status).toBe('rejected');
+    expect(result.reason).toBe('session_not_in_progress');
+  });
+
+  // ---------------------------------------------------------------------------
+  // What the whole path never does
+  // ---------------------------------------------------------------------------
+
+  it('resolves the session through the one ownership-scoped door, every time', async () => {
+    // A 404 for another learner's session is inherited from `getSession`'s own
+    // `userId` filter rather than re-implemented here — the same property the
+    // mint route above relies on.
+    await call({ tool: 'next_question' });
+
+    expect(practice.getSession).toHaveBeenCalledWith(USER_A, SESSION_ID);
+  });
+
+  it('spends nothing: no mint, no dispatcher call', async () => {
+    await ask();
+    await call({ tool: 'grade_answer', questionId: Q1, transcript: 'John Roberts' });
+    await call({ tool: 'end_session', reason: 'learner_asked' });
+
+    // The only AI call reachable from this path at all is the grading ladder's
+    // own rung 2, which happens INSIDE `recordAttempt` — one layer below the
+    // double above — and degrades to the deterministic verdict when nothing is
+    // configured.
+    expect(
+      (service as any).dispatch.createRealtimeSession,
+    ).not.toHaveBeenCalled();
   });
 });

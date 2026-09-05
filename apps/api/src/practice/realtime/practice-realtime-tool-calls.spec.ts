@@ -1,9 +1,13 @@
 import {
+  alreadyAnsweredRejection,
   decideEndSession,
   decideGradeAnswer,
   decideNextQuestion,
   decideRepeatQuestion,
   decideSkipQuestion,
+  emptyTranscriptRejection,
+  noQuestionToServe,
+  PRACTICE_REALTIME_REJECTION_REASONS,
   type PracticeRealtimeTurnContext,
 } from './practice-realtime-tool-calls';
 
@@ -308,5 +312,100 @@ describe('the rules module itself', () => {
     // at all: a decision that depended on "now" could not be replayed.
     expect(strippedSource()).not.toContain('new Date(');
     expect(strippedSource()).not.toContain('Clock');
+  });
+});
+
+// =============================================================================
+// The three refusals the rules cannot decide (issue #354)
+// =============================================================================
+//
+// Every other rejection in this file comes out of a rule over the context
+// struct. These three come from somewhere the context cannot see — a
+// `ConflictException` raised inside `recordAttempt`'s transaction, a blank
+// string on a call the schema had no way to refuse, and a state the derivation
+// says is impossible — so they are exported builders the handler calls, tested
+// here as the refusals they produce rather than as rules.
+
+describe('the builders the handler reaches for', () => {
+  it('already_answered is a well-formed refusal for either writing tool', () => {
+    for (const tool of ['grade_answer', 'skip_question'] as const) {
+      expectWellFormedRefusal(alreadyAnsweredRejection(tool), 'already_answered', tool);
+    }
+  });
+
+  it('already_answered tells the model to carry on, never to retry', () => {
+    // THE DISTINCTION THAT MATTERS. The state HAS moved — the row exists — so
+    // a retry of the same call could only produce this same refusal again. An
+    // instruction that said "try again" would turn a duplicate tool call into
+    // a loop on a per-minute-billing connection.
+    const rejection = alreadyAnsweredRejection('grade_answer');
+
+    expect(rejection.instruction).toContain('next_question');
+    expect(rejection.instruction.toLowerCase()).not.toContain('try again');
+  });
+
+  it('empty_transcript refuses rather than skipping on the learner’s behalf', () => {
+    const rejection = emptyTranscriptRejection();
+
+    expectWellFormedRefusal(rejection, 'empty_transcript', 'grade_answer');
+    // A silence the model could not fill is not the learner DECIDING to move
+    // on, so the instruction offers the honest move (ask again) and warns off
+    // the dishonest one rather than taking either.
+    expect(rejection.instruction).toContain('say their answer again');
+    expect(rejection.instruction).toContain('unless they have');
+  });
+
+  it('noQuestionToServe points at end_session, whichever tool asked', () => {
+    for (const tool of ['next_question', 'repeat_question'] as const) {
+      const rejection = noQuestionToServe(tool);
+      expectWellFormedRefusal(rejection, 'no_questions_left', tool);
+      expect(rejection.instruction).toContain('end_session');
+    }
+  });
+});
+
+describe('the closed set of rejection reasons', () => {
+  it('is exactly the set the rules and the builders can produce', () => {
+    // ENUMERATED SO IT CAN BE ITERATED. A union type alone cannot keep this
+    // promise: a reason declared and never produced compiles perfectly, and a
+    // reason produced but undeclared is a compile error somewhere far from
+    // here. This walks the array and collects everything this module can
+    // actually emit.
+    const produced = new Set<string>();
+
+    const record = (decision: { status: string; reason?: string }) => {
+      if (decision.status === 'rejected' && decision.reason) {
+        produced.add(decision.reason);
+      }
+    };
+
+    const closed = ctx({ sessionStatus: 'completed' });
+    const outstanding = ctx({ outstandingQuestionId: QUESTION });
+
+    // session_not_in_progress — every tool, from a closed session.
+    record(decideNextQuestion(closed));
+    // answer_outstanding — a second question before the first is answered.
+    record(decideNextQuestion(outstanding));
+    // no_questions_left — the count ran out.
+    record(decideNextQuestion(ctx({ questionsRemaining: 0 })));
+    // no_answer_outstanding — an answer with nothing in the air.
+    record(decideGradeAnswer(ctx(), { questionId: QUESTION }));
+    // wrong_question — an answer naming something else.
+    record(decideGradeAnswer(outstanding, { questionId: OTHER_QUESTION }));
+    // questions_remain — the model declaring a session over that is not.
+    record(decideEndSession(ctx(), { reason: 'no_questions_left' }));
+    // The two the rules cannot decide.
+    record(alreadyAnsweredRejection('grade_answer'));
+    record(emptyTranscriptRejection());
+
+    expect([...produced].sort()).toEqual(
+      [...PRACTICE_REALTIME_REJECTION_REASONS].sort(),
+    );
+  });
+
+  it('every reason is distinct, so a model can branch on it', () => {
+    expect(new Set(PRACTICE_REALTIME_REJECTION_REASONS).size).toBe(
+      PRACTICE_REALTIME_REJECTION_REASONS.length,
+    );
   });
 });
