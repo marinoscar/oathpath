@@ -195,7 +195,7 @@
  * agrees with them.
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   AlertTitle,
@@ -214,6 +214,7 @@ import {
 import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import KeyboardIcon from '@mui/icons-material/Keyboard';
 import MicIcon from '@mui/icons-material/Mic';
+import StopIcon from '@mui/icons-material/Stop';
 import { Link as RouterLink, Navigate, useNavigate, useParams } from 'react-router-dom';
 
 import { AttemptFeedback } from '../components/practice/AttemptFeedback';
@@ -222,14 +223,28 @@ import { AI_KEY_SETTINGS_PATH, ExplainPanel } from '../components/ai/ExplainPane
 import { LoadingSpinner } from '../components/common/LoadingSpinner';
 import { PushToTalkButton } from '../components/voice/PushToTalkButton';
 import { QuestionAudio } from '../components/voice/QuestionAudio';
+import type { QuestionAudioHandle } from '../components/voice/QuestionAudio';
 import { VoiceUnavailableNotice } from '../components/voice/VoiceUnavailableNotice';
 import { isLowConfidence } from '../components/voice/confidence';
 import { useOptionalAiStatus } from '../contexts/AiStatusContext';
 import { usePracticeSession } from '../hooks/usePracticeSession';
 import { useAudioCapture } from '../hooks/useAudioCapture';
 import { useIsMounted } from '../hooks/useIsMounted';
+import { useVoiceActivity } from '../hooks/useVoiceActivity';
 import { useVoiceAvailability } from '../hooks/useVoiceAvailability';
-import { useVoicePrefs } from '../hooks/useVoicePrefs';
+import {
+  DEFAULT_VOICE_CONVERSATION_MODE,
+  useVoicePrefs,
+  writeFor,
+} from '../hooks/useVoicePrefs';
+import { useConversationSession } from '../hooks/useConversationSession';
+import type {
+  ConversationGrade,
+  ConversationPhase,
+  ConversationSpeechOutcome,
+  ConversationSpeechPort,
+  UseConversationSessionReturn,
+} from '../hooks/useConversationSession';
 import {
   ApiError,
   completePracticeSession,
@@ -345,6 +360,75 @@ function voiceAttemptFields(args: {
   };
 }
 
+/**
+ * What the hands-free loop is doing, in one sentence per phase.
+ *
+ * ON SCREEN AS WELL AS ALOUD. Conversation mode is built for a learner who is
+ * not looking, which is exactly why the phase must also be readable: a learner
+ * who DOES glance at the phone — or who has sound off, or is using a screen
+ * reader — has otherwise no way to tell "listening" from "thinking" from
+ * "stopped". The spoken cue and this line are two renderings of one fact, never
+ * two facts.
+ *
+ * `idle` is empty rather than "stopped": the controls beside it already say so,
+ * and a live region that announces "idle" every time a session ends is noise.
+ */
+const CONVERSATION_PHASE_TEXT: Record<ConversationPhase, string> = {
+  idle: '',
+  // DELIBERATELY NOT `QuestionAudio`'s own "Reading the question aloud." — the
+  // loop mounts that component, so the two lines sit on the same screen at the
+  // same moment, and two live regions saying the identical sentence is one
+  // announcement a screen-reader user hears twice with no way to tell which
+  // control it came from.
+  speakingQuestion: 'Asking you the question.',
+  listening: 'Listening. Answer when you are ready.',
+  processing: 'Working out how that went.',
+  speakingAnswer: 'Telling you the answer.',
+  advancing: 'Moving on to the next question.',
+};
+
+/**
+ * Say one of the driver's own short lines with the browser's own voice.
+ *
+ * THE `nudge` HALF OF THE SPEECH PORT, and deliberately not `QuestionAudio`:
+ * "I didn't catch that. Go ahead." is five words of the app's own scaffolding,
+ * not content. Routing it through the premium path would spend the learner's
+ * own key on it, put it in the deployment-wide audio cache, and give it a
+ * replay button nobody wants — see `ConversationSpeechKind`.
+ *
+ * NEVER REJECTS. A browser with no `speechSynthesis` resolves `failed`, which
+ * the driver treats as a nudge that was not heard rather than a reason to stop.
+ */
+function speakNudge(text: string): Promise<ConversationSpeechOutcome> {
+  return new Promise<ConversationSpeechOutcome>((resolve) => {
+    const synthesis = typeof window === 'undefined' ? undefined : window.speechSynthesis;
+    const Utterance =
+      typeof window === 'undefined' ? undefined : window.SpeechSynthesisUtterance;
+    if (!synthesis || typeof Utterance !== 'function') {
+      resolve('failed');
+      return;
+    }
+
+    let settled = false;
+    const settle = (outcome: ConversationSpeechOutcome) => {
+      if (settled) return;
+      settled = true;
+      resolve(outcome);
+    };
+
+    const utterance = new Utterance(text);
+    utterance.onend = () => settle('ended');
+    utterance.onerror = (event: SpeechSynthesisErrorEvent) => {
+      // `cancel()` reports the utterance it interrupted as an error. That is
+      // this page silencing itself — `cancelled`, not a failure — and the
+      // driver's turn token has already moved on from it either way.
+      const reason = event?.error;
+      settle(reason === 'canceled' || reason === 'interrupted' ? 'cancelled' : 'failed');
+    };
+    synthesis.speak(utterance);
+  });
+}
+
 /** `/practice/sessions/:id/summary` for one id, spelled once. */
 export function practiceSummaryPath(sessionId: string): string {
   return `/practice/sessions/${sessionId}/summary`;
@@ -378,17 +462,59 @@ export default function PracticeSessionPage() {
   // send.
   const capture = useAudioCapture();
   const { release: releaseRecording } = capture;
+
+  // ---------------------------------------------------------------------------
+  // Conversation mode (issue #313, epic #304 / E13). See `docs/specs/conversation-mode.md`.
+  // ---------------------------------------------------------------------------
+  //
+  // A SECOND CAPTURE HOOK, NOT A SECOND MODE ON THE FIRST ONE. The hand-driven
+  // flow above wants a stream that lives for exactly one hold (E9's behaviour,
+  // and the microphone light going out with the learner's last word); the
+  // hands-free loop wants one that outlives every answer in the session, so it
+  // can hear a barge-in over a question it is still reading
+  // (`conversation-mode.md` §2). Those are different lifetimes, and one hook
+  // whose `persistent` flag flipped underneath it would be a stream whose
+  // teardown rules changed mid-session.
+  //
+  // Two instances cost nothing until one of them opens a device: this one asks
+  // for the microphone only when `start()` is tapped, and `PushToTalkButton` is
+  // unmounted for as long as the loop is running, so exactly one of the two is
+  // ever holding the device.
+  const conversationCapture = useAudioCapture({ persistent: true });
+
+  /**
+   * The driver, readable from the detector's callback below.
+   *
+   * The two hooks are SIBLINGS — `useVoiceActivity`'s events go into
+   * `useConversationSession`, and the driver arms and disarms the detector —
+   * so one of the two references has to be late. This is it: the detector only
+   * ever reads it from a poll, never during render.
+   */
+  const conversationRef = useRef<UseConversationSessionReturn | null>(null);
+
+  const voiceActivity = useVoiceActivity({
+    // `null` until the loop opens the microphone, and inert until then: `arm()`
+    // on a null stream reports `unavailable` and starts no timer, which is
+    // exactly right for a page sitting in Text mode.
+    stream: conversationCapture.stream,
+    onEvent: (event) => conversationRef.current?.onVoiceActivityEvent(event),
+  });
   // THE SINGLE READER of the voice roles' binding state. Not `useAiStatus()`
   // and not `unboundRoles` directly — `transcribeBound` is false while the
   // status is still unknown, which is what makes the microphone appear a beat
   // late rather than appear dead.
-  const { transcribeBound } = useVoiceAvailability();
+  const { transcribeBound, isLoading: voiceAvailabilityLoading } =
+    useVoiceAvailability();
 
   // The learner's own voice preferences (#288, epic #280), read through the
   // SAME `useUserSettings` the rest of the app uses — see `useVoicePrefs`.
   // Resolved to the built-in defaults until the settings read lands, so the
   // question is readable from the first paint rather than after a round trip.
-  const { voice: voicePrefs, isLoading: voicePrefsLoading } = useVoicePrefs();
+  const {
+    voice: voicePrefs,
+    isLoading: voicePrefsLoading,
+    saveVoice,
+  } = useVoicePrefs();
   /**
    * Optional on purpose, exactly as in `ExplainPanel`: this page must not blank
    * out when the status provider is absent (a test rendering it in isolation,
@@ -399,6 +525,34 @@ export default function PracticeSessionPage() {
 
   /** Which control the learner is using RIGHT NOW. Never resets the session. */
   const [answerMode, setAnswerMode] = useState<AnswerMode>('text');
+  /**
+   * The stored `voice.conversationMode` has been applied to `answerMode`.
+   *
+   * ONCE PER MOUNT, and never again: after the first application the mode is
+   * the learner's to change on this screen, and a settings read landing later
+   * (or a re-read after a preference is written) must not take the microphone
+   * away from somebody who has just switched to typing — the same reason
+   * `answerMode` is deliberately not reset when the session is re-read.
+   */
+  const modeSeededRef = useRef(false);
+  /**
+   * Is the hands-free loop driving right now?
+   *
+   * A REF because the page's own transcription effect has to read it (see
+   * below) and that effect must not re-run when the phase changes. Assigned
+   * during render, once the driver exists.
+   */
+  const conversationRunningRef = useRef(false);
+  /**
+   * The attempt the loop's NEXT submission supersedes, or `null`.
+   *
+   * The driver has no attempt id — it hands over a transcript and is told
+   * whether it landed — so supersession is this page's business
+   * (`useConversationSession`'s `submit` port says so outright). Set from the
+   * graded attempt when the loop is about to offer its one retry, and cleared
+   * with the rest of the question's state.
+   */
+  const conversationRetryOfRef = useRef<string | null>(null);
   /** The question was ACTUALLY spoken to them — `promptMode: 'heard'`. */
   const [promptWasHeard, setPromptWasHeard] = useState(false);
   /** A transcription request is in flight. */
@@ -476,6 +630,7 @@ export default function PracticeSessionPage() {
     setTranscribing(false);
     setRetryOf(null);
     setCorrection(null);
+    conversationRetryOfRef.current = null;
     releaseRecording();
   }, [releaseRecording]);
 
@@ -573,6 +728,15 @@ export default function PracticeSessionPage() {
   const recording = capture.recording;
 
   useEffect(() => {
+    // THE HANDS-FREE LOOP OWNS ITS OWN AUDIO. While the driver is running it
+    // holds a different capture hook, transcribes that hook's blob itself, and
+    // calls `release()` on it in its own `finally` — so this effect must not
+    // claim a recording as well. The two hooks are separate instances, which
+    // already makes a collision impossible in a browser; the guard is what
+    // keeps it impossible in a test that fakes `useAudioCapture` with one
+    // shared recorder, and it is cheaper to state than to rediscover as two
+    // transcriptions billed to one learner for one answer.
+    if (conversationRunningRef.current) return;
     if (!recording || uploadedRef.current === recording) return;
     uploadedRef.current = recording;
 
@@ -698,12 +862,23 @@ export default function PracticeSessionPage() {
     if (spokenDraft) inputRef.current?.focus();
   }, [spokenDraft]);
 
+  /**
+   * Record one attempt, and HAND BACK WHAT WAS GRADED.
+   *
+   * The return value is #313's one addition: every hand-driven caller ignores
+   * it and reads `result` from state exactly as before, but the hands-free
+   * loop cannot — `useConversationSession.submit` is a promise of a verdict,
+   * because the driver has to decide from it whether to read an answer aloud,
+   * offer its one retry, or move on, and it decides that inside an async
+   * continuation where this page's `result` state has not been committed yet.
+   * `null` means no attempt was recorded.
+   */
   const submitAttempt = useCallback(
     async (
       input: Omit<RecordPracticeAttemptInput, 'questionId'>,
       mode: Pending,
-    ) => {
-      if (!id || !question) return;
+    ): Promise<PracticeAttemptResult | null> => {
+      if (!id || !question) return null;
       // Reached only from a click or a form submit — see `hasUserGesture`.
       setHasUserGesture(true);
       setPending(mode);
@@ -715,6 +890,7 @@ export default function PracticeSessionPage() {
           ...input,
         });
         if (isMounted()) setResult(graded);
+        return graded;
       } catch (err) {
         if (isMounted()) {
           setActionError(describeAttemptError(err, Boolean(input.retryOfAttemptId)));
@@ -739,6 +915,7 @@ export default function PracticeSessionPage() {
             void refresh();
           }
         }
+        return null;
       } finally {
         if (isMounted()) setPending(null);
       }
@@ -878,8 +1055,23 @@ export default function PracticeSessionPage() {
     releaseRecording();
   };
 
-  /** Throw it away and type instead — the same clearing, plus the toggle. */
+  /**
+   * Throw it away and type instead — the same clearing, plus the toggle.
+   *
+   * REACHABLE FROM EVERY PHASE OF THE HANDS-FREE LOOP (#313,
+   * `conversation-mode.md` §7's third preserved constraint). `stop('typing')`
+   * is the driver's SILENT exit: the learner just asked for this, and being
+   * told what you did is not information. Nothing about the session goes with
+   * it — the questions already answered, the attempt rows and the progress
+   * counter all live on the server, so this changes which control renders and
+   * nothing else.
+   *
+   * It deliberately does NOT write `voice.conversationMode`. Typing for one
+   * question on a noisy bus is not a statement about how this learner wants to
+   * start their next session; only the mode control itself is.
+   */
   const handleTypeInstead = () => {
+    conversationRef.current?.stop('typing');
     setSpokenDraft(null);
     setResponse('');
     setVoiceError(null);
@@ -887,6 +1079,206 @@ export default function PracticeSessionPage() {
     releaseRecording();
     setAnswerMode('text');
     inputRef.current?.focus();
+  };
+
+  // ---------------------------------------------------------------------------
+  // The hands-free loop's four ports (#313). The driver is mounted below them.
+  // ---------------------------------------------------------------------------
+
+  /**
+   * What the loop is having read aloud right now, or `null`.
+   *
+   * ONE `QuestionAudio` PER UTTERANCE, keyed by `id`. That component autoplays
+   * once per `text`, so two identical sentences in a row — an accepted answer
+   * repeated after a retry — would be one play and a driver waiting forever on
+   * the second. A monotonic key makes every `speak()` a fresh mount and
+   * therefore a fresh play, and it costs a remount of a button.
+   */
+  const [speechRequest, setSpeechRequest] = useState<{
+    id: number;
+    text: string;
+    kind: 'question' | 'answer';
+  } | null>(null);
+  const speechIdRef = useRef(0);
+  /** The pending `speak()`, resolved by `onFinished` or by our own `stop()`. */
+  const speechResolveRef = useRef<((outcome: ConversationSpeechOutcome) => void) | null>(
+    null,
+  );
+  const speechPlayerRef = useRef<QuestionAudioHandle | null>(null);
+
+  const settleSpeech = useCallback((outcome: ConversationSpeechOutcome) => {
+    const resolve = speechResolveRef.current;
+    speechResolveRef.current = null;
+    resolve?.(outcome);
+  }, []);
+
+  /**
+   * The voice, as the driver's port.
+   *
+   * `question` and `answer` go through `QuestionAudio` — the premium voice, the
+   * learner's own rate, the deployment-wide audio cache and a replay button all
+   * come with it — and resolve `ended`/`failed` from its `onFinished` (#311).
+   * A `cancelled` can only ever come from OUR OWN `stop()`: that component
+   * deliberately reports nothing for a cancel, which is exactly what a barge-in
+   * needs (the playback it cut off must not later announce itself as finished
+   * and move the machine on), so this is where the honest `cancelled` is
+   * produced.
+   */
+  const conversationSpeech = useMemo<ConversationSpeechPort>(
+    () => ({
+      speak: (text, kind) => {
+        // Whatever was speaking is superseded, and its promise settled — a
+        // `speak` that never resolves is a loop that never moves.
+        settleSpeech('cancelled');
+        if (kind === 'nudge') return speakNudge(text);
+        return new Promise<ConversationSpeechOutcome>((resolve) => {
+          speechResolveRef.current = resolve;
+          speechIdRef.current += 1;
+          setSpeechRequest({ id: speechIdRef.current, text, kind });
+        });
+      },
+      stop: () => {
+        speechPlayerRef.current?.stop();
+        // The nudge path has no component to stop — it is a bare utterance on
+        // the shared engine, so this is what silences one.
+        if (typeof window !== 'undefined') window.speechSynthesis?.cancel();
+        settleSpeech('cancelled');
+      },
+    }),
+    [settleSpeech],
+  );
+
+  /**
+   * Grade one spoken answer for the loop, and answer its three questions.
+   *
+   * THE SAME `POST /api/practice/sessions/{id}/attempts` E12's auto-submit
+   * already sends, with the same `voiceAttemptFields` — there is no second
+   * submit path, and epic #304's locked decision 6 (no API change) is kept by
+   * this function being a binding rather than a request.
+   *
+   * `retryOfAttemptId` is supplied HERE because the driver has no attempt id.
+   * It is armed only for an attempt that the server would actually accept a
+   * retry of — not already a retry, not revealed — which mirrors
+   * `canAnswerAgain`'s own conditions rather than discovering them as a 409 a
+   * walking learner cannot act on.
+   */
+  const conversationSubmit = useCallback(
+    async (
+      transcript: string,
+      confidence: number | null,
+    ): Promise<ConversationGrade | null> => {
+      const graded = await submitAttempt(
+        {
+          responseText: transcript,
+          durationMs: elapsedMs(),
+          ...voiceAttemptFields({
+            promptWasHeard,
+            spokenText: transcript,
+            confidence,
+            retryOf: conversationRetryOfRef.current,
+          }),
+        },
+        'answer',
+      );
+      if (!graded) return null;
+
+      const { attempt } = graded;
+      conversationRetryOfRef.current =
+        attempt.retryOfAttemptId === null && !attempt.revealed ? attempt.id : null;
+
+      return {
+        outcome: attempt.outcome,
+        // The FIRST accepted answer, which is what the hand-driven verdict
+        // reads aloud too. `null` — a question whose answers need a state this
+        // learner has not set — is ordinary, and the driver says nothing.
+        spokenAnswer: graded.acceptedAnswers[0]?.text ?? null,
+        // The server's own verdict about the recogniser, never this page's.
+        misheard: attempt.failureCause === 'misheard',
+      };
+    },
+    [elapsedMs, promptWasHeard, submitAttempt],
+  );
+
+  const conversation = useConversationSession({
+    capture: conversationCapture,
+    voiceActivity,
+    speech: conversationSpeech,
+    // The identical call the hand-driven transcription effect makes.
+    transcribe: transcribeAudio,
+    submit: conversationSubmit,
+    // The host's own Next, unchanged. The driver does not wait on it — it
+    // waits for `questionId` to change, which is the only signal that means
+    // the screen actually moved.
+    advance: handleNext,
+    questionId,
+    questionText: question?.prompt ?? null,
+  });
+
+  conversationRef.current = conversation;
+  conversationRunningRef.current = conversation.isRunning;
+
+  /**
+   * Land on the mode the learner asked for, once.
+   *
+   * BOTH READS HAVE TO HAVE SETTLED. `voice.conversationMode` says what they
+   * want; `transcribeBound` says whether this deployment can offer it, and
+   * both start out as "not yet". Seeding before either lands would put a
+   * learner who chose Voice on Text (or, worse, on a Voice mode this
+   * deployment cannot record in) and then move the control under them.
+   */
+  useEffect(() => {
+    if (modeSeededRef.current) return;
+    if (voicePrefsLoading || voiceAvailabilityLoading) return;
+    modeSeededRef.current = true;
+    if (voicePrefs.conversationMode && transcribeBound) setAnswerMode('voice');
+  }, [
+    transcribeBound,
+    voiceAvailabilityLoading,
+    voicePrefs.conversationMode,
+    voicePrefsLoading,
+  ]);
+
+  /**
+   * The learner chose how to answer — for this session AND for the next one.
+   *
+   * TWO THINGS HAPPEN HERE, and both are the point of #313:
+   *
+   *  1. **The gesture is recorded.** `hasUserGesture` used to be set in
+   *     `submitAttempt` and nowhere else, so nothing had armed autoplay before
+   *     the FIRST answer of a session — a learner who turned
+   *     `voice.readQuestionsAloud` on got silence on question 1, which is the
+   *     one question they most clearly asked to hear. A tap on this control is
+   *     a real interaction with the document, which is all a browser wants.
+   *  2. **The choice is stored**, through the same `PATCH /api/user-settings`
+   *     every other preference uses, and with the same `writeFor` null-delete:
+   *     returning to the built-in default sends `null`, never today's value.
+   *     So the mode survives a reload, which is what makes "one tap" true on
+   *     the second session as well as the first.
+   */
+  const chooseAnswerMode = (next: AnswerMode) => {
+    setHasUserGesture(true);
+    if (next === answerMode) return;
+    setAnswerMode(next);
+    // Leaving Voice ends the loop silently — the learner just asked for it.
+    if (next !== 'voice') conversationRef.current?.stop('typing');
+    void saveVoice({
+      conversationMode: writeFor(next === 'voice', DEFAULT_VOICE_CONVERSATION_MODE),
+    });
+  };
+
+  /**
+   * The loop's last word, when there is no question left to render it beside.
+   *
+   * `null` unless Voice is the mode and there is something to say — see the
+   * panel itself for why the notice outlives the question.
+   */
+  const conversationNotice =
+    answerMode === 'voice' && transcribeBound ? conversation.notice : null;
+
+  /** One tap: the gesture that arms audio, and the loop. */
+  const handleStartConversation = () => {
+    setHasUserGesture(true);
+    conversation.start();
   };
 
   /**
@@ -1149,6 +1541,201 @@ export default function PracticeSessionPage() {
           </Alert>
         )}
 
+        {(question || conversationNotice) && (
+          <Box sx={{ mb: 3 }}>
+            {/* MOUNTED UNCONDITIONALLY. It renders null unless `transcribe` is
+                KNOWN to be unbound, which is why it can sit here rather than
+                behind a condition this page would have to get right — and it
+                is NOT the app-wide `AiNotReady` for `systemReady === false`,
+                which is a different problem with a different remedy. The two
+                are never merged.
+
+                IT SITS BESIDE THE MODE CONTROL (#313) because it is the
+                explanation for the missing option: with `transcribe` unbound
+                there is no Voice to choose, and "why not" belongs where the
+                choice would have been rather than further down the page. */}
+            {question && <VoiceUnavailableNotice />}
+
+            {/* THE SESSION-WIDE PICKER (#313, epic #304 / E13).
+
+                ABOVE THE QUESTION, not beside the answer field, because it is
+                no longer a per-question choice about which control to type
+                into: it decides how this whole session is conducted, and
+                `docs/specs/conversation-mode.md` §7 amends `voice.md` §5 —
+                formally, on the record — to allow exactly that. `Decisions
+                locked` #6 there locks OPTIONALITY, not the granularity of the
+                picker: this is still a choice, still reversible at every phase,
+                and still not the only way to answer.
+
+                THE VOICE OPTION IS ABSENT, NOT DISABLED, when no `transcribe`
+                model is bound (`conversation-mode.md` §10's own row, and
+                `voice.md` §1's "hidden, not disabled" rule reused unchanged).
+                Caught here, at the moment the mode is chosen — never mid-walk,
+                which is the failure locked decision 4 exists to prevent. With
+                nothing to choose between, the whole group goes: a one-button
+                picker is a control that cannot be operated, and the notice
+                above has already said why. */}
+            {question && transcribeBound && (
+              <ToggleButtonGroup
+                exclusive
+                size="small"
+                value={answerMode}
+                // The two buttons say what they DO; this says what they are
+                // choosing between, which is what a screen-reader user needs
+                // before either label means anything. It names the GROUP, so
+                // both buttons are reachable and announced in its context —
+                // and `ToggleButton` renders real `<button>`s, so Tab and
+                // Space/Enter work with nothing added.
+                aria-label="How you want to answer"
+                onChange={(_event, next: AnswerMode | null) => {
+                  // MUI reports `null` when the already-active button is
+                  // pressed again. Ignored: there is no third state, and
+                  // clearing the choice would leave a learner with neither
+                  // control on screen.
+                  if (next) chooseAnswerMode(next);
+                }}
+              >
+                <ToggleButton value="text">
+                  <KeyboardIcon fontSize="small" sx={{ mr: 0.5 }} />
+                  Text
+                </ToggleButton>
+                <ToggleButton value="voice">
+                  <MicIcon fontSize="small" sx={{ mr: 0.5 }} />
+                  Voice
+                </ToggleButton>
+              </ToggleButtonGroup>
+            )}
+
+            {/* THE LOOP'S OWN CONTROLS AND ITS ONE STATUS REGION.
+
+                EVERYTHING IT SAYS IS ALSO WRITTEN DOWN. The driver speaks
+                every phase change and every involuntary exit, because a
+                walking learner is not reading the screen — but a learner who
+                glances at it, has sound off, or is using a screen reader has
+                otherwise no way to tell listening from thinking from stopped.
+                One `role="status"` region, mounted from the first render of
+                this branch and empty until there is something to say. */}
+            {answerMode === 'voice' && transcribeBound && (
+              <Paper variant="outlined" sx={{ mt: 2, p: { xs: 2, sm: 2.5 } }}>
+                {/* THE CONTROLS NEED A QUESTION; THE NOTICE DOES NOT. The loop
+                    stopping BECAUSE the session ran out of questions is exactly
+                    the case where `question` is already null, and a panel that
+                    unmounted with it would take the one sentence explaining
+                    what just happened off the screen at the moment it was
+                    said. */}
+                {question && (
+                  <>
+                  <Typography variant="body2" color="text.secondary">
+                    Hands-free practice reads each question aloud, listens for
+                    your answer, and moves on by itself. You can stop, or go back
+                    to typing, at any moment.
+                  </Typography>
+
+                  <Stack
+                    direction={{ xs: 'column', sm: 'row' }}
+                    spacing={1}
+                    sx={{ mt: 2, alignItems: { xs: 'stretch', sm: 'center' } }}
+                  >
+                    {conversation.isRunning ? (
+                      <Button
+                        variant="outlined"
+                        startIcon={<StopIcon />}
+                        onClick={() => conversation.stop()}
+                      >
+                        Stop
+                      </Button>
+                    ) : (
+                      <Button
+                        variant="contained"
+                        startIcon={<MicIcon />}
+                        onClick={handleStartConversation}
+                        disabled={pending !== null}
+                      >
+                        Start hands-free
+                      </Button>
+                    )}
+                    {/* REACHABLE AT EVERY PHASE — rendered from this branch
+                        rather than from any state of the loop, so there is no
+                        moment in `speakingQuestion → listening → processing →
+                        speakingAnswer → advancing` where it is missing. */}
+                    <Button variant="text" onClick={handleTypeInstead}>
+                      Type instead
+                    </Button>
+                  </Stack>
+                  </>
+                )}
+
+                <Box role="status" aria-live="polite" sx={{ mt: 1 }}>
+                  {CONVERSATION_PHASE_TEXT[conversation.phase] && (
+                    <Typography variant="body2" color="text.secondary">
+                      {CONVERSATION_PHASE_TEXT[conversation.phase]}
+                    </Typography>
+                  )}
+                  {conversation.notice && (
+                    <Typography variant="body2" color="text.secondary">
+                      {conversation.notice.message}
+                    </Typography>
+                  )}
+                </Box>
+
+                {conversation.notice && (
+                  <Button
+                    size="small"
+                    variant="text"
+                    onClick={conversation.dismissNotice}
+                  >
+                    Dismiss
+                  </Button>
+                )}
+
+                {/* THE LOOP'S VOICE. One mount per utterance — see
+                    `speechRequest` — and unmounted with the loop, which is what
+                    silences it. `autoPlay` is the whole point: nobody is going
+                    to press play. */}
+                {conversation.isRunning && speechRequest && (
+                  <Box sx={{ mt: 1, ml: -1 }}>
+                    <QuestionAudio
+                      key={speechRequest.id}
+                      ref={speechPlayerRef}
+                      text={speechRequest.text}
+                      autoPlay
+                      premiumVoice={voicePrefs.preferPremiumVoice}
+                      voice={voicePrefs.preferredVoice}
+                      rate={voicePrefs.speechRate}
+                      // The QUESTION was actually spoken — `promptMode:
+                      // 'heard'`, exactly as the hand-driven player reports it.
+                      // An accepted answer read aloud says nothing about how
+                      // the question reached the learner.
+                      onPlayed={() => {
+                        if (speechRequest.kind === 'question') setPromptWasHeard(true);
+                      }}
+                      // `ended` / `failed` both mean "stop waiting" (#311). A
+                      // cancel is never reported here, by design — see
+                      // `conversationSpeech`.
+                      onFinished={(event) =>
+                        settleSpeech(event.reason === 'ended' ? 'ended' : 'failed')
+                      }
+                    />
+                  </Box>
+                )}
+
+                {/* A NUDGE, NEVER AN ERROR (`conversation-mode.md` §8). A
+                    browser with no wake lock is not broken and the loop runs
+                    exactly the same; what changes is that the phone may lock
+                    itself, which suspends timers and audio on every mobile
+                    browser this product runs on. Saying so beats letting it be
+                    reported as "my session stopped by itself". */}
+                {conversation.isRunning && !conversation.wakeLock.isSupported && (
+                  <Typography variant="caption" color="text.secondary" component="p" sx={{ mt: 1 }}>
+                    This browser can&rsquo;t keep the screen awake, so keep the
+                    page open while you practise.
+                  </Typography>
+                )}
+              </Paper>
+            )}
+          </Box>
+        )}
+
         {question && (
           <Paper variant="outlined" sx={{ p: { xs: 2, sm: 3 } }}>
             <Typography
@@ -1193,56 +1780,35 @@ export default function PracticeSessionPage() {
                 // all, so `voice.readQuestionsAloud` was a switch on
                 // `/settings/voice` that did nothing and explained nothing.
                 //
-                // QUESTION 1 STILL DOES NOT SPEAK BY ITSELF: `hasUserGesture`
-                // is set in `submitAttempt` and nowhere else, so nothing has
-                // armed it before the first answer. #313 sets it from the
-                // Start/mode tap, which is where question 1 gets its gesture —
-                // and which also removes the mid-question flip today's late
-                // gesture causes.
-                autoPlay={voicePrefs.readQuestionsAloud && hasUserGesture}
+                // QUESTION 1 NOW SPEAKS (#313). `hasUserGesture` is no longer
+                // set only in `submitAttempt` — the Text/Voice tap and the
+                // hands-free Start both arm it, which is how the first question
+                // of a session gets the gesture a browser insists on before any
+                // sound at all.
+                //
+                // THE LAST TWO CLAUSES CLOSE THE TRANSIENT #311 LEFT BEHIND.
+                // `hasUserGesture` still flips false → true inside
+                // `submitAttempt` for a learner who never touches the mode
+                // control, and this prop's effect keys on its own value: that
+                // flip alone would re-read the question at the exact moment the
+                // verdict appeared. `setPending` is committed in the same batch
+                // as the gesture, so from the first submit onwards this is
+                // false for the rest of the question and the re-read cannot
+                // happen. It re-arms when Next clears both.
+                //
+                // AND NOT WHILE THE LOOP IS DRIVING, or the same sentence plays
+                // twice: conversation mode reads the question through its own
+                // player (`speechRequest`), which is the one whose end it is
+                // waiting on.
+                autoPlay={
+                  voicePrefs.readQuestionsAloud &&
+                  hasUserGesture &&
+                  pending === null &&
+                  result === null &&
+                  !conversation.isRunning
+                }
               />
             </Box>
-
-            {/* MOUNTED UNCONDITIONALLY. It renders null unless `transcribe` is
-                KNOWN to be unbound, which is why it can sit here rather than
-                behind a condition this page would have to get right — and it
-                is NOT the app-wide `AiNotReady` for `systemReady === false`,
-                which is a different problem with a different remedy. The two
-                are never merged. */}
-            <VoiceUnavailableNotice />
-
-            {/* The toggle appears only where speaking is actually possible.
-                Offering "Speak" on a deployment with no `transcribe` model
-                bound would be a dead affordance beside a notice explaining
-                that it is dead. */}
-            {transcribeBound && (
-              <ToggleButtonGroup
-                exclusive
-                size="small"
-                value={answerMode}
-                // The two buttons say what they DO; this says what they are
-                // choosing between, which is what a screen-reader user needs
-                // before either label means anything.
-                aria-label="How you want to answer"
-                onChange={(_event, next: AnswerMode | null) => {
-                  // MUI reports `null` when the already-active button is
-                  // pressed again. Ignored: there is no third state, and
-                  // clearing the choice would leave a learner with neither
-                  // control on screen.
-                  if (next) setAnswerMode(next);
-                }}
-                sx={{ mt: 2 }}
-              >
-                <ToggleButton value="text">
-                  <KeyboardIcon fontSize="small" sx={{ mr: 0.5 }} />
-                  Type
-                </ToggleButton>
-                <ToggleButton value="voice">
-                  <MicIcon fontSize="small" sx={{ mr: 0.5 }} />
-                  Speak
-                </ToggleButton>
-              </ToggleButtonGroup>
-            )}
 
             {/* The form is a real `<form>` so Enter submits, which is what a
                 learner typing an answer expects. */}
@@ -1255,7 +1821,15 @@ export default function PracticeSessionPage() {
                 </Typography>
               )}
 
-              {answerMode === 'voice' && transcribeBound && (
+              {/* THE HAND-DRIVEN MICROPHONE, and NOT while the loop is
+                  driving: two controls holding two microphones over one answer
+                  is one recording too many, and the "hold to talk" invitation
+                  is wrong for a learner who has just been told to answer when
+                  they are ready. Voice mode without the loop running is
+                  E9/E12's per-question flow, unchanged in every particular —
+                  `conversation-mode.md` §10's own degradation row keeps it as
+                  the behaviour of Voice mode when the loop is not armed. */}
+              {answerMode === 'voice' && transcribeBound && !conversation.isRunning && (
                 <Box sx={{ mb: 2 }}>
                   <PushToTalkButton
                     capture={capture}
@@ -1463,11 +2037,25 @@ export default function PracticeSessionPage() {
                   alignItems: { xs: 'stretch', sm: 'center' },
                 }}
               >
+                {/* INERT WHILE THE LOOP IS DRIVING, all three of them. The
+                    driver is about to submit this question itself, and a hand
+                    on Submit, Show me the answer or Skip in the middle of that
+                    is two attempts at one question — the second of which the
+                    server would refuse as a retry of a retry. The escape is
+                    "Type instead", which is on screen at every phase and ends
+                    the loop before handing the question back. In Text mode, and
+                    in Voice mode with the loop idle, `isRunning` is false and
+                    nothing about these three has changed. */}
                 <Button
                   type="submit"
                   variant="contained"
                   size="large"
-                  disabled={!trimmed || pending !== null || result !== null}
+                  disabled={
+                    !trimmed ||
+                    pending !== null ||
+                    result !== null ||
+                    conversation.isRunning
+                  }
                 >
                   {pending === 'answer'
                     ? 'Checking…'
@@ -1478,7 +2066,7 @@ export default function PracticeSessionPage() {
                 <Button
                   variant="outlined"
                   onClick={handleReveal}
-                  disabled={pending !== null || result !== null}
+                  disabled={pending !== null || result !== null || conversation.isRunning}
                 >
                   {pending === 'reveal' ? 'Showing…' : 'Show me the answer'}
                 </Button>
@@ -1486,7 +2074,7 @@ export default function PracticeSessionPage() {
                   variant="text"
                   color="inherit"
                   onClick={handleSkip}
-                  disabled={pending !== null || result !== null}
+                  disabled={pending !== null || result !== null || conversation.isRunning}
                 >
                   {pending === 'skip' ? 'Skipping…' : 'Skip'}
                 </Button>

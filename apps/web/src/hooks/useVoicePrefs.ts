@@ -36,10 +36,10 @@
  * whatever `speechRate` the learner set, and nothing is missing.
  */
 
-import { useMemo } from 'react';
+import { useCallback, useMemo } from 'react';
 
 import { useUserSettings } from './useUserSettings';
-import type { VoiceSettings } from '../types';
+import type { VoiceSettings, VoiceSettingsPatch } from '../types';
 
 /**
  * A spoken answer grades itself on release, with no confirm step.
@@ -119,6 +119,23 @@ export interface VoicePreferences {
   conversationMode: boolean;
 }
 
+/**
+ * What to send for a value the learner just chose: the value, or `null`.
+ *
+ * `null` is the DELETE. Writing today's default back because the learner
+ * happened to land on it pins them to it forever, invisibly, including after a
+ * later release moves it — this file's own header states the cost in full.
+ *
+ * IT LIVES HERE, BESIDE THE DEFAULTS IT IS ALWAYS CALLED WITH, so the two
+ * surfaces that write a voice preference — `/settings/voice` and the practice
+ * screen's own `Text | Voice` control (#313) — share one reducer rather than
+ * one of them re-deriving it. `components/settings/VoiceSettings.tsx` re-exports
+ * it, so every existing caller of `writeFor` is unaffected.
+ */
+export function writeFor<T>(next: T, builtInDefault: T): T | null {
+  return next === builtInDefault ? null : next;
+}
+
 /** A stored boolean, or the built-in default. A stored `false` is real. */
 function resolveBoolean(value: unknown, fallback: boolean): boolean {
   return typeof value === 'boolean' ? value : fallback;
@@ -196,6 +213,27 @@ export interface UseVoicePrefsResult {
   voice: VoicePreferences;
   /** True until the first settings read resolves. Callers render defaults meanwhile. */
   isLoading: boolean;
+  /**
+   * Store ONE voice preference, from outside the settings page (#313).
+   *
+   * THE SAME `PATCH /api/user-settings` EVERY OTHER CONTROL USES, on the same
+   * `useUserSettings` instance this hook already reads through — so a page that
+   * writes a preference still makes exactly one settings request, and there is
+   * still no second copy of the document anywhere in this feature.
+   *
+   * The `null`-delete contract is the CALLER'S to keep, exactly as it is on
+   * `/settings/voice`: send `null` for a field the learner has moved back to
+   * the built-in default (`writeFor` in `components/settings/VoiceSettings.tsx`
+   * is the reducer that does it), never today's default value — see this
+   * file's own header for what materialising one costs.
+   *
+   * NEVER REJECTS. A preference that could not be stored must not take a
+   * practice session down with it: the mode the learner just chose is already
+   * theirs on screen, and all that was lost is that it will not be there next
+   * time. `useUserSettings` has already reported the failure into its own
+   * `error`.
+   */
+  saveVoice: (patch: VoiceSettingsPatch) => Promise<void>;
 }
 
 export function useVoicePrefs(): UseVoicePrefsResult {
@@ -206,12 +244,25 @@ export function useVoicePrefs(): UseVoicePrefsResult {
   // `useNavigationPrefs` documents for the rail. It also drops the
   // `ThemeContextProvider` requirement, which a practice screen has no other
   // reason to carry.
-  const { settings, isLoading } = useUserSettings({ syncTheme: false });
+  const { settings, isLoading, updateSettings } = useUserSettings({
+    syncTheme: false,
+  });
 
   const voice = useMemo(
     () => resolveVoicePreferences(settings?.voice),
     [settings],
   );
 
-  return { voice, isLoading };
+  const saveVoice = useCallback(
+    async (patch: VoiceSettingsPatch) => {
+      try {
+        await updateSettings({ voice: patch });
+      } catch {
+        // Swallowed on purpose — see `saveVoice`'s own contract above.
+      }
+    },
+    [updateSettings],
+  );
+
+  return { voice, isLoading, saveVoice };
 }

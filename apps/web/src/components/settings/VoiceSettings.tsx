@@ -1,5 +1,5 @@
 /**
- * The six `user_settings.voice` controls, and the voice picker.
+ * The seven `user_settings.voice` controls, and the voice picker.
  *
  * Issue #288, epic #280. Rendered by `pages/VoiceSettingsPage.tsx` inside the
  * shared `UserSettingsSection` chrome — the same split
@@ -79,6 +79,7 @@ import VolumeUpIcon from '@mui/icons-material/VolumeUp';
 import { synthesizeSpeech } from '../../services/api';
 import {
   DEFAULT_VOICE_AUTO_SUBMIT_SPOKEN,
+  DEFAULT_VOICE_CONVERSATION_MODE,
   DEFAULT_VOICE_PREFER_PREMIUM,
   DEFAULT_VOICE_READ_ANSWERS_ALOUD,
   DEFAULT_VOICE_READ_QUESTIONS_ALOUD,
@@ -86,6 +87,7 @@ import {
   VOICE_SPEECH_RATE_MAX,
   VOICE_SPEECH_RATE_MIN,
   resolveVoicePreferences,
+  writeFor,
 } from '../../hooks/useVoicePrefs';
 import type {
   SpeechVoice,
@@ -119,15 +121,15 @@ const RATE_MARKS = [
 ];
 
 /**
- * What to send for a value the learner just chose: the value, or `null`.
+ * The null-delete reducer every control on this page uses — see rule C in the
+ * file header for what it prevents.
  *
- * `null` is the DELETE. Writing today's default back because the learner
- * happened to land on it pins them to it forever, invisibly, including after a
- * later release moves it — see rule C in the file header.
+ * DEFINED IN `hooks/useVoicePrefs.ts`, beside the `DEFAULT_VOICE_*` constants
+ * it is always called with, since #313 gave the practice screen a second
+ * surface that writes a voice preference. Re-exported here unchanged, so this
+ * file is still where a reader of the settings page finds it.
  */
-export function writeFor<T>(next: T, builtInDefault: T): T | null {
-  return next === builtInDefault ? null : next;
-}
+export { writeFor };
 
 /** What the preview is currently saying, if anything. */
 type PreviewState =
@@ -184,6 +186,7 @@ export function VoiceSettings({
   // never point every `aria-describedby` at the first one's copy.
   const idPrefix = useId();
   const autoSubmitHelpId = `${idPrefix}-auto-submit-help`;
+  const conversationHelpId = `${idPrefix}-conversation-help`;
   const readQuestionsHelpId = `${idPrefix}-read-questions-help`;
   const readAnswersHelpId = `${idPrefix}-read-answers-help`;
   const premiumHelpId = `${idPrefix}-premium-help`;
@@ -364,6 +367,51 @@ export function VoiceSettings({
             speaking. Turn it off if you would rather read what we heard, fix
             anything that came out wrong, and send it yourself.
           </Typography>
+
+          {/* CONVERSATION MODE (#313, epic #304 / E13).
+
+              IN THIS CARD, not a new one, and not a new settings page: it
+              answers the same question its neighbour above does — what happens
+              when you answer out loud — and `CLAUDE.md`'s Settings UI Pattern
+              reserves a new destination for a new question, never for one more
+              switch about an existing one.
+
+              Bound with `writeFor` like every other control here, so turning it
+              back off sends the null-delete rather than pinning this learner to
+              today's `false` forever. See rule C in the file header. */}
+          <Box sx={{ mt: 2 }}>
+            <FormControlLabel
+              disabled={isSaving}
+              label="Start practice sessions hands-free"
+              control={
+                <Switch
+                  checked={resolved.conversationMode}
+                  onChange={(_event, next) =>
+                    onChange({
+                      conversationMode: writeFor(
+                        next,
+                        DEFAULT_VOICE_CONVERSATION_MODE,
+                      ),
+                    })
+                  }
+                  // `slotProps.input` for the same reason as its neighbour
+                  // above: MUI forwards unknown props to the ROOT span, leaving
+                  // the element that carries `role="switch"` undescribed.
+                  slotProps={{ input: { 'aria-describedby': conversationHelpId } }}
+                />
+              }
+            />
+            <Typography
+              id={conversationHelpId}
+              variant="body2"
+              color="text.secondary"
+              sx={{ maxWidth: '62ch' }}
+            >
+              Practice starts on Voice instead of Text, so you can put the phone
+              down and answer out loud. You can switch back to typing at any
+              moment, and nothing you have already answered is lost.
+            </Typography>
+          </Box>
         </CardContent>
       </Card>
 
