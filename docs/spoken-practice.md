@@ -21,6 +21,34 @@ that new answer is the one that counts. Correcting it costs you nothing:
 your practice history and your progress read exactly as if you had gotten
 it right the first time. Nothing about the misheard attempt sticks to you.
 
+## Practice hands-free
+
+If you'd rather not hold your phone or look at the screen, you can walk
+through a whole practice session just by talking. Look for **Start
+hands-free** on a practice session. One tap, and OathPath takes it from
+there: it reads you the question, listens for your answer, tells you how
+you did, reads you the right answer if you need it, and moves on to the
+next question by itself. You don't have to press anything between
+questions.
+
+You can jump in any time you want to say something — you don't have to
+wait for the question to finish. Start talking, and OathPath stops reading
+and listens instead. And you don't have to watch the screen to know what's
+happening: a little sound plays when it's your turn to talk, and another
+when it has heard you, so you can tell what's going on with your ears
+alone.
+
+**You are always in control.** Say **Stop** any time, or tap **Type
+instead**, and you're back to answering by hand — nothing about your
+session or your progress is lost either way.
+
+**Keep the screen on and this page in front of you while you practice this
+way.** If your phone locks or you switch to another app, practice stops
+where it is — that's just how phones work when the screen goes dark or
+another app takes over, not something wrong with OathPath. Walking around
+your kitchen or living room with the screen on works fine; a session
+running in your pocket does not.
+
 ## Correcting a mishearing never counts against you
 
 Sometimes what gets marked wrong has nothing to do with whether you knew the
