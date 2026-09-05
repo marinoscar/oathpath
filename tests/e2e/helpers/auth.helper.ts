@@ -4,7 +4,7 @@ import { OnboardingLevel, seedOnboarding } from './seed-onboarding';
 // Re-exported so a spec that wants a partial onboarding state (#85) can
 // `import { seedOnboarding } from '../helpers/auth.helper'` alongside
 // `loginAsTestUser` rather than needing a second import path.
-export { seedOnboarding } from './seed-onboarding';
+export { seedOnboarding, TEST_AI_KEY } from './seed-onboarding';
 export type {
   OnboardingLevel,
   SeedOnboardingOptions,
