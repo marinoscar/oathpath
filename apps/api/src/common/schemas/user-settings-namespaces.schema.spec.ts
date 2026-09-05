@@ -1,6 +1,11 @@
 import {
   navigationSchema,
   studySchema,
+  coachSchema,
+  coachPatchSchema,
+  COACH_PERSONAS,
+  DEFAULT_COACH_PERSONA,
+  DEFAULT_COACH_REACTIONS,
   voiceSchema,
   voicePatchSchema,
   VOICE_SPEECH_RATE_MIN,
@@ -144,6 +149,88 @@ describe('voiceSchema (issue #282, epic #280 "Spoken Civics Audio")', () => {
     it('navigationSchema and studySchema also produce {} from {}', () => {
       expect(navigationSchema.parse({})).toEqual({});
       expect(studySchema.parse({})).toEqual({});
+    });
+  });
+});
+
+describe('coachSchema (issue #317, epic #305 "The Coach\'s personality")', () => {
+  it('round-trips both fields', () => {
+    const value = { persona: 'playful' as const, reactions: false };
+
+    expect(coachSchema.parse(value)).toEqual(value);
+  });
+
+  it('accepts a namespace with no fields at all (both fields are optional)', () => {
+    expect(coachSchema.parse({})).toEqual({});
+  });
+
+  it('rejects an unknown key (the schema is `.strict()`)', () => {
+    // `.strict()` is what turns a client typo into a 400 instead of a write
+    // that returns 200 and stores nothing — the same silent-success failure
+    // the namespaces file's header describes for a namespace missing from
+    // `userSettingsSchema`.
+    expect(() => coachSchema.parse({ personality: 'playful' })).toThrow();
+  });
+
+  describe('persona: a CLOSED enum', () => {
+    it.each(COACH_PERSONAS)('accepts %s', (persona) => {
+      expect(coachSchema.parse({ persona }).persona).toBe(persona);
+    });
+
+    it.each([
+      ['an unknown persona', 'sarcastic'],
+      ['a near-miss of a real one', 'Supportive'],
+      ['an empty string', ''],
+      ['a non-string', 3],
+    ])('rejects %s', (_label, persona) => {
+      // Closed, unlike `voice.preferredVoice` (shape-validated only) — the
+      // accepted set here belongs to THIS application, not to a provider, so
+      // there is no rolling-provider argument for accepting a value nothing
+      // can resolve. A stored persona no registry entry matches would compose
+      // feedback with no prompt fragment at all.
+      expect(() => coachSchema.parse({ persona })).toThrow();
+    });
+  });
+
+  it('rejects a non-boolean reactions', () => {
+    expect(() => coachSchema.parse({ reactions: 'yes' })).toThrow();
+  });
+
+  describe('coachPatchSchema: every field also accepts null (restore the default)', () => {
+    it('accepts both fields set to null in the same request', () => {
+      const patch = { persona: null, reactions: null };
+
+      expect(coachPatchSchema.parse(patch)).toEqual(patch);
+    });
+
+    it('still enforces the persona enum when non-null', () => {
+      expect(() => coachPatchSchema.parse({ persona: 'sarcastic' })).toThrow();
+    });
+  });
+
+  describe('NEVER `.default()` — absent must mean "use the built-in default, resolved at read time"', () => {
+    // The same behavioural assertion the `voice` block above makes, and it
+    // bites harder here: a `.default('supportive')` would materialise the
+    // persona into a stored row the first time a learner touched any
+    // unrelated preference, turning "nothing changes for existing accounts"
+    // into "nothing ever changes for them" the day the default moves.
+    it('parsing an empty namespace produces an empty object, not a defaulted one', () => {
+      expect(coachSchema.parse({})).toEqual({});
+      expect(coachSchema.parse({})).not.toHaveProperty('persona');
+      expect(coachSchema.parse({})).not.toHaveProperty('reactions');
+    });
+
+    it('the built-in defaults are read-time constants, not schema defaults', () => {
+      // `supportive` is exactly today's voice, so a learner who never opens
+      // the setting experiences zero change; reactions default ON because the
+      // coverage gap epic #305 exists to close is that most attempts say
+      // nothing at all beyond the verdict.
+      expect(DEFAULT_COACH_PERSONA).toBe('supportive');
+      expect(DEFAULT_COACH_REACTIONS).toBe(true);
+
+      // And the default persona is a member of the enum it defaults to — the
+      // one way these two declarations could drift apart while both compile.
+      expect(COACH_PERSONAS).toContain(DEFAULT_COACH_PERSONA);
     });
   });
 });
