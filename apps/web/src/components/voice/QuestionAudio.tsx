@@ -79,18 +79,102 @@
  * one component, rather than as coordination bolted onto each host — a host
  * cannot observe a click on a button it does not own, and the invariant is a
  * property of "this is the app's audio player", not of any one screen.
+ *
+ * =============================================================================
+ * `onPlayed` IS THE START. `onFinished` IS THE END — AND ONLY A GENUINE ONE.
+ * =============================================================================
+ *
+ * Issue #311, epic #304 / E13. A "read the question, THEN listen" loop needs
+ * the moment playback stops, and until #311 the end of audio was handled
+ * privately in three places (`utterance.onend`, the element's `onended`, and
+ * the one callback its failures shared) with nothing a caller could hang on.
+ *
+ * `onFinished` fires EXACTLY ONCE per play, from either path, and NEVER for a
+ * cancel. That second half is the load-bearing one: `stop()` — this instance's,
+ * another instance's through `ACTIVE_PLAYERS`, or the caller's through the ref
+ * below — cancels `window.speechSynthesis`, which reports the utterance it
+ * interrupted through `onerror`. A barge-in is the learner taking the turn, and
+ * a loop that treated it as a completion would advance over the person who just
+ * interrupted it. Nothing new enforces this: `stop()` bumps `requestRef`, and
+ * every callback here already returns early when its own request is no longer
+ * the current one, so a cancelled play is structurally unable to report an end.
+ *
+ * `reason` separates "the clip ran out" from "nothing more is going to play":
+ *
+ *   - A premium clip that errors MID-playback fires `failed`. The browser
+ *     fall-through in `play()` is unreachable by then (its `playBlob` already
+ *     resolved `true`), so a driver waiting for an end that will never arrive
+ *     would hang forever.
+ *   - A premium clip that fails BEFORE it starts fires NOTHING, because the
+ *     browser voice is about to speak the same sentence and report its own end.
+ *     One play, one `onFinished`.
+ *
+ * `stop()` is exposed on a ref (`QuestionAudioHandle`) for the same feature.
+ * `ACTIVE_PLAYERS` is one player silencing another; this is the CALLER cutting
+ * playback off — a driver that has heard the learner start speaking — which no
+ * amount of coordination between players can observe.
  */
 
 import StopIcon from '@mui/icons-material/Stop';
 import VolumeUpIcon from '@mui/icons-material/VolumeUp';
 import { Box, Button, Typography } from '@mui/material';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useRef,
+  useState,
+  type Ref,
+} from 'react';
 
 import { useOptionalAiStatus } from '../../contexts/AiStatusContext';
 import { synthesizeSpeech } from '../../services/api';
 
 /** Which voice actually spoke. See {@link QuestionAudioProps.onPlayed}. */
 export type QuestionAudioSource = 'browser' | 'premium';
+
+/**
+ * Why playback stopped. See {@link QuestionAudioProps.onFinished}.
+ *
+ * There is deliberately no `'cancelled'` member: a cancel does not fire
+ * `onFinished` at all (see the file header), so a caller that switched on a
+ * third value here would be writing a branch that can never run — and one that
+ * looks, to the next reader, like the guarantee runs the other way.
+ */
+export type QuestionAudioFinishReason = 'ended' | 'failed';
+
+/** What `onFinished` is handed. */
+export interface QuestionAudioFinished {
+  /**
+   * `'ended'` — the audio ran to its own natural end.
+   * `'failed'` — playback is over and nothing further will speak this text.
+   *
+   * Both mean "stop waiting". They are distinguished because a driver that
+   * wants to say something about a failure (or count one) cannot recover the
+   * difference afterwards, and conflating them is how a silent failure becomes
+   * indistinguishable from a question the learner actually heard.
+   */
+  reason: QuestionAudioFinishReason;
+  /**
+   * Which voice was speaking, or trying to.
+   *
+   * `null` only on the one case where neither could: `reason: 'failed'` with no
+   * source is the same state the live region's `unavailable` copy describes.
+   */
+  source: QuestionAudioSource | null;
+}
+
+/** The imperative surface a driver gets from a `ref`. */
+export interface QuestionAudioHandle {
+  /**
+   * Silence playback immediately, on whichever path is speaking.
+   *
+   * IDEMPOTENT, and it never fires `onFinished` — this is the caller's own
+   * barge-in, and the caller does not need to be told about the silence it just
+   * asked for. Safe to call when nothing is playing.
+   */
+  stop: () => void;
+}
 
 /**
  * Every string this component can put on screen.
@@ -233,6 +317,32 @@ export interface QuestionAudioProps {
   onPlayed?: (source: QuestionAudioSource) => void;
 
   /**
+   * Playback is OVER — exactly once per play, and never for a cancel.
+   *
+   * Issue #311, epic #304 / E13: the completion half of `onPlayed`, and what a
+   * "read the question, then listen" loop advances on. The three rules it is
+   * worth restating at the call site are in the file header: once per play (a
+   * premium attempt that falls through to the browser voice reports one end,
+   * not two), never for a `stop()` or a barge-in, and `reason: 'failed'` rather
+   * than silence when a premium clip dies mid-playback, so a driver cannot wait
+   * forever on an end that is not coming.
+   *
+   * OPTIONAL, and every caller that predates #311 passes nothing: a component
+   * with no listener behaves exactly as it did.
+   */
+  onFinished?: (event: QuestionAudioFinished) => void;
+
+  /**
+   * A handle for cutting playback off from OUTSIDE this component.
+   *
+   * {@link QuestionAudioHandle}. `ACTIVE_PLAYERS` already covers one player
+   * starting while another speaks; this covers the case it cannot see — a
+   * driver that decides, for a reason living entirely in the host (the learner
+   * started talking, the turn moved on), that this must stop now.
+   */
+  ref?: Ref<QuestionAudioHandle>;
+
+  /**
    * Speak as soon as this mounts (and again whenever `text` changes), with no
    * click.
    *
@@ -269,6 +379,8 @@ export function QuestionAudio({
   voice,
   rate = DEFAULT_SPEECH_RATE,
   onPlayed,
+  onFinished,
+  ref,
   autoPlay = false,
   size = 'small',
   copy,
@@ -295,6 +407,41 @@ export function QuestionAudio({
   const requestRef = useRef(0);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const objectUrlRef = useRef<string | null>(null);
+
+  /**
+   * The latest `onFinished`, without making it a callback dependency.
+   *
+   * The same device — and the same reason — as `playRef` below: a host that
+   * passes an inline arrow would otherwise rebuild `speakWithBrowser` and
+   * `play` on every render of the page above, and this component's whole
+   * autoplay guard is built on those identities being stable.
+   */
+  const onFinishedRef = useRef(onFinished);
+  onFinishedRef.current = onFinished;
+
+  /**
+   * The request number already reported as finished, so one play reports once.
+   *
+   * A single number rather than a boolean: `requestRef` is monotonic, so
+   * "already reported" is a comparison and there is no flag anybody has to
+   * remember to reset when the next play starts.
+   */
+  const reportedRef = useRef(0);
+
+  /**
+   * Report the end of ONE play — at most once, and never for a superseded one.
+   *
+   * The `requestRef` check is what makes a cancel silent: `stop()` bumps the
+   * counter before `speechSynthesis.cancel()` reaches the utterance it is
+   * interrupting, so the `onerror` that arrives belongs to a request that is no
+   * longer current and nothing is reported. See the file header.
+   */
+  const finish = useCallback((request: number, event: QuestionAudioFinished) => {
+    if (request !== requestRef.current) return;
+    if (reportedRef.current === request) return;
+    reportedRef.current = request;
+    onFinishedRef.current?.(event);
+  }, []);
 
   // POINT-OF-USE, SO THE NON-THROWING ACCESSOR. This control lives inside
   // practice and interview screens whose reason to exist has nothing to do with
@@ -337,6 +484,13 @@ export function QuestionAudio({
     setIsPreparing(false);
   }, [revokeObjectUrl]);
 
+  // THE CALLER'S OWN BARGE-IN (#311). `stop` is already idempotent and already
+  // the callback `ACTIVE_PLAYERS` holds, so the handle is that exact function
+  // rather than a second way to stop that could drift from it. React 19 takes
+  // `ref` as an ordinary prop, so there is no `forwardRef` here — and no
+  // precedent in this codebase to follow either way.
+  useImperativeHandle(ref, () => ({ stop }), [stop]);
+
   // Leaving the screen, or moving to a different question, silences the voice.
   // A question still being read aloud over the next one is disorienting, and on
   // the premium path it is also audio nobody is listening to.
@@ -374,21 +528,30 @@ export function QuestionAudio({
       utterance.onend = () => {
         if (request !== requestRef.current) return;
         setIsSpeaking(false);
+        // THE GENUINE END of the browser path. See `onFinished`.
+        finish(request, { reason: 'ended', source: 'browser' });
       };
       utterance.onerror = (event) => {
         if (request !== requestRef.current) return;
         setIsSpeaking(false);
         // `cancel()` reports the utterance it interrupted as an error. That is
-        // this component stopping itself, not a failure to report to anybody.
+        // this component stopping itself, not a failure to report to anybody —
+        // and emphatically not a completion: `onFinished` stays silent, so a
+        // loop the learner barged in on does not advance over them. (The
+        // `requestRef` guard above has already returned for a `stop()`-driven
+        // cancel; this covers an engine that reports one without our asking.)
         const reason = (event as SpeechSynthesisErrorEvent).error;
         if (reason === 'canceled' || reason === 'interrupted') return;
         setMessage(unavailableMessage);
+        // A real synthesis failure. Nothing else is going to speak this text,
+        // so a driver is told to stop waiting rather than left hanging.
+        finish(request, { reason: 'failed', source: 'browser' });
       };
 
       window.speechSynthesis.speak(utterance);
       return true;
     },
-    [onPlayed, rate, supportsBrowserSpeech, text, unavailableMessage],
+    [finish, onPlayed, rate, supportsBrowserSpeech, text, unavailableMessage],
   );
 
   const play = useCallback(async () => {
@@ -430,10 +593,25 @@ export function QuestionAudio({
               setIsSpeaking(true);
               onPlayed?.('premium');
             },
-            onEnd: () => {
+            onEnded: () => {
               if (request !== requestRef.current) return;
               setIsSpeaking(false);
               revokeObjectUrl();
+              // THE GENUINE END of the premium path.
+              finish(request, { reason: 'ended', source: 'premium' });
+            },
+            onError: (started) => {
+              if (request !== requestRef.current) return;
+              setIsSpeaking(false);
+              revokeObjectUrl();
+              // THE SPLIT #311 EXISTS FOR — see `playBlob`. A clip that had
+              // already STARTED is the end of this play: `playBlob` resolved
+              // `true`, so the browser fall-through below is unreachable and
+              // silence here would hang a driver forever on an end that is not
+              // coming. A clip that never started is NOT reported: the browser
+              // voice is about to speak the same sentence and report its own
+              // end, and one play must fire `onFinished` once.
+              if (started) finish(request, { reason: 'failed', source: 'premium' });
             },
             audioRef,
             objectUrlRef,
@@ -456,7 +634,12 @@ export function QuestionAudio({
     // Neither voice is available. Said plainly, once, in a live region — and
     // the question text is still on the page, which is the actual content.
     setMessage(unavailableMessage);
+    // `source: null` — nothing spoke, so naming a voice would be a claim about
+    // audio that never existed. Reported all the same, because a driver waiting
+    // on a play that could not happen is the one failure mode with no symptom.
+    finish(request, { reason: 'failed', source: null });
   }, [
+    finish,
     onPlayed,
     revokeObjectUrl,
     speakWithBrowser,
@@ -545,12 +728,29 @@ export function QuestionAudio({
  * this is the opposite direction. It is still revoked the moment playback ends
  * or is stopped, because a blob URL nobody revokes pins its bytes for the
  * lifetime of the document.
+ *
+ * SUCCESS AND FAILURE ARE TWO CALLBACKS, NOT ONE (#311). Until E13 this
+ * function aliased them — `audio.onerror = ctx.onEnd` — which was harmless
+ * while the only job either had was to drop the state and the bytes, and is
+ * not harmless now that a caller advances a conversation on the difference: a
+ * clip that died halfway through would have reported itself as a question the
+ * learner heard to the end. `onError` also carries WHETHER PLAYBACK HAD
+ * STARTED, which is the one fact only this function holds — its caller sees a
+ * `false` return for "never started" but nothing at all for a mid-clip death,
+ * because by then the promise it awaited has long resolved.
  */
 async function playBlob(
   blob: Blob,
   ctx: {
     onStart: () => void;
-    onEnd: () => void;
+    /** The element reached the end of the clip. A genuine completion. */
+    onEnded: () => void;
+    /**
+     * The element failed. `started` is true when sound had already begun,
+     * which is what tells the caller whether its browser-voice fall-through is
+     * still ahead of it (`false`) or already out of reach (`true`).
+     */
+    onError: (started: boolean) => void;
     audioRef: { current: HTMLAudioElement | null };
     objectUrlRef: { current: string | null };
   },
@@ -566,17 +766,27 @@ async function playBlob(
   const url = URL.createObjectURL(blob);
   ctx.objectUrlRef.current = url;
 
+  // Tracked HERE because the element does not report it: `onerror` is the same
+  // event whether sound had begun or not, and the difference is what the caller
+  // needs. See this function's header.
+  let started = false;
+
   const audio = new Audio(url);
   ctx.audioRef.current = audio;
-  audio.onplay = ctx.onStart;
-  audio.onended = ctx.onEnd;
-  audio.onerror = ctx.onEnd;
+  audio.onplay = () => {
+    started = true;
+    ctx.onStart();
+  };
+  audio.onended = ctx.onEnded;
+  audio.onerror = () => ctx.onError(started);
 
   try {
     await audio.play();
     return true;
   } catch {
-    ctx.onEnd();
+    // NEVER STARTED — an autoplay policy, most often. The caller falls through
+    // to the browser voice, so this is a cleanup call, not the end of anything.
+    ctx.onError(started);
     return false;
   }
 }
