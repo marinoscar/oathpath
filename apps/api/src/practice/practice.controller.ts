@@ -2,12 +2,25 @@ import {
   Body,
   Controller,
   Get,
+  Header,
+  HttpCode,
+  HttpStatus,
   Param,
   ParseUUIDPipe,
   Post,
   Query,
 } from '@nestjs/common';
-import { ApiOperation, ApiParam, ApiQuery, ApiResponse, ApiTags } from '@nestjs/swagger';
+import {
+  ApiExtraModels,
+  ApiOkResponse,
+  ApiOperation,
+  ApiParam,
+  ApiQuery,
+  ApiResponse,
+  ApiTags,
+  getSchemaPath,
+} from '@nestjs/swagger';
+import type { SchemaObject } from '@nestjs/swagger/dist/interfaces/open-api-spec.interface';
 
 import { ApiDataResponse } from '../common/decorators/api-data-response.decorator';
 import { Auth } from '../auth/decorators/auth.decorator';
@@ -21,6 +34,14 @@ import {
   PracticeAttemptDto,
   type PracticeAttemptResponse,
 } from './dto/practice-attempt.dto';
+import {
+  PracticeRealtimeSessionFailedDto,
+  PracticeRealtimeSessionOkDto,
+  PracticeRealtimeSessionUnavailableDto,
+  type PracticeRealtimeSessionResponse,
+} from './dto/practice-realtime-session.dto';
+import { PracticeRealtimeService } from './realtime/practice-realtime.service';
+import { PRACTICE_REALTIME_SESSION_TTL_SECONDS } from './realtime/practice-realtime-tools';
 import {
   PracticeAttemptResultDto,
   PracticeSessionDetailDto,
@@ -44,10 +65,21 @@ import {
 //   POST /api/practice/sessions/:id/attempts/:attemptId/self-mark @Auth(), none
 //   POST /api/practice/sessions/:id/complete                     @Auth(), none
 //   GET  /api/practice/queue                                     @Auth(), none
+//   POST /api/practice/sessions/:id/realtime-session             @Auth(), none  (#353, E15)
 //
-// The last route is issue #78 (epic #54 / E5 "Memory"): the Practice page's
+// `GET /queue` is issue #78 (epic #54 / E5 "Memory"): the Practice page's
 // picker counts, drawn from `mastery/selector.ts`'s own bucket rule so they
 // can never disagree with what starting a session right now would select.
+//
+// The last route is issue #353 (epic #345 / E15): the realtime mint, which
+// hands the browser a short-lived credential for a spoken practice session and
+// is the ONE route in this file that delegates to something other than
+// `PracticeService` — see `realtime/practice-realtime.service.ts` for why the
+// dispatcher stays off the class that writes every attempt row. It adds no
+// permission string, for the same reason nothing else here has one, and it
+// takes NO REQUEST BODY at all: the instructions, the tools and the session's
+// lifetime are the server's, and a body would be the first field through which
+// a caller could ask for a session that is not this practice session's.
 //
 // -----------------------------------------------------------------------------
 // NO ROUTE ACCEPTS A USER ID. THAT IS THE SECURITY BOUNDARY.
@@ -105,10 +137,45 @@ import {
 // route shape anyway — nesting here does not paint that in.
 // =============================================================================
 
+/**
+ * `{ data: <one of these>, meta? }`, with `status` as the discriminator.
+ *
+ * The same helper `ai-speech.controller.ts` and `interviews.controller.ts`
+ * already carry, copied rather than shared for the reason they give: it exists
+ * because `createZodDto` builds a class and a class cannot extend a union
+ * (TS2509), so a union response has to be published as one DTO per member and
+ * composed by hand here.
+ */
+function envelopedOneOf(
+  ...models: Parameters<typeof getSchemaPath>[0][]
+): SchemaObject {
+  return {
+    type: 'object',
+    required: ['data'],
+    properties: {
+      data: {
+        oneOf: models.map((model) => ({ $ref: getSchemaPath(model) })),
+        discriminator: { propertyName: 'status' },
+      },
+      meta: { type: 'object', additionalProperties: true },
+    },
+  };
+}
+
 @ApiTags('Practice')
+// Referenced by `$ref` from the hand-written `oneOf` below, so nothing else in
+// the document would pull them in — without this they are dangling references.
+@ApiExtraModels(
+  PracticeRealtimeSessionOkDto,
+  PracticeRealtimeSessionUnavailableDto,
+  PracticeRealtimeSessionFailedDto,
+)
 @Controller('practice')
 export class PracticeController {
-  constructor(private readonly practiceService: PracticeService) {}
+  constructor(
+    private readonly practiceService: PracticeService,
+    private readonly practiceRealtime: PracticeRealtimeService,
+  ) {}
 
   @Post('sessions')
   @Auth()
@@ -402,5 +469,113 @@ export class PracticeController {
   })
   getQueue(@CurrentUser('id') userId: string): Promise<PracticeQueueResponse> {
     return this.practiceService.getQueue(userId);
+  }
+
+  /**
+   * Mint one ephemeral realtime session credential for this practice session.
+   *
+   * ---------------------------------------------------------------------------
+   * THE SUCCESS BODY IS A CREDENTIAL, NOT DATA
+   * ---------------------------------------------------------------------------
+   *
+   * The browser never sees the learner's API key — only an ephemeral,
+   * session-scoped secret. A long-lived key handed to browser JavaScript is a
+   * key in the network tab, in browser history, and readable by any script on
+   * the page, and it keeps working until a human revokes it. The secret this
+   * route returns expires in about a minute and is scoped to a session
+   * configuration this application authored for this one practice session.
+   *
+   * Three consequences visible in this handler:
+   *
+   *   * `@Header('Cache-Control', 'no-store')`. A cached mint response is a
+   *     bearer credential sitting in a shared cache or a browser's disk cache
+   *     for longer than it is valid — a liability with no matching benefit,
+   *     since it cannot open a second session even while still readable.
+   *   * NO REQUEST BODY. There is nothing for a client to configure: the
+   *     instructions, the tools and the TTL are all the server's, and the model
+   *     comes from the admin's `realtime` binding.
+   *   * The secret is never logged, never a span attribute and never an
+   *     `audit_events` row — see `PracticeRealtimeService`'s own header.
+   *
+   * ---------------------------------------------------------------------------
+   * `unavailable` IS A 200 WITH A CAUSE, NEVER A 4xx OR A 5xx
+   * ---------------------------------------------------------------------------
+   *
+   * The posture `ai-speech.controller.ts` already takes, for the reason
+   * `ai-speech.dto.ts` states in full: a non-2xx is flattened into generic
+   * failure handling and the cause — the one fact this response exists to
+   * carry — never reaches the screen. An unbound `realtime` role is not an
+   * error; it is a deployment where spoken practice is not configured, and the
+   * client's correct response is to fall back to E13's hands-free loop or to
+   * typing, with no loss of progress: both drive the same session and the same
+   * `practice_attempts` rows.
+   *
+   * The 404 and the 409 below are different in kind and stay exception-shaped:
+   * they are facts about the SESSION, not about AI.
+   */
+  @Post('sessions/:id/realtime-session')
+  @Auth()
+  // 200, not the 201 a POST defaults to. Nothing in this application is
+  // created — a credential is minted at the provider — and there is no
+  // resource this route could hand back a location for.
+  @HttpCode(HttpStatus.OK)
+  // See the doc comment. `no-store`, not merely `no-cache`.
+  @Header('Cache-Control', 'no-store')
+  @ApiOperation({
+    summary: 'Mint a realtime session for this practice session',
+    description:
+      'Returns a **short-lived, single-session client secret** your browser uses to open ' +
+      'a realtime voice connection directly to the AI provider. The audio never passes ' +
+      'through this API.\n\n' +
+      '**It is never your API key.** Your own key does not leave the server on any code ' +
+      `path. The secret returned here expires in roughly ${PRACTICE_REALTIME_SESSION_TTL_SECONDS} ` +
+      'seconds — long enough to open the connection, not to hold a conversation — and a ' +
+      'session already under way is not cut off when it expires. The response is ' +
+      '`Cache-Control: no-store`; do not store it, and do not send it anywhere but the ' +
+      'provider.\n\n' +
+      '**There is no request body.** The coach’s instructions, the tools the model may ' +
+      'call and the session’s lifetime are all decided server-side. There is no model ' +
+      'parameter — the model is the one your administrator bound to the `realtime` role.\n\n' +
+      '**The application still decides everything.** The model is given five tools ' +
+      '(`next_question`, `grade_answer`, `repeat_question`, `skip_question`, ' +
+      '`end_session`) and no way to choose a question, report a grade, or end the session ' +
+      'early: `grade_answer` has no `verdict` and no `confidence` field at all, question ' +
+      'selection stays with the spaced-repetition scheduler, and the question text comes ' +
+      'back from `next_question` to be spoken verbatim.\n\n' +
+      '**Re-mint freely while the session is `in_progress`.** If the secret expires or the ' +
+      'connection drops, call this again — the session resumes at whatever question is ' +
+      'still unanswered, because that state is server-side and was never held in the ' +
+      'expired session.\n\n' +
+      '**Read `status`.** `ok` carries the secret. `unavailable` means no mint was ' +
+      'attempted — you have stored no AI key, or an administrator has not bound a ' +
+      '`realtime` model — and names the `cause` and the `role`. `failed` means the mint ' +
+      'was attempted and did not produce a usable session. **All three are HTTP 200**; a ' +
+      'non-2xx would discard the cause, which is the one fact this response exists to ' +
+      'carry. On either, practise by voice through the ordinary push-to-talk flow, or by ' +
+      'typing — the session and its recorded attempts are identical.',
+  })
+  @ApiParam({ name: 'id', type: String, format: 'uuid' })
+  @ApiOkResponse({
+    description:
+      'The ephemeral secret, or a typed reason there is none. Read `status`. Never ' +
+      'cached — the response is `Cache-Control: no-store`.',
+    schema: envelopedOneOf(
+      PracticeRealtimeSessionOkDto,
+      PracticeRealtimeSessionUnavailableDto,
+      PracticeRealtimeSessionFailedDto,
+    ),
+  })
+  @ApiResponse({ status: 404, description: 'No such session for this caller' })
+  @ApiResponse({
+    status: 409,
+    description:
+      'The session is completed or abandoned, or has no question left to ask — there is ' +
+      'nothing left for a realtime session to conduct',
+  })
+  createRealtimeSession(
+    @CurrentUser('id') userId: string,
+    @Param('id', ParseUUIDPipe) id: string,
+  ): Promise<PracticeRealtimeSessionResponse> {
+    return this.practiceRealtime.createRealtimeSession(userId, id);
   }
 }

@@ -3,6 +3,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 
 import { PracticeController } from './practice.controller';
 import { PracticeService } from './practice.service';
+import { PracticeRealtimeService } from './realtime/practice-realtime.service';
 import { RBAC_EXTENSION_KEY } from '../auth/decorators/auth.decorator';
 import { PERMISSIONS_KEY } from '../auth/decorators/permissions.decorator';
 import { ROLES_KEY } from '../auth/decorators/roles.decorator';
@@ -40,6 +41,12 @@ const ROUTE_METHODS = [
   'recordAttempt',
   'selfMarkAttempt',
   'completeSession',
+  // The realtime mint (#353, epic #345 / E15). Listed here rather than given
+  // its own block, so every structural assertion in this file — authenticated,
+  // no permission, no role, no user-id parameter anywhere — covers it too. The
+  // one route in this controller that delegates somewhere other than
+  // `PracticeService` is held to exactly the same shape as the six that do.
+  'createRealtimeSession',
 ] as const;
 
 /** Nest's `RouteParamtypes` enum values, as embedded in `__routeArguments__` keys. */
@@ -57,6 +64,7 @@ describe('PracticeController', () => {
     selfMarkAttempt: jest.Mock;
     completeSession: jest.Mock;
   };
+  let practiceRealtime: { createRealtimeSession: jest.Mock };
 
   beforeEach(async () => {
     practiceService = {
@@ -68,10 +76,17 @@ describe('PracticeController', () => {
       completeSession: jest.fn().mockResolvedValue({ marker: 'completeSession' }),
     };
 
+    practiceRealtime = {
+      createRealtimeSession: jest
+        .fn()
+        .mockResolvedValue({ marker: 'createRealtimeSession' }),
+    };
+
     const module: TestingModule = await Test.createTestingModule({
       controllers: [PracticeController],
       providers: [
         { provide: PracticeService, useValue: practiceService },
+        { provide: PracticeRealtimeService, useValue: practiceRealtime },
         // `@Auth()` applies `JwtAuthGuard`, which injects `PatService`. Stubbed
         // so this spec stays about the controller, the same shape
         // `journey.controller.spec.ts` and `ai-user-key.controller.spec.ts` use.
@@ -151,7 +166,13 @@ describe('PracticeController', () => {
     });
 
     it('takes a @Param("id") on every session-scoped route, and only those', () => {
-      const withSessionId = ['getSession', 'recordAttempt', 'selfMarkAttempt', 'completeSession'];
+      const withSessionId = [
+        'getSession',
+        'recordAttempt',
+        'selfMarkAttempt',
+        'completeSession',
+        'createRealtimeSession',
+      ];
 
       for (const method of withSessionId) {
         expect(paramNames(routeArgs(method as any))).toContain('id');
@@ -168,7 +189,14 @@ describe('PracticeController', () => {
         expect.arrayContaining(['id', 'attemptId']),
       );
 
-      for (const method of ['createSession', 'listSessions', 'getSession', 'recordAttempt', 'completeSession']) {
+      for (const method of [
+        'createSession',
+        'listSessions',
+        'getSession',
+        'recordAttempt',
+        'completeSession',
+        'createRealtimeSession',
+      ]) {
         expect(paramNames(routeArgs(method as any))).not.toContain('attemptId');
       }
     });
@@ -198,6 +226,58 @@ describe('PracticeController', () => {
       });
 
       expect(withBody.sort()).toEqual(['createSession', 'recordAttempt'].sort());
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // The realtime mint's own decorations (#353, epic #345 / E15)
+  // ---------------------------------------------------------------------------
+
+  describe('the realtime mint route', () => {
+    const handler = () => PracticeController.prototype.createRealtimeSession;
+
+    it('answers 200, not the 201 a POST defaults to', () => {
+      // Nothing in this application is created — a credential is minted at the
+      // provider — and there is no resource this route could hand back a
+      // location for. It also matters for the union: `unavailable` and
+      // `failed` are 200s too, so every outcome of this route is one status
+      // code and a `status` field.
+      expect(Reflect.getMetadata('__httpCode__', handler())).toBe(200);
+    });
+
+    it('is never cached: Cache-Control: no-store', () => {
+      // The response body is a bearer credential. A cached mint response is
+      // one sitting in a shared cache or a browser's disk cache for longer
+      // than it is valid — a liability with no matching benefit, since it
+      // cannot open a second session even while it is still readable.
+      // `no-store`, not merely `no-cache`.
+      const headers = Reflect.getMetadata('__headers__', handler()) ?? [];
+
+      expect(headers).toContainEqual(
+        expect.objectContaining({ name: 'Cache-Control', value: 'no-store' }),
+      );
+    });
+
+    it('accepts no request body at all', () => {
+      // THE FIRST FIELD THROUGH WHICH A CALLER COULD ASK FOR A SESSION THAT IS
+      // NOT THIS PRACTICE SESSION'S would be a body field, so there is no
+      // body: the instructions, the tool list, the model and the lifetime are
+      // all the server's. (The blanket "a @Body only on createSession and
+      // recordAttempt" assertion above says the same thing across the whole
+      // controller; this states it where the reason lives.)
+      const args: Record<string, any> =
+        Reflect.getMetadata(
+          '__routeArguments__',
+          PracticeController,
+          'createRealtimeSession',
+        ) ?? {};
+
+      expect(
+        Object.keys(args).some((key) => key.startsWith(`${BODY}:`)),
+      ).toBe(false);
+      expect(
+        Object.keys(args).some((key) => key.startsWith(`${QUERY}:`)),
+      ).toBe(false);
     });
   });
 
@@ -256,6 +336,19 @@ describe('PracticeController', () => {
 
       expect(practiceService.completeSession).toHaveBeenCalledWith(CALLER, SESSION_ID);
       expect(result).toEqual({ marker: 'completeSession' });
+    });
+
+    it('createRealtimeSession forwards the caller and the session id to the realtime service', async () => {
+      // The one route that does NOT go through `PracticeService`: the
+      // dispatcher stays off the class that writes every attempt row (see
+      // `realtime/practice-realtime.service.ts`).
+      const result = await controller.createRealtimeSession(CALLER, SESSION_ID);
+
+      expect(practiceRealtime.createRealtimeSession).toHaveBeenCalledWith(
+        CALLER,
+        SESSION_ID,
+      );
+      expect(result).toEqual({ marker: 'createRealtimeSession' });
     });
 
     it('never forwards anything but the caller resolved from @CurrentUser', () => {
