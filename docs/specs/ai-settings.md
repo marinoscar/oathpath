@@ -51,8 +51,9 @@ Source of truth for every claim below:
 - `apps/web/src/config/adminSections.tsx` — `SettingsCardDef`, including the
   `disabled` flag the unwired roles reuse. Four roles were unwired when this
   document was written; `transcribe` and `speak` wired since E9
-  (`docs/specs/voice.md` §1), so only `realtime` and `embed` still render
-  this way.
+  (`docs/specs/voice.md` §1) and `realtime` wired since E11
+  (`docs/specs/realtime-interview.md` §1), so `embed` is the only role left
+  rendering this way.
 - `apps/web/src/config/userSettingsSections.tsx` — the no-`permission` rule for
   per-user cards, and the `Security` group's stated reasoning.
 - `apps/web/src/pages/Admin/EmailSettingsPage.tsx` — the write-only secret
@@ -117,7 +118,7 @@ shapes several modules at once.
 
 | # | Decision | What it rules out |
 |---|---|---|
-| 1 | **Six role slots declared, two wired at launch.** The schema declares all six; the admin UI bound `tutor` + `grader` and rendered the other four inert using the registry's existing `disabled` card idiom. **Since E9 (`docs/specs/voice.md` §1), `transcribe` and `speak` are wired too — four wired, two still inert (`realtime`, `embed`).** | A schema change (and a settings migration over live rows) when voice work starts — which is exactly what did **not** have to happen: E9 flipped two booleans in the existing registry, no migration. |
+| 1 | **Six role slots declared, two wired at launch.** The schema declares all six; the admin UI bound `tutor` + `grader` and rendered the other four inert using the registry's existing `disabled` card idiom. **Since E9 (`docs/specs/voice.md` §1), `transcribe` and `speak` are wired too, and since E11 (`docs/specs/realtime-interview.md` §1), `realtime` is as well — five wired, `embed` the only one still inert.** | A schema change (and a settings migration over live rows) when voice work starts — which is exactly what did **not** have to happen: E9 flipped two booleans in the existing registry, and E11 a third, no migration either time. |
 | 2 | **Configurable generation floor with an escape hatch.** Classify each id into a capability family, parse its generation, apply the floor (default `5.4`) **to the text families only** — plus a "show all models" toggle. | An upstream rename emptying the dropdown with no admin workaround. |
 | 3 | **Provider interface now, OpenAI concrete only.** `AiProvider` + `BaseAiProvider` mirroring `EmailProvider` / `BaseEmailProvider`, with per-provider capability flags. | Reshaping the settings surface, the test endpoint and the admin page all at once when Anthropic arrives. Also rules out an `openai-compatible` custom-baseURL kind for now. |
 | 4 | **BYOK is mandatory per user.** All inference runs on the calling user's key. There is no server-key fallback. The server key populates the model catalog and lets an admin verify connectivity — nothing else. | A shared server key, and with it any ability to tell a user what they personally spent. |
@@ -289,6 +290,18 @@ flip an already-deployed installation's `systemReady` to `false` for a
 capability nobody asked for. Read `docs/specs/voice.md` §1 for the failure
 that would have caused and the narrowing that prevents it; it is not
 restated here.
+
+**E11 (`docs/specs/realtime-interview.md` §1) wired a third non-text role,
+`realtime`, and needed no further change to this formula at all** — the
+identical property the narrowing above was written to have. `realtime`'s
+capability is `'realtime'`, not `'text'`, so it joins `unboundRoles` the
+moment no model is bound to it (an admin sees the interview simulator has
+no model) without ever touching `systemReady` (a learner with no `realtime`
+binding still has a complete, working *text* mock interview). **State this
+once, generally, rather than per role: `systemReady` is, and remains, a
+statement about the wired *text* roles only — today `tutor` and `grader` —
+and every voice or realtime surface gates on its own role's entry in
+`unboundRoles`, never on `systemReady`.**
 
 **`userKeyConfigured === false` is a hard block.** Immediately after login the
 user is routed to `/setup/ai-key` and can reach nothing else. It is framed as a
