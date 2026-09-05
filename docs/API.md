@@ -1429,6 +1429,67 @@ cache**, which is content-addressed and never serves stale audio regardless.
 
 ---
 
+### AI Coach
+
+Issue #320, epic #305 (E14 "The Coach's personality"). One route, and it is
+the smallest in this file: the four voices a learner may ask their coach to
+speak in, so `/settings/coach` can show them what they are choosing before
+they choose it.
+
+**`@Auth()`, no permissions, no user id anywhere.** Every authenticated
+learner owns their own coach preference, exactly as they own their own voice
+preference and their own AI key. There is no "may choose a coach" privilege
+in this product's authorization model, and inventing one would leave a
+Viewer — the default role — unable to change how the application talks to
+them. The list is identical for every caller on the deployment and reveals
+nothing about the administrator's AI configuration or any other learner.
+
+Design record:
+[`docs/specs/coach-personality.md`](specs/coach-personality.md).
+
+#### GET /ai/coach/personas
+The available personas, in the order the settings page renders them —
+`supportive`, the default, first. **No query parameters, no request body.**
+
+**Response:**
+```json
+{
+  "data": {
+    "personas": [
+      {
+        "key": "supportive",
+        "label": "Supportive",
+        "description": "Warm, specific, and honest. Encouragement you have actually earned, never cheerleading. This is the default, and it is how OathPath has always spoken.",
+        "sampleLine": "Not quite right — but you can get it next time. Take the answer with you."
+      }
+    ]
+  }
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `key` | What to store in `coach.persona` through `PATCH /user-settings`. **Persisted**, so it is stable: renaming one would be a migration, not a refactor. |
+| `label` | The name on the card. |
+| `description` | What choosing it changes, in the learner's terms. |
+| `sampleLine` | One line in that voice, readable without pressing anything. Hearing it spoken is a separate, explicit press, because synthesising it spends the learner's own key. |
+
+**Four fields, never five.** Each registry entry also carries a
+`promptFragment` — the paragraph appended to a grader's or a tutor's system
+message — and it is **never returned**. Neither is the curated reaction bank:
+selection from it is deterministic and happens on the server, so a client
+holding the bank would be a client that could pick its own line, which is
+precisely the "two reactions to one event" defect that determinism exists to
+prevent.
+
+**`unfiltered` is opt-in and never suggested.** It is one card among four,
+never preselected, never surfaced as a nudge or a notification, and its
+`description` states plainly what it will and will not do. No persona relaxes
+the invariant floor — a blunter joke about a miss is not licence to say
+anything about the learner.
+
+---
+
 ### Journey
 
 Issue #65, epic #50. Everything behind the learner's own onboarding, home
@@ -2505,6 +2566,37 @@ attempt or a skip:**
 | `transcript` | string \| null | For a spoken attempt, **the text that was graded, as the learner left it** (redefined by E12, epic #280, issue #285 — see `docs/specs/voice.md` §8's amendment note). Identical to `responseText` on a spoken attempt today; kept as a separate column so a future epic grading something other than the graded transcript never has to guess which one a historical row meant. |
 | `asrConfidence` | number \| null | The recogniser's own confidence in `transcript`, `0`–`1`. **`null` means unknown, never low** — only a reported value below the threshold contributes to `failureCause: "misheard"` below. On the wire for a client to explain its own behaviour to itself, never to show a learner a raw confidence number. |
 | `retryOfAttemptId` | uuid \| null | The earlier attempt at this question, in this session, that this one supersedes. Set only on a retry — see the request body's own `retryOfAttemptId` entry above for what admits one, and for the mastery-replay consequence E12/#285 added. The superseded attempt stays in the table and in this same response; it is excluded only from `progress.answered`, the session's stored `summary`, and (since #285) from `question_mastery`'s scheduling history. |
+
+**One more field, issue #320 (epic #305, E14 "The Coach's personality"),
+present on every attempt regardless of how it was graded:**
+
+| Field | Type | Description |
+|---|---|---|
+| `coachReaction` | object \| null | `{ "text": "…", "persona": "supportive" }` — one short line in the learner's chosen coach voice, about what just happened. `null` when the learner has set `coach.reactions` to `false`; a client renders nothing rather than reserving space for a placeholder. |
+
+**Present on a `gradingMethod: "exact"` attempt, and that is the point.**
+Every other coaching field above is null on a deterministically-graded
+attempt, because no grader ran and a deterministic grade invents nothing —
+which is correct, and which left the common case saying nothing at all beyond
+the verdict. `coachReaction` is the field that covers it: it comes from a
+curated, human-reviewed line bank rather than from a model, so it costs
+nothing, needs no AI key, and works on a deployment with no AI configured.
+
+**Computed at read time and never persisted.** No column is added to
+`practice_attempts` for it. The line is selected by a pure function seeded by
+the attempt's own id, so the same attempt yields the same line on the
+immediate response and on every later re-read through
+`GET /practice/sessions/{id}` — the guarantee that the live screen and the
+summary review never show a learner two different reactions to one answer —
+without anything being stored to guarantee it. Freezing copy that may later
+be improved into a row that is already the permanent evidence record would be
+the wrong trade; see
+[`docs/specs/coach-personality.md`](specs/coach-personality.md) §9.
+
+**It never carries a fact.** The verdict, the accepted answers and the
+failure cause are the fields above, from the row. A reaction line states no
+answer, changes no verdict, and is not an input to mastery, scheduling or
+readiness.
 
 Example of an AI-graded attempt (`gradingMethod: "ai"`, `outcome: "correct"`
 from rung 2 despite `matchAnswer` missing on rung 1):
