@@ -259,17 +259,19 @@ export type StudyPatchValue = z.infer<typeof studyPatchSchema>;
 // User Settings Namespace: `voice` (issue #282, epic #280 "Spoken Civics Audio")
 // =============================================================================
 //
-// Six independent scalar preferences, all about how a learner experiences
+// Seven independent scalar preferences, all about how a learner experiences
 // SPOKEN questions and answers — whether a spoken answer grades itself the
 // instant they release the mic, whether they hear the premium synthesized
 // voice or the browser's own free one, which provider voice they hear if the
-// premium path is available, how fast it speaks, and whether either side of
-// a civics card plays itself automatically. None of the six governs whether
-// audio is CACHED (`speech_audio_assets`, issue #282's other half) — this
-// namespace is entirely about local playback behaviour a learner controls
-// for themselves.
+// premium path is available, how fast it speaks, whether either side of
+// a civics card plays itself automatically, and (`conversationMode`, issue
+// #307, epic #304 "Conversation mode") whether a practice session starts in
+// hands-free Voice mode rather than the typed one. None of the seven governs
+// whether audio is CACHED (`speech_audio_assets`, issue #282's other half) —
+// this namespace is entirely about local playback and input behaviour a
+// learner controls for themselves.
 //
-// SAME SHAPE AS `study`, SAME MERGE STRATEGY. Six independently-optional
+// SAME SHAPE AS `study`, SAME MERGE STRATEGY. Seven independently-optional
 // scalar fields with no nested map to deep-merge — `mergeNavigation` and
 // `mergeStudy` already establish the field-wise pattern this namespace
 // reuses (see `user-settings.service.ts`), never `mergeDataTables`'
@@ -345,6 +347,22 @@ export const DEFAULT_VOICE_READ_QUESTIONS_ALOUD = false;
 export const DEFAULT_VOICE_READ_ANSWERS_ALOUD = false;
 
 /**
+ * Whether a practice session starts in hands-free Voice mode — the officer
+ * speaks, the learner answers out loud — rather than in the typed mode
+ * (issue #307, epic #304 "Conversation mode").
+ *
+ * `false`. Conversation mode is OPT-IN, for the identical reason
+ * `readQuestionsAloud` is: a learner who has not asked for it should not have
+ * a practice screen open a microphone and start talking at them. It is also
+ * the mode with a hardware prerequisite (a working mic, somewhere the learner
+ * can speak aloud) that the typed mode does not have, so defaulting it on
+ * would strand anybody who has neither — and, exactly as with every other
+ * field here, this default is never materialised into a learner's document
+ * to say so. Absent means "typed", resolved at read time.
+ */
+export const DEFAULT_VOICE_CONVERSATION_MODE = false;
+
+/**
  * Shape bound for a provider voice id, e.g. `alloy`.
  *
  * SHAPE VALIDATED, MEMBERSHIP NOT — the same rule
@@ -383,6 +401,7 @@ export const voiceSchema = z
       .optional(),
     readQuestionsAloud: z.boolean().optional(),
     readAnswersAloud: z.boolean().optional(),
+    conversationMode: z.boolean().optional(),
   })
   .strict();
 
@@ -412,6 +431,7 @@ export const voicePatchSchema = z
       .optional(),
     readQuestionsAloud: z.boolean().nullable().optional(),
     readAnswersAloud: z.boolean().nullable().optional(),
+    conversationMode: z.boolean().nullable().optional(),
   })
   .strict();
 

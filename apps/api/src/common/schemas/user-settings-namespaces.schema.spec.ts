@@ -10,6 +10,7 @@ import {
   DEFAULT_VOICE_SPEECH_RATE,
   DEFAULT_VOICE_READ_QUESTIONS_ALOUD,
   DEFAULT_VOICE_READ_ANSWERS_ALOUD,
+  DEFAULT_VOICE_CONVERSATION_MODE,
 } from './user-settings-namespaces.schema';
 
 describe('voiceSchema (issue #282, epic #280 "Spoken Civics Audio")', () => {
@@ -21,6 +22,7 @@ describe('voiceSchema (issue #282, epic #280 "Spoken Civics Audio")', () => {
       speechRate: 1.25,
       readQuestionsAloud: true,
       readAnswersAloud: true,
+      conversationMode: true,
     };
 
     expect(voiceSchema.parse(value)).toEqual(value);
@@ -79,8 +81,40 @@ describe('voiceSchema (issue #282, epic #280 "Spoken Civics Audio")', () => {
       'preferPremiumVoice',
       'readQuestionsAloud',
       'readAnswersAloud',
+      'conversationMode',
     ])('rejects a non-boolean %s', (field) => {
       expect(() => voiceSchema.parse({ [field]: 'yes' })).toThrow();
+    });
+
+    it.each([
+      'autoSubmitSpoken',
+      'preferPremiumVoice',
+      'readQuestionsAloud',
+      'readAnswersAloud',
+      'conversationMode',
+    ])('accepts either boolean for %s', (field) => {
+      expect(voiceSchema.parse({ [field]: true })).toEqual({ [field]: true });
+      expect(voiceSchema.parse({ [field]: false })).toEqual({ [field]: false });
+    });
+  });
+
+  // `conversationMode` (issue #307, epic #304 "Conversation mode") is the
+  // seventh field on this namespace and was added as a FIELD, not a new
+  // namespace: everything the other six get from `.strict()`, the patch
+  // schema and the no-`.default()` rule, it gets by construction. These
+  // assertions exist so that stays true rather than being assumed.
+  describe('conversationMode (issue #307, epic #304)', () => {
+    it('is rejected when misspelled, like every other key (`.strict()`)', () => {
+      expect(() => voiceSchema.parse({ conversationmode: true })).toThrow();
+      expect(() => voiceSchema.parse({ conversation_mode: true })).toThrow();
+      expect(() => voicePatchSchema.parse({ conversationMod: null })).toThrow();
+    });
+
+    it('accepts null on the patch schema only', () => {
+      expect(voicePatchSchema.parse({ conversationMode: null })).toEqual({
+        conversationMode: null,
+      });
+      expect(() => voiceSchema.parse({ conversationMode: null })).toThrow();
     });
   });
 
@@ -93,6 +127,7 @@ describe('voiceSchema (issue #282, epic #280 "Spoken Civics Audio")', () => {
         speechRate: null,
         readQuestionsAloud: null,
         readAnswersAloud: null,
+        conversationMode: null,
       };
 
       expect(voicePatchSchema.parse(patch)).toEqual(patch);
@@ -127,11 +162,14 @@ describe('voiceSchema (issue #282, epic #280 "Spoken Civics Audio")', () => {
       expect(DEFAULT_VOICE_SPEECH_RATE).toBe(0.95);
       expect(DEFAULT_VOICE_READ_QUESTIONS_ALOUD).toBe(false);
       expect(DEFAULT_VOICE_READ_ANSWERS_ALOUD).toBe(false);
+      // Hands-free Voice mode is opt-in, exactly as autoplay is.
+      expect(DEFAULT_VOICE_CONVERSATION_MODE).toBe(false);
 
       // None of them appear when the namespace is absent from the parsed
       // value — confirming the schema never injects them itself.
       expect(voiceSchema.parse({})).not.toHaveProperty('autoSubmitSpoken');
       expect(voiceSchema.parse({})).not.toHaveProperty('speechRate');
+      expect(voiceSchema.parse({})).not.toHaveProperty('conversationMode');
     });
   });
 
