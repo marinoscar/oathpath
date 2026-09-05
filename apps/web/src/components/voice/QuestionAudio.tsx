@@ -99,6 +99,18 @@ export interface QuestionAudioCopy {
   unavailable: string;
 }
 
+/**
+ * The browser-voice playback rate when the caller passes none.
+ *
+ * The value this component hard-coded before #288, kept as the default so a
+ * caller that knows nothing about preferences sounds exactly as it did. It
+ * MIRRORS `DEFAULT_VOICE_SPEECH_RATE` (`hooks/useVoicePrefs.ts`, itself
+ * mirroring the API's constant) rather than importing it, so this component
+ * stays free of any dependency on the settings layer — it takes props, and the
+ * host page is what knows where a preference is stored.
+ */
+export const DEFAULT_SPEECH_RATE = 0.95;
+
 const DEFAULT_COPY: QuestionAudioCopy = {
   play: 'Read the question aloud',
   stop: 'Stop reading',
@@ -136,11 +148,39 @@ export interface QuestionAudioProps {
    * default (§2). The upgrade is taken only when this is true AND the `speak`
    * role is bound on this deployment.
    *
-   * Where the opt-in is stored is a later issue's business — this component
-   * takes it as a prop so that the preference and the player can ship
-   * independently.
+   * Stored as `user_settings.voice.preferPremiumVoice` since #288 (epic #280),
+   * read through `useVoicePrefs` and passed in by the host page. It stays a
+   * PROP rather than being read here, so this component keeps working on a
+   * caller that has no opinion (the default is still `false`) and so the two
+   * practice screens that disagree about the rule — `/practice/writing` uses
+   * premium only when the browser has NO voice at all — can each state their
+   * own.
    */
   premiumVoice?: boolean;
+
+  /**
+   * The PROVIDER's voice id (e.g. `alloy`), or omitted to let it choose.
+   *
+   * `user_settings.voice.preferredVoice` (#288). Applies to the PREMIUM path
+   * only: it is sent as the synthesis request's `voice` field. The browser's
+   * `speechSynthesis` has its own, unrelated voice list keyed by BCP-47 name,
+   * and picking a browser voice from a provider's id would be a coincidence
+   * rather than a match — so an id that means nothing to `speechSynthesis` is
+   * simply not applied there.
+   */
+  voice?: string;
+
+  /**
+   * Playback speed as a multiplier of normal, e.g. `0.95`.
+   *
+   * `user_settings.voice.speechRate` (#288). Applies to the BROWSER path only,
+   * which is where the hard-coded `0.95` this replaces lived: `utterance.rate`
+   * is a client-side playback parameter, and the provider's synthesis endpoint
+   * has no speed control this application uses today. That gap is named
+   * deliberately in `docs/specs/voice-hands-free.md` §5 rather than papered
+   * over with a rate this component silently ignores on one of its two paths.
+   */
+  rate?: number;
 
   /**
    * The question was ACTUALLY SPOKEN — fired when audio starts, not when a
@@ -172,6 +212,8 @@ export interface QuestionAudioProps {
 export function QuestionAudio({
   text,
   premiumVoice = false,
+  voice,
+  rate = DEFAULT_SPEECH_RATE,
   onPlayed,
   size = 'small',
   copy,
@@ -252,8 +294,11 @@ export function QuestionAudio({
       const utterance = new window.SpeechSynthesisUtterance(text);
       // A civics question read at conversational speed is hard to follow for
       // somebody studying in a second language, which is most of the people
-      // this product is for.
-      utterance.rate = 0.95;
+      // this product is for. `0.95` is therefore still the DEFAULT (see
+      // `DEFAULT_SPEECH_RATE`); since #288 a learner who wants it slower or
+      // faster can say so on `/settings/voice`, and this is where their answer
+      // lands.
+      utterance.rate = rate;
 
       utterance.onstart = () => {
         if (request !== requestRef.current) return;
@@ -278,7 +323,7 @@ export function QuestionAudio({
       window.speechSynthesis.speak(utterance);
       return true;
     },
-    [onPlayed, supportsBrowserSpeech, text, unavailableMessage],
+    [onPlayed, rate, supportsBrowserSpeech, text, unavailableMessage],
   );
 
   const play = useCallback(async () => {
@@ -289,7 +334,10 @@ export function QuestionAudio({
     if (usePremium) {
       setIsPreparing(true);
       try {
-        const result = await synthesizeSpeech(text);
+        // `voice` is the learner's stored preference, or absent — in which
+        // case the provider chooses, and the request omits the key entirely
+        // rather than sending an empty one (see `synthesizeSpeech`).
+        const result = await synthesizeSpeech(text, { voice });
         if (request !== requestRef.current) return;
 
         // BRANCHED ON, NOT CAUGHT (issue #277). `unavailable` and `failed` are
@@ -346,6 +394,7 @@ export function QuestionAudio({
     text,
     unavailableMessage,
     usePremium,
+    voice,
   ]);
 
   // The control is ABSENT rather than disabled when nothing could speak. See

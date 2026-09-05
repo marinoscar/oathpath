@@ -207,6 +207,7 @@ import { usePracticeSession } from '../hooks/usePracticeSession';
 import { useAudioCapture } from '../hooks/useAudioCapture';
 import { useIsMounted } from '../hooks/useIsMounted';
 import { useVoiceAvailability } from '../hooks/useVoiceAvailability';
+import { useVoicePrefs } from '../hooks/useVoicePrefs';
 import {
   ApiError,
   completePracticeSession,
@@ -294,6 +295,12 @@ export default function PracticeSessionPage() {
   // status is still unknown, which is what makes the microphone appear a beat
   // late rather than appear dead.
   const { transcribeBound } = useVoiceAvailability();
+
+  // The learner's own voice preferences (#288, epic #280), read through the
+  // SAME `useUserSettings` the rest of the app uses — see `useVoicePrefs`.
+  // Resolved to the built-in defaults until the settings read lands, so the
+  // question is readable from the first paint rather than after a round trip.
+  const { voice: voicePrefs } = useVoicePrefs();
   /**
    * Optional on purpose, exactly as in `ExplainPanel`: this page must not blank
    * out when the status provider is absent (a test rendering it in isolation,
@@ -918,7 +925,14 @@ export default function PracticeSessionPage() {
             <Box sx={{ mt: 1, ml: -1 }}>
               <QuestionAudio
                 text={question.prompt}
-                premiumVoice={false}
+                // THE LEARNER'S STORED PREFERENCE (#288), not the hard-coded
+                // `false` this used to pass. It is still only a WISH: the
+                // premium path is taken when this is true AND an admin has
+                // bound `speak`, and the browser's own voice reads the
+                // question in every other case.
+                premiumVoice={voicePrefs.preferPremiumVoice}
+                voice={voicePrefs.preferredVoice}
+                rate={voicePrefs.speechRate}
                 // FIRED WHEN AUDIO ACTUALLY STARTS, not when the button is
                 // pressed: a play that produced no sound (a failed synthesis,
                 // an autoplay block) is a question that was READ, and
