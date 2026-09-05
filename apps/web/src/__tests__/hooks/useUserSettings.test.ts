@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, waitFor, act } from '@testing-library/react';
 import { useUserSettings } from '../../hooks/useUserSettings';
 import { api, ApiError } from '../../services/api';
+import { useOptionalThemeContext } from '../../contexts/ThemeContext';
 import type { UserSettings } from '../../types';
 
 // Mock the API module
@@ -23,16 +24,24 @@ vi.mock('../../services/api', () => ({
   },
 }));
 
-// Helper to mock useThemeContext
+// Helper to mock useThemeContext / useOptionalThemeContext
 const mockSetMode = vi.fn();
+const mockThemeContextValue = {
+  mode: 'system',
+  theme: {},
+  isDarkMode: false,
+  setMode: mockSetMode,
+  toggleMode: vi.fn(),
+};
 vi.mock('../../contexts/ThemeContext', () => ({
-  useThemeContext: vi.fn(() => ({
-    mode: 'system',
-    theme: {},
-    isDarkMode: false,
-    setMode: mockSetMode,
-    toggleMode: vi.fn(),
-  })),
+  useThemeContext: vi.fn(() => mockThemeContextValue),
+  // `useUserSettings` reads the theme through the non-throwing accessor
+  // (#288). Mirror the real "has a provider" case by default, sharing the
+  // same object (and the same `mockSetMode`) as `useThemeContext` above, so
+  // the existing sync-on-fetch/update assertions still exercise the real
+  // `setMode` spy. A test that needs the no-provider branch overrides this
+  // per-test with `mockReturnValueOnce(null)`.
+  useOptionalThemeContext: vi.fn(() => mockThemeContextValue),
 }));
 
 // Mock data
@@ -74,6 +83,24 @@ describe('useUserSettings', () => {
       const { result } = renderHook(() => useUserSettings());
 
       expect(result.current.isSaving).toBe(false);
+    });
+  });
+
+  describe('syncTheme: false with no ThemeContextProvider (#288)', () => {
+    it('should fetch and expose settings without throwing when useOptionalThemeContext returns null', async () => {
+      vi.mocked(useOptionalThemeContext).mockReturnValueOnce(null);
+      vi.mocked(api.get).mockResolvedValue(mockUserSettings);
+
+      const { result } = renderHook(() => useUserSettings({ syncTheme: false }));
+
+      await waitFor(() => {
+        expect(result.current.isLoading).toBe(false);
+      });
+
+      expect(result.current.error).toBeNull();
+      expect(result.current.settings).toEqual(mockUserSettings);
+      // No provider above it, and syncTheme is off, so setMode is never reached.
+      expect(mockSetMode).not.toHaveBeenCalled();
     });
   });
 

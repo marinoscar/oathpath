@@ -210,3 +210,73 @@ describe('USER_SETTINGS_SECTIONS - Danger zone group (issue #270)', () => {
     expect(securitySection?.cards.some((c) => c.path === '/settings/reset')).toBe(false);
   });
 });
+
+/**
+ * Issue #288, epic #280. `/settings/voice` is where every voice preference in
+ * that epic lives, and CLAUDE.md's Settings UI Pattern says what shape that has
+ * to take: a registry card plus a route, never a new tab on an existing
+ * settings page.
+ *
+ * The route half and the no-permission half are already asserted generically
+ * above — "routes EVERY user-settings card path in App.tsx, each with no
+ * permission gate" loops over the whole registry, so this card inherits both
+ * for free. What is left here is what is specific to THIS card.
+ */
+describe('USER_SETTINGS_SECTIONS - Voice card (issue #288)', () => {
+  function findVoiceCard() {
+    for (const section of USER_SETTINGS_SECTIONS) {
+      const card = section.cards.find((c) => c.path === '/settings/voice');
+      if (card) return card;
+    }
+    return undefined;
+  }
+
+  it('is present in the registry, with a real title and description', () => {
+    const card = findVoiceCard();
+    expect(card).toBeDefined();
+    expect(card?.title).toBe('Voice');
+    // Written as user-facing copy, not the field names restated.
+    expect(card?.description).toMatch(/read to you/i);
+    expect(card?.description).toMatch(/out loud/i);
+  });
+
+  it('declares no permission - every authenticated learner owns their own voice preferences', () => {
+    // `PATCH /api/user-settings` grants `user_settings:write` to all three
+    // roles and `GET /api/ai/speech/voices` is `@Auth()` with no permissions,
+    // so there is no string to mirror and none may be invented. A gate would
+    // leave a Viewer - the default role - unable to slow down the voice
+    // reading them their questions.
+    const card = findVoiceCard();
+    expect(card).toBeDefined();
+    expect('permission' in (card as object)).toBe(false);
+    expect(card?.permission).toBeUndefined();
+  });
+
+  it('is grouped under Account, beside Appearance - how the account sounds, not a credential', () => {
+    const accountSection = USER_SETTINGS_SECTIONS.find((s) => s.label === 'Account');
+    expect(accountSection?.cards.some((c) => c.path === '/settings/voice')).toBe(true);
+
+    const securitySection = USER_SETTINGS_SECTIONS.find((s) => s.label === 'Security');
+    expect(securitySection?.cards.some((c) => c.path === '/settings/voice')).toBe(false);
+  });
+
+  it('adds a card rather than a tab: no existing card path is reused or replaced', () => {
+    // CLAUDE.md Settings UI Pattern rule 2 in its checkable form - every card
+    // that existed before #288 is still its own destination, and the new one
+    // is not folded into any of them.
+    const paths = USER_SETTINGS_SECTIONS.flatMap((s) => s.cards.map((c) => c.path));
+    expect(paths).toEqual(
+      expect.arrayContaining([
+        '/settings/voice',
+        '/settings/journey',
+        '/settings/profile',
+        '/settings/appearance',
+        '/settings/notifications',
+        '/settings/ai',
+        '/settings/tokens',
+        '/settings/reset',
+      ]),
+    );
+    expect(new Set(paths).size).toBe(paths.length);
+  });
+});
