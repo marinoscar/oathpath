@@ -140,6 +140,34 @@ export const aiTranscribeOkSchema = z.object({
    * invented for it.
    */
   confidence: z.number().min(0).max(1).nullable(),
+
+  /**
+   * Can the model this deployment binds to `transcribe` report a confidence AT
+   * ALL? (issue #348, epic #345.)
+   *
+   * -------------------------------------------------------------------------
+   * A DEPLOYMENT FACT, NOT A FACT ABOUT THIS RECORDING
+   * -------------------------------------------------------------------------
+   *
+   * `confidence: null` is ordinary and always has been, but it answers two
+   * questions at once and a client cannot tell which: "this call produced no
+   * score" and "no call on this deployment ever will". Only the second is
+   * actionable, and it is the one `docs/specs/voice.md` §3 turns out to depend
+   * on entirely — the misheard protection reads a MEASURED confidence, so where
+   * there is none it does not fire rarely, it never fires.
+   *
+   * `false` IS NOT AN ERROR AND NOT A DEGRADED STATE, and a client must not
+   * render it as one. What replaces the score is the mechanism that never
+   * needed one: the learner reads the words that will be (or were) graded and
+   * can correct them, which every spoken screen offers unconditionally. This
+   * field only lets the copy beside those words be honest — "we cannot tell how
+   * clearly that came through" rather than a silence that implies we checked.
+   *
+   * It is NOT a secret and not administrator-facing configuration: it names no
+   * model, no provider and no key — it is one boolean about a capability the
+   * learner's own screen behaves differently for.
+   */
+  confidenceAvailable: z.boolean(),
 });
 
 /**

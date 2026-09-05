@@ -37,6 +37,20 @@ export type {
   SynthesizedSpeech,
   TranscribeUpload,
 } from './ai-speech.service';
+// The recogniser's hints (#348, epic #345). The SERVICE is deliberately absent
+// from this list, exactly as `SpeechAudioService` is: it is declared by
+// `SpeechAudioModule` (see that file for the cycle it avoids), and nothing
+// outside that module should be resolving a learner's civics rows in order to
+// steer a recogniser. What is exported is the rule and its two pure functions,
+// so a test — or a future second transcription caller — reads one definition of
+// "which language" and "which glossary" rather than writing a second.
+export {
+  DEFAULT_TRANSCRIPTION_LANGUAGE,
+  MAX_RECOGNITION_PROMPT_CHARS,
+  buildRecognitionPrompt,
+  resolveTranscriptionLanguage,
+} from './transcription-context.service';
+export type { TranscriptionContext } from './transcription-context.service';
 export { AiUserKeyService } from './ai-user-key.service';
 export { AiUserCredentialCleanupTask } from './tasks/ai-credential-cleanup.task';
 export { AiStatusService } from './ai-status.service';
