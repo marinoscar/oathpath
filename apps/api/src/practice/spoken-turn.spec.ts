@@ -4,12 +4,14 @@ import { COACH_REACTION_LINES } from '../ai/coach/reaction-lines';
 import { reactionLine } from '../ai/coach/select-line';
 import {
   SPOKEN_VERDICT_LINES,
+  composeSessionClosingTurn,
   composeSpokenTurn,
   spokenAcceptedAnswer,
   spokenAcknowledgement,
   spokenVerdictKey,
   type SpokenTurnFacts,
 } from './spoken-turn';
+import { coachEventForSessionSummary } from '../ai/coach/session-event';
 
 // =============================================================================
 // composeSpokenTurn — tests (issue #351, epic #345)
@@ -507,5 +509,106 @@ describe('composeSpokenTurn', () => {
         expect(`answer.${spokenVerdictKey(c)}`).toBe(event);
       }
     });
+  });
+});
+
+// =============================================================================
+// composeSessionClosingTurn — tests (issue #352, epic #345)
+// =============================================================================
+//
+// About a quarter of the reaction bank was unreachable before this issue: the
+// three `session.complete_*` cells were computed and served and nothing on any
+// client rendered or spoke them. These assertions cover the composer that ends
+// that — including the two ways it must say NOTHING, which is the half a
+// "render the line" change most easily gets wrong.
+// =============================================================================
+
+describe('composeSessionClosingTurn', () => {
+  const SESSION_ID = 'c2222222-2222-4222-8222-222222222222';
+
+  /** The real, curated closing line for a set of summary numbers. */
+  function closingLine(answered: number, correct: number): string {
+    return reactionLine(
+      'supportive',
+      coachEventForSessionSummary({ answered, correct }),
+      SESSION_ID,
+    );
+  }
+
+  it('says the coach’s line, and only it — no tally, no score, no digits', () => {
+    const line = closingLine(20, 18);
+    const turn = composeSessionClosingTurn({ coachReaction: { text: line } });
+
+    expect(turn).toEqual([line]);
+    // The no-interpolation rule, asserted rather than trusted: a spoken score
+    // would be a fourth exception to `spoken-turn.ts`'s three named ones.
+    expect(turn.join(' ')).not.toMatch(/\d/);
+  });
+
+  it('says nothing when the learner has turned reactions off', () => {
+    // `coach.reactions: false` becomes `null` ONCE, in `toCoachReaction`, and
+    // this is what falls out of it. There is no second suppression branch to
+    // keep in step — which is the point of asserting it here.
+    expect(composeSessionClosingTurn({ coachReaction: null })).toEqual([]);
+  });
+
+  it('says nothing for a session with no summary yet', () => {
+    // An `in_progress` session reaches this with the identical `null`: the
+    // three completion events are a pure function of `correct`/`answered`, so
+    // a session with nothing to summarise has nothing to react to.
+    expect(composeSessionClosingTurn({ coachReaction: null })).toEqual([]);
+  });
+
+  it('says nothing rather than an empty line for whitespace', () => {
+    expect(composeSessionClosingTurn({ coachReaction: { text: '   ' } })).toEqual([]);
+  });
+
+  it('is drawn from the curated bank for each of the three completion bands', () => {
+    const bands: [number, number, keyof typeof COACH_REACTION_LINES.supportive][] = [
+      [20, 18, 'session.complete_strong'],
+      [20, 12, 'session.complete_mixed'],
+      [20, 4, 'session.complete_weak'],
+    ];
+
+    for (const [answered, correct, event] of bands) {
+      const [line] = composeSessionClosingTurn({
+        coachReaction: { text: closingLine(answered, correct) },
+      });
+      expect(COACH_REACTION_LINES.supportive[event]).toContain(line);
+    }
+  });
+
+  it('speaks nothing the banned-topic lint would reject, for any persona or band', () => {
+    const violations: string[] = [];
+    for (const persona of ['supportive', 'academic', 'playful', 'unfiltered']) {
+      for (const [answered, correct] of [
+        [20, 20],
+        [20, 12],
+        [20, 0],
+      ]) {
+        const text = reactionLine(
+          persona,
+          coachEventForSessionSummary({ answered, correct }),
+          SESSION_ID,
+        );
+        for (const line of composeSessionClosingTurn({ coachReaction: { text } })) {
+          const hits = bannedFamilyHits(line);
+          if (hits.length > 0) {
+            violations.push(`${persona}: ${JSON.stringify(line)} — ${hits.join(', ')}`);
+          }
+        }
+      }
+    }
+    expect(violations).toEqual([]);
+  });
+
+  it('is deterministic in the session id — the summary screen and the speaker agree', () => {
+    const first = composeSessionClosingTurn({
+      coachReaction: { text: closingLine(20, 18) },
+    });
+    const second = composeSessionClosingTurn({
+      coachReaction: { text: closingLine(20, 18) },
+    });
+    expect(second).toEqual(first);
   });
 });

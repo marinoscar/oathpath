@@ -226,6 +226,10 @@ const SESSION_BASE: PracticeSession = {
   startedAt: '2026-03-01T12:00:00.000Z',
   completedAt: null,
   summary: null,
+  // An `in_progress` session has nothing to summarise and therefore nothing to
+  // react to (#352) — the same null the server sends.
+  coachReaction: null,
+  spokenTurn: [],
 };
 
 function makeAttempt(overrides: Partial<PracticeAttempt> = {}): PracticeAttempt {
@@ -329,6 +333,14 @@ interface Options {
    * preference changes the settings document, exactly as a learner would.
    */
   voice?: VoiceSettings;
+  /**
+   * What `POST .../complete` answers with (#352, epic #345).
+   *
+   * The default is a completed session that says NOTHING — no reaction, an
+   * empty closing turn — so every test written before this issue keeps
+   * asserting the page it already asserted.
+   */
+  completedSession?: PracticeSession;
   theme?: typeof lightTheme;
 }
 
@@ -484,7 +496,12 @@ function renderSession(options: Options = {}) {
     ),
     http.post(`${API_BASE}/practice/sessions/${SESSION_ID}/complete`, () =>
       HttpResponse.json({
-        data: { ...SESSION_BASE, status: 'completed', completedAt: '2026-03-01T12:20:00.000Z' },
+        data:
+          options.completedSession ?? {
+            ...SESSION_BASE,
+            status: 'completed',
+            completedAt: '2026-03-01T12:20:00.000Z',
+          },
       }),
     ),
   );
@@ -1671,5 +1688,164 @@ describe('the confirmation step is reachable and announced', () => {
     // verdict's own announcement reads as two unrelated interruptions.
     expect(heading.closest('[role="status"]')).toBeNull();
     expect(heading.closest('[role="alert"]')).toBeNull();
+  });
+});
+
+// -----------------------------------------------------------------------------
+// THE CLOSING TURN (#352, epic #345 "The conversation the coach has")
+// -----------------------------------------------------------------------------
+//
+// The end of a session was silent on both transports: the server has computed
+// a session's `coachReaction` since #320, and no client carried the field. The
+// summary screen now RENDERS it (`PracticeSummaryPage.test.tsx`); in Voice mode
+// this page must also SAY it, and — the half that is easier to get wrong — must
+// say nothing at all when there is nothing to say.
+// -----------------------------------------------------------------------------
+
+/** A speech engine that records what was said and finishes each utterance. */
+function installRecordingSpeechSynthesis(): string[] {
+  const spoken: string[] = [];
+  Object.defineProperty(window, 'speechSynthesis', {
+    value: {
+      cancel: vi.fn(),
+      speak: vi.fn(
+        (utterance: {
+          text: string;
+          onstart?: (() => void) | null;
+          onend?: (() => void) | null;
+        }) => {
+          spoken.push(utterance.text);
+          utterance.onstart?.();
+          // FIRES `onend`, unlike `installSpeechSynthesis` above: the closing
+          // turn is AWAITED before the page navigates (a browser that cancels
+          // speech on unmount would otherwise cut the coach off mid-sentence),
+          // so an engine that never finishes would hold the summary screen up
+          // until this page's own eight-second guard expired.
+          utterance.onend?.();
+        },
+      ),
+    },
+    configurable: true,
+  });
+  (
+    window as unknown as { SpeechSynthesisUtterance: unknown }
+  ).SpeechSynthesisUtterance = class {
+    text: string;
+    rate = 1;
+    onstart: (() => void) | null = null;
+    onend: (() => void) | null = null;
+    onerror: ((event: { error: string }) => void) | null = null;
+    constructor(text: string) {
+      this.text = text;
+    }
+  };
+  return spoken;
+}
+
+/** A finished session: no question left, so the page shows its Finish panel. */
+function finishedDetail(): PracticeSessionDetail {
+  return detailFor({
+    nextQuestion: null,
+    progress: { answered: 5, planned: 5 },
+    attempts: [makeAttempt()],
+  });
+}
+
+function completedWith(spokenTurn: string[]): PracticeSession {
+  return {
+    ...SESSION_BASE,
+    status: 'completed',
+    completedAt: '2026-03-01T12:20:00.000Z',
+    summary: {
+      plannedCount: 5,
+      answered: 5,
+      correct: 3,
+      partial: 0,
+      incorrect: 2,
+      skipped: 0,
+      selfMarked: 0,
+      revealed: 0,
+      hintUsed: 0,
+      totalDurationMs: null,
+      timedAttempts: 0,
+    },
+    coachReaction:
+      spokenTurn.length > 0 ? { text: spokenTurn[0], persona: 'supportive' } : null,
+    spokenTurn,
+  };
+}
+
+describe('the coach’s closing turn', () => {
+  const CLOSING_LINE = 'Mixed set — some of it landed, some needs another pass.';
+
+  async function finishSession(user: ReturnType<typeof userEvent.setup>) {
+    const finish = await screen.findByRole('button', {
+      name: /finish and see your summary/i,
+    });
+    await user.click(finish);
+  }
+
+  it('speaks the line the server composed, then leaves for the summary', async () => {
+    const user = userEvent.setup();
+    const spoken = installRecordingSpeechSynthesis();
+
+    renderSession({
+      detail: finishedDetail(),
+      // Voice mode without a tap: the learner's own stored preference, which
+      // is what #313 made this control write.
+      voice: { conversationMode: true },
+      completedSession: completedWith([CLOSING_LINE]),
+    });
+
+    await finishSession(user);
+
+    // SPOKEN — verbatim, and drawn from the server's own `spokenTurn`. This
+    // page selects nothing: the string it says is the string the summary
+    // screen is about to render.
+    await waitFor(() => expect(spoken).toContain(CLOSING_LINE));
+    // …and the learner still gets to the summary.
+    expect(
+      await screen.findByRole('heading', { level: 1, name: 'Practice summary' }),
+    ).toBeInTheDocument();
+  });
+
+  it('says nothing when the learner has turned reactions off', async () => {
+    const user = userEvent.setup();
+    const spoken = installRecordingSpeechSynthesis();
+
+    renderSession({
+      detail: finishedDetail(),
+      voice: { conversationMode: true },
+      // `coach.reactions: false` reaches this page as a null reaction and an
+      // EMPTY turn — suppressed once, server-side, in `toCoachReaction`. This
+      // page has no branch of its own for the setting and must not grow one.
+      completedSession: completedWith([]),
+    });
+
+    await finishSession(user);
+
+    expect(
+      await screen.findByRole('heading', { level: 1, name: 'Practice summary' }),
+    ).toBeInTheDocument();
+    expect(spoken).toEqual([]);
+  });
+
+  it('says nothing in Text mode — a learner who is reading is not read to', async () => {
+    const user = userEvent.setup();
+    const spoken = installRecordingSpeechSynthesis();
+
+    renderSession({
+      detail: finishedDetail(),
+      // No `conversationMode`, so the session starts in Text — exactly as it
+      // did before E13.
+      completedSession: completedWith([CLOSING_LINE]),
+    });
+
+    await finishSession(user);
+
+    expect(
+      await screen.findByRole('heading', { level: 1, name: 'Practice summary' }),
+    ).toBeInTheDocument();
+    expect(spoken).toEqual([]);
   });
 });

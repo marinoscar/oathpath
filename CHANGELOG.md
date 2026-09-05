@@ -130,6 +130,19 @@ production build eliminates it.
   read of the bank — `unfiltered`'s lines specifically — has not happened
   and is recommended before this feature reaches a public release.
 
+  **The bank was deepened from 123 lines to 648 (issue #352, epic #345),
+  and the attestation above covers the new lines exactly as it covers the
+  old ones:** all 525 additions were written by Claude and read back by
+  Claude against the same invariant floor, with no human review of any of
+  them. Every one passes the same automated banned-topic lint, which now
+  also enforces a depth floor tied to `MAX_PLANNED_COUNT` (twenty lines per
+  `answer.*` cell, so a full twenty-question session can never be forced to
+  repeat a line) and global uniqueness across the whole bank. The same
+  issue lit up the three `session.complete_*` cells, which had been
+  computed and served since #320 and rendered by nothing: a completed
+  session's `coachReaction` is now shown on the practice summary and, in
+  Voice mode, spoken as the session's closing turn.
+
 ### Changed
 
 - **Rebranded to OathPath.** The application, its CLI, its database and its

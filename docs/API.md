@@ -2613,8 +2613,13 @@ Every other coaching field above is null on a deterministically-graded
 attempt, because no grader ran and a deterministic grade invents nothing —
 which is correct, and which left the common case saying nothing at all beyond
 the verdict. `coachReaction` is the field that covers it: it comes from a
-curated, human-reviewed line bank rather than from a model, so it costs
-nothing, needs no AI key, and works on a deployment with no AI configured.
+curated line bank rather than from a model, so it costs nothing, needs no AI
+key, and works on a deployment with no AI configured. **On who reviewed that
+bank:** every line was written and read against the invariant floor by
+Claude, the coding agent, not by an independent human reviewer; an automated
+banned-topic lint runs over every shipped line on every build. The bank's own
+header (`apps/api/src/ai/coach/reaction-lines.ts`) and `CHANGELOG.md` state
+this in the same words.
 
 **Computed at read time and never persisted.** No column is added to
 `practice_attempts` for it. The line is selected by a pure function seeded by
@@ -2892,7 +2897,12 @@ the client sends contributes to it.
       "hintUsed": 0,
       "totalDurationMs": 42000,
       "timedAttempts": 5
-    }
+    },
+    "coachReaction": {
+      "text": "Mixed set — some of it landed, some needs another pass.",
+      "persona": "supportive"
+    },
+    "spokenTurn": ["Mixed set — some of it landed, some needs another pass."]
   }
 }
 ```
@@ -2900,6 +2910,33 @@ the client sends contributes to it.
 `totalDurationMs` is `null` — never `0` — when no attempt reported a
 duration; `timedAttempts` says how many attempts it covers, so a partial
 total can never be read as a complete one.
+
+**The coach's closing word** (issue #320 for `coachReaction`, issue #352,
+epic #345, for `spokenTurn`) — carried on **every** session shape this API
+returns, here and on `GET /practice/sessions` and
+`GET /practice/sessions/{id}`:
+
+| Field | Type | Description |
+|---|---|---|
+| `coachReaction` | object \| null | `{ "text": "…", "persona": "…" }` — one line in the learner's chosen coach voice about how the whole session went, drawn from the curated bank by the same pure function an attempt's reaction uses. **`null` whenever `summary` is `null`** (an unfinished or abandoned session has nothing to react to), and `null` when the learner has set `coach.reactions` to `false`. |
+| `spokenTurn` | string[] | What the coach **says** when the session ends, in order — the spoken sibling of the field above, composed server-side so every transport says the same thing. **`[]` whenever `coachReaction` is `null`**, and a client speaks an empty array as silence rather than substituting a line of its own. |
+
+**Which of the three completion lines is chosen comes from `summary.correct
+/ summary.answered`** — the same two numbers the response already carries —
+so the line and the tally a learner reads it beside can never disagree.
+
+**`spokenTurn` deliberately carries no tally.** The band is already in the
+line the coach says; the digits are on the summary screen, where they can be
+read at the learner's own pace. Interpolating a score into spoken copy would
+be a new exception to the no-interpolation rule that keeps the spoken bank
+auditable — see `apps/api/src/practice/spoken-turn.ts`.
+
+**Computed at read time, stored nowhere**, exactly as an attempt's reaction
+is: seeded by the **session** id, so the completion response and every later
+read of that session say the same thing with no column behind them. Editing
+the line bank re-maps that selection for past sessions too, which is
+expected rather than a defect —
+[`docs/specs/coach-personality.md`](specs/coach-personality.md) §7.1.
 
 **Idempotent**: completing an already-`completed` session returns the stored
 summary unchanged and does not move `completedAt`. The moment a learner

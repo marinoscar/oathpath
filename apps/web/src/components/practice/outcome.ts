@@ -54,10 +54,17 @@ const OUTCOMES: Record<string, OutcomeDisplay> = {
     color: 'success',
     detail: 'That matches an accepted answer.',
   },
-  // Declared by the API and unreachable from E3's grading path — exact match
-  // plus normalisation is binary by construction. It is handled here anyway,
-  // because the day E4's semantic grader produces one, this file is not the
-  // place anybody will remember to look.
+  // LIVE SINCE E4, and this comment used to say the opposite. It was written
+  // when E3's exact matcher was the only grading path — binary by
+  // construction, so `partial` was declared by the API and reachable by
+  // nothing. E4's semantic grader changed that: `GRADING_VERDICTS`
+  // (`apps/api/src/practice/grading.ts`) offers the model `partial`, and
+  // `PracticeService.grade` persists the verdict it returns. A learner on a
+  // deployment with a `grader` model bound can see this today.
+  //
+  // It IS still dark on a deployment with no AI configured at all, which is
+  // the honest half of the original claim and the only half that survives
+  // (issue #352 asked the question directly rather than leaving it ambiguous).
   partial: {
     label: 'Partly right',
     color: 'warning',
