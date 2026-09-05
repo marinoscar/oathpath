@@ -2596,7 +2596,7 @@ to rung 1's result rather than erroring the request.
 **Five more fields, all issue #104 (epic #58, E9 "Voice foundation")**, none
 of them a verdict — they are facts about the learner's own session the
 server cannot otherwise observe, because the audio itself is never stored
-(see `Voice` above):
+(see [`AI Speech`](#ai-speech) above):
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
