@@ -1226,7 +1226,10 @@ your own OpenAI dashboard.
 |-------|-------------|
 | `days` | Window size. Defaults to 30, clamped to 1–365. An unparseable value falls back to the default rather than erroring |
 
-Returns totals plus breakdowns by model and by the role each call served.
+Returns totals plus breakdowns by model and by the role each call served, plus
+a `timeline`: one entry per UTC calendar day in the window (`date`, `calls`,
+`totalTokens`), ascending, zero-filled for days with no calls — the trend
+chart's data source.
 
 ---
 
