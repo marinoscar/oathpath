@@ -1322,7 +1322,7 @@ describe('Civics audio cache — GET /api/ai/speech/audio', () => {
         {
           provide: OpenAiProvider,
           useValue: new FakeAiProvider(
-            new AiUsageService(prismaMock as unknown as PrismaService),
+            new AiUsageService(prismaMock as unknown as PrismaService, new Clock()),
           ),
         },
         { provide: CredentialsService, useValue: { getSecret } },
