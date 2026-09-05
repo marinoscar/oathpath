@@ -240,15 +240,35 @@ export const CONVERSATION_NOTICE_SESSION_COMPLETE =
 // ---------------------------------------------------------------------------
 
 /**
- * Where the loop is. Six states, exactly the six in
- * `docs/specs/conversation-mode.md` §4 — `idle` is both "never started" and
- * "stopped", because a stopped conversation has no residue: the stream is
- * closed, the wake lock is dropped and the next `start()` begins from nothing.
- * A separate `stopped` state would be a state whose only distinguishing
- * property is the notice, which is already its own field.
+ * Where the loop is. `idle` is both "never started" and "stopped", because a
+ * stopped conversation has no residue: the stream is closed, the wake lock is
+ * dropped and the next `start()` begins from nothing. A separate `stopped`
+ * state would be a state whose only distinguishing property is the notice,
+ * which is already its own field.
+ *
+ * SEVEN, NOT THE SIX OF `docs/specs/conversation-mode.md` §4 — issue #349,
+ * epic #345 added `preparing`, and it exists to stop this machine lying.
+ *
+ * `start()` used to `setPhase('speakingQuestion')` one line before calling
+ * `acquireStream()`, so for as long as the browser's permission modal stood
+ * open — which on a first use is a dialogue a learner has to read — the screen
+ * said "Asking you the question." while nothing was being asked, no audio was
+ * playing, and the microphone was not yet open. A learner who believed it
+ * started answering into a device that did not exist yet.
+ *
+ * `preparing` is the honest name for that span, and it is a PHASE rather than
+ * "hold at `idle` until the stream resolves" because `idle` is load-bearing in
+ * three other places: `start()` refuses a second tap from any non-`idle` phase,
+ * the wake lock is taken by `phase !== 'idle'`, and `isRunning` (which is what
+ * swaps Start for Stop) is the same expression. Holding at `idle` would make a
+ * doubled tap open two prompts, drop the wake lock for the duration of the
+ * device round-trip, and leave a Start button on screen that had already been
+ * pressed. §4's diagram is otherwise unchanged: `preparing` sits between the
+ * tap and `speakingQuestion`, and every transition after it is the same.
  */
 export type ConversationPhase =
   | 'idle'
+  | 'preparing'
   | 'speakingQuestion'
   | 'listening'
   | 'processing'
@@ -854,7 +874,13 @@ export function useConversationSession(
     const turn = beginTurn();
     // The phase moves first: it is what takes the wake lock, and it is what a
     // second tap on Start is refused by while the device is being opened.
-    setPhase('speakingQuestion');
+    //
+    // `preparing`, NOT `speakingQuestion` (issue #349). The question is asked
+    // by `askQuestion` below, on the other side of the device round-trip and
+    // whatever permission dialogue it raises; claiming it here would put
+    // "Asking you the question." on screen over a modal, with silence behind
+    // it. See {@link ConversationPhase}.
+    setPhase('preparing');
 
     void opts.capture.acquireStream().then(
       (stream) => {
