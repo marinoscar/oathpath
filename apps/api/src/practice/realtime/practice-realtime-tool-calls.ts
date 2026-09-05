@@ -164,7 +164,30 @@ export interface PracticeRealtimeToolOk {
   readonly questionId: string | null;
 }
 
-/** Why a tool call was refused. One of these, never a free-text reason. */
+/**
+ * Why a tool call was refused. One of these, never a free-text reason.
+ *
+ * ---------------------------------------------------------------------------
+ * THE CLOSED SET, AND ITS RELATIONSHIP TO `realtime-practice.md` §5's TABLE
+ * ---------------------------------------------------------------------------
+ *
+ * The spec's table names five reasons; this union names eight. It is a
+ * REFINEMENT, not a divergence, and the mapping is written out here so a
+ * reader holding the spec can check it line by line rather than guess:
+ *
+ * | spec (§5)          | shipped                                        | why |
+ * |--------------------|------------------------------------------------|-----|
+ * | `answer_outstanding` | `answer_outstanding`                          | same |
+ * | `session_complete`   | `session_not_in_progress` + `no_questions_left` | the spec folds two DIFFERENT facts into one code — "this session is over" and "this session has asked everything it planned". They need different instructions (stop talking entirely vs. call `end_session`), and a model handed one code for both has to guess which situation it is in. |
+ * | `wrong_item`         | `wrong_question`                              | renamed only. A practice session has one item kind — a civics question — where the interview's tool contract has three, so `item` was the interview's generality and not this transport's. |
+ * | `session_not_over`   | `questions_remain`                            | renamed only, to state the FACT rather than the negation of the claim being refused. |
+ * | `already_answered`   | `already_answered`                            | same (issue #354). |
+ * | —                    | `no_answer_outstanding`                       | added: an answer or a skip arriving when the session is waiting on nothing. The spec's table has no row for it because it reads the recording tools as always following a question; a model that has lost its place does not. |
+ * | —                    | `empty_transcript`                            | added (issue #354), and it is the enforcement of a rule the spec DOES state in prose (§5): "An empty or missing transcript must never be routed to `grade_answer` and graded `incorrect` in place of a skip." A refusal is what stops that from being a false claim about the learner. |
+ *
+ * {@link PRACTICE_REALTIME_REJECTION_REASONS} enumerates the set as values, and
+ * the compile-time proof beneath it fails the build if the two drift.
+ */
 export type PracticeRealtimeRejectionReason =
   /** The session is completed or abandoned. */
   | 'session_not_in_progress'
@@ -177,7 +200,65 @@ export type PracticeRealtimeRejectionReason =
   /** The session has asked everything it set out to ask. */
   | 'no_questions_left'
   /** `end_session` claimed there was nothing left, and there is. */
-  | 'questions_remain';
+  | 'questions_remain'
+  /**
+   * The question this answer or skip names has ALREADY been recorded.
+   *
+   * NOT A RULE THIS FILE CAN DECIDE, and the only reason in the set that is
+   * not: it is `PracticeService.recordAttempt`'s own one-attempt-per-question
+   * guard, which is a `ConflictException` raised inside a transaction against
+   * rows this module cannot see. The handler catches it and calls
+   * {@link alreadyAnsweredRejection} — see that function for why a 409 must
+   * not be allowed to reach a live realtime connection.
+   */
+  | 'already_answered'
+  /**
+   * `grade_answer` carried nothing the learner actually said.
+   *
+   * A BLANK TRANSCRIPT IS NOT A WRONG ANSWER. Graded, it would be recorded
+   * `incorrect` — a claim that the learner answered and got it wrong, about
+   * somebody who said nothing at all — and that row would then lapse the
+   * question's mastery. `docs/specs/realtime-practice.md` §5 states the rule;
+   * this is where it is enforced.
+   */
+  | 'empty_transcript';
+
+/**
+ * The closed set, as values.
+ *
+ * ENUMERATED SO IT CAN BE ITERATED — a test walks this array and asserts every
+ * reason is reachable, which is a promise a union type alone cannot keep
+ * (a reason declared and never produced compiles perfectly).
+ */
+export const PRACTICE_REALTIME_REJECTION_REASONS = [
+  'session_not_in_progress',
+  'answer_outstanding',
+  'no_answer_outstanding',
+  'wrong_question',
+  'no_questions_left',
+  'questions_remain',
+  'already_answered',
+  'empty_transcript',
+] as const;
+
+/**
+ * Compile-time proof that the array above and the union are the same set.
+ *
+ * BOTH DIRECTIONS, so neither can grow alone: a reason added to the union with
+ * no entry in the array would leave the "every reason is reachable" test
+ * silently skipping it, and an entry in the array naming a reason no rule can
+ * produce would fail that test loudly but only after somebody wrote it.
+ */
+type DeclaredRejectionReason = (typeof PRACTICE_REALTIME_REJECTION_REASONS)[number];
+
+export type RejectionReasonsAreEnumerated =
+  DeclaredRejectionReason extends PracticeRealtimeRejectionReason
+    ? PracticeRealtimeRejectionReason extends DeclaredRejectionReason
+      ? true
+      : never
+    : never;
+
+export const REJECTION_REASONS_ARE_ENUMERATED: RejectionReasonsAreEnumerated = true;
 
 /**
  * A refused call, as the model is told about it.
@@ -264,6 +345,101 @@ function sessionClosed(
 }
 
 /**
+ * The refusal a duplicate answer or skip gets: this question is already recorded.
+ *
+ * ---------------------------------------------------------------------------
+ * EXPORTED, BECAUSE IT IS THE ONE REFUSAL THIS FILE CANNOT DECIDE
+ * ---------------------------------------------------------------------------
+ *
+ * Every other rejection here comes out of a rule over the context struct. This
+ * one comes out of `PracticeService.recordAttempt`'s own
+ * one-attempt-per-question guard — a `ConflictException` thrown inside a
+ * transaction, against `practice_attempts` rows no pure function can see. The
+ * handler catches that exception and calls this, so the refusal that reaches
+ * the model is built by the same function as every other one and carries the
+ * same three fields.
+ *
+ * IT IS EXPORTED RATHER THAN HAND-ROLLED AT THE CATCH SITE for exactly that
+ * reason: a refusal assembled inline is a refusal free to omit `instruction`,
+ * and `instruction` is the field that gets the session moving again.
+ *
+ * WHY THE CONFLICT MUST NEVER PROPAGATE: a duplicate `grade_answer` is an
+ * ORDINARY event on this transport — a retried tool call after a slow
+ * acknowledgement, two nearly-simultaneous calls after a connection hiccup, a
+ * re-mint racing the original. Letting the 409 (or, past the relay, a generic
+ * failure) reach a live, per-minute-billing connection would end a session the
+ * learner is in the middle of, over something that is not a problem: the answer
+ * they gave is already recorded, correctly, exactly once.
+ *
+ * SO THE INSTRUCTION IS "CARRY ON", NOT "TRY AGAIN". The state HAS moved — the
+ * row exists — and a retry of the same call could only produce this same
+ * refusal a second time.
+ */
+export function alreadyAnsweredRejection(
+  tool: 'grade_answer' | 'skip_question',
+): PracticeRealtimeRejection {
+  return reject(
+    tool,
+    'already_answered',
+    'That question has already been recorded for this session.',
+    'The answer is already saved. Call next_question and say what it returns. Do not tell ' +
+      'the learner anything happened, and do not send this again.',
+  );
+}
+
+/**
+ * The refusal a `grade_answer` carrying nothing the learner said gets.
+ *
+ * A BLANK TRANSCRIPT IS NOT A WRONG ANSWER, and the difference is a row. Passed
+ * through to `recordAttempt` it would be graded `incorrect` — recorded evidence
+ * that the learner answered and missed, about somebody who said nothing — and
+ * `nextSchedule` would then lapse the question on the strength of it. That is a
+ * false claim about a person, written into the one table this product treats as
+ * fact.
+ *
+ * REFUSED RATHER THAN CONVERTED INTO A SKIP, which is the tempting shortcut and
+ * is wrong for the mirror-image reason: a skip is the learner DECIDING to move
+ * on, and a silence the model could not fill is not that decision either. The
+ * instruction therefore offers the two honest moves — ask them again, or skip
+ * only if they actually asked to — and takes neither on their behalf.
+ */
+export function emptyTranscriptRejection(): PracticeRealtimeRejection {
+  return reject(
+    'grade_answer',
+    'empty_transcript',
+    'That call carried no answer — there is nothing to grade.',
+    'Ask the learner to say their answer again. Do not call skip_question unless they have ' +
+      'asked to move on, and never report an answer they did not give.',
+  );
+}
+
+/**
+ * The refusal a tool gets when the session has nothing left to ask.
+ *
+ * EXPORTED FOR A SECOND CALLER THAT SHOULD NEVER FIRE. {@link decideNextQuestion}
+ * raises it from the rules, where it is the ordinary end-of-session path. The
+ * handler also holds it as the answer to a case that cannot happen by
+ * construction — `questionsRemaining` is DERIVED from whether a question is
+ * available, so a rule that said "go ahead" alongside no question to serve
+ * would mean the derivation had drifted.
+ *
+ * A REFUSAL RATHER THAN A THROWN ERROR OR A NON-NULL ASSERTION, for that exact
+ * case: an impossible state reached on a live connection should degrade into a
+ * sentence the model can act on, not a 500 that ends a learner's session, and
+ * not a `!` that turns it into a `TypeError` one line later.
+ */
+export function noQuestionToServe(
+  tool: PracticeRealtimeToolName,
+): PracticeRealtimeRejection {
+  return reject(
+    tool,
+    'no_questions_left',
+    'This session has asked everything it set out to ask.',
+    'Call end_session with the reason no_questions_left.',
+  );
+}
+
+/**
  * `next_question`: may the coach ask for the next line?
  *
  * REFUSED WHILE AN ANSWER IS OUTSTANDING, which is the rule that keeps one
@@ -290,12 +466,7 @@ export function decideNextQuestion(
   }
 
   if (context.questionsRemaining <= 0) {
-    return reject(
-      'next_question',
-      'no_questions_left',
-      'This session has asked everything it set out to ask.',
-      'Call end_session with the reason no_questions_left.',
-    );
+    return noQuestionToServe('next_question');
   }
 
   return { status: 'ok' };
