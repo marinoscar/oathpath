@@ -290,6 +290,10 @@ const SESSION_BASE: PracticeSession = {
   startedAt: '2026-09-01T12:00:00.000Z',
   completedAt: null,
   summary: null,
+  // #352: an `in_progress` session has nothing to summarise and so nothing
+  // to react to — the same null and empty turn the server sends.
+  coachReaction: null,
+  spokenTurn: [],
 };
 
 function makeAttempt(overrides: Partial<PracticeAttempt> = {}): PracticeAttempt {
