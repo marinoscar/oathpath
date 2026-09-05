@@ -35,70 +35,69 @@
  * and resolves no palette — and be unreadable in a real dark-theme browser.
  */
 
-/** What a chip or a verdict line says, and which palette role it wears. */
+/**
+ * What a chip or a verdict line says, and which palette role it wears.
+ *
+ * =============================================================================
+ * THE VERDICT IS ONE LABEL. THERE IS NO SECOND SENTENCE (#358, epic #345)
+ * =============================================================================
+ *
+ * This interface used to carry a `detail` string as well — "Not a match" plus
+ * "That doesn't match an accepted answer." — and the two were rendered one
+ * above the other on every graded attempt. That is the SAME INFORMATION TWICE,
+ * in two registers, and E14's coach reaction had to sit sandwiched between
+ * them: the flattest line on the screen immediately above the one line the
+ * learner is actually meant to read, and another immediately below.
+ *
+ * `detail` was therefore deleted rather than demoted. A restatement that is
+ * merely made smaller is still a restatement, and the space it occupies is the
+ * space the coach needs. The chip's `label` states the verdict, once, in text
+ * as well as colour — which is what a learner who cannot tell a red chip from
+ * a green one relies on.
+ */
 export interface OutcomeDisplay {
   /** User-facing, and deliberately plain. Never "FAIL", never an emoji. */
   label: string;
   color: 'success' | 'error' | 'warning' | 'default';
-  /**
-   * The one-line explanation under a verdict, in `VISION.md`'s tone: never
-   * congratulatory, never scolding, and never implying the learner should have
-   * known better.
-   */
-  detail: string;
 }
 
 const OUTCOMES: Record<string, OutcomeDisplay> = {
-  correct: {
-    label: 'Correct',
-    color: 'success',
-    detail: 'That matches an accepted answer.',
-  },
+  correct: { label: 'Correct', color: 'success' },
   // Declared by the API and unreachable from E3's grading path — exact match
   // plus normalisation is binary by construction. It is handled here anyway,
   // because the day E4's semantic grader produces one, this file is not the
   // place anybody will remember to look.
-  partial: {
-    label: 'Partly right',
-    color: 'warning',
-    detail: 'Part of that matches an accepted answer.',
-  },
-  incorrect: {
-    label: 'Not a match',
-    color: 'error',
-    // NOT "wrong". The matcher compares text; it does not judge the learner,
-    // and a near-miss it could not recognise is exactly what the self-mark
-    // exists for.
-    detail: 'That doesn’t match an accepted answer.',
-  },
-  skipped: {
-    label: 'Skipped',
-    color: 'default',
-    detail: 'You moved on without answering this one.',
-  },
+  partial: { label: 'Partly right', color: 'warning' },
+  // NOT "wrong". The matcher compares text; it does not judge the learner, and
+  // a near-miss it could not recognise is exactly what the self-mark exists
+  // for.
+  incorrect: { label: 'Not a match', color: 'error' },
+  skipped: { label: 'Skipped', color: 'default' },
 };
 
 /** The wording and colour for one recorded outcome. Never throws. */
 export function outcomeDisplay(outcome: string): OutcomeDisplay {
   return (
-    OUTCOMES[outcome] ?? {
-      label: 'Recorded',
-      color: 'default',
-      // Says only what is certainly true. A newer server's outcome value means
-      // something this build has never heard of, and guessing at it would be
-      // the one thing worse than saying nothing.
-      detail: 'This answer was recorded.',
-    }
+    // Says only what is certainly true. A newer server's outcome value means
+    // something this build has never heard of, and guessing at it would be the
+    // one thing worse than saying nothing.
+    OUTCOMES[outcome] ?? { label: 'Recorded', color: 'default' }
   );
 }
 
 /**
- * The note beside an outcome explaining WHO decided it — or null when nobody
- * needs telling.
+ * The note explaining WHO decided an outcome — or null when nobody needs
+ * telling.
  *
  * `exact` returns null on purpose: the deterministic matcher is the ordinary
  * case, and labelling every ordinary row "graded automatically" is noise that
  * makes the two rows that genuinely differ harder to see.
+ *
+ * SINCE #358 THIS IS PROGRESSIVE, NOT STACKED. `AiFeedbackCard` renders it
+ * behind a "How this was graded" disclosure rather than as a third fixed line
+ * under the verdict. The string is unchanged and so is the rule about when it
+ * is null; what changed is that a learner who wants to know who decided has to
+ * ask, instead of every learner reading it whether they wanted it or not.
  */
 export function gradingMethodNote(method: string): string | null {
   if (method === 'self') return 'You marked this one correct yourself.';
