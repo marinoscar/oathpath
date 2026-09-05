@@ -1,4 +1,10 @@
-import type { ReadinessComponentKey, ReadinessResult } from './readiness-engine';
+import {
+  ENGLISH_READING_TARGET,
+  ENGLISH_WRITING_TARGET,
+  type EnglishSegment,
+  type ReadinessComponentKey,
+  type ReadinessResult,
+} from './readiness-engine';
 
 // =============================================================================
 // The top recommendation (issue #127, epic #55 / E6 "Readiness and Progress")
@@ -66,17 +72,35 @@ import type { ReadinessComponentKey, ReadinessResult } from './readiness-engine'
 // example of what happens otherwise: it named mock interviews and pointed at
 // the general practice page for two whole epics.
 //
-// `english`'s path is the live instance of that debt, and it is recorded here
-// rather than left to be discovered. THE READING AND WRITING SCREENS DO NOT
-// EXIST YET — they are issues #144 and #147, later in this same epic, and
-// `apps/web/src/App.tsx` today mounts no `/practice/english`,
-// `/practice/reading` or `/practice/writing` route. So this card points at
-// `/practice`, which is real, and its copy is written not to promise a screen
-// that would 404: it says English practice is what would move the number, and
-// does not say "tap here to start a reading test". Inventing the future path
-// now would ship a recommendation whose one action is a redirect to `/`.
-// WHEN #144/#147 LAND, RE-POINT THIS ONE PATH — exactly as #133 re-pointed
-// the capped card's — and tighten the copy to name the screen.
+// `english` WAS THE SECOND INSTANCE OF THAT DEBT, AND IT IS NOW DISCHARGED
+// (#144/#147, this same epic). It shipped pointing at `/practice` with a note
+// here saying to re-point it, because the reading and writing screens did not
+// exist and its copy was deliberately written not to promise one. They exist
+// now — `apps/web/src/App.tsx` mounts `/practice/reading` (#144) and
+// `/practice/writing` (#147) — so the card names a screen and links to it.
+//
+// AND IT PICKS WHICH OF THE TWO, per learner. That is not cleverness for its
+// own sake: there is no third destination that serves "reading and writing"
+// together, and `/practice` serves neither, so one shared path would be the
+// capped card's mistake a third time. The pick is this file's own headroom
+// rule applied one level down. `english` is
+// `ENGLISH_SEGMENT_SHARE * readingValue + ENGLISH_SEGMENT_SHARE * writingValue`
+// with the two shares EQUAL (`readiness-engine.ts`), so the segment with the
+// greater headroom is just the one with the lower value — and both values are
+// recomputable from `evidenceCounts.english`, which the engine already
+// returned. A tie keeps `reading`, the first-declared segment, for the same
+// reason `buildTopRecommendation`'s strict `>` keeps the first-declared
+// component: two calls on identical input must produce identical cards, and a
+// learner with no English evidence at all is exactly such a tie.
+//
+// THE COMPARISON IS CREDIT AGAINST EACH SEGMENT'S OWN TARGET, NEVER RAW
+// SENTENCE COUNTS. `ENGLISH_READING_TARGET` (6) and `ENGLISH_WRITING_TARGET`
+// (4) differ on purpose (`english-test.md` §6.2), and they are imported here
+// rather than restated as literals so this file cannot drift from the engine
+// that scores them. Counting sentences instead would send a learner who read
+// six sentences and missed all six — `readingValue = 0` — to the writing
+// screen, under a sentence claiming they had done less writing, which is
+// false about that person.
 // =============================================================================
 
 export interface ReadinessTopRecommendation {
@@ -186,23 +210,52 @@ function copyFor(
       };
     }
     case 'english': {
-      const { readingSentences, writingSentences } = counts.english;
+      const { readingSentences, writingSentences, readingCredit, writingCredit } = counts.english;
       const practised = readingSentences + writingSentences;
-      return {
-        title: 'Practice reading and writing English',
-        reason:
-          practised > 0
-            ? `In the last 30 days you've worked through ${readingSentences} reading ` +
-              `sentence${readingSentences === 1 ? '' : 's'} and ${writingSentences} writing ` +
-              `sentence${writingSentences === 1 ? '' : 's'} — the interview tests both, and more of ` +
-              'whichever you’ve done less of is what moves this the most.'
-            : 'You haven’t practiced reading or writing a sentence in the last 30 days — the ' +
-              'interview asks for both, and neither takes long to build evidence for.',
-        // `/practice`, not a reading or writing screen: those are #144/#147 and
-        // do not exist yet. See this file's header — the copy above is written
-        // to stay true at this destination until they do.
-        path: '/practice',
-      };
+
+      // The same headroom arithmetic `buildTopRecommendation` runs across
+      // components, run here across this component's two segments — the shares
+      // are equal, so the greater headroom is the lower value. Credit over each
+      // segment's own target, never raw counts; see the header.
+      const readingValue = Math.min(readingCredit / ENGLISH_READING_TARGET, 1);
+      const writingValue = Math.min(writingCredit / ENGLISH_WRITING_TARGET, 1);
+      // Strict `<` keeps `reading` on a tie, exactly as the component loop's
+      // strict `>` keeps the first-declared key.
+      const segment: EnglishSegment = writingValue < readingValue ? 'writing' : 'reading';
+
+      if (practised === 0) {
+        // Both values are 0 here, so the tie-break above has already chosen
+        // `reading` — the card names one screen because it has to link to one,
+        // and the sentence still tells the learner the interview asks for both.
+        return {
+          title: 'Read a sentence out loud',
+          reason:
+            'You haven’t practiced reading or writing a sentence in the last 30 days — the ' +
+            'interview asks for both, and reading one out loud takes about a minute.',
+          path: '/practice/reading',
+        };
+      }
+
+      const counted =
+        `In the last 30 days you've worked through ${readingSentences} reading ` +
+        `sentence${readingSentences === 1 ? '' : 's'} and ${writingSentences} writing ` +
+        `sentence${writingSentences === 1 ? '' : 's'}`;
+
+      return segment === 'reading'
+        ? {
+            title: 'Read a few more sentences out loud',
+            reason:
+              `${counted} — reading is the half with the most room left, so it is what moves ` +
+              'this the most right now.',
+            path: '/practice/reading',
+          }
+        : {
+            title: 'Write a few more sentences from dictation',
+            reason:
+              `${counted} — writing is the half with the most room left, so it is what moves ` +
+              'this the most right now.',
+            path: '/practice/writing',
+          };
     }
     default:
       // Unreachable: `key` is drawn from `EARNABLE_COMPONENT_KEYS` only.

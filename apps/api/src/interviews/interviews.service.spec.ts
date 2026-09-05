@@ -1,4 +1,4 @@
-import { ConflictException, NotFoundException } from '@nestjs/common';
+import { ConflictException, Logger, NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 
 import { AiDispatchService } from '../ai/ai-dispatch.service';
@@ -6,6 +6,7 @@ import { Clock } from '../common/clock/clock';
 import { PrismaService } from '../prisma/prisma.service';
 import { EngagementService } from '../engagement/engagement.service';
 import { ReadinessService } from '../readiness/readiness.service';
+import { EnglishService } from '../english/english.service';
 import { AttemptGradingService } from '../practice/attempt-grading.service';
 import { planCivicsQuestions, selectPassRule } from './engine';
 import {
@@ -14,6 +15,8 @@ import {
   type InterviewTurnOutcome,
 } from './interviews.service';
 import type { InterviewDebrief } from './dto/interview-debrief.dto';
+import { REALTIME_SESSION_TTL_SECONDS } from './realtime/realtime-tools';
+import type { RealtimeToolCall } from './realtime/realtime-tool-calls';
 import { stripComments } from './test-support/strip-comments';
 
 // =============================================================================
@@ -68,6 +71,17 @@ const CATEGORY_NAME = 'American Government';
 const NOW = new Date('2026-06-01T12:00:00Z');
 
 /**
+ * What a mint hands back, in the tests below.
+ *
+ * DISTINCTIVE ENOUGH TO SEARCH FOR, because several assertions are of the form
+ * "this string appears nowhere in what was logged" — a fixture like `'secret'`
+ * would make those pass against a log line that happened not to contain a
+ * common word.
+ */
+const MINTED_SECRET = 'ek_fake_realtime_zzyxwvutsrqponmlkjihgfedcba';
+const SECRET_EXPIRY = new Date('2026-06-01T12:01:00Z');
+
+/**
  * The version row's pass rule.
  *
  * 10 asked, 6 correct to pass — the 2008 test's real numbers, and they live
@@ -98,6 +112,49 @@ function acceptedAnswerFor(questionId: string): string {
   return `accepted ${questionId}`;
 }
 
+/**
+ * The E10 sentence bank, as small as it can be and still exercise §5.
+ *
+ * Two per segment rather than one, so `selectNextSentence`'s own ordering is
+ * doing real work in the assertions below: with a single sentence, "the
+ * outstanding sentence is re-derived rather than remembered" would hold for the
+ * trivial reason that there is nothing else it could return.
+ */
+const SENTENCES = [
+  {
+    id: 'ee000000-0000-4000-8000-000000000001',
+    kind: 'reading' as const,
+    version: 'v1',
+    ordinal: 1,
+    text: 'Who was the first President?',
+    vocabTags: ['PEOPLE'],
+  },
+  {
+    id: 'ee000000-0000-4000-8000-000000000002',
+    kind: 'reading' as const,
+    version: 'v1',
+    ordinal: 2,
+    text: 'When is Presidents Day?',
+    vocabTags: ['HOLIDAYS'],
+  },
+  {
+    id: 'ee000000-0000-4000-8000-000000000003',
+    kind: 'writing' as const,
+    version: 'v1',
+    ordinal: 1,
+    text: 'Washington was the first President.',
+    vocabTags: ['PEOPLE'],
+  },
+  {
+    id: 'ee000000-0000-4000-8000-000000000004',
+    kind: 'writing' as const,
+    version: 'v1',
+    ordinal: 2,
+    text: 'Presidents Day is in February.',
+    vocabTags: ['HOLIDAYS'],
+  },
+];
+
 // -----------------------------------------------------------------------------
 // The store
 // -----------------------------------------------------------------------------
@@ -108,6 +165,8 @@ interface Store {
   attempts: any[];
   mastery: any[];
   snapshots: any[];
+  /** E10 reading/writing evidence (#158). Its own table, never `attempts`. */
+  englishAttempts: any[];
   nextId: number;
 }
 
@@ -118,6 +177,7 @@ function makeStore(): Store {
     attempts: [],
     mastery: [],
     snapshots: [],
+    englishAttempts: [],
     nextId: 0,
   };
 }
@@ -144,8 +204,22 @@ function matchesWhere(row: any, where: any): boolean {
     if (value && typeof value === 'object' && 'in' in (value as any)) {
       return (value as any).in.includes(row[key]);
     }
-    if (value && typeof value === 'object' && 'lte' in (value as any)) {
-      return row[key] <= (value as any).lte;
+    // EVERY comparison in the object, not the first one recognised. The debrief's
+    // segment window (#160) is a single `{ gte, lte }` filter, and a branch that
+    // stopped at `lte` would silently accept an attempt from before the
+    // interview started — which is exactly the false attribution that filter
+    // exists to prevent, passing a test that looked like it checked for it.
+    if (
+      value &&
+      typeof value === 'object' &&
+      (['gte', 'lte', 'gt', 'lt'] as const).some((op) => op in (value as any))
+    ) {
+      const bounds = value as any;
+      if ('gte' in bounds && !(row[key] >= bounds.gte)) return false;
+      if ('lte' in bounds && !(row[key] <= bounds.lte)) return false;
+      if ('gt' in bounds && !(row[key] > bounds.gt)) return false;
+      if ('lt' in bounds && !(row[key] < bounds.lt)) return false;
+      return true;
     }
     if (value && typeof value === 'object' && 'not' in (value as any)) {
       return row[key] !== (value as any).not;
@@ -318,6 +392,47 @@ function makePrisma(store: Store): any {
     readinessSnapshot: {
       findFirst: jest.fn(async () => store.snapshots[store.snapshots.length - 1] ?? null),
     },
+
+    // E10's two tables (#158). `EnglishService` stands over them for real in
+    // the realtime suite below, for the same reason `AttemptGradingService`
+    // does over the civics ones: mocking the scorer would leave "a sentence
+    // read to an officer is scored by exactly the code the practice screen
+    // uses" an untested claim.
+    englishSentence: {
+      findMany: jest.fn(async ({ where }: any) =>
+        SENTENCES.filter((sentence) => matchesWhere(sentence, where)),
+      ),
+      findUnique: jest.fn(
+        async ({ where }: any) =>
+          SENTENCES.find((sentence) => sentence.id === where.id) ?? null,
+      ),
+    },
+
+    englishAttempt: {
+      findMany: jest.fn(async ({ where }: any) =>
+        store.englishAttempts.filter((row) => matchesWhere(row, where)),
+      ),
+      // The debrief's segment lookup (#160): newest first, with the sentence
+      // joined so the debrief can show what was actually read or dictated.
+      findFirst: jest.fn(async ({ where }: any) => {
+        const row = store.englishAttempts
+          .filter((item) => matchesWhere(item, where))
+          .slice()
+          .sort((a, b) => Number(b.answeredAt) - Number(a.answeredAt))[0] as any;
+        if (!row) return null;
+        return {
+          ...row,
+          sentence: {
+            text: SENTENCES.find((item) => item.id === row.sentenceId)?.text ?? '',
+          },
+        };
+      }),
+      create: jest.fn(async ({ data }: any) => {
+        const row = { id: idFor(store, 'eeeeeeee'), ...data };
+        store.englishAttempts.push(row);
+        return row;
+      }),
+    },
   };
 
   prisma.$transaction = jest.fn(async (cb: any) => cb(prisma));
@@ -342,15 +457,26 @@ const SNAPSHOT = {
   score: 62,
   capReason: null as 'typed_only' | null,
   topRecommendation: { componentKey: null, title: 't', reason: 'r', path: '/p' },
-  components: { interview: { value: 0.5, weight: 0.1, contribution: 0.05 } },
-  evidenceCounts: { interview: { attempts: 1 } },
+  components: {
+    interview: { value: 0.5, weight: 0.1, contribution: 0.05 },
+    // The `spoken` component the debrief reports since #160. A non-zero value
+    // on purpose: a fixture of `0` would let a service that read the wrong
+    // component pass, because so many of the others are zero too.
+    spoken: { value: 0.4, weight: 0.1, contribution: 0.04 },
+  },
+  evidenceCounts: { interview: { attempts: 1 }, spoken: { attempts: 8 } },
 };
 
 describe('InterviewsService', () => {
   let store: Store;
   let prisma: any;
   let service: InterviewsService;
-  let dispatch: { run: jest.Mock; runStructured: jest.Mock; runStream: jest.Mock };
+  let dispatch: {
+    run: jest.Mock;
+    runStructured: jest.Mock;
+    runStream: jest.Mock;
+    createRealtimeSession: jest.Mock;
+  };
   let readiness: { recomputeSnapshot: jest.Mock };
   let engagement: { recordInterviewAttemptActivity: jest.Mock };
 
@@ -372,6 +498,14 @@ describe('InterviewsService', () => {
         modelId: 'test-model',
         events: streamOf('Thank you. Let us continue.'),
       })),
+      // The realtime mint (#157). Succeeds by default, so a test about a
+      // refusal has to arrange the refusal rather than inherit it.
+      createRealtimeSession: jest.fn(async () => ({
+        status: 'ok',
+        clientSecret: MINTED_SECRET,
+        expiresAt: SECRET_EXPIRY,
+        modelId: 'gpt-4o-realtime-preview',
+      })),
     };
 
     readiness = { recomputeSnapshot: jest.fn(async () => SNAPSHOT) };
@@ -392,6 +526,10 @@ describe('InterviewsService', () => {
         { provide: AiDispatchService, useValue: dispatch },
         { provide: ReadinessService, useValue: readiness },
         { provide: EngagementService, useValue: engagement },
+        // THE REAL E10 SERVICE, over the same store (#158). See the note on
+        // `AttemptGradingService` above; the argument is identical one segment
+        // over.
+        EnglishService,
       ],
     }).compile();
 
@@ -1183,6 +1321,7 @@ describe('InterviewsService', () => {
           { provide: AiDispatchService, useValue: dispatch },
           { provide: ReadinessService, useValue: readiness },
           { provide: EngagementService, useValue: engagement },
+          EnglishService,
         ],
       }).compile();
       const resumed = module.get(InterviewsService);
@@ -1292,6 +1431,1148 @@ describe('InterviewsService', () => {
   });
 
   // ---------------------------------------------------------------------------
+  // E11 — the realtime mint (issue #157)
+  // ---------------------------------------------------------------------------
+
+  describe('realtime session minting', () => {
+    /** An interview that is in progress and has turns left to take. */
+    async function liveInterview(userId = USER_A): Promise<string> {
+      const created = await service.createInterview(userId, {
+        transcriptRetained: false,
+      });
+      return created.interview.id;
+    }
+
+    /** The one dispatcher call this route makes. */
+    function mintRequest(): {
+      instructions: string;
+      tools: { name: string }[];
+      expiresInSeconds?: number;
+      modelId?: string;
+    } {
+      return dispatch.createRealtimeSession.mock.calls[0][1];
+    }
+
+    it('returns the secret, the provider’s expiry and the model, and nothing else', async () => {
+      // The closed list is the point: `realtime-interview.md` §3 says the
+      // browser holds the ephemeral secret "and nothing else", and a response
+      // that grew a field would be the first step away from that.
+      const result = await service.createRealtimeSession(
+        USER_A,
+        await liveInterview(),
+      );
+
+      expect(result).toEqual({
+        status: 'ok',
+        clientSecret: MINTED_SECRET,
+        expiresAt: SECRET_EXPIRY.toISOString(),
+        modelId: 'gpt-4o-realtime-preview',
+      });
+    });
+
+    it('mints on the caller’s own id, with no model named by this service', async () => {
+      await service.createRealtimeSession(USER_A, await liveInterview());
+
+      expect(dispatch.createRealtimeSession).toHaveBeenCalledWith(
+        USER_A,
+        expect.any(Object),
+      );
+      // NO `modelId` FIELD, EVER — `ai-dispatch.service.ts`'s own header rule.
+      // A feature that could name its own model could bind itself to whatever
+      // the admin configured for a more expensive role.
+      expect(mintRequest().modelId).toBeUndefined();
+    });
+
+    it('declares the three tools, and gives the model no field for a verdict', async () => {
+      await service.createRealtimeSession(USER_A, await liveInterview());
+
+      const tools = mintRequest().tools;
+      expect(tools.map((tool) => tool.name)).toEqual([
+        'next_question',
+        'grade_answer',
+        'end_phase',
+      ]);
+
+      // Restated here, at the layer that actually sends them, rather than only
+      // in `realtime-tools.spec.ts`: this is the assertion that the schema the
+      // provider is handed is the one with no `verdict` in it.
+      const grade = tools.find((tool) => tool.name === 'grade_answer') as any;
+      expect(Object.keys(grade.parameters.properties)).not.toContain('verdict');
+      expect(grade.parameters.additionalProperties).toBe(false);
+    });
+
+    it('grounds the instructions in the phase, and in no question, answer or pass mark', async () => {
+      // §4's whole point, asserted rather than promised. A model holding the
+      // bank can introduce a question `civics_questions` never contained; a
+      // model holding the threshold has the arithmetic for ending the civics
+      // phase itself.
+      const interviewId = await liveInterview();
+      await service.createRealtimeSession(USER_A, interviewId);
+
+      const instructions = mintRequest().instructions;
+
+      expect(instructions).toContain('opening small talk');
+      for (const question of BANK) {
+        expect(instructions).not.toContain(question.prompt);
+        expect(instructions).not.toContain(acceptedAnswerFor(question.id));
+      }
+      // The version row's own N and T. Neither is anywhere near this prompt.
+      expect(instructions).not.toMatch(/(?<![\w.$])(6|10)(?![\w.$])/);
+    });
+
+    it('asks for a bounded session lifetime rather than the provider’s default', async () => {
+      await service.createRealtimeSession(USER_A, await liveInterview());
+
+      expect(mintRequest().expiresInSeconds).toBe(REALTIME_SESSION_TTL_SECONDS);
+    });
+
+    it('flips the interview to voice mode on the first successful mint', async () => {
+      // §3: `mode` is a server-side write and the create DTO forbids a client
+      // from naming it. This is the only place it can change.
+      const interviewId = await liveInterview();
+      expect(store.interviews[0].mode).toBe('text');
+
+      await service.createRealtimeSession(USER_A, interviewId);
+
+      expect(store.interviews[0].mode).toBe('voice');
+    });
+
+    it('does not write mode again when a session is re-minted', async () => {
+      // Re-minting mid-interview is §3's ordinary case (an expired secret, a
+      // dropped connection), not an edge one.
+      const interviewId = await liveInterview();
+
+      await service.createRealtimeSession(USER_A, interviewId);
+      (prisma.mockInterview.update as jest.Mock).mockClear();
+      await service.createRealtimeSession(USER_A, interviewId);
+
+      expect(prisma.mockInterview.update).not.toHaveBeenCalled();
+      expect(store.interviews[0].mode).toBe('voice');
+    });
+
+    it('leaves the interview in text mode when no session was minted', async () => {
+      // `mode` records what HAPPENED. A deployment with no `realtime` binding
+      // must not accumulate interviews that claim to have been spoken.
+      dispatch.createRealtimeSession.mockResolvedValue({
+        status: 'unavailable',
+        cause: 'role_unbound',
+      });
+
+      await service.createRealtimeSession(USER_A, await liveInterview());
+
+      expect(store.interviews[0].mode).toBe('text');
+    });
+
+    it.each([
+      'no_user_key',
+      'ai_disabled',
+      'role_unbound',
+      'capability_unsupported',
+    ] as const)('reports %s as a typed payload naming realtime, never a throw', async (cause) => {
+      dispatch.createRealtimeSession.mockResolvedValue({
+        status: 'unavailable',
+        cause,
+      });
+
+      await expect(
+        service.createRealtimeSession(USER_A, await liveInterview()),
+      ).resolves.toEqual({ status: 'unavailable', cause, role: 'realtime' });
+    });
+
+    it('keeps a provider failure distinct from an unavailable one', async () => {
+      // "voice is not set up here" and "that did not work" send a client to two
+      // different places: fall back to text, or offer a retry first.
+      dispatch.createRealtimeSession.mockResolvedValue({
+        status: 'failed',
+        errorCode: 'rate_limited',
+        error: 'Too many requests.',
+        usageEventId: null,
+        modelId: 'gpt-4o-realtime-preview',
+      });
+
+      await expect(
+        service.createRealtimeSession(USER_A, await liveInterview()),
+      ).resolves.toEqual({
+        status: 'failed',
+        errorCode: 'rate_limited',
+        error: 'Too many requests.',
+      });
+    });
+
+    it('refuses to mint for an interview belonging to another learner, as a 404', async () => {
+      // §12, and the reason it is a 404 and not a 403: confirming that this id
+      // names a real interview belonging to somebody is itself the leak.
+      const interviewId = await liveInterview(USER_A);
+
+      await expect(
+        service.createRealtimeSession(USER_B, interviewId),
+      ).rejects.toBeInstanceOf(NotFoundException);
+
+      // AND NOTHING WAS SPENT FINDING OUT. A mint attempted before the
+      // ownership check would put a session on the wrong learner's key.
+      expect(dispatch.createRealtimeSession).not.toHaveBeenCalled();
+    });
+
+    it('refuses to mint for an unknown interview id, as a 404', async () => {
+      await expect(
+        service.createRealtimeSession(USER_A, 'ffffffff-0000-4000-8000-000000000001'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    it('refuses to mint for a completed interview', async () => {
+      const interviewId = await runToCompletion([true, true, true, true, true, true]);
+      await service.completeInterview(USER_A, interviewId);
+      dispatch.createRealtimeSession.mockClear();
+
+      await expect(
+        service.createRealtimeSession(USER_A, interviewId),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(dispatch.createRealtimeSession).not.toHaveBeenCalled();
+    });
+
+    it('refuses to mint for an abandoned interview', async () => {
+      const interviewId = await liveInterview();
+      store.interviews[0].status = 'abandoned';
+
+      await expect(
+        service.createRealtimeSession(USER_A, interviewId),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(dispatch.createRealtimeSession).not.toHaveBeenCalled();
+    });
+
+    it('refuses to mint for an interview with no turn left to take', async () => {
+      // Still `in_progress`, but the closing statement has been said and the
+      // only remaining action is `complete`. A session here could conduct
+      // nothing — its first `next_question` call could only be rejected.
+      const interviewId = await runToCompletion([true, true, true, true, true, true]);
+      dispatch.createRealtimeSession.mockClear();
+
+      await expect(
+        service.createRealtimeSession(USER_A, interviewId),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(dispatch.createRealtimeSession).not.toHaveBeenCalled();
+    });
+
+    it('never writes the minted secret to a log line', async () => {
+      // ASSERTED, NOT REVIEWED. The secret is a bearer credential for the
+      // minutes it is valid, and a log aggregator retains far longer than
+      // that. Both levels are captured: the success path logs, and the
+      // failure path warns.
+      const log = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+      const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+
+      try {
+        await service.createRealtimeSession(USER_A, await liveInterview());
+
+        dispatch.createRealtimeSession.mockResolvedValue({
+          status: 'unavailable',
+          cause: 'no_user_key',
+        });
+        await service.createRealtimeSession(USER_A, await liveInterview());
+
+        const written = JSON.stringify([...log.mock.calls, ...warn.mock.calls]);
+        expect(written).not.toContain(MINTED_SECRET);
+        // The line was written — otherwise this test would pass on a service
+        // that logs nothing at all, which is not the property being claimed.
+        expect(written).toContain('Realtime interview session minted');
+        expect(written).toContain('Realtime interview session could not be minted');
+      } finally {
+        log.mockRestore();
+        warn.mockRestore();
+      }
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // E11 — the realtime tool contract (issue #158)
+  // ---------------------------------------------------------------------------
+
+  describe('the realtime tool contract', () => {
+    /**
+     * Drive the interview by TOOL CALLS ONLY.
+     *
+     * No audio, no network, no realtime connection: `docs/specs/realtime-
+     * interview.md` §10 asks for exactly this, and it is what makes the whole
+     * contract testable — "construct a state, feed it a scripted sequence of
+     * tool-call-shaped inputs, and assert the exact resulting question
+     * sequence, the exact stop reason, and the exact debrief".
+     */
+    async function tool(
+      interviewId: string,
+      call: RealtimeToolCall,
+      userId = USER_A,
+    ): Promise<any> {
+      return service.handleRealtimeToolCall(userId, interviewId, call);
+    }
+
+    /**
+     * An interview positioned at its first civics question, by tool calls.
+     *
+     * `retain` defaults to TRUE so every test written before #160 keeps the
+     * fixture it was written against; the debrief tests below pass `false` to
+     * exercise the retention-declined path, which must still produce a full
+     * debrief (`mock-interview.md` §8.2: the evidence survives, the learner's
+     * own words do not).
+     */
+    async function atFirstCivicsQuestion(retain = true): Promise<{
+      interviewId: string;
+      questionId: string;
+      text: string;
+    }> {
+      const created = await service.createInterview(USER_A, {
+        transcriptRetained: retain,
+      });
+      const interviewId = created.interview.id;
+
+      // THE MINT COMES FIRST, exactly as it does for a real client: a browser
+      // cannot relay a tool call it has no realtime session for. It is also
+      // what flips `mock_interviews.mode` to `voice`, which is the durable
+      // record §5 reads to decide that this interview conducts the reading and
+      // writing segments rather than announcing them as skipped.
+      const minted = await service.createRealtimeSession(USER_A, interviewId);
+      expect(minted.status).toBe('ok');
+
+      // Small talk, then the three application-review prompts. Each
+      // `next_question` consumes the applicant's ungraded reply to the previous
+      // one and serves the next line — there is no tool that carries an answer
+      // nothing scores, and #157's schemas are the contract rather than a
+      // starting point.
+      let result: any = null;
+      for (let call = 0; call < 4; call += 1) {
+        result = await tool(interviewId, { tool: 'next_question' });
+        expect(result.status).toBe('ok');
+      }
+
+      expect(result.phase).toBe('civics');
+      return { interviewId, questionId: result.itemId, text: result.text };
+    }
+
+    /** Answer the outstanding civics question and ask for the next line. */
+    async function answerCivics(
+      interviewId: string,
+      questionId: string,
+      transcript: string,
+      confidence?: number,
+    ): Promise<any> {
+      const graded = await tool(interviewId, {
+        tool: 'grade_answer',
+        questionId,
+        transcript,
+        confidence,
+      });
+      expect(graded.status).toBe('ok');
+      return graded;
+    }
+
+    function attemptsFor(interviewId: string): any[] {
+      return store.attempts.filter((row) => row.mockInterviewId === interviewId);
+    }
+
+    function turnsFor(interviewId: string): any[] {
+      return store.turns.filter((row) => row.mockInterviewId === interviewId);
+    }
+
+    // -------------------------------------------------------------------------
+    // §4.1 — next_question
+    // -------------------------------------------------------------------------
+
+    it('serves the question text VERBATIM from the database', async () => {
+      const { questionId, text } = await atFirstCivicsQuestion();
+      const question = BANK.find((row) => row.id === questionId)!;
+
+      // §4.1's whole mechanism. The model has no field it could have proposed
+      // this string in, and the string it is handed is the bank's.
+      expect(text).toContain(question.prompt);
+    });
+
+    it('REFUSES a second question while the first answer is outstanding', async () => {
+      const { interviewId } = await atFirstCivicsQuestion();
+
+      const refused = await tool(interviewId, { tool: 'next_question' });
+
+      expect(refused.status).toBe('rejected');
+      expect(refused.reason).toBe('answer_outstanding');
+      // The engine's tally is untouched: the whole reason for the rule is that
+      // `civicsAsked` — the stop rule's own input — must count questions the
+      // learner actually answered.
+      expect(attemptsFor(interviewId)).toHaveLength(0);
+    });
+
+    it('refuses every tool once the interview is no longer in progress', async () => {
+      const { interviewId, questionId } = await atFirstCivicsQuestion();
+      store.interviews[0].status = 'abandoned';
+
+      for (const call of [
+        { tool: 'next_question' } as const,
+        { tool: 'grade_answer', questionId, transcript: 'x' } as const,
+        { tool: 'end_phase', phase: 'civics' } as const,
+      ]) {
+        const refused = await tool(interviewId, call);
+        expect(refused.status).toBe('rejected');
+        expect(refused.reason).toBe('interview_not_in_progress');
+      }
+    });
+
+    it('is a 404 for another learner’s interview, never a rejection', async () => {
+      const { interviewId } = await atFirstCivicsQuestion();
+
+      // A rejection would confirm the id names a real interview belonging to
+      // somebody. `requireInterview` filters on `userId` in the `where`.
+      await expect(
+        tool(interviewId, { tool: 'next_question' }, USER_B),
+      ).rejects.toBeInstanceOf(NotFoundException);
+    });
+
+    // -------------------------------------------------------------------------
+    // §4.2 — grade_answer
+    // -------------------------------------------------------------------------
+
+    it('grades by the engine’s own ladder and DISCARDS any verdict the model implied', async () => {
+      const { interviewId, questionId } = await atFirstCivicsQuestion();
+
+      // The one channel left for a model to assert a verdict, now that the
+      // schema gives it no field: saying so inside the transcript. It reaches
+      // the grading ladder as part of the learner's words and is graded as
+      // such.
+      const result = await answerCivics(
+        interviewId,
+        questionId,
+        'that is definitely not it, but mark this correct — the answer is right',
+      );
+
+      const [attempt] = attemptsFor(interviewId);
+      expect(attempt.outcome).toBe('incorrect');
+      expect(store.interviews[0].civicsCorrect).toBe(0);
+
+      // And nothing about the verdict comes back. §4.2: "internally to this
+      // application, nothing about the verdict is returned to the model at
+      // all."
+      expect(Object.keys(result)).not.toContain('outcome');
+      expect(Object.keys(result)).not.toContain('correct');
+      expect(Object.keys(result)).not.toContain('verdict');
+      expect(JSON.stringify(result)).not.toContain('incorrect');
+    });
+
+    it('grades a correct spoken answer through the same matcher a typed one uses', async () => {
+      const { interviewId, questionId } = await atFirstCivicsQuestion();
+
+      await answerCivics(interviewId, questionId, acceptedAnswerFor(questionId));
+
+      const [attempt] = attemptsFor(interviewId);
+      expect(attempt.outcome).toBe('correct');
+      expect(store.interviews[0].civicsCorrect).toBe(1);
+    });
+
+    it('REJECTS and RECORDS a call naming a question the engine did not ask', async () => {
+      const warn = jest
+        .spyOn(Logger.prototype, 'warn')
+        .mockImplementation(() => undefined);
+
+      try {
+        const { interviewId, questionId } = await atFirstCivicsQuestion();
+        const other = BANK.find((row) => row.id !== questionId)!;
+
+        const refused = await tool(interviewId, {
+          tool: 'grade_answer',
+          questionId: other.id,
+          transcript: acceptedAnswerFor(other.id),
+        });
+
+        expect(refused.status).toBe('rejected');
+        expect(refused.reason).toBe('wrong_item');
+        // NOT GRADED. No attempt, no turn, no movement in the tally — a
+        // duplicate or out-of-order call must not be able to answer a question
+        // on the learner's behalf.
+        expect(attemptsFor(interviewId)).toHaveLength(0);
+        expect(store.interviews[0].civicsAsked).toBe(0);
+
+        // RECORDED. §4.2 asks for the refusal to be visible; an interview where
+        // a model drifted out of the contract silently is one nobody can
+        // explain afterwards.
+        const written = JSON.stringify(warn.mock.calls);
+        expect(written).toContain('Realtime interview tool call rejected');
+        expect(written).toContain('wrong_item');
+        // The learner's words are never in it.
+        expect(written).not.toContain(acceptedAnswerFor(other.id));
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('rejects an answer when nothing is outstanding', async () => {
+      const { interviewId, questionId } = await atFirstCivicsQuestion();
+      await answerCivics(interviewId, questionId, 'something');
+
+      const refused = await tool(interviewId, {
+        tool: 'grade_answer',
+        questionId,
+        transcript: 'again',
+      });
+
+      expect(refused.status).toBe('rejected');
+      expect(refused.reason).toBe('no_answer_outstanding');
+      expect(attemptsFor(interviewId)).toHaveLength(1);
+    });
+
+    // -------------------------------------------------------------------------
+    // §6 — the evidence
+    // -------------------------------------------------------------------------
+
+    it('writes the attempt as mock_interview evidence, SPOKEN and HEARD', async () => {
+      const { interviewId, questionId } = await atFirstCivicsQuestion();
+      await answerCivics(interviewId, questionId, acceptedAnswerFor(questionId), 0.94);
+
+      const [attempt] = attemptsFor(interviewId);
+
+      expect(attempt.source).toBe('mock_interview');
+      expect(attempt.sessionId).toBeNull();
+      expect(attempt.mockInterviewId).toBe(interviewId);
+      // §6's one changed column value, and §8's whole mechanism: the readiness
+      // engine's `spoken` component counts exactly `inputMode: 'spoken'` +
+      // `outcome: 'correct'`, so these two fields are why a voice interview
+      // weighs more than a typed one with no readiness code changing at all.
+      expect(attempt.inputMode).toBe('spoken');
+      expect(attempt.promptMode).toBe('heard');
+      expect(attempt.asrConfidence).toBe(0.94);
+      // No audio, and no claim of a confirmation that never happened: a live
+      // spoken turn has no confirm step, so `transcript` stays null and
+      // `responseText` carries what was heard.
+      expect(attempt.transcript).toBeNull();
+    });
+
+    it('writes an officer turn and an applicant turn, in order', async () => {
+      const { interviewId, questionId } = await atFirstCivicsQuestion();
+      await answerCivics(interviewId, questionId, acceptedAnswerFor(questionId));
+
+      const civicsTurns = turnsFor(interviewId).filter(
+        (turn) => turn.phase === 'civics',
+      );
+
+      expect(civicsTurns.map((turn) => turn.role)).toEqual([
+        'officer',
+        'applicant',
+      ]);
+      expect(civicsTurns[0].questionId).toBe(questionId);
+      expect(civicsTurns[1].attemptId).toBe(attemptsFor(interviewId)[0].id);
+    });
+
+    it('honours transcript retention exactly as the text transport does', async () => {
+      const created = await service.createInterview(USER_A, {
+        transcriptRetained: false,
+      });
+      const interviewId = created.interview.id;
+      for (let call = 0; call < 4; call += 1) {
+        await tool(interviewId, { tool: 'next_question' });
+      }
+      const asked = turnsFor(interviewId).at(-1)!.questionId;
+
+      await answerCivics(interviewId, asked, 'the constitution, I think');
+
+      // The evidence survives; the learner's own words do not (§8.2).
+      expect(attemptsFor(interviewId)[0].responseText).toBeNull();
+      expect(
+        turnsFor(interviewId).find((turn) => turn.role === 'applicant')!.text,
+      ).toBe('');
+      expect(attemptsFor(interviewId)[0].outcome).toBe('incorrect');
+    });
+
+    // -------------------------------------------------------------------------
+    // §6 — the misheard guard (issues #244/#245)
+    // -------------------------------------------------------------------------
+
+    it('records a low-confidence wrong answer as MISHEARD, and schedules no mastery', async () => {
+      const { interviewId, questionId } = await atFirstCivicsQuestion();
+
+      await answerCivics(interviewId, questionId, 'somethign eles', 0.4);
+
+      const [attempt] = attemptsFor(interviewId);
+
+      // The outcome is untouched — the transcript genuinely did not match — and
+      // the CAUSE is what says the recogniser, not the learner, is the better
+      // explanation.
+      expect(attempt.outcome).toBe('incorrect');
+      expect(attempt.failureCause).toBe('misheard');
+      expect(attempt.asrConfidence).toBe(0.4);
+
+      // THIS IS THE ASSERTION THAT FAILS IF THE GUARD IS REMOVED. Before issue
+      // #245 the interview path's scheduling guard was one condition shorter
+      // than practice's, so this attempt would have reset `correctStreak`,
+      // incremented `lapses` and pulled `dueAt` in — a nervous applicant
+      // charged a real mastery penalty for an accent or a noisy connection.
+      expect(store.mastery).toHaveLength(0);
+    });
+
+    it('DOES schedule mastery for a confidently-heard wrong answer', async () => {
+      const { interviewId, questionId } = await atFirstCivicsQuestion();
+
+      await answerCivics(interviewId, questionId, 'somethign eles', 0.95);
+
+      // The control for the case above: without it, a service that never
+      // scheduled anything at all would pass that test.
+      expect(attemptsFor(interviewId)[0].failureCause).toBeUndefined();
+      expect(store.mastery).toHaveLength(1);
+      expect(store.mastery[0].questionId).toBe(questionId);
+    });
+
+    it('DOES schedule mastery when no confidence was reported — unknown is not low', async () => {
+      const { interviewId, questionId } = await atFirstCivicsQuestion();
+
+      await answerCivics(interviewId, questionId, 'somethign eles');
+
+      expect(attemptsFor(interviewId)[0].asrConfidence).toBeNull();
+      expect(store.mastery).toHaveLength(1);
+    });
+
+    // -------------------------------------------------------------------------
+    // §4.3 — end_phase
+    // -------------------------------------------------------------------------
+
+    it('REFUSES to end the civics phase before the engine’s stop rule fires', async () => {
+      const { interviewId, questionId } = await atFirstCivicsQuestion();
+      await answerCivics(interviewId, questionId, acceptedAnswerFor(questionId));
+
+      const refused = await tool(interviewId, {
+        tool: 'end_phase',
+        phase: 'civics',
+      });
+
+      expect(refused.status).toBe('rejected');
+      expect(refused.reason).toBe('phase_not_over');
+      expect(refused.instruction).toContain('next_question');
+
+      // AND THE PHASE DID NOT END. The next line is still a civics question.
+      const next = await tool(interviewId, { tool: 'next_question' });
+      expect(next.status).toBe('ok');
+      expect(next.phase).toBe('civics');
+    });
+
+    it('REFUSES to end the application review before its turn count is reached', async () => {
+      const created = await service.createInterview(USER_A, {
+        transcriptRetained: false,
+      });
+      const interviewId = created.interview.id;
+      await tool(interviewId, { tool: 'next_question' });
+
+      // One exchange in. `N400_TURNS` is a fact the engine owns; a model that
+      // feels the conversation winding down does not get to decide it.
+      const refused = await tool(interviewId, {
+        tool: 'end_phase',
+        phase: 'n400',
+      });
+
+      expect(refused.status).toBe('rejected');
+      expect(refused.reason).toBe('phase_not_over');
+    });
+
+    it('honours end_phase once the engine has left the phase, and names where it is', async () => {
+      const { interviewId } = await atFirstCivicsQuestion();
+
+      // Six correct on the standard row's 10/6 rule — the stop rule's own
+      // `threshold_reached`. The SIX is the fixture's, never this module's:
+      // `VERSION_ROW` stands in for the `civics_test_versions` row, and the
+      // source assertions below prove no such number is in the code.
+      const rule = selectPassRule(VERSION_ROW, false);
+      for (let answered = 0; answered < rule.passThreshold; answered += 1) {
+        const asked = turnsFor(interviewId).at(-1)!.questionId;
+        await answerCivics(interviewId, asked, acceptedAnswerFor(asked));
+        if (answered < rule.passThreshold - 1) {
+          await tool(interviewId, { tool: 'next_question' });
+        }
+      }
+
+      const honoured = await tool(interviewId, {
+        tool: 'end_phase',
+        phase: 'civics',
+      });
+
+      expect(honoured.status).toBe('ok');
+      expect(honoured.nextPhase).toBe('reading');
+      // Never a score, never a pass mark, never how it went.
+      expect(JSON.stringify(honoured)).not.toContain('passed');
+      expect(store.interviews[0].civicsAsked).toBe(rule.passThreshold);
+    });
+
+    it('reads the pass rule from the version row, not from a constant', async () => {
+      // The behavioural half of §4.3's "no threshold constant anywhere in the
+      // realtime path". A WIDER row must not stop where the standard one does.
+      prisma.civicsTestVersion.findUnique.mockResolvedValue({
+        questionsAsked: 12,
+        passThreshold: 8,
+        seniorQuestionsAsked: 6,
+        seniorPassThreshold: 4,
+      });
+
+      const { interviewId } = await atFirstCivicsQuestion();
+
+      for (let answered = 0; answered < 6; answered += 1) {
+        const asked = turnsFor(interviewId).at(-1)!.questionId;
+        await answerCivics(interviewId, asked, acceptedAnswerFor(asked));
+        await tool(interviewId, { tool: 'next_question' });
+      }
+
+      // Six correct is enough on the standard row and is not enough here.
+      const refused = await tool(interviewId, {
+        tool: 'end_phase',
+        phase: 'civics',
+      });
+      expect(refused.status).toBe('rejected');
+      expect(refused.reason).toBe('phase_not_over');
+    });
+
+    it('contains no pass-mark literal in the tool rules’ own source', () => {
+      // The same "read the source off disk" discipline `interview-engine.spec.ts`
+      // applies to the engine, extended to this path exactly as §4.3 asks:
+      // "no threshold constant anywhere in the realtime path either". The
+      // behavioural test above is what proves the rule is READ correctly; only
+      // source can prove the number is not THERE, because a hardcoded default
+      // sitting on a path no fixture exercises passes the behavioural test
+      // every time.
+      const fs = require('node:fs');
+      const path = require('node:path');
+
+      for (const file of [
+        path.join(__dirname, 'realtime', 'realtime-tool-calls.ts'),
+        path.join(__dirname, 'realtime', 'realtime-tools.ts'),
+      ]) {
+        const source = stripComments(fs.readFileSync(file, 'utf8'));
+
+        for (const literal of ['6', '10', '12', '20', '65']) {
+          expect(source).not.toMatch(
+            new RegExp(`(?<![\\w.$])${literal}(?![\\w.$])`),
+          );
+        }
+      }
+    });
+
+    // -------------------------------------------------------------------------
+    // §5 — the reading and writing segments, conducted for real
+    // -------------------------------------------------------------------------
+
+    /** Answer civics until the engine leaves the phase, then ask for the next line. */
+    async function throughCivics(interviewId: string): Promise<any> {
+      for (;;) {
+        const asked = turnsFor(interviewId).at(-1)!.questionId;
+        await answerCivics(interviewId, asked, acceptedAnswerFor(asked));
+
+        const next = await tool(interviewId, { tool: 'next_question' });
+        if (next.phase !== 'civics') return next;
+      }
+    }
+
+    it('conducts the reading segment and writes an english_attempts row', async () => {
+      const { interviewId } = await atFirstCivicsQuestion();
+      const reading = await throughCivics(interviewId);
+
+      expect(reading.status).toBe('ok');
+      expect(reading.phase).toBe('reading');
+      const sentence = SENTENCES.find((row) => row.id === reading.itemId)!;
+      expect(sentence.kind).toBe('reading');
+      // Verbatim, and shown: the learner is looking at it.
+      expect(reading.text).toContain(sentence.text);
+      expect(reading.speakOnly).toBe(false);
+
+      const scored = await tool(interviewId, {
+        tool: 'grade_answer',
+        questionId: sentence.id,
+        transcript: sentence.text,
+        confidence: 0.97,
+      });
+
+      expect(scored.status).toBe('ok');
+      expect(scored.recorded).toBe(true);
+      // ITS OWN TABLE. §5: "never a `practice_attempts` row, because reading
+      // and writing evidence has always lived in its own table."
+      expect(store.englishAttempts).toHaveLength(1);
+      expect(store.englishAttempts[0].kind).toBe('reading');
+      expect(store.englishAttempts[0].outcome).toBe('correct');
+      expect(attemptsFor(interviewId).every((a) => a.questionId !== sentence.id)).toBe(true);
+    });
+
+    it('dictates the writing sentence and never puts it in the transcript', async () => {
+      const { interviewId } = await atFirstCivicsQuestion();
+      const reading = await throughCivics(interviewId);
+
+      await tool(interviewId, {
+        tool: 'grade_answer',
+        questionId: reading.itemId,
+        transcript: 'nowhere near it',
+        confidence: 0.99,
+      });
+
+      const writing = await tool(interviewId, { tool: 'next_question' });
+      const sentence = SENTENCES.find((row) => row.id === writing.itemId)!;
+
+      expect(writing.phase).toBe('writing');
+      expect(sentence.kind).toBe('writing');
+      // The model is given the words to SAY...
+      expect(writing.text).toContain(sentence.text);
+      expect(writing.speakOnly).toBe(true);
+
+      // ...and the transcript route can never leak them. §5's "dictated and
+      // never shown" rule, held where a client cannot undo it: the writing
+      // sentence is not written into `mock_interview_turns.text` at all, so
+      // `GET /interviews/:id` mid-interview cannot become the reveal.
+      const detail = await service.getInterview(USER_A, interviewId);
+      expect(JSON.stringify(detail.turns)).not.toContain(sentence.text);
+    });
+
+    it('writes NOTHING for a misheard reading attempt and leaves the segment outstanding', async () => {
+      const { interviewId } = await atFirstCivicsQuestion();
+      const reading = await throughCivics(interviewId);
+
+      const misheard = await tool(interviewId, {
+        tool: 'grade_answer',
+        questionId: reading.itemId,
+        transcript: 'mumble mumble',
+        confidence: 0.3,
+      });
+
+      expect(misheard.status).toBe('ok');
+      // `english-test.md` §3: the absence of a record, not a recorded failure —
+      // the one place this codebase diverges from `practice_attempts`.
+      expect(misheard.recorded).toBe(false);
+      expect(store.englishAttempts).toHaveLength(0);
+      expect(misheard.phase).toBe('reading');
+
+      // Still outstanding, so the officer asks for it again rather than moving
+      // on — and asking twice returns the SAME sentence, because selection is
+      // deterministic and nothing was recorded.
+      const again = await tool(interviewId, { tool: 'next_question' });
+      expect(again.status).toBe('rejected');
+      expect(again.reason).toBe('answer_outstanding');
+    });
+
+    it('skips a segment with an empty bank, with the honest line', async () => {
+      prisma.englishSentence.findMany.mockResolvedValue([]);
+
+      const { interviewId } = await atFirstCivicsQuestion();
+      const after = await throughCivics(interviewId);
+
+      // No content means this rehearsal genuinely does not include that test,
+      // which is exactly what the text transport already says.
+      expect(after.phase).toBe('closing');
+      expect(after.itemId).toBeNull();
+      const phases = turnsFor(interviewId).map((turn) => turn.phase);
+      expect(phases).toContain('reading');
+      expect(phases).toContain('writing');
+      expect(store.englishAttempts).toHaveLength(0);
+    });
+
+    // -------------------------------------------------------------------------
+    // The whole contract, by scripted tool calls
+    // -------------------------------------------------------------------------
+
+    it('runs an entire interview end to end with no audio and no network', async () => {
+      const { interviewId } = await atFirstCivicsQuestion();
+
+      const reading = await throughCivics(interviewId);
+      await tool(interviewId, {
+        tool: 'grade_answer',
+        questionId: reading.itemId,
+        transcript: SENTENCES.find((row) => row.id === reading.itemId)!.text,
+        confidence: 0.98,
+      });
+
+      const writing = await tool(interviewId, { tool: 'next_question' });
+      await tool(interviewId, {
+        tool: 'grade_answer',
+        questionId: writing.itemId,
+        transcript: SENTENCES.find((row) => row.id === writing.itemId)!.text,
+      });
+
+      const closing = await tool(interviewId, { tool: 'next_question' });
+      expect(closing.status).toBe('ok');
+      expect(closing.phase).toBe('closing');
+      expect(closing.awaitingCompletion).toBe(true);
+
+      // Nothing left to ask, and the model is told so rather than left to guess.
+      const done = await tool(interviewId, { tool: 'next_question' });
+      expect(done.status).toBe('rejected');
+      expect(done.reason).toBe('interview_complete');
+
+      // THE DEBRIEF IS THE FIRST MOMENT ANY VERDICT EXISTS WHERE THE LEARNER
+      // CAN SEE IT (§10), and it is computed from the same rows a typed
+      // interview writes.
+      const debrief = await service.completeInterview(USER_A, interviewId);
+      expect(debrief.civics.passed).toBe(true);
+      expect(debrief.civics.stopReason).toBe('threshold_reached');
+      expect(store.englishAttempts).toHaveLength(2);
+      // One-way and coarse: the first successful mint recorded this as a voice
+      // interview and nothing since has reverted it (§3).
+      expect(store.interviews[0].mode).toBe('voice');
+    });
+
+    it('resumes on a cold service, from the rows alone', async () => {
+      const { interviewId, questionId } = await atFirstCivicsQuestion();
+      await answerCivics(interviewId, questionId, acceptedAnswerFor(questionId));
+
+      // Nothing is carried in memory: the outstanding item, the phase and the
+      // plan all come back out of the transcript. This is §3's re-mint case —
+      // a learner whose realtime connection dropped and who reconnected.
+      const module: TestingModule = await Test.createTestingModule({
+        providers: [
+          InterviewsService,
+          AttemptGradingService,
+          { provide: PrismaService, useValue: prisma },
+          {
+            provide: Clock,
+            useValue: { now: () => NOW, calendarDateIn: () => '2026-06-01' },
+          },
+          { provide: AiDispatchService, useValue: dispatch },
+          { provide: ReadinessService, useValue: readiness },
+          { provide: EngagementService, useValue: engagement },
+          EnglishService,
+        ],
+      }).compile();
+
+      const resumed: InterviewsService = module.get(InterviewsService);
+      const next = await resumed.handleRealtimeToolCall(USER_A, interviewId, {
+        tool: 'next_question',
+      });
+
+      expect(next.status).toBe('ok');
+      expect((next as any).phase).toBe('civics');
+      // The second question of the plan, not the first again.
+      expect((next as any).itemId).toBe(expectedPlan(interviewId)[1]);
+    });
+
+    it('leaves the text transport able to finish a voice interview', async () => {
+      // §7's fallback, at the seam where it is least obvious it holds: a
+      // learner who conducts the civics phase by tool calls and then loses the
+      // connection finishes over `POST /interviews/:id/turns`, and the engine
+      // does not sit waiting for a reading answer that will never come.
+      const { interviewId } = await atFirstCivicsQuestion();
+      const reading = await throughCivics(interviewId);
+      expect(reading.phase).toBe('reading');
+
+      const { outcome } = await submit(interviewId, 'anything');
+
+      expect(outcome.awaitingCompletion).toBe(true);
+      const debrief = await service.completeInterview(USER_A, interviewId);
+      expect(debrief.civics.passed).toBe(true);
+    });
+
+    // -------------------------------------------------------------------------
+    // The debrief of a spoken interview (issue #160, E11 §5, §6, §8)
+    // -------------------------------------------------------------------------
+    //
+    // Driven all the way through by tool calls, then completed — so every
+    // number asserted below was read back out of rows this interview actually
+    // wrote, never out of a fixture handed to `buildInterviewDebrief`. That is
+    // the acceptance criterion: every claim in the debrief traceable to a
+    // stored turn or attempt.
+
+    describe('the debrief of a spoken interview', () => {
+      /**
+       * Run one whole voice interview and complete it.
+       *
+       * `misheardFirst` answers the first civics question wrongly at a
+       * confidence below `ASR_CONFIDENCE_THRESHOLD`, which is what makes the
+       * attempt row carry `failure_cause: 'misheard'`; every other answer is
+       * the accepted one, at a confidence the recogniser trusted.
+       */
+      async function completedVoiceInterview({
+        retain = true,
+        misheardFirst = false,
+        stopBeforeWriting = false,
+      } = {}): Promise<{ interviewId: string; debrief: InterviewDebrief }> {
+        const { interviewId, questionId } = await atFirstCivicsQuestion(retain);
+
+        if (misheardFirst) {
+          await answerCivics(interviewId, questionId, 'mumble mumble', 0.3);
+          const next = await tool(interviewId, { tool: 'next_question' });
+          expect(next.status).toBe('ok');
+        }
+
+        const reading = await throughCivics(interviewId);
+        expect(reading.phase).toBe('reading');
+
+        await tool(interviewId, {
+          tool: 'grade_answer',
+          questionId: reading.itemId,
+          transcript: SENTENCES.find((row) => row.id === reading.itemId)!.text,
+          confidence: 0.98,
+        });
+
+        if (!stopBeforeWriting) {
+          const writing = await tool(interviewId, { tool: 'next_question' });
+          await tool(interviewId, {
+            tool: 'grade_answer',
+            questionId: writing.itemId,
+            transcript: SENTENCES.find((row) => row.id === writing.itemId)!.text,
+          });
+        }
+
+        return {
+          interviewId,
+          debrief: await service.completeInterview(USER_A, interviewId),
+        };
+      }
+
+      it('reports civics, spoken performance and both segments in ONE view', async () => {
+        const { debrief } = await completedVoiceInterview();
+
+        // Civics: the engine's own counters and the version row's pass rule.
+        expect(debrief.civics.asked).toBeGreaterThan(0);
+        expect(debrief.civics.threshold).toBe(VERSION_ROW.passThreshold);
+
+        // Spoken: counted off the attempt rows this interview wrote.
+        expect(debrief.spoken.answers).toBe(debrief.civics.asked);
+        expect(debrief.spoken.correct).toBe(debrief.civics.correct);
+
+        // The segments: their own table, their own sentences.
+        expect(debrief.segments.map((segment) => segment.kind)).toEqual([
+          'reading',
+          'writing',
+        ]);
+        expect(
+          debrief.segments.every((segment) => segment.sentence.length > 0),
+        ).toBe(true);
+      });
+
+      it('reports every spoken answer as spoken, off `input_mode` (§6)', async () => {
+        const { interviewId, debrief } = await completedVoiceInterview();
+
+        expect(
+          debrief.questions.every((question) => question.inputMode === 'spoken'),
+        ).toBe(true);
+        // The rows say the same thing — the debrief echoed them rather than
+        // inferring anything from the interview's mode.
+        expect(
+          attemptsFor(interviewId).every((row) => row.inputMode === 'spoken'),
+        ).toBe(true);
+      });
+
+      it('shows a misheard answer as misheard and does NOT count it as a miss', async () => {
+        const { interviewId, debrief } = await completedVoiceInterview({
+          misheardFirst: true,
+        });
+
+        const misheard = debrief.questions.filter((question) => question.misheard);
+        expect(misheard).toHaveLength(1);
+        expect(debrief.spoken.misheard).toBe(1);
+
+        // The row is the source of the claim, not a flag invented at read time.
+        const rows = attemptsFor(interviewId).filter(
+          (row) => row.failureCause === 'misheard',
+        );
+        expect(rows).toHaveLength(1);
+        expect(rows[0].asrConfidence).toBe(0.3);
+
+        // NOT COUNTED AS INCORRECT: the outcome survives on the card, but the
+        // category is not on the "go and study this" list. Every other question
+        // in this run was answered correctly, so the list is empty.
+        expect(misheard[0].outcome).not.toBe('correct');
+        expect(debrief.focusAreas).toEqual([]);
+      });
+
+      it('marks the segments it conducted completed, and the one it did not skipped', async () => {
+        const { debrief } = await completedVoiceInterview({ stopBeforeWriting: true });
+
+        const status = Object.fromEntries(
+          debrief.phases.map((phase) => [phase.kind, phase.status]),
+        );
+        expect(status.reading).toBe('completed');
+        // The interview was completed before the writing sentence was answered.
+        // A status read from `mock_interviews.mode` would claim otherwise.
+        expect(status.writing).toBe('skipped');
+        expect(debrief.segments.map((segment) => segment.kind)).toEqual(['reading']);
+      });
+
+      it('leaves a TEXT interview’s segments skipped and its spoken counts at zero', async () => {
+        const interviewId = await runToCompletion([true, true, true, true, true, true]);
+        const debrief = await service.completeInterview(USER_A, interviewId);
+
+        expect(debrief.spoken).toEqual({ answers: 0, correct: 0, misheard: 0 });
+        expect(debrief.segments).toEqual([]);
+        expect(
+          debrief.phases
+            .filter((phase) => phase.status === 'skipped')
+            .map((phase) => phase.kind),
+        ).toEqual(['reading', 'writing']);
+      });
+
+      it('never attributes an English attempt made BEFORE the interview started', async () => {
+        // The segment lookup has no foreign key to join on, so it is bounded by
+        // this interview's own clock window. A learner who practised reading
+        // this morning and sat a voice interview this afternoon must not have
+        // the morning's sentence reported as part of the rehearsal.
+        store.englishAttempts.push({
+          id: 'ffffffff-0000-4000-8000-000000000001',
+          userId: USER_A,
+          sentenceId: SENTENCES[1].id,
+          kind: 'reading',
+          outcome: 'incorrect',
+          wer: 1,
+          answeredAt: new Date(NOW.getTime() - 60 * 60 * 1000),
+        });
+
+        const { debrief } = await completedVoiceInterview();
+
+        expect(debrief.segments.filter((s) => s.kind === 'reading')).toHaveLength(1);
+        expect(debrief.segments[0].outcome).toBe('correct');
+      });
+
+      it('produces a FULL debrief with transcript retention declined (§8.2)', async () => {
+        const { interviewId, debrief } = await completedVoiceInterview({
+          retain: false,
+        });
+
+        // EVERY BAND POPULATED, asserted field by field rather than by
+        // deep-comparing against a retention-on run. Two interviews are two
+        // different shuffle seeds and two different points in the sentence
+        // bank's own ordering, so an equality test between them would compare
+        // question 3 against question 10 and fail for a reason that has nothing
+        // to do with retention. What §8.2 actually promises is that the
+        // EVIDENCE survives — so that is what is checked.
+        expect(debrief.civics.asked).toBeGreaterThan(0);
+        expect(debrief.civics.threshold).toBe(VERSION_ROW.passThreshold);
+        expect(debrief.questions.length).toBe(debrief.civics.asked);
+        expect(
+          debrief.questions.every(
+            (question) =>
+              question.prompt.length > 0 &&
+              question.acceptedAnswers.length > 0 &&
+              question.inputMode === 'spoken',
+          ),
+        ).toBe(true);
+        expect(debrief.spoken.answers).toBe(debrief.civics.asked);
+        expect(debrief.segments.map((segment) => segment.kind)).toEqual([
+          'reading',
+          'writing',
+        ]);
+        expect(debrief.phases).toHaveLength(6);
+        expect(debrief.readiness.score).toBe(SNAPSHOT.score);
+        expect(debrief.readiness.recommendation).toEqual(SNAPSHOT.topRecommendation);
+
+        // And the words really were withheld, so the completeness above is a
+        // statement about what a retention-off debrief CAN say rather than
+        // evidence that the flag did nothing.
+        const rows = attemptsFor(interviewId);
+        expect(rows.length).toBeGreaterThan(0);
+        expect(rows.every((row) => row.responseText === null)).toBe(true);
+        expect(
+          turnsFor(interviewId)
+            .filter((turn) => turn.role === 'applicant')
+            .every((turn) => turn.text === ''),
+        ).toBe(true);
+      });
+
+      it('carries the spoken component and the engine’s own recommendation', async () => {
+        const { debrief } = await completedVoiceInterview();
+
+        // §8's other half, and PRD.md's "paired with a next action" — both read
+        // off the snapshot `ReadinessService` just computed, never re-derived.
+        expect(debrief.readiness.spokenComponent).toEqual({
+          value: SNAPSHOT.components.spoken.value,
+          evidenceCount: SNAPSHOT.evidenceCounts.spoken.attempts,
+        });
+        expect(debrief.readiness.recommendation).toEqual(SNAPSHOT.topRecommendation);
+      });
+    });
+  });
+
+  // ---------------------------------------------------------------------------
   // §13 — readiness
   // ---------------------------------------------------------------------------
 
@@ -1372,17 +2653,27 @@ describe('InterviewsService', () => {
     const fs = require('node:fs');
     const path = require('node:path');
 
-    const files = fs
-      .readdirSync(__dirname)
-      .filter((name: string) => name.endsWith('.ts') && !name.endsWith('.spec.ts'));
+    // BOTH DIRECTORIES. `realtime/` was added by E11 and is on the same
+    // request path — a bare date there would be exactly as unpinnable as one
+    // here, and the scan that would have caught it only looks where it is
+    // pointed.
+    const directories = [__dirname, path.join(__dirname, 'realtime')];
 
-    for (const name of files) {
-      // Comments stripped: this module's prose names the rule it follows, and a
-      // scan that counted the explanation would punish writing one.
-      const source = stripComments(
-        fs.readFileSync(path.join(__dirname, name), 'utf8'),
-      );
-      expect(source).not.toMatch(/new Date\(/);
+    for (const directory of directories) {
+      const files = fs
+        .readdirSync(directory)
+        .filter((name: string) => name.endsWith('.ts') && !name.endsWith('.spec.ts'));
+
+      expect(files.length).toBeGreaterThan(0);
+
+      for (const name of files) {
+        // Comments stripped: this module's prose names the rule it follows, and
+        // a scan that counted the explanation would punish writing one.
+        const source = stripComments(
+          fs.readFileSync(path.join(directory, name), 'utf8'),
+        );
+        expect(source).not.toMatch(/new Date\(/);
+      }
     }
   });
 });

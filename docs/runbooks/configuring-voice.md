@@ -2,7 +2,10 @@
 
 This runbook covers the two model roles E9 (epic #58) added to
 `/admin/settings/ai` — `transcribe` and `speak` — for an administrator
-deciding whether, and what, to bind them to.
+deciding whether, and what, to bind them to. E10's reading and writing
+practice (epic #59) is a second caller of both roles, added no new role of
+its own, and needs no configuration beyond what is already here — §6 below
+says exactly what that means for you.
 
 For the underlying design — the confirm-before-grade mechanism, the
 `misheard` failure cause, why audio is never stored — see
@@ -24,6 +27,15 @@ Source of truth for every claim below:
   and the credential address each inference call actually runs on.
 - `apps/web` — the practice session's spoken-mode UI and its unbound-role
   degraded states (`docs/specs/voice.md` §1's table).
+- `apps/web/src/pages/ReadingPracticePage.tsx`,
+  `WritingPracticePage.tsx` — the E10 (epic #59) screens at
+  `/practice/reading` and `/practice/writing`, read directly to confirm §6
+  below: reading gates its microphone on the identical `transcribeBound`
+  flag the civics practice screen uses, and writing's dictation calls
+  `window.speechSynthesis` directly with `speak` as an optional upgrade.
+- [`docs/specs/english-test.md`](../specs/english-test.md) §3, §4 — the
+  design record for how E10 reuses the accent rule and the dictation
+  default; not restated here.
 
 ---
 
@@ -111,7 +123,42 @@ grading) works exactly as it does today. `transcribe`/`speak` appearing in
 surface which of the two roles is unconfigured, on the rare occasion one
 needs to say so, and nothing more.
 
-## 5. Summary checklist
+## 5. English reading and writing practice needs nothing new here
+
+The reading and writing screens (`/practice/reading`, `/practice/writing`,
+epic #59 / E10) are a **second caller** of the exact two roles this runbook
+already covers — not a third role, and not a separate decision for you to
+make.
+
+**Reading practice reuses `transcribe`, with the identical degradation.**
+The reading screen's microphone is gated on the same `transcribeBound` flag
+the civics practice screen already reads — verified directly in
+`ReadingPracticePage.tsx`. Whatever you decided in §1 for spoken civics
+practice is what a learner gets for reading practice too, automatically:
+bound, they record their reading and it is transcribed and scored word for
+word; unbound, the microphone is simply absent and the learner instead
+reads the sentence aloud to themselves and marks their own attempt — a
+normal, fully working fallback, not a broken screen. There is nothing to
+configure a second time.
+
+**Writing practice's dictation reuses the exact same default and the exact
+same optional upgrade §1 already describes for hearing a civics question
+aloud** — the browser's own `window.speechSynthesis` by default, with
+`speak` as an optional, never-required upgrade if you have bound it. If
+neither `speechSynthesis` support nor a bound `speak` model is available,
+the writing screen says so plainly and points the learner to reading
+practice instead — it never falls back to showing the sentence, which would
+silently turn a writing exercise into a copying exercise (`docs/specs/
+english-test.md` §4).
+
+**Nothing about `systemReady` changes.** English reading and writing read
+the same `unboundRoles`/`transcribeBound` signals every other voice surface
+already reads; no new entry was added to `AI_MODEL_ROLES` for it (`CLAUDE.md`,
+"Adding a New AI Model Role"), so there is no new row on `/admin/settings/ai`
+and §6's checklist below needs only one added line, not a new section of its
+own.
+
+## 6. Summary checklist
 
 - [ ] Decide whether spoken practice (voice **input**) is something you want
       to offer — if yes, bind a `transcribe`-capable model
@@ -120,6 +167,9 @@ needs to say so, and nothing more.
 - [ ] Neither decision affects `systemReady` or blocks any learner from using
       the rest of the app (§2)
 - [ ] Both roles bill the learner's own OpenAI key, never yours (§3)
+- [ ] English reading and writing practice (`/practice/reading`,
+      `/practice/writing`) automatically inherit whatever you decided above
+      — nothing to configure separately for them (§5)
 - [ ] If testing locally with `AI_PROVIDER_FAKE=true`
       (`infra/compose/.env.example`), both roles are served by the built-in
       fake provider — no real OpenAI account needed to exercise either flow;

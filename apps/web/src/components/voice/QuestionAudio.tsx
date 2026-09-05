@@ -39,6 +39,27 @@
  * is on the page regardless (this component never renders it, and never
  * replaces it), so the reading experience is unchanged; a broken-looking
  * control would be the only thing lost.
+ *
+ * `browserSpeechAvailable()` is exported so a caller for whom that is NOT true
+ * — the writing screen (#147), where the sentence is dictated and never shown,
+ * so a silent button means there is nothing to practise on — can ask the same
+ * question this component asks itself and render its own honest absence. It is
+ * one function rather than a duplicated pair of `typeof` checks precisely so
+ * the two can never disagree about what "this browser can speak" means.
+ *
+ * =============================================================================
+ * THE COPY IS OVERRIDABLE. THE BEHAVIOUR IS NOT.
+ * =============================================================================
+ *
+ * `copy` exists because "Read the question aloud" and "The text is above" are
+ * true on a civics screen and FALSE on the writing screen, where there is no
+ * question and the text is deliberately nowhere on the page (issue #147,
+ * `docs/specs/english-test.md` §4) — a shared component whose wording asserts
+ * something untrue about its host is worse than two components. It overrides
+ * strings and nothing else: the browser-first preference, the premium upgrade
+ * path, the `onPlayed`-only-when-audio-starts rule and the absent-not-disabled
+ * control are the same on every caller, which is the reason this is one
+ * component with a copy prop rather than a second player.
  */
 
 import StopIcon from '@mui/icons-material/Stop';
@@ -51,6 +72,58 @@ import { synthesizeSpeech } from '../../services/api';
 
 /** Which voice actually spoke. See {@link QuestionAudioProps.onPlayed}. */
 export type QuestionAudioSource = 'browser' | 'premium';
+
+/**
+ * Every string this component can put on screen.
+ *
+ * All five default to the civics-question wording this component was written
+ * for, so an existing caller passes nothing and reads exactly as before.
+ */
+export interface QuestionAudioCopy {
+  /** The button, at rest. */
+  play: string;
+  /** The button, while audio is playing. */
+  stop: string;
+  /** The button, while a premium synthesis request is in flight. */
+  preparing: string;
+  /** The live region, while audio is playing. */
+  speaking: string;
+  /**
+   * The live region, when NEITHER voice could speak.
+   *
+   * The default's second sentence ("The text is above") is a statement about
+   * the HOST page, which is why this is overridable at all: on the writing
+   * screen the text is not above, and saying so would be both false and a
+   * pointer at the one thing that screen must never show.
+   */
+  unavailable: string;
+}
+
+const DEFAULT_COPY: QuestionAudioCopy = {
+  play: 'Read the question aloud',
+  stop: 'Stop reading',
+  preparing: 'Preparing the voice…',
+  speaking: 'Reading the question aloud.',
+  unavailable: 'The question could not be read aloud. The text is above.',
+};
+
+/**
+ * Can this browser speak on its own — no binding, no key, no network?
+ *
+ * THE ONE DEFINITION, used by this component to decide whether to render a
+ * button at all and by the writing screen to decide whether it can run its
+ * exercise at all. Both `speechSynthesis` and `SpeechSynthesisUtterance` are
+ * checked because a browser (or a jsdom test environment) can have one without
+ * the other, and `speak()` on a half-implemented API throws rather than
+ * degrading.
+ */
+export function browserSpeechAvailable(): boolean {
+  return (
+    typeof window !== 'undefined' &&
+    typeof window.speechSynthesis !== 'undefined' &&
+    typeof window.SpeechSynthesisUtterance === 'function'
+  );
+}
 
 export interface QuestionAudioProps {
   /** The question, exactly as it is rendered on screen. */
@@ -85,6 +158,15 @@ export interface QuestionAudioProps {
 
   /** Passed through to the button. */
   size?: 'small' | 'medium' | 'large';
+
+  /**
+   * Override any of the five strings. See {@link QuestionAudioCopy}.
+   *
+   * Partial and merged over the defaults, so a caller that only needs a
+   * different button label does not have to restate the other four and cannot
+   * drift from them when they change.
+   */
+  copy?: Partial<QuestionAudioCopy>;
 }
 
 export function QuestionAudio({
@@ -92,7 +174,15 @@ export function QuestionAudio({
   premiumVoice = false,
   onPlayed,
   size = 'small',
+  copy,
 }: QuestionAudioProps) {
+  const words = { ...DEFAULT_COPY, ...copy };
+  // Pulled out as a PRIMITIVE because it is read inside two `useCallback`s and
+  // `words` is a fresh object on every render — a dependency array holding the
+  // object would rebuild both callbacks every time, which is exactly the
+  // needless-invalidation this component's `requestRef` guard is compensating
+  // for elsewhere. A string compares by value and does not.
+  const unavailableMessage = words.unavailable;
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [isPreparing, setIsPreparing] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -120,10 +210,7 @@ export function QuestionAudio({
     !!aiStatus?.status && !aiStatus.status.unboundRoles.includes('speak');
   const usePremium = premiumVoice && speakBound;
 
-  const supportsBrowserSpeech =
-    typeof window !== 'undefined' &&
-    typeof window.speechSynthesis !== 'undefined' &&
-    typeof window.SpeechSynthesisUtterance === 'function';
+  const supportsBrowserSpeech = browserSpeechAvailable();
 
   const revokeObjectUrl = useCallback(() => {
     const url = objectUrlRef.current;
@@ -185,13 +272,13 @@ export function QuestionAudio({
         // this component stopping itself, not a failure to report to anybody.
         const reason = (event as SpeechSynthesisErrorEvent).error;
         if (reason === 'canceled' || reason === 'interrupted') return;
-        setMessage('The question could not be read aloud. The text is above.');
+        setMessage(unavailableMessage);
       };
 
       window.speechSynthesis.speak(utterance);
       return true;
     },
-    [onPlayed, supportsBrowserSpeech, text],
+    [onPlayed, supportsBrowserSpeech, text, unavailableMessage],
   );
 
   const play = useCallback(async () => {
@@ -236,13 +323,14 @@ export function QuestionAudio({
 
     // Neither voice is available. Said plainly, once, in a live region — and
     // the question text is still on the page, which is the actual content.
-    setMessage('The question could not be read aloud. The text is above.');
+    setMessage(unavailableMessage);
   }, [
     onPlayed,
     revokeObjectUrl,
     speakWithBrowser,
     stop,
     text,
+    unavailableMessage,
     usePremium,
   ]);
 
@@ -271,11 +359,7 @@ export function QuestionAudio({
         // duplicating it, and no icon-only control whose name a screen reader
         // has to guess at.
       >
-        {isSpeaking
-          ? 'Stop reading'
-          : isPreparing
-            ? 'Preparing the voice…'
-            : 'Read the question aloud'}
+        {isSpeaking ? words.stop : isPreparing ? words.preparing : words.play}
       </Button>
 
       {/* Always mounted, empty when idle: a live region inserted at the same
@@ -283,7 +367,7 @@ export function QuestionAudio({
       <Box role="status" aria-live="polite">
         {isSpeaking && (
           <Typography variant="body2" color="text.secondary">
-            Reading the question aloud.
+            {words.speaking}
           </Typography>
         )}
         {!isSpeaking && message && (

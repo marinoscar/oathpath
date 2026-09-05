@@ -91,25 +91,31 @@ dynamic-answer endpoints (§9); `apps/api/prisma/content/` holds the content
 files, the structural validator, and the idempotent loader (§6–§7). What has
 **not** shipped:
 
-1. **Neither content file is human-verified, though they are no longer at the
-   same starting point.** `civics-2008.json` is `UNVERIFIED_MODEL_DRAFT` —
-   drafted to give the rest of this epic realistic-shaped data to build
-   against, not transcribed from the official USCIS PDF, with every dynamic
-   (officeholder) answer an explicit `"[DRAFT PLACEHOLDER]"` string.
-   `civics-2025.json` **was** `AWAITING_SOURCE` with zero questions — the
-   128-question bank was deliberately not fabricated while there was no
-   access to the official source. Issue #212 closed that gap: the file now
-   holds all 128 questions, transcribed from the downloaded, hashed official
-   source (M-1778 (09/25), sha256 recorded in `provenance.sha256`), across the
-   8 real USCIS categories rather than the 3-category "Integrated Civics"
-   scaffold this document used to assume would carry over from 2008 (§2.1
-   below). Its status is still `UNVERIFIED_MODEL_DRAFT`, deliberately not
-   `HUMAN_VERIFIED` — a real source document was read this time, but no human
-   has yet checked the transcription page by page. The loader enforces the
+1. **`civics-2008.json` is still not human-verified; `civics-2025.json` now
+   is, in the specific sense its own note records.** `civics-2008.json` is
+   `UNVERIFIED_MODEL_DRAFT` — drafted to give the rest of this epic
+   realistic-shaped data to build against, not transcribed from the official
+   USCIS PDF, with every dynamic (officeholder) answer an explicit
+   `"[DRAFT PLACEHOLDER]"` string. `civics-2025.json` **was**
+   `AWAITING_SOURCE` with zero questions — the 128-question bank was
+   deliberately not fabricated while there was no access to the official
+   source. Issue #212 closed that gap: the file now holds all 128 questions,
+   transcribed from the downloaded, hashed official source (M-1778 (09/25),
+   sha256 recorded in `provenance.sha256`), across the 8 real USCIS
+   categories rather than the 3-category "Integrated Civics" scaffold this
+   document used to assume would carry over from 2008 (§2.1 below), and its
+   status is `HUMAN_VERIFIED` — the repository owner's sign-off, dated
+   2026-09-02, over a machine transcription plus an automated re-parse and
+   diff of that same source reporting zero mismatches. Read that status for
+   exactly what it says: its own `provenance.transcription.warning` states
+   that this was **not** an independent page-by-page human re-read of the
+   PDF, and that the 8 dynamic questions are not certified by it at all —
+   their current officeholder is operational data maintained through
+   `PUT /api/civics/dynamic-answers` (§9). The loader enforces the
    `HUMAN_VERIFIED` gate rather than merely documenting it (§7); see
    [`docs/runbooks/updating-civics-content.md`](../runbooks/updating-civics-content.md)
    for how a human verifies either file, including the page-by-page check
-   `civics-2025.json` still needs.
+   nobody has yet run on `civics-2025.json`.
 2. **The admin dynamic-answer page is UI work in flight**, not yet merged to
    `main` as of this writing — the API surface in §9 it renders against is
    live. (The Learn destination against §8's read API has since shipped,

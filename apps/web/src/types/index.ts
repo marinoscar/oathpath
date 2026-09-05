@@ -2367,6 +2367,60 @@ export interface InterviewDebriefQuestion {
   outcome: PracticeOutcome;
   /** From the FROZEN answer snapshot on the attempt row, never a live re-query. */
   acceptedAnswers: string[];
+
+  /**
+   * How this answer reached the officer — `practice_attempts.input_mode`
+   * (issue #160, epic #60 / E11).
+   *
+   * PER QUESTION, NOT PER INTERVIEW: a dropped realtime connection falls back
+   * to the text transport with the same interview id, so one interview can
+   * genuinely carry both.
+   */
+  inputMode: 'typed' | 'spoken';
+
+  /**
+   * The recogniser was not confident it heard what was said —
+   * `failure_cause: 'misheard'` on the row.
+   *
+   * A SEPARATE FACT FROM `outcome`, never a ninth outcome value. Both are
+   * rendered: the outcome is what the grading ladder concluded about the words
+   * it was given, and this is whether we believe those were the learner's.
+   */
+  misheard: boolean;
+
+  /** The recogniser's own confidence. Null means UNKNOWN, never low. */
+  asrConfidence: number | null;
+}
+
+/**
+ * How the spoken half of this interview went — three counts over its own
+ * `practice_attempts` rows (issue #160).
+ *
+ * `correct` is exactly what readiness's `spoken` component counts, which is
+ * what lets the readiness band and the question list on one screen explain
+ * each other.
+ */
+export interface InterviewSpokenSummary {
+  answers: number;
+  correct: number;
+  misheard: number;
+}
+
+/**
+ * One conducted English segment — the reading or the writing test, as scored
+ * (issue #160).
+ *
+ * A segment the interview did not conduct is ABSENT, never an entry with
+ * zeros: `phases` is where "this rehearsal did not include the reading test"
+ * is said.
+ */
+export interface InterviewSegmentResult {
+  kind: 'reading' | 'writing';
+  outcome: 'correct' | 'partial' | 'incorrect';
+  /** The sentence itself. For writing this is the reveal, read after the fact. */
+  sentence: string;
+  /** The word error rate the outcome was computed from. Never re-derived here. */
+  wer: number;
 }
 
 /** Whether this rehearsal conducted a phase, or named it and skipped it. */
@@ -2384,6 +2438,16 @@ export interface InterviewReadinessSummary {
   /** The fixed cap copy, server-written, or null. Rendered verbatim. */
   capMessage: string | null;
   interviewComponent: { value: number; evidenceCount: number };
+  /**
+   * The `spoken` component — `min(distinctQuestionsCorrectSpoken / 20, 1)`.
+   *
+   * `evidenceCount` is the learner's LIFETIME count across every source, not
+   * this interview's own. How many came from this interview is
+   * `InterviewDebrief.spoken.correct`, and the two answer different questions.
+   */
+  spokenComponent: { value: number; evidenceCount: number };
+  /** The snapshot's own next action, whole — never a subset chosen on screen. */
+  recommendation: ReadinessTopRecommendation;
 }
 
 /**
@@ -2398,6 +2462,10 @@ export interface InterviewReadinessSummary {
 export interface InterviewDebrief {
   civics: InterviewCivicsResult;
   questions: InterviewDebriefQuestion[];
+  /** How the spoken half went. All zeros on a text interview, never absent. */
+  spoken: InterviewSpokenSummary;
+  /** The segments this interview conducted, reading first. Empty in text mode. */
+  segments: InterviewSegmentResult[];
   phases: InterviewPhaseStatus[];
   /** Category names with at least one miss. Deterministic, never model-written. */
   focusAreas: string[];
@@ -2514,4 +2582,383 @@ export interface AccountResetResult {
   scope: AccountResetScope;
   deleted: Record<string, number>;
   aiKeyRemoved: boolean;
+}
+
+// =============================================================================
+// The realtime voice interview — mint and relay (issues #157/#158/#159, E11)
+// =============================================================================
+//
+// Hand-written mirrors of `apps/api/src/interviews/dto/interview-realtime-session.dto.ts`
+// and `interview-tool-call.dto.ts`, field for field against those Zod schemas.
+//
+// -----------------------------------------------------------------------------
+// THERE IS NO `apiKey` ON ANY SHAPE IN THIS BLOCK, AND THAT IS THE POINT
+// -----------------------------------------------------------------------------
+//
+// `docs/specs/realtime-interview.md` §12's second locked decision: "The browser
+// never sees the learner's API key — only an ephemeral, interview-scoped
+// secret." The API carries a compile-time proof that no long-lived credential
+// can travel on the mint response; this is the same closed list on the reading
+// side, so a field added to the server's response that nobody declared here is
+// a field the web cannot start reading by accident.
+//
+// {@link RealtimeSessionOk.clientSecret} is deliberately NOT an exception to
+// that rule. It expires in about a minute, it is scoped to one session
+// configuration this application authored for one interview, and it is useless
+// outside the handshake it exists for.
+// =============================================================================
+
+/** A session was minted. Three fields, and the list is closed. */
+export interface RealtimeSessionOk {
+  status: 'ok';
+  /**
+   * The ephemeral, single-session client secret.
+   *
+   * Handed straight to the provider's own handshake and NEVER stored: not in
+   * `localStorage`, not in `sessionStorage`, not in a cookie, not in a module
+   * variable that outlives the connection. A credential written to storage
+   * outlives the tab that needed it, and this one has no second use.
+   */
+  clientSecret: string;
+  /** When the secret stops being usable, as the PROVIDER reported it. */
+  expiresAt: string;
+  /** The realtime model the secret was minted against. Named on the handshake. */
+  modelId: string;
+}
+
+/**
+ * No mint was attempted, and why.
+ *
+ * NOT AN ERROR. `role_unbound` on a deployment whose administrator has not
+ * bound a realtime model is an ordinary, correctly-configured installation
+ * where the voice interview is not set up — and the client's correct response
+ * is the text transport, with the same interview id (§7).
+ */
+export interface RealtimeSessionUnavailable {
+  status: 'unavailable';
+  cause: AiUnavailableCause;
+  /** Always `realtime` — the role that could not be served. */
+  role: 'realtime';
+}
+
+/**
+ * The mint was attempted and did not produce a usable session.
+ *
+ * DISTINCT FROM `unavailable`, and the distinction is what the screen renders:
+ * "voice interviews are not set up here" is a state a learner can do nothing
+ * about, while "that did not work" is worth a retry before falling back.
+ */
+export interface RealtimeSessionFailed {
+  status: 'failed';
+  errorCode: string;
+  error: string;
+}
+
+export type RealtimeSessionResponse =
+  | RealtimeSessionOk
+  | RealtimeSessionUnavailable
+  | RealtimeSessionFailed;
+
+/** The three tools the realtime officer may call. */
+export type RealtimeToolName = 'next_question' | 'grade_answer' | 'end_phase';
+
+/**
+ * One tool call, as it goes on the wire to
+ * `POST /api/interviews/:id/realtime/tool-calls`.
+ *
+ * THERE IS NO `verdict` FIELD AND THERE NEVER WILL BE. The API's own DTO
+ * carries a compile-time proof of the absence; this mirror keeps the browser
+ * from being the layer that reintroduces one. The model reports what it HEARD;
+ * the engine's grading ladder decides whether that was right.
+ */
+export type RealtimeToolCallInput =
+  | { tool: 'next_question' }
+  | {
+      tool: 'grade_answer';
+      questionId: string;
+      transcript: string;
+      /** ABSENT MEANS UNKNOWN, never low. Never send 0 as a stand-in. */
+      confidence?: number;
+    }
+  | { tool: 'end_phase'; phase: InterviewPhase };
+
+/** What every honoured result carries: where the interview is now. */
+export interface RealtimeTurnStatusFields {
+  phase: InterviewPhase;
+  turnIndex: number;
+  /** PACING, never score — the same `InterviewProgress` the text screen reads. */
+  progress: InterviewProgress;
+  awaitingCompletion: boolean;
+}
+
+/** `next_question`, honoured: the exact words the officer should say. */
+export interface RealtimeNextQuestionResult extends RealtimeTurnStatusFields {
+  tool: 'next_question';
+  status: 'ok';
+  /**
+   * The officer's line, assembled server-side and to be spoken AS GIVEN.
+   *
+   * No part of it was written by a model: a civics question is
+   * `civics_questions.prompt` verbatim, a reading or writing sentence is
+   * `english_sentences.text` verbatim, and everything around them is
+   * code-owned copy.
+   */
+  text: string;
+  /**
+   * SAY THIS; NEVER RENDER IT. True only for the writing test's sentence.
+   *
+   * The writing test is a DICTATION, so a screen that printed this string
+   * would not be showing the learner the question — it would be showing them
+   * the answer (`docs/specs/english-test.md` §4). Honouring it is a DOM
+   * invariant the realtime screen enforces, exactly as `WritingPracticePage`
+   * enforces the same rule over `GET /api/english/next`.
+   */
+  speakOnly: boolean;
+  /** The id a subsequent `grade_answer` must name, or `null` for an unscored turn. */
+  itemId: string | null;
+}
+
+/** `grade_answer`, honoured: an acknowledgement, and nothing else. */
+export interface RealtimeGradeAnswerResult extends RealtimeTurnStatusFields {
+  tool: 'grade_answer';
+  status: 'ok';
+  /** The neutral sentence to speak. IDENTICAL WHATEVER THE OUTCOME WAS. */
+  ack: string;
+  /**
+   * Whether evidence was written. A statement about the RECORD, not the answer.
+   *
+   * `false` only for a reading attempt whose transcript the recogniser did not
+   * trust — no row is written and the segment stays outstanding. It never
+   * correlates with whether the learner was right, so nothing may render it as
+   * a verdict.
+   */
+  recorded: boolean;
+}
+
+/** `end_phase`, honoured: where the interview now is. */
+export interface RealtimeEndPhaseResult {
+  tool: 'end_phase';
+  status: 'ok';
+  nextPhase: InterviewPhase;
+  /** One sentence of orientation for the model. Never a summary of how it went. */
+  context: string;
+  awaitingCompletion: boolean;
+}
+
+/**
+ * Any tool, refused — and **HTTP 200**, never a 4xx.
+ *
+ * A refusal is an expected outcome of the contract rather than an error: the
+ * model must be told what to do instead, and {@link instruction} is the field
+ * that gets the interview moving again. A relay that treated this as a failure
+ * would discard it and leave the officer waiting on a tool result that never
+ * arrives.
+ */
+export interface RealtimeToolCallRejected {
+  tool: RealtimeToolName;
+  status: 'rejected';
+  /** A stable, group-able code. Never a message. */
+  reason: string;
+  error: string;
+  instruction: string;
+}
+
+export type RealtimeToolCallResponse =
+  | RealtimeNextQuestionResult
+  | RealtimeGradeAnswerResult
+  | RealtimeEndPhaseResult
+  | RealtimeToolCallRejected;
+
+// =============================================================================
+// English — `GET /api/english/next`, `POST /api/english/attempts`,
+// `GET /api/english/progress` (issue #136, epic #59 / E10)
+// =============================================================================
+//
+// Hand-written mirrors of `apps/api/src/english/dto/*.ts`, field for field
+// against those Zod schemas rather than approximated — the same discipline the
+// Practice and Interview blocks above already state for themselves.
+//
+// THE ONE PROPERTY OF THIS BLOCK THAT IS LOAD-BEARING
+// ---------------------------------------------------
+//
+// `RecordEnglishAttemptInput` has FOUR fields and none of them is a verdict.
+// There is no `outcome`, no `wer`, no `diff`, no `errors` — scoring happens on
+// the server, against sentence text the client is not trusted to echo back, and
+// `record-english-attempt.dto.ts` carries a compile-time proof that no
+// verdict-shaped field can be added to it. A client that widened this type "so
+// the screen can show the result sooner" would be a client that decides its own
+// grade, and the evidence table E6 reads would record whatever it decided.
+//
+// `EnglishAttemptResult` is DISCRIMINATED ON `status`, and both arms are HTTP
+// 200. `misheard` is NOT an outcome: it is the ABSENCE of a recorded failure —
+// no `english_attempts` row was written at all (`docs/specs/english-test.md`
+// §3). A caller that folded it into the failure branch would be showing a
+// learner a failure the server deliberately declined to record.
+// =============================================================================
+
+/** Which segment of the interview a sentence belongs to. */
+export type EnglishSegmentKind = 'reading' | 'writing';
+
+/**
+ * The three outcomes an `english_attempts` row can hold.
+ *
+ * THREE, not `PracticeOutcome`'s four: there is no `skipped` here. A declined
+ * segment produces no row at all rather than a `skipped` row — see
+ * `docs/specs/english-test.md` §5.1.
+ */
+export type EnglishOutcome = 'correct' | 'partial' | 'incorrect';
+
+/** One step of the word-level alignment. */
+export type EnglishDiffOpKind = 'match' | 'substitute' | 'delete' | 'insert';
+
+/**
+ * One operation of the reference-to-hypothesis alignment.
+ *
+ * `reference` is null on an `insert` (the learner said a word that is not in
+ * the sentence); `hypothesis` is null on a `delete` (a sentence word they did
+ * not say). Both are present on a `match` and a `substitute`.
+ *
+ * These are NORMALISED tokens, not the sentence's original spelling: the
+ * scorer aligns `normalizeAnswer`'s output on both sides, so "first" arrives
+ * here as `1` and "President of the United States" as the single token
+ * `president`. A screen rendering them is showing what was actually compared.
+ */
+export interface EnglishDiffOp {
+  kind: EnglishDiffOpKind;
+  reference: string | null;
+  hypothesis: string | null;
+  /** Position in the normalised reference. Insertions repeat the position. */
+  referenceIndex: number;
+}
+
+/** One sentence from the bank — `GET /api/english/next`. */
+export interface EnglishSentence {
+  id: string;
+  kind: EnglishSegmentKind;
+  /** Which vocabulary revision this bank is. */
+  version: string;
+  ordinal: number;
+  /**
+   * The sentence itself.
+   *
+   * Returned for BOTH segments, writing included, because dictation defaults to
+   * the browser's own speech synthesis and that needs the string client-side.
+   * The WRITING screen must never render it (`docs/specs/english-test.md` §4);
+   * the READING screen must — reading is a test of reading it.
+   */
+  text: string;
+  /** The USCIS vocabulary categories this sentence's own words resolve to. */
+  vocabTags: string[];
+  /** The SCORER's token count, not a naive space split. */
+  wordCount: number;
+}
+
+/** `GET /api/english/next` — `sentence: null` means the bank is empty. */
+export interface EnglishNextResponse {
+  sentence: EnglishSentence | null;
+}
+
+/**
+ * The whole body of `POST /api/english/attempts`.
+ *
+ * `asrConfidence` is READING-ONLY and **absent means unknown — never send 0**.
+ * A `0` is a confident claim that the recogniser was certain it heard nothing,
+ * which the server reads as a mishearing and stamps on a perfectly good answer.
+ *
+ * `replayCount` is WRITING-ONLY; a non-zero count on a reading attempt is a
+ * 400, because a reading sentence is shown rather than dictated.
+ */
+export interface RecordEnglishAttemptInput {
+  sentenceId: string;
+  /** What is actually scored — for reading, the learner-CONFIRMED transcript. */
+  responseText: string;
+  asrConfidence?: number;
+  replayCount?: number;
+}
+
+/** The scoring fields both arms of the attempt response carry. */
+export interface EnglishScoreFields {
+  sentenceId: string;
+  kind: EnglishSegmentKind;
+  /** The sentence as composed — on a writing attempt, this is the reveal. */
+  text: string;
+  responseText: string;
+  wer: number;
+  errors: number;
+  substitutions: number;
+  deletions: number;
+  insertions: number;
+  referenceTokenCount: number;
+  diff: EnglishDiffOp[];
+  normalizedReference: string;
+  normalizedHypothesis: string;
+}
+
+/** A row WAS written. */
+export interface EnglishAttemptScored extends EnglishScoreFields {
+  status: 'scored';
+  attemptId: string;
+  outcome: EnglishOutcome;
+  answeredAt: string;
+  asrConfidence: number | null;
+  replayCount: number;
+}
+
+/**
+ * NOTHING was written.
+ *
+ * The recogniser reported confidence below the threshold on a reading attempt
+ * that did not score `correct`. The diff still comes back — so the learner can
+ * see what was heard — but no `english_attempts` row exists and no failure is
+ * on their record. Offer a retry; never render this as a miss.
+ */
+export interface EnglishAttemptMisheard extends EnglishScoreFields {
+  status: 'misheard';
+  asrConfidence: number;
+  confidenceThreshold: number;
+}
+
+export type EnglishAttemptResult = EnglishAttemptScored | EnglishAttemptMisheard;
+
+/** One sentence's history — `GET /api/english/progress`. */
+export interface EnglishSentenceProgress {
+  sentenceId: string;
+  kind: EnglishSegmentKind;
+  text: string;
+  ordinal: number;
+  vocabTags: string[];
+  attempts: number;
+  bestOutcome: EnglishOutcome | null;
+  lastOutcome: EnglishOutcome | null;
+  lastWer: number | null;
+  lastAnsweredAt: string | null;
+}
+
+/** The same evidence rolled up by USCIS vocabulary category. */
+export interface EnglishVocabTagProgress {
+  tag: string;
+  sentencesTotal: number;
+  sentencesAttempted: number;
+  sentencesPassed: number;
+  attempts: number;
+}
+
+/** Reading and writing totals, always both. */
+export interface EnglishKindProgress {
+  kind: EnglishSegmentKind;
+  sentencesTotal: number;
+  sentencesAttempted: number;
+  sentencesPassed: number;
+  attempts: number;
+  /** `null` — never `0` — when there are no attempts. A mean of zero is a
+   *  perfect record, the opposite of no record. */
+  averageWer: number | null;
+  version: string | null;
+}
+
+/** `GET /api/english/progress` — three grains of the same evidence. */
+export interface EnglishProgress {
+  sentences: EnglishSentenceProgress[];
+  vocabTags: EnglishVocabTagProgress[];
+  byKind: EnglishKindProgress[];
 }

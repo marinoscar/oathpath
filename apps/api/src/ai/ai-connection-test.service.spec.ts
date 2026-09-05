@@ -122,9 +122,11 @@ describe('AiConnectionTestService', () => {
       ]);
     });
 
-    it('never probes the four unwired roles', async () => {
-      // They are declared and inert; probing them would fail a test for a
-      // feature that does not exist yet.
+    it('never probes a role with no binding', async () => {
+      // Wired or not. An unwired role (`embed`) is inert, and a wired one an
+      // admin has not configured (`transcribe`, `speak`, `realtime` on this
+      // fixture) has no model to probe — reporting either as unreachable would
+      // fail a key test for configuration the admin has simply not done.
       await service.runTest(ADMIN);
 
       const probes = openai.testConnection.mock.calls[0][1] as Array<{

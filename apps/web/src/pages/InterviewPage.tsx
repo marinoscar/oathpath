@@ -141,7 +141,12 @@ import {
   Typography,
 } from '@mui/material';
 import ArrowBackIcon from '@mui/icons-material/ArrowBack';
-import { Link as RouterLink, useNavigate, useParams } from 'react-router-dom';
+import {
+  Link as RouterLink,
+  useLocation,
+  useNavigate,
+  useParams,
+} from 'react-router-dom';
 
 import { AiNotReady } from '../components/ai/AiNotReady';
 import { AI_KEY_SETTINGS_PATH } from '../components/ai/ExplainPanel';
@@ -171,6 +176,26 @@ export function afterCompletionPath(interviewId: string): string {
 export default function InterviewPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const location = useLocation();
+
+  /**
+   * Why this learner is here rather than on the spoken screen (#159, E11).
+   *
+   * Set only when `RealtimeInterviewPage` navigated here after a voice
+   * connection it could not re-establish. It is a SENTENCE, not a code, and it
+   * is announced — a learner whose officer went silent mid-question and who
+   * then finds themselves looking at a text box deserves one line saying what
+   * happened, not a screen that pretends this is where they meant to be.
+   *
+   * Router state rather than a query parameter, because it describes how this
+   * navigation happened rather than what this URL is: a bookmark of an
+   * interview should not carry it.
+   */
+  const voiceFallback =
+    typeof (location.state as { voiceFallback?: unknown } | null)
+      ?.voiceFallback === 'string'
+      ? (location.state as { voiceFallback: string }).voiceFallback
+      : null;
 
   const {
     interview,
@@ -334,6 +359,20 @@ export default function InterviewPage() {
         </Box>
 
         <Divider aria-hidden sx={{ mt: 2, mb: 3 }} />
+
+        {/* ARRIVED FROM THE SPOKEN SCREEN (#159). Not an error: the interview
+            itself is untouched — same id, same engine state, same next question
+            — and the only thing that changed is which transport is carrying it.
+            `role="status"` rather than `role="alert"`, because nothing here
+            needs interrupting; the officer's turn below is what the learner
+            should be reading. */}
+        {voiceFallback && (
+          <Alert severity="info" role="status" sx={{ mb: 3 }}>
+            <AlertTitle>{voiceFallback}</AlertTitle>
+            You are carrying on by typing, in the same interview. Nothing you
+            already answered was lost, and the next question is below.
+          </Alert>
+        )}
 
         {/* THE TRANSCRIPT, AND THE LIVE REGION. Mounted from the first render
             and only ever added to — see the file header for why that ordering

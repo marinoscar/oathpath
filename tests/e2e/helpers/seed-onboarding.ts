@@ -73,8 +73,16 @@ export interface SeededTestUser {
   callbackUrl: string;
 }
 
-/** A key that is obviously fake and obviously not a real OpenAI secret. */
-const TEST_AI_KEY = 'sk-e2e-test-key-not-a-real-openai-key';
+/**
+ * A key that is obviously fake and obviously not a real OpenAI secret.
+ *
+ * EXPORTED (issue #161, epic #60 / E11) so a spec that needs to prove a
+ * response or a browser store never carries the learner's own stored key —
+ * `mock-interview-realtime.spec.ts`'s mint-secrecy check — can assert against
+ * the EXACT literal this file put there, rather than a second guess at what
+ * `seedOnboarding` happens to store.
+ */
+export const TEST_AI_KEY = 'sk-e2e-test-key-not-a-real-openai-key';
 
 /**
  * Orientation fields enough to satisfy `JourneyService.isOrientationComplete`

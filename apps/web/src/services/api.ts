@@ -335,10 +335,18 @@ import type {
   InterviewDetail,
   InterviewPage,
   InterviewState,
+  RealtimeSessionResponse,
+  RealtimeToolCallInput,
+  RealtimeToolCallResponse,
   EngagementSummary,
   AccountDataSummary,
   AccountResetScope,
   AccountResetResult,
+  EnglishAttemptResult,
+  EnglishNextResponse,
+  EnglishProgress,
+  EnglishSegmentKind,
+  RecordEnglishAttemptInput,
 } from '../types';
 
 // Allowlist API
@@ -1549,4 +1557,151 @@ export async function resetAccountData(
     scope,
     confirmationPhrase,
   });
+}
+
+// =============================================================================
+// The realtime voice interview — mint and relay (issue #159, epic #60 / E11)
+// =============================================================================
+//
+// Two calls, and between them the browser's ENTIRE authority over a spoken
+// interview. Everything else on this transport — which question is next, what
+// the officer says, whether an answer was right, whether a phase is over — is
+// decided server-side and reaches the browser only as a string to hand onward.
+//
+// -----------------------------------------------------------------------------
+// THE LEARNER'S API KEY IS NOT IN THIS FILE, AND CANNOT BE
+// -----------------------------------------------------------------------------
+//
+// `docs/specs/realtime-interview.md` §12's second locked decision. The mint
+// returns an ephemeral secret the browser uses to open its own connection to
+// the provider; the learner's own key never leaves the API process on any code
+// path. There is no request here that could ask for one and no response shape
+// that could carry one — see the `Realtime*` types in `types/index.ts`.
+// =============================================================================
+
+/**
+ * Mint one ephemeral realtime session for this interview —
+ * `POST /api/interviews/:id/realtime-session`.
+ *
+ * NO REQUEST BODY, deliberately: the officer's instructions, the tools the
+ * model may call and the session's lifetime are all the server's, built from
+ * this interview's own state. A body would be the first field through which a
+ * caller could ask for a session that is not this interview's.
+ *
+ * ALL THREE OUTCOMES ARE HTTP 200 — read `status`. A non-2xx would be
+ * flattened into generic failure handling and the `cause`, the one fact an
+ * `unavailable` response exists to carry, would never reach the screen. On
+ * `unavailable` or `failed` the caller conducts the interview in text, with
+ * the same interview id and no loss of progress (§7).
+ *
+ * SAFE TO CALL AGAIN while the interview is `in_progress`: the secret is short
+ * -lived by design, and a re-mint resolves the interview's CURRENT engine state
+ * — so a dropped connection resumes at whatever question the engine says comes
+ * next, never at the first one.
+ */
+export async function createRealtimeSession(
+  id: string,
+): Promise<RealtimeSessionResponse> {
+  return api.post<RealtimeSessionResponse>(
+    `/interviews/${id}/realtime-session`,
+    // An empty object rather than nothing, so the request carries the JSON
+    // content type every other POST in this file does. The route accepts no
+    // fields; sending `{}` is how "there is nothing to configure" travels.
+    {},
+  );
+}
+
+/**
+ * Relay one tool call from the realtime session to the engine —
+ * `POST /api/interviews/:id/realtime/tool-calls`.
+ *
+ * THE BROWSER IS A RELAY AND NOTHING MORE. It forwards the call the model
+ * emitted and hands the result back over the same data channel. It does not
+ * interpret the result, does not grade, does not choose a question, and does
+ * not decide whether a phase is over — the whole reason this route exists is
+ * that those decisions are the engine's (§4).
+ *
+ * A REFUSAL IS A 200 WITH AN `instruction`, NOT AN ERROR. `status: 'rejected'`
+ * means the interview's own state did not permit the call; the `instruction`
+ * field says what the model should do instead, and relaying it verbatim is
+ * what gets the interview moving again. Treating it as a failure would leave
+ * the officer waiting on a tool result that never arrives — a live
+ * conversation that has silently stopped, with nothing on screen to say so.
+ */
+export async function sendRealtimeToolCall(
+  id: string,
+  call: RealtimeToolCallInput,
+): Promise<RealtimeToolCallResponse> {
+  return api.post<RealtimeToolCallResponse>(
+    `/interviews/${id}/realtime/tool-calls`,
+    call,
+  );
+}
+
+// =============================================================================
+// English — reading and writing (issue #136, epic #59 / E10)
+// =============================================================================
+
+/**
+ * The next sentence for one segment — `GET /api/english/next?kind=…`.
+ *
+ * `@Auth()` with no permissions and no user id: the same posture
+ * `getPracticeQueue`/`getProgressMastery` already take, for the same reason —
+ * every learner owns their own English history, resolved from the JWT.
+ *
+ * SELECTION IS THE SERVER'S, AND IT IS DETERMINISTIC. Untried sentences first,
+ * then the ones most recently missed, then partials, then passes. A client that
+ * picked its own sentence out of a list would undo that ordering silently, and
+ * there is no endpoint that would let it: this returns ONE sentence.
+ *
+ * `sentence: null` is an honest absence, NOT a 404 — the request was valid and
+ * the answer is that no sentences are loaded for this segment. Render it as
+ * prose; there is nothing for the learner to fix.
+ */
+export async function getNextEnglishSentence(
+  kind: EnglishSegmentKind,
+): Promise<EnglishNextResponse> {
+  return api.get<EnglishNextResponse>(`/english/next?kind=${kind}`);
+}
+
+/**
+ * Submit one reading or writing attempt — `POST /api/english/attempts`.
+ *
+ * THE CALLER NEVER SENDS THE VERDICT. There is no `outcome`, `wer` or `diff`
+ * field on the request; the server normalises both sides, aligns them word by
+ * word, and decides. `kind` is read from the sentence rather than from the
+ * body, so there is nothing here for a client to get wrong about which segment
+ * it is in.
+ *
+ * READ `status`, NOT THE HTTP CODE — both arms are 200.
+ *
+ *   * `scored` wrote exactly one `english_attempts` row. `attemptId` and
+ *     `outcome` are that row's.
+ *   * `misheard` wrote **NOTHING**. The recogniser reported low confidence on a
+ *     reading attempt that did not score `correct`, and
+ *     `docs/specs/english-test.md` §3 requires that this leave no trace: a
+ *     transcript we do not believe is not weak evidence of a reading skill, it
+ *     is none. The diff still comes back so the learner can see what was heard.
+ *     **Never render it as a failure** — offer the retry instead.
+ *
+ * This is a deliberate divergence from practice, where `misheard` is a
+ * `failureCause` on a row that IS written. Both are right for their own table;
+ * a caller that shares code between them must not share this branch.
+ */
+export async function recordEnglishAttempt(
+  input: RecordEnglishAttemptInput,
+): Promise<EnglishAttemptResult> {
+  return api.post<EnglishAttemptResult>('/english/attempts', input);
+}
+
+/**
+ * The caller's own reading and writing history — `GET /api/english/progress`.
+ *
+ * Three grains of one evidence set: per sentence, per USCIS vocabulary
+ * category, and per segment. No parameters — "my English progress" is the one
+ * question it answers, and the query DTO rejects anything else rather than
+ * silently ignoring it.
+ */
+export async function getEnglishProgress(): Promise<EnglishProgress> {
+  return api.get<EnglishProgress>('/english/progress');
 }

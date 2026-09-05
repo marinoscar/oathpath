@@ -152,13 +152,19 @@ import {
 import AutorenewOutlinedIcon from '@mui/icons-material/AutorenewOutlined';
 import BoltIcon from '@mui/icons-material/Bolt';
 import ChevronRightIcon from '@mui/icons-material/ChevronRight';
+import EditNoteOutlinedIcon from '@mui/icons-material/EditNoteOutlined';
 import HistoryEduOutlinedIcon from '@mui/icons-material/HistoryEduOutlined';
+import RecordVoiceOverOutlinedIcon from '@mui/icons-material/RecordVoiceOverOutlined';
 import { Link as RouterLink, useNavigate } from 'react-router-dom';
 
 import { LoadingSpinner } from '../components/common/LoadingSpinner';
 import { PracticeQueueSummary } from '../components/practice/PracticeQueueSummary';
 import { RecentSessions } from '../components/practice/RecentSessions';
 import { INTERVIEWS_PATH } from '../components/interview/paths';
+import {
+  READING_PRACTICE_PATH,
+  WRITING_PRACTICE_PATH,
+} from '../components/english/paths';
 // The same `/settings/journey` page the civics state notice links to. Imported
 // rather than re-spelled: two literals for one destination is how one of them
 // survives a route rename.
@@ -457,7 +463,99 @@ export default function PracticePage() {
             </Box>
 
             {/* -----------------------------------------------------------
-                3. Mock interview — a LINK, not a POST, and copy that says
+                3. Reading aloud (#144, epic #59 / E10) — a LINK, not a POST.
+                   `/practice/reading` has no session resource to create: the
+                   screen asks the server for one sentence at a time, so there
+                   is nothing for a click here to bring into existence and an
+                   `<a href>` is the honest affordance (middle-click and
+                   "open in new tab" both work, which they cannot on the Quick 5
+                   button above).
+
+                   It sits between the civics drills and the mock interview
+                   because that is where it belongs in a learner's day: it is
+                   a different SKILL from the civics questions above, and a
+                   shorter commitment than the interview below.
+                ----------------------------------------------------------- */}
+            <Box
+              component="section"
+              aria-labelledby="practice-reading-heading"
+              sx={{ mt: 4 }}
+            >
+              <Typography
+                id="practice-reading-heading"
+                variant="overline"
+                component="h2"
+                color="text.secondary"
+                sx={{ display: 'block' }}
+              >
+                Reading aloud
+              </Typography>
+              <Typography color="text.secondary" sx={{ mt: 1, maxWidth: '60ch' }}>
+                The English part of the interview, not the civics part. You read
+                one sentence out loud and see exactly which words came through
+                &mdash; not a score on its own. One sentence takes about a
+                minute.
+              </Typography>
+              <Button
+                component={RouterLink}
+                to={READING_PRACTICE_PATH}
+                variant="outlined"
+                size="large"
+                startIcon={<RecordVoiceOverOutlinedIcon />}
+                sx={{ mt: 2, width: { xs: '100%', sm: 'auto' } }}
+              >
+                Practise reading aloud
+              </Button>
+            </Box>
+
+            {/* -----------------------------------------------------------
+                3b. Writing from dictation (#147, same epic) — a LINK for the
+                    same reason the reading entry above is one: nothing is
+                    created by pressing it, so middle-click and "open in new
+                    tab" must work, which they cannot on a button.
+
+                    Its OWN band rather than a second button under "Reading
+                    aloud", because they are two different skills tested
+                    separately in the interview — a learner who reads well and
+                    writes badly needs to see that as two lines, not one. The
+                    copy leads with the dictation, since being unable to see the
+                    sentence is the thing about this exercise a learner should
+                    know before they start it rather than discover.
+                ----------------------------------------------------------- */}
+            <Box
+              component="section"
+              aria-labelledby="practice-writing-heading"
+              sx={{ mt: 4 }}
+            >
+              <Typography
+                id="practice-writing-heading"
+                variant="overline"
+                component="h2"
+                color="text.secondary"
+                sx={{ display: 'block' }}
+              >
+                Writing from dictation
+              </Typography>
+              <Typography color="text.secondary" sx={{ mt: 1, maxWidth: '60ch' }}>
+                The other English half. You hear a sentence read aloud and write
+                down what you heard &mdash; you never see it, exactly as in the
+                interview. Play it again as often as you like; it costs you
+                nothing.
+              </Typography>
+              <Button
+                component={RouterLink}
+                to={WRITING_PRACTICE_PATH}
+                variant="outlined"
+                size="large"
+                startIcon={<EditNoteOutlinedIcon />}
+                sx={{ mt: 2, width: { xs: '100%', sm: 'auto' } }}
+              >
+                Practise writing from dictation
+              </Button>
+            </Box>
+
+            {/* -----------------------------------------------------------
+                4. Mock interview — a LINK, not a POST, and copy that says
                    what it is before the learner commits to twenty minutes
                    of it. See the header.
                 ----------------------------------------------------------- */}
@@ -499,7 +597,7 @@ export default function PracticePage() {
             </Box>
 
             {/* -----------------------------------------------------------
-                4. Recent sessions.
+                5. Recent sessions.
                 ----------------------------------------------------------- */}
             <Box sx={{ mt: 4 }}>
               {sessionsError ? (

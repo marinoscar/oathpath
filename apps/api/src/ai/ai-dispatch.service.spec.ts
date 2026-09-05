@@ -15,6 +15,7 @@ import type { AiSettings } from './ai-settings.schema';
 import type { AiSettingsService } from './ai-settings.service';
 import type { CredentialsService } from '../credentials/credentials.service';
 import type {
+  AiRealtimeSessionResult,
   AiRecordedCompletionResult,
   AiStreamEvent,
   AiStructuredCompletionResult,
@@ -150,6 +151,17 @@ function providerDouble(overrides: Partial<AiProvider> = {}): AiProvider {
       errorCode: null,
       error: null,
     } satisfies AiSynthesisResult),
+    createRealtimeSession: jest.fn().mockResolvedValue({
+      success: true,
+      clientSecret: MINTED_SECRET,
+      expiresAt: SECRET_EXPIRY,
+      modelId: 'gpt-4o-realtime-preview',
+      // ALL-NULL, and here it is not even "we were not told": minting a
+      // credential runs no inference. See `AiRealtimeSessionResult.usage`.
+      usage: SPEECH_USAGE,
+      errorCode: null,
+      error: null,
+    } satisfies AiRealtimeSessionResult),
     ...overrides,
   } as AiProvider;
 }
@@ -175,6 +187,17 @@ async function collect(events: AsyncIterable<AiStreamEvent>) {
 }
 
 const USER_KEY = 'sk-alice-abcdefghijklmnopqrst';
+
+/**
+ * What a realtime mint hands back.
+ *
+ * LONG ENOUGH TO BE REDACTABLE rather than withheld whole: `SecretRedactor`
+ * replaces a secret in place only past a minimum length, and a short fixture
+ * would exercise the "withhold the entire message" branch instead of the one
+ * production takes.
+ */
+const MINTED_SECRET = 'ek_realtime_abcdefghijklmnopqrstuvwxyz';
+const SECRET_EXPIRY = new Date('2026-06-01T12:01:00Z');
 const MESSAGES = [{ role: 'user' as const, content: 'why is this the answer?' }];
 
 beforeAll(() => {
@@ -884,6 +907,288 @@ describe('AiDispatchService.synthesize', () => {
     await expect(
       service.synthesize(ALICE, { text: 'Hello' }),
     ).resolves.toMatchObject({ status: 'failed', errorCode: 'dispatch_error' });
+  });
+});
+
+// =============================================================================
+// Realtime session minting (issue #157, epic #60 — E11)
+// =============================================================================
+//
+// The same three kinds of property the speech block covers, plus one this
+// surface is the only place in the file that has: the thing that comes BACK is
+// itself a credential. So there is a test that a throw raised after the mint
+// cannot quote it, and the file-level "the server key is unreachable" block at
+// the bottom already covers the other half — a browser-facing secret minted on
+// the organisation's key would be the most expensive instance of exactly the
+// failure that block exists to forbid.
+// =============================================================================
+
+/** Settings with the realtime role bound. */
+function realtimeSettings(overrides: Partial<AiSettings> = {}): AiSettings {
+  return readySettings({
+    models: {
+      ...DEFAULT_AI_SETTINGS.models,
+      tutor: 'gpt-5.4-mini',
+      grader: 'gpt-5.4-mini',
+      realtime: 'gpt-4o-realtime-preview',
+    },
+    ...overrides,
+  });
+}
+
+const REALTIME_REQUEST = {
+  instructions: 'You are an immigration officer conducting a practice interview.',
+  tools: [
+    {
+      name: 'next_question',
+      description: 'Ask for the next thing to say.',
+      parameters: { type: 'object', properties: {}, additionalProperties: false },
+    },
+  ],
+};
+
+describe('AiDispatchService.createRealtimeSession', () => {
+  it('returns the ephemeral secret, its expiry and the bound model', async () => {
+    const { service } = build(realtimeSettings(), USER_KEY);
+
+    expect(await service.createRealtimeSession(ALICE, REALTIME_REQUEST)).toEqual({
+      status: 'ok',
+      clientSecret: MINTED_SECRET,
+      expiresAt: SECRET_EXPIRY,
+      modelId: 'gpt-4o-realtime-preview',
+    });
+  });
+
+  it('returns nothing else — no usage, no key, no echo of the configuration', async () => {
+    // What reaches a browser is bounded by what this method returns. A `usage`
+    // field of three nulls would be read as this session's cost, which is the
+    // one thing it is not; anything echoing the request back is a second copy
+    // of the officer's prompt on a path that does not need one.
+    const result = await build(realtimeSettings(), USER_KEY).service.createRealtimeSession(
+      ALICE,
+      REALTIME_REQUEST,
+    );
+
+    expect(Object.keys(result).sort()).toEqual([
+      'clientSecret',
+      'expiresAt',
+      'modelId',
+      'status',
+    ]);
+  });
+
+  it('runs on the caller`s own key and names the realtime role to the provider', async () => {
+    // The role key is what `BaseAiProvider.recordUsage` writes to
+    // `ai_usage_events.roleKey`. Asserted at the one place this service
+    // chooses it.
+    const { service, provider } = build(realtimeSettings(), USER_KEY);
+
+    await service.createRealtimeSession(ALICE, {
+      ...REALTIME_REQUEST,
+      voice: 'alloy',
+      expiresInSeconds: 60,
+    });
+
+    expect(provider.createRealtimeSession).toHaveBeenCalledWith(
+      ALICE,
+      USER_KEY,
+      {
+        roleKey: 'realtime',
+        modelId: 'gpt-4o-realtime-preview',
+        instructions: REALTIME_REQUEST.instructions,
+        tools: REALTIME_REQUEST.tools,
+        voice: 'alloy',
+        expiresInSeconds: 60,
+      },
+    );
+  });
+
+  it('reports the resolved binding as `modelId`, not the provider`s echo', async () => {
+    // Every other `ok` result in this file means "the model this dispatcher
+    // chose" by that name. A provider that echoed something else would
+    // otherwise make this one method's field mean a different thing.
+    const provider = providerDouble({
+      createRealtimeSession: jest.fn().mockResolvedValue({
+        success: true,
+        clientSecret: MINTED_SECRET,
+        expiresAt: SECRET_EXPIRY,
+        modelId: 'something-the-provider-substituted',
+        usage: SPEECH_USAGE,
+        errorCode: null,
+        error: null,
+      } satisfies AiRealtimeSessionResult),
+    });
+    const { service } = build(realtimeSettings(), USER_KEY, provider);
+
+    expect(
+      await service.createRealtimeSession(ALICE, REALTIME_REQUEST),
+    ).toMatchObject({ modelId: 'gpt-4o-realtime-preview' });
+  });
+
+  it('treats a success with no client secret as a failure with its own code', async () => {
+    const provider = providerDouble({
+      createRealtimeSession: jest.fn().mockResolvedValue({
+        success: true,
+        clientSecret: null,
+        expiresAt: SECRET_EXPIRY,
+        modelId: 'gpt-4o-realtime-preview',
+        usage: SPEECH_USAGE,
+        errorCode: null,
+        error: null,
+      } satisfies AiRealtimeSessionResult),
+    });
+    const { service } = build(realtimeSettings(), USER_KEY, provider);
+
+    expect(
+      await service.createRealtimeSession(ALICE, REALTIME_REQUEST),
+    ).toMatchObject({
+      status: 'failed',
+      errorCode: 'empty_realtime_session',
+      error: 'The provider reported success and returned no client secret.',
+    });
+  });
+
+  it('treats a success with no expiry as a failure too, and says which half', async () => {
+    // A secret a browser cannot date is a browser that cannot know when to
+    // re-mint — `realtime-interview.md` §3's own resume rule needs the number.
+    const provider = providerDouble({
+      createRealtimeSession: jest.fn().mockResolvedValue({
+        success: true,
+        clientSecret: MINTED_SECRET,
+        expiresAt: null,
+        modelId: 'gpt-4o-realtime-preview',
+        usage: SPEECH_USAGE,
+        errorCode: null,
+        error: null,
+      } satisfies AiRealtimeSessionResult),
+    });
+    const { service } = build(realtimeSettings(), USER_KEY, provider);
+
+    expect(
+      await service.createRealtimeSession(ALICE, REALTIME_REQUEST),
+    ).toMatchObject({
+      status: 'failed',
+      errorCode: 'empty_realtime_session',
+      error: 'The provider reported success and returned no expiry.',
+    });
+  });
+
+  it('reports a provider failure as failed, not unavailable', async () => {
+    const provider = providerDouble({
+      createRealtimeSession: jest.fn().mockResolvedValue({
+        success: false,
+        clientSecret: null,
+        expiresAt: null,
+        modelId: null,
+        usage: SPEECH_USAGE,
+        errorCode: 'rate_limited',
+        error: 'Too many requests.',
+      } satisfies AiRealtimeSessionResult),
+    });
+    const { service } = build(realtimeSettings(), USER_KEY, provider);
+
+    expect(
+      await service.createRealtimeSession(ALICE, REALTIME_REQUEST),
+    ).toMatchObject({
+      status: 'failed',
+      errorCode: 'rate_limited',
+      error: 'Too many requests.',
+    });
+  });
+
+  it('never rejects when the provider throws', async () => {
+    const provider = providerDouble({
+      createRealtimeSession: jest.fn().mockRejectedValue(new Error('socket hang up')),
+    });
+    const { service } = build(realtimeSettings(), USER_KEY, provider);
+
+    await expect(
+      service.createRealtimeSession(ALICE, REALTIME_REQUEST),
+    ).resolves.toMatchObject({ status: 'failed', errorCode: 'dispatch_error' });
+  });
+
+  it('never quotes the minted secret in an error raised after the mint', async () => {
+    // CONTRIVED ON PURPOSE, and the contrivance is the point. The getter below
+    // stands in for a future edit between the mint and the return that raises
+    // while the secret is in scope — the one path `BaseAiProvider`'s own
+    // redactor does not cover, because the string being formatted is this
+    // file's, not the provider's. Without `redact.protect(result.clientSecret)`
+    // this assertion fails and a live bearer credential reaches a log.
+    const provider = providerDouble({
+      createRealtimeSession: jest.fn().mockResolvedValue({
+        success: true,
+        clientSecret: MINTED_SECRET,
+        get expiresAt(): Date {
+          throw new Error(`the session ${MINTED_SECRET} could not be read`);
+        },
+        modelId: 'gpt-4o-realtime-preview',
+        usage: SPEECH_USAGE,
+        errorCode: null,
+        error: null,
+      }),
+    });
+    const { service } = build(realtimeSettings(), USER_KEY, provider);
+
+    const result = await service.createRealtimeSession(ALICE, REALTIME_REQUEST);
+
+    expect(result).toMatchObject({ status: 'failed', errorCode: 'dispatch_error' });
+    expect(JSON.stringify(result)).not.toContain(MINTED_SECRET);
+  });
+
+  it.each([
+    ['no key stored', realtimeSettings(), null, 'no_user_key'],
+    ['the master switch off', realtimeSettings({ enabled: false }), USER_KEY, 'ai_disabled'],
+    [
+      'the role unbound',
+      readySettings({ models: { ...DEFAULT_AI_SETTINGS.models, realtime: null } }),
+      USER_KEY,
+      'role_unbound',
+    ],
+  ] as const)(
+    'shares `resolve` with `run`: reports %s as its own cause',
+    async (_case, settings, secret, cause) => {
+      const { service, provider } = build(settings, secret);
+
+      expect(
+        await service.createRealtimeSession(ALICE, REALTIME_REQUEST),
+      ).toEqual({ status: 'unavailable', cause });
+
+      // NO MINT WAS ATTEMPTED. `unavailable` is a call that never ran.
+      expect(provider.createRealtimeSession).not.toHaveBeenCalled();
+    },
+  );
+
+  it('reports capability_unsupported when the provider has no realtime surface', async () => {
+    // The first cause this codebase can produce in production, on the day a
+    // text-only provider is configured: OpenAI declares all six families.
+    const provider = providerDouble({
+      capabilities: new Set(['text']),
+      supports: jest.fn((family: string) => family === 'text'),
+    } as Partial<AiProvider>);
+    const { service } = build(realtimeSettings(), USER_KEY, provider);
+
+    expect(
+      await service.createRealtimeSession(ALICE, REALTIME_REQUEST),
+    ).toEqual({ status: 'unavailable', cause: 'capability_unsupported' });
+  });
+
+  it('reports the administrator`s gap before the caller`s missing key', async () => {
+    const { service } = build(realtimeSettings({ enabled: false }), null);
+
+    expect(
+      await service.createRealtimeSession(ALICE, REALTIME_REQUEST),
+    ).toEqual({ status: 'unavailable', cause: 'ai_disabled' });
+  });
+
+  it('does not decrypt the caller`s key for a mint an unbound role would refuse', async () => {
+    const settings = readySettings({
+      models: { ...DEFAULT_AI_SETTINGS.models, realtime: null },
+    });
+    const { service, credentials } = build(settings, USER_KEY);
+
+    await service.createRealtimeSession(ALICE, REALTIME_REQUEST);
+
+    expect(credentials.getSecret).not.toHaveBeenCalled();
   });
 });
 

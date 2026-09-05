@@ -34,12 +34,35 @@ const ProgressPage = lazy(() => import("./pages/ProgressPage"));
 // new `DESTINATION_ROUTES` entry is needed or wanted.
 const PracticeSessionPage = lazy(() => import("./pages/PracticeSessionPage"));
 const PracticeSummaryPage = lazy(() => import("./pages/PracticeSummaryPage"));
+const ReadingPracticePage = lazy(
+  () => import("./pages/ReadingPracticePage"),
+);
+// Issue #147, epic #59 / E10 — the writing half of the same English segment,
+// under the same `/practice` prefix. A SEPARATE PAGE from the reading screen
+// rather than a mode of it: the two share a scorer and an endpoint but hold
+// opposite rules about the sentence (reading shows it; writing must never show
+// it before submission), and one component holding both is the shape in which
+// "never render the sentence" eventually gets rendered by accident.
+const WritingPracticePage = lazy(
+  () => import("./pages/WritingPracticePage"),
+);
 // Issue #140 (the first two) and #145 (the debrief), epic #57 / E8 — the mock
 // interview, three more screens UNDER the same Practice destination and owned
 // by the same `/practice` prefix.
 const InterviewStartPage = lazy(() => import("./pages/InterviewStartPage"));
 const InterviewPage = lazy(() => import("./pages/InterviewPage"));
 const InterviewDebriefPage = lazy(() => import("./pages/InterviewDebriefPage"));
+// Issue #159, epic #60 / E11 — the SPOKEN interview, a fourth screen under the
+// same Practice destination and owned by the same `/practice` prefix. A
+// separate route from `/practice/interviews/:id` rather than a mode of it: the
+// two hold opposite rules about the microphone and about the writing sentence,
+// and one component holding both is the shape in which "never render the
+// sentence" eventually gets rendered by accident. Falling back from voice to
+// text keeps the SAME interview id, because the engine's state is server-side
+// and a transport change is not a restart (`realtime-interview.md` §7).
+const RealtimeInterviewPage = lazy(
+  () => import("./pages/RealtimeInterviewPage"),
+);
 const AiKeySetupPage = lazy(() => import("./pages/AiKeySetupPage"));
 // Issue #72, epic #50 — the orientation screen behind `RequireOrientation`.
 const OrientationPage = lazy(() => import("./pages/OrientationPage"));
@@ -250,6 +273,60 @@ function AppRoutes() {
                           path="/practice/sessions/:id/summary"
                           element={<PracticeSummaryPage />}
                         />
+                        {/* Reading practice (#144, epic #59 / E10), in this
+                        same `RequireOrientation` group and ungated beyond it
+                        for the identical reason the practice loop above is:
+                        every `/api/english/*` route is `@Auth()` with NO
+                        permission, because a learner's own reading and writing
+                        attempts are exactly as unconditionally theirs as their
+                        own practice attempts, so there is no permission string
+                        a gate here could honestly mirror and one would leave a
+                        Viewer — the default role — unable to practise reading
+                        at all.
+
+                        `/practice/reading`, not `/english/reading` and not a
+                        view in `/practice`'s query string. Under `/practice`
+                        because `owns('/practice', …)` in
+                        `config/destinations.ts` matches on segment boundaries
+                        and already covers this whole subtree — the rail keeps
+                        highlighting Practice here and `DESTINATION_ROUTES`
+                        GAINS NOTHING, exactly as it gained nothing for
+                        `/practice/sessions/:id` and `/practice/interviews`.
+                        This is content WITHIN the Practice destination, never a
+                        destination of its own.
+
+                        A real route rather than a query-string view because it
+                        is a distinct EXERCISE with its own scorer, its own
+                        evidence table and its own entry points from Learn and
+                        Practice — and because it is the destination the
+                        readiness card's `english` recommendation names.
+                        `apps/api/src/readiness/top-recommendation.ts` points
+                        that recommendation here, and at `/practice/writing`
+                        instead for a learner whose writing is the half with
+                        more room left; the arithmetic behind that pick is in
+                        that file's own header and in
+                        `docs/specs/english-test.md` §6.4. */}
+                        <Route
+                          path="/practice/reading"
+                          element={<ReadingPracticePage />}
+                        />
+                        {/* Writing practice (#147, same epic), in the same
+                        `RequireOrientation` group and ungated beyond it for the
+                        identical reason: `POST /api/english/attempts` is the
+                        same `@Auth()`-with-no-permission route the reading
+                        screen already posts to, so there is no permission
+                        string a gate here could honestly mirror.
+
+                        `config/destinations.ts` GAINS NOTHING here either —
+                        `owns('/practice', …)` matches on segment boundaries and
+                        already covers this whole subtree, so the rail keeps
+                        highlighting Practice while a learner takes dictation.
+                        Content WITHIN the Practice destination, never a
+                        destination of its own. */}
+                        <Route
+                          path="/practice/writing"
+                          element={<WritingPracticePage />}
+                        />
                         {/* The mock interview (#140, epic #57 / E8), in this
                         same `RequireOrientation` group and ungated beyond it for
                         the identical reason the practice loop above is: every
@@ -299,6 +376,37 @@ function AppRoutes() {
                         <Route
                           path="/practice/interviews/:id/debrief"
                           element={<InterviewDebriefPage />}
+                        />
+                        {/* The spoken interview (#159, epic #60 / E11). In the
+                        same `RequireOrientation` group and ungated beyond it
+                        for the identical reason the three routes above are:
+                        `POST /api/interviews/:id/realtime-session` and
+                        `POST /api/interviews/:id/realtime/tool-calls` are both
+                        `@Auth()` with NO permission, because a learner's own
+                        interview is exactly as unconditionally theirs as their
+                        own practice attempts — and `realtime` adds no
+                        permission string of its own
+                        (`docs/specs/realtime-interview.md` §3).
+
+                        NOT GATED ON THE `realtime` ROLE EITHER, and that is
+                        deliberate rather than an omission. Whether a model is
+                        bound is a per-deployment fact this bundle learns from
+                        `GET /api/ai/status`, and a route guard reading it would
+                        turn "your administrator has not set this up" into the
+                        catch-all redirect to `/` — a learner bounced to the
+                        home page with no explanation. The screen renders
+                        `AiNotReady` naming the role and offers the text
+                        interview instead, which is §7's own answer.
+
+                        `config/destinations.ts` GAINS NOTHING here either:
+                        `owns('/practice', …)` matches on segment boundaries and
+                        already covers this whole subtree, so the rail keeps
+                        highlighting Practice throughout a spoken interview.
+                        Content WITHIN the Practice destination, never a
+                        destination of its own. */}
+                        <Route
+                          path="/practice/interviews/:id/voice"
+                          element={<RealtimeInterviewPage />}
                         />
                         <Route path="/progress" element={<ProgressPage />} />
                         {/* The per-user settings surface (#96, epic #90) — the same

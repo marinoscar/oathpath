@@ -84,8 +84,8 @@ a v2.
 | E7 | Habit | Daily goal, streaks with protection, session-end celebrations, three reminder notification events on an hourly cron | E1, E3, E5 | done<sup>‖</sup> | [#56](https://github.com/marinoscar/oathpath/issues/56) |
 | E8 | Mock interview — text mode | Deterministic interview engine (question selection, pass rules from `civics_test_versions`), text-mode interview and debrief — closes Milestone A | #25 (for `tutor`), E4, E6 | done<sup>‖</sup> | [#57](https://github.com/marinoscar/oathpath/issues/57) |
 | E9 | Voice foundation | `transcribe`/`speak` wired, audio capture and playback, spoken practice mode with transcript confirmation, misheard-vs-wrong distinction — opens Milestone B | #25, E4, E6 | done<sup>¶</sup> | [#58](https://github.com/marinoscar/oathpath/issues/58) |
-| E10 | Reading and writing tests | Vocabulary-sourced sentences, word-error-rate reading scoring, dictated writing scoring, the readiness `english` component | E9 | in progress<sup>**</sup> | [#59](https://github.com/marinoscar/oathpath/issues/59) |
-| E11 | Realtime voice interview | `realtime` wired, ephemeral session tokens, the E8 engine driving a realtime model over tool calls — closes Milestone B and the MVP | #25, E8, E9, E10 | not started | [#60](https://github.com/marinoscar/oathpath/issues/60) |
+| E10 | Reading and writing tests | Vocabulary-sourced sentences, word-error-rate reading scoring, dictated writing scoring, the readiness `english` component | E9 | done<sup>**</sup> | [#59](https://github.com/marinoscar/oathpath/issues/59) |
+| E11 | Realtime voice interview | `realtime` wired, ephemeral session tokens, the E8 engine driving a realtime model over tool calls — closes Milestone B and the MVP | #25, E8, E9, E10 | done<sup>††</sup> | [#60](https://github.com/marinoscar/oathpath/issues/60) |
 
 Status legend: `not started` — no child issue in progress; `in progress` —
 at least one child issue has an open PR or merged work; `done` — the epic
@@ -103,23 +103,27 @@ record of what a later reader should not assume was verified:
    the real component sources and it typechecks and registers, but the
    environment it was authored in had no Docker daemon, so nobody has run the
    walk against the compose stack.
-2. **The civics content is not human-verified.** `uscis.gov` was unreachable
-   when the content files were originally written, so `civics-2008.json`
-   ships as an `UNVERIFIED_MODEL_DRAFT` — every officeholder answer is a
-   `[DRAFT PLACEHOLDER]` string rather than a name, and it was never
-   transcribed from the official PDF at all. Issue #212 (2026-09-02) later
-   closed the gap on `civics-2025.json` specifically: it now holds all 128
-   questions, transcribed from the downloaded, hashed official USCIS source
-   (M-1778 (09/25)) rather than shipping empty, but its status is still
-   `UNVERIFIED_MODEL_DRAFT` — a real source document was read, but no human
-   has yet checked the transcription page by page. The loader refuses to
-   load either file without `CIVICS_ALLOW_UNVERIFIED_CONTENT=true`, and
-   refuses outright under `NODE_ENV=production`, so this cannot reach a
-   learner by accident. Closing 2008 needs a human with the official USCIS
-   PDF from scratch; closing 2025 needs a human verification pass against the
-   PDF already on file; see
+2. **`civics-2008.json` is not human-verified, and `civics-2025.json` is
+   verified only in the sense its own note records.** `uscis.gov` was
+   unreachable when the content files were originally written, so
+   `civics-2008.json` ships as an `UNVERIFIED_MODEL_DRAFT` — eight questions
+   carry a literal `[DRAFT PLACEHOLDER]` string rather than an answer, and it
+   was never transcribed from the official PDF at all. Issue #212
+   (2026-09-02) closed the gap on `civics-2025.json` specifically: it holds
+   all 128 questions, transcribed from the downloaded, hashed official USCIS
+   source (M-1778 (09/25)) rather than shipping empty, and the repository
+   owner signed it off as `HUMAN_VERIFIED` on the recorded basis of an
+   automated re-parse and diff of that same source reporting zero
+   mismatches — **not** a page-by-page human re-read of the PDF, which its
+   own `provenance.transcription.warning` states outright rather than
+   letting the status imply. The loader refuses `civics-2008.json` without
+   `CIVICS_ALLOW_UNVERIFIED_CONTENT=true`, and refuses it outright under
+   `NODE_ENV=production`, so it cannot reach a learner by accident. Closing
+   2008 needs a human with the official USCIS PDF from scratch; the stronger
+   page-by-page pass on 2025 remains available and unrun; see
    [`docs/runbooks/updating-civics-content.md`](docs/runbooks/updating-civics-content.md)
-   §5.
+   §5, and [§7](#7-cross-cutting-rules)'s content-provenance rule for what
+   each status does and does not certify.
 
 Both were closed as a deliberate call rather than an oversight, and #101 and
 #132 can be reopened if either is picked up (#212 has since narrowed #132 to
@@ -248,18 +252,96 @@ stack** — the §6 check this legend requires. All three specs exist on `main`
 alongside the shipped code they exercise, but nothing here confirms any of
 them has been executed end to end.
 
-With this, Milestone A (E1–E8) is `done` on paper across every epic in it;
-per [§2](#2-what-the-mvp-is), Milestone B (E9–E11) is still required to
-close the MVP, and E9 already carries its own `done` footnote above.
+With this, Milestone A (E1–E8) is `done` on paper across every epic in it.
+E9 and E10 already carry their own `done` footnotes above, and E11 (#60)
+now does too (see the `††` footnote below) — which per
+[§2](#2-what-the-mvp-is) closes Milestone B, and with it the MVP itself.
 
-<sup>**</sup> **E10 is `in progress`, not `not started`** — the legend's own
-rule is "at least one child issue has an open PR or merged work", and E10 has
-merged work: #124, the reading and writing design spec
-(`docs/specs/english-test.md`), landed on `main` in #246. Its other seven
-children — #130, #136, #141, #144, #147, #149, #152 — are open, so no code,
-content row or migration for the English test exists yet; the epic has a
-design and nothing else. E11 (#60) has all eight children open and no merged
-work, so it remains `not started`.
+<sup>**</sup> **E10 is marked `done`, on the same convention this table has
+followed since E5**: an epic whose child issues are all merged and whose CI
+is green is `done`, and an unrun Playwright journey spec is a footnoted
+fact, not a status. All eight child issues are merged to `main`: #124
+(`docs/specs/english-test.md`, the design spec, PR #246), #130 (the
+`english_sentences`/`english_attempts` schema and the vocabulary content, PR
+#250), #136 (the `english` module — sentences, attempts, WER scoring, PR
+#251), #141 (the readiness `english` component, PR #253), #144
+(`/practice/reading`, PR #254), #147 (`/practice/writing`, PR #256), #149
+(`tests/e2e/specs/english.spec.ts`, PR #257), and #152 (the runbook, the
+learner page, and the reference updates, PR #259).
+
+One thing a later reader should not assume this footnote settles, on the
+identical terms E5's, E9's, and E6/E7/E8's footnotes above state it:
+**whether a human has actually run `tests/e2e/specs/english.spec.ts`
+against the compose stack** — the §6 check this legend requires. It
+typechecks and `playwright test --list` reports its seven scenarios, but
+Docker is unavailable in the environment it was authored in, so the compose
+stack it targets could not be raised, and the suite has not been executed
+end to end.
+
+<sup>††</sup> **E11 is marked `done`, on the same convention this table has
+followed since E5**: an epic whose child issues are all merged and whose CI
+is green is `done`, and an unrun Playwright journey spec is a footnoted
+fact, not a status. All eight child issues are merged to `main`: #155
+(`docs/specs/realtime-interview.md`, the design spec, PR #264), #156
+(`realtime` wired and `createRealtimeSession` added to the provider surface,
+PR #265), #157 (`POST /api/interviews/:id/realtime-session`, ephemeral
+session minting, PR #268), #158 (the interview engine driven over the
+realtime tool contract, `POST /api/interviews/:id/realtime/tool-calls`, PR
+#269 — this PR also fixed issue #245, moving the mastery-skip rule inside
+`AttemptGradingService` so both call sites cannot disagree), #159 (the
+realtime interview screen, `/practice/interviews/:id/voice`, PR #273 — this
+PR also fixed issue #272, an nginx `Permissions-Policy: microphone=()`
+header that denied the microphone to its own origin, silently breaking E9's
+push-to-talk in every deployment behind the proxy, plus a CSP `connect-src`
+block), #160 (the realtime debrief and readiness weighting, PR #271), #161
+(the tool-contract sequence suite and the Playwright fallback spec, PR
+#275), and #162 (the operator runbook, the learner page, and the reference
+updates, PR #274).
+
+One more fix landed while working this epic, outside its own child list:
+**#266 (PR #267)** — the web CI job had been red on `main` for roughly ten
+merges because jsdom's `File` fails undici's brand check on Node 24.
+
+E11 departs from its predecessors on the first of these two points and
+adds a second that is new to this epic, because nothing before it shipped a
+manual checklist of its own:
+
+1. **`tests/e2e/specs/mock-interview-realtime.spec.ts` HAS been executed** —
+   unlike every prior epic's journey spec, whose footnote above says
+   plainly that nobody has run it. It passes 5/5 standalone and 8/8 run
+   sequentially alongside `mock-interview-text.spec.ts`. Read the claim
+   precisely, though: no Docker daemon was available, so it was run against
+   a **hand-assembled equivalent** of the compose stack — a real PostgreSQL
+   migrated and seeded with the real content, the real API under
+   `AI_PROVIDER_FAKE=true`, and the real Vite dev server on 3535 — not
+   against `docker compose` itself. That is materially more than the other
+   epics can claim and materially less than the §6 check literally asks
+   for, and both halves belong in the same sentence. Writing it surfaced a
+   genuine cross-file hazard, since fixed: leaving `realtime` bound past
+   this spec's own run changes the button text
+   `mock-interview-text.spec.ts` selects on, so an `afterAll` hook restores
+   `tutor`+`grader`-only bindings — which closes the sequential case this
+   suite is actually run in, and not a true concurrent-worker race.
+2. **Whether the manual verification checklist in
+   `docs/specs/realtime-interview.md` §11 has been run — it has not.** That
+   checklist (barge-in in both directions, end-to-end latency, the end
+   control under load, audio device switching mid-session, microphone
+   denial, network loss mid-interview, and secret expiry mid-interview) is
+   deliberately not automatable, for the reason §10 of the same document
+   gives: no suite in this codebase opens a real WebRTC connection to a
+   realtime model, speaks synthetic audio at it, and asserts on what comes
+   back, and none should — a fabricated realtime transport convincing
+   enough to stand in for actual speech recognition and barge-in behaviour
+   would only be a test asserting against a fake of the one thing it exists
+   to verify. §11 itself requires each item to be run, by a person, against
+   a real deployment and a real microphone, before any release that changes
+   voice or realtime code, with the pass/fail result recorded in
+   `CHANGELOG.md`. That has not happened yet.
+
+With E11 marked `done`, Milestone B (E9–E11) closes, and with it the MVP
+(E1–E11 plus the AI configuration foundation): done on paper across every
+epic, with the manual and end-to-end verification the legend requires still
+outstanding — see [§2](#2-what-the-mvp-is).
 
 ## 4. Why this order
 
@@ -541,10 +623,54 @@ only, forever, by design, not as an interim state.
 
 **Content provenance.** Civics content (E2) and English vocabulary-sourced
 sentences (E10) are versioned JSON under `apps/api/prisma/content/`, each
-carrying a source URL, a retrieval date, and a sha256, transcribed from
-official USCIS PDFs and human-verified. Neither is ever generated from model
-memory — the same "OathPath owns the truth" rule applied to the content
-pipeline itself, not just the runtime grading path.
+carrying a source URL, a retrieval date, a sha256, and a verification status
+that the loaders **read** — an untrusted file is refused outright under
+`NODE_ENV=production` and elsewhere without an explicit dev/CI override
+(`CIVICS_ALLOW_UNVERIFIED_CONTENT` / `ENGLISH_ALLOW_UNVERIFIED_CONTENT`, both
+documented in `infra/compose/.env.example`). No fact in this content is ever
+taken from model memory — every civics answer and every vocabulary word comes
+from an official document, not from what a model recalls — which is the same
+"OathPath owns the truth" rule applied to the content pipeline itself, not
+just the runtime grading path.
+
+"Verified" is not one fact, and the five shipped files are in three different
+states. Using one word for all three is the failure this rule exists to
+prevent, so each is named:
+
+- **`civics-2025.json` — `HUMAN_VERIFIED`.** Transcribed from the downloaded,
+  hashed official source (M-1778 (09/25)) and signed off by the repository
+  owner on 2026-09-02 (#212), on the recorded basis of an automated re-parse
+  and diff of that same source, which reported zero mismatches. Its own note
+  states plainly that this was **not** an independent page-by-page human
+  re-read of the PDF.
+- **The three English files — `HUMAN_VERIFIED`, in the recorded sense.** The
+  two vocabulary lists are transcriptions of the official USCIS lists; the 36
+  sentences are **composed**, because USCIS publishes vocabulary lists and no
+  sentence list at all. Those 36 were produced by an agent session rather than
+  by hand — a claim to the contrary in the file was withdrawn under #261
+  rather than left standing — which is why the rule above holds here only in
+  its precise form: no *word* in them came from model memory (every one is
+  mechanically checked against the checked-in vocabulary list, on every load),
+  but the sentences themselves are model-composed, and
+  `docs/specs/english-test.md` §1.2 requires human composition for every
+  sentence added from here on. What the owner's 2026-09-04 sign-off records is
+  a human reading and approving what shipped. What no English attestation
+  claims is a check against the official PDFs: `uscis.gov` returns HTTP 403
+  and `web.archive.org` is unreachable from the environment this work was done
+  in, so every hash was carried forward, not re-derived. Each file says so
+  itself.
+- **`civics-2008.json` — `UNVERIFIED_MODEL_DRAFT`, deliberately, and it must
+  stay that way until a human transcribes it from the official PDF.** It was
+  drafted by a model with no access to the source. Eight of its 100 questions
+  carry literal `[DRAFT PLACEHOLDER] … not sourced, needs verification` text
+  in place of an answer, and **three of those eight — Q29 (Vice President),
+  Q40 (Chief Justice), Q46 (President's political party) — are
+  `dynamicScope: 'none'`**, which `PUT /api/civics/dynamic-answers` rejects by
+  design (`civics-admin.service.ts` administers `national` and `state` only).
+  Certifying this file would mark placeholder text as verified and
+  learner-visible with no operational repair path — the five dynamic-scoped
+  ones an operator could at least correct through the admin surface; these
+  three they could not.
 
 **Engagement never moves readiness.** `PRD.md` requires the separation
 explicitly. E7's `daily_activity`, streaks, and points are kept structurally
@@ -630,7 +756,9 @@ block implying it was sourced, each content file now carries
 unconditionally under `NODE_ENV=production` regardless of that flag; the
 validator's `--strict` mode is the matching release gate. This turns the
 human-verification rule from a sentence in a spec into something the system
-enforces. The 2025 bank shipped empty rather than fabricated: a bank of
+enforces. (Issue #261 later extended the identical mechanism to the three
+English content files, with `ENGLISH_ALLOW_UNVERIFIED_CONTENT` as its
+override — see [§7](#7-cross-cutting-rules).) The 2025 bank shipped empty rather than fabricated: a bank of
 plausible-but-wrong questions would look complete and send a learner into a
 real citizenship interview having studied the wrong material. (The
 transcription gap this paragraph describes was later closed — see the
@@ -652,10 +780,14 @@ not the 3-category "Integrated Civics" scaffold carried over from the 2008
 test's structure — transcribed from the downloaded, hashed official source
 (M-1778 (09/25), "128 Civics Questions and Answers (2025 version)",
 sha256 `f280608c0fb6dc1eba344b4746a7ba52d02fe411fba30cedd4371819f0abe11c`).
-Status is `UNVERIFIED_MODEL_DRAFT`, deliberately not `HUMAN_VERIFIED` — a real
-source document was read this time, not model recall, but no human has yet
-checked the transcription page by page, which the loader still requires
-before production will serve it. Two content facts worth naming because they
+Status at the time of this entry was `UNVERIFIED_MODEL_DRAFT`, deliberately
+not `HUMAN_VERIFIED` — a real source document was read this time, not model
+recall, but no human had yet checked the transcription page by page, which
+the loader requires before production will serve it. (The owner has since
+signed the file off as `HUMAN_VERIFIED`, on the recorded basis of an
+automated re-parse and diff of that same source rather than the page-by-page
+re-read, which remains unrun — see [§7](#7-cross-cutting-rules)'s
+content-provenance rule.) Two content facts worth naming because they
 are easy to mistake for errors on review: (1) Q39 (Vice President) and Q57
 (Chief Justice) are modelled `dynamicScope: 'national'` here, a deliberate
 divergence from `civics-2008.json`'s narrower `'none'` scoping for both,

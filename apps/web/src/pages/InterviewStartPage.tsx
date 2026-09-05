@@ -99,11 +99,16 @@ import {
 import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import { Link as RouterLink, useNavigate } from 'react-router-dom';
 
+import { AiNotReady } from '../components/ai/AiNotReady';
 import { InterviewHistory } from '../components/interview/InterviewHistory';
 import { LoadingSpinner } from '../components/common/LoadingSpinner';
 import { RetentionChoice } from '../components/interview/RetentionChoice';
-import { interviewPath } from '../components/interview/paths';
+import {
+  interviewPath,
+  interviewVoicePath,
+} from '../components/interview/paths';
 import { useInterviews } from '../hooks/useInterviews';
+import { useRealtimeAvailability } from '../hooks/useRealtimeAvailability';
 import { useIsMounted } from '../hooks/useIsMounted';
 import { createInterview } from '../services/api';
 
@@ -126,13 +131,37 @@ export default function InterviewStartPage() {
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
 
-  const handleStart = async () => {
+  /**
+   * Whether this deployment can hold a SPOKEN interview (#159, epic #60 / E11).
+   *
+   * Both flags are false while the status is unknown, so the spoken option is
+   * absent for the moment rather than present-and-dead — see
+   * `useRealtimeAvailability`'s header. A learner never meets a start button
+   * that asks for their microphone and then cannot succeed.
+   */
+  const { realtimeBound, realtimeUnbound } = useRealtimeAvailability();
+
+  /**
+   * Start an interview and go to the screen that conducts it.
+   *
+   * ONE `POST /api/interviews` FOR BOTH TRANSPORTS, and there is no `mode`
+   * field on it — the API's own DTO forbids one, and the interview is recorded
+   * as `voice` server-side by the first successful realtime mint rather than by
+   * anything a client claims (`realtime-interview.md` §3). What this parameter
+   * chooses is which SCREEN opens, not what kind of interview was created:
+   * either one can hand over to the other later with the same id.
+   */
+  const handleStart = async (spoken: boolean) => {
     setStarting(true);
     setStartError(null);
     try {
       const state = await createInterview({ transcriptRetained });
       if (!isMounted()) return;
-      navigate(interviewPath(state.interview.id));
+      navigate(
+        spoken
+          ? interviewVoicePath(state.interview.id)
+          : interviewPath(state.interview.id),
+      );
     } catch (err) {
       if (isMounted()) {
         setStartError(
@@ -209,15 +238,53 @@ export default function InterviewStartPage() {
         </Paper>
 
         <Box sx={{ mt: 3 }}>
-          <Button
-            variant="contained"
-            size="large"
-            onClick={() => void handleStart()}
-            disabled={starting}
-            fullWidth={false}
+          <Stack
+            direction={{ xs: 'column', sm: 'row' }}
+            spacing={1.5}
+            sx={{ alignItems: { xs: 'stretch', sm: 'center' } }}
           >
-            {starting ? 'Starting…' : 'Start the interview'}
-          </Button>
+            {/* THE SPOKEN OPTION IS FIRST WHEN IT EXISTS, because it is the
+                closer rehearsal of the real event — the officer speaks, the
+                applicant answers out loud, and neither waits for a button.
+                It is HIDDEN rather than disabled when no model is bound to
+                `realtime`: `voice.md` §1's own posture for an unbound speech
+                role, and the reason is that a greyed-out control is an
+                affordance for an action that cannot succeed, which reads as
+                the product being broken rather than as unfinished setup. */}
+            {realtimeBound && (
+              <Button
+                variant="contained"
+                size="large"
+                onClick={() => void handleStart(true)}
+                disabled={starting}
+              >
+                {starting ? 'Starting…' : 'Start a spoken interview'}
+              </Button>
+            )}
+
+            <Button
+              variant={realtimeBound ? 'outlined' : 'contained'}
+              size="large"
+              onClick={() => void handleStart(false)}
+              disabled={starting}
+            >
+              {starting
+                ? 'Starting…'
+                : realtimeBound
+                  ? 'Start by typing instead'
+                  : 'Start the interview'}
+            </Button>
+          </Stack>
+
+          {/* THE SHARED COMPONENT, UNFORKED, NAMING THE ROLE (§7). It renders
+              nothing at all unless `realtime` is KNOWN to be unbound, so it can
+              sit here rather than behind a condition this page would have to
+              get right — and an administrator reading it gets "no model is
+              bound to realtime" plus the link that fixes it, while everybody
+              else gets "nothing is wrong on your side", which is true. */}
+          {realtimeUnbound && (
+            <AiNotReady feature="A spoken interview" role="realtime" />
+          )}
         </Box>
 
         {/* -----------------------------------------------------------

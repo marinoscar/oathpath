@@ -14,6 +14,8 @@ import type {
   AiConnectionTestResult,
   AiModelCatalogResult,
   AiReachabilityRequest,
+  AiRealtimeSessionRequest,
+  AiRealtimeSessionResult,
   AiRecordedCompletionResult,
   AiStreamEvent,
   AiStructuredCompletionRequest,
@@ -43,8 +45,8 @@ import type {
 // So the public methods are implemented HERE, once, `final` by convention, and
 // subclasses implement `fetchModels` / `probeConnection` / `runCompletion` /
 // `runStructuredCompletion` / `openStream` / `runTranscription` /
-// `runSynthesis` instead. A subclass has no public method to get wrong; the
-// entire never-throw contract is this file.
+// `runSynthesis` / `runRealtimeSession` instead. A subclass has no public
+// method to get wrong; the entire never-throw contract is this file.
 //
 // A hook may still contain a `try` — `OpenAiProvider.probeTextModel` and
 // `runTranscription` both do — but never as a never-throw guard: each catches
@@ -334,6 +336,28 @@ export abstract class BaseAiProvider implements AiProvider {
     request: AiSynthesisRequest,
     redact: SecretRedactor,
   ): Promise<AiSynthesisResult>;
+
+  /**
+   * Mint one ephemeral realtime session credential on the caller's key.
+   *
+   * MAY THROW FREELY. Only called when the provider declares `'realtime'` —
+   * see {@link runTranscription}.
+   *
+   * RETURN THE SECRET AND LET THE PUBLIC METHOD REGISTER IT. A hook that
+   * called `redact.protect` on its own result would be doing the right thing
+   * twice; one that forgot would leave a live bearer credential quotable in
+   * any error raised after minting. {@link createRealtimeSession} registers it
+   * the instant the result comes back, so a subclass has nothing to forget.
+   *
+   * @param redact the key is already registered by
+   *        {@link createRealtimeSession}; the MINTED SECRET is registered
+   *        there too, as soon as this hook returns it.
+   */
+  protected abstract runRealtimeSession(
+    apiKey: string,
+    request: AiRealtimeSessionRequest,
+    redact: SecretRedactor,
+  ): Promise<AiRealtimeSessionResult>;
 
   // ---------------------------------------------------------------------------
   // Public surface — NEVER THROWS. Do not override.
@@ -1155,6 +1179,159 @@ export abstract class BaseAiProvider implements AiProvider {
     return result;
   }
 
+  /**
+   * Mint one ephemeral realtime session credential, and record it. NEVER
+   * throws (#156, epic #60).
+   *
+   * The same construction as {@link synthesize}, line for line, with the same
+   * capability gate (on `'realtime'`) and the same usage-row obligation. The
+   * span carries the model and the role; it does not carry the instructions,
+   * the tool list, or — emphatically — the minted secret.
+   *
+   * -------------------------------------------------------------------------
+   * THE MINTED SECRET IS REGISTERED WITH THE REDACTOR THE MOMENT IT EXISTS
+   * -------------------------------------------------------------------------
+   *
+   * Everywhere else on this class, the only thing worth redacting arrives
+   * BEFORE the call — the API key, registered on the first line. Here a second
+   * credential comes back FROM it, and it is a live bearer token for as long
+   * as it is valid: anything that throws afterwards (the usage write, a
+   * logger, a future edit between here and the return) could otherwise quote
+   * it into an error string that reaches a log aggregator which retains far
+   * longer than the secret's own lifetime.
+   *
+   * So `redact.protect(result.clientSecret)` runs the instant the hook
+   * returns — on the failure branch as well as the success one, because a hook
+   * that minted a secret and then failed may name it in its own error text,
+   * and `formatError` is the last thing that reads that text. It costs nothing
+   * when there is no secret to register, and it is the difference between a
+   * short-lived credential and a logged one when there is.
+   */
+  async createRealtimeSession(
+    userId: string,
+    apiKey: string,
+    request: AiRealtimeSessionRequest,
+  ): Promise<AiRealtimeSessionResult> {
+    const redact = new SecretRedactor();
+
+    // REGISTERED BEFORE ANYTHING THAT CAN THROW WHILE HOLDING IT.
+    redact.protect(apiKey);
+
+    const span = tracer.startSpan(`${this.providerName}.createRealtimeSession`);
+    span.setAttribute('ai.model', request.modelId);
+    span.setAttribute('ai.role', request.roleKey);
+    // NO OTHER ATTRIBUTE. Not the instructions (our officer prompt, but still
+    // content), not the tool names, and never the secret this call produces —
+    // see the doc comment.
+
+    if (!this.supports('realtime')) {
+      span.setStatus({
+        code: SpanStatusCode.ERROR,
+        message: 'capability unsupported',
+      });
+      span.end();
+
+      return {
+        ...this.unsupported('realtime sessions'),
+        clientSecret: null,
+        expiresAt: null,
+        modelId: null,
+      };
+    }
+
+    const startedAt = Date.now();
+    let result: AiRealtimeSessionResult;
+
+    try {
+      result = await this.runRealtimeSession(apiKey, request, redact);
+
+      if (typeof result !== 'object' || result === null) {
+        this.logger.error(
+          `${this.providerName} provider returned no realtime session result; treating as a failure`,
+        );
+        result = {
+          success: false,
+          clientSecret: null,
+          expiresAt: null,
+          modelId: null,
+          usage: EMPTY_USAGE,
+          errorCode: 'malformed_result',
+          error: `${this.providerName} returned no result.`,
+        };
+      } else {
+        // THE LINE THIS METHOD HAS THAT `synthesize` DOES NOT, and it runs on
+        // BOTH branches. On success it is the point after which no error
+        // string can quote the live secret back; on a subclass-authored
+        // failure it covers the case of a hook that minted a secret and then
+        // decided the call had failed, whose own error text may well name what
+        // it was holding — `formatError` below is the last thing that reads
+        // that text, so the registration has to come first.
+        //
+        // `protect` ignores null and empty, so the ordinary failure path — no
+        // secret at all — costs nothing.
+        redact.protect(result.clientSecret);
+
+        if (!result.success) {
+          // A subclass-authored failure goes through the single exit path for
+          // error text and is forced back onto the null payload: a failed mint
+          // has no session, whatever fields it thought to populate.
+          result = {
+            ...result,
+            clientSecret: null,
+            expiresAt: null,
+            modelId: null,
+            error: this.formatError(result.error ?? 'Unknown error.', redact),
+          };
+        }
+      }
+    } catch (err) {
+      result = {
+        success: false,
+        clientSecret: null,
+        expiresAt: null,
+        modelId: null,
+        usage: EMPTY_USAGE,
+        errorCode: classifyThrow(err),
+        error: this.formatCaught(err, redact),
+      };
+    }
+
+    const latencyMs = Date.now() - startedAt;
+
+    if (result.success) {
+      span.setStatus({ code: SpanStatusCode.OK });
+    } else {
+      span.setStatus({
+        code: SpanStatusCode.ERROR,
+        message: 'realtime session failed',
+      });
+      this.logger.warn(
+        `${this.providerName} realtime session failed for user ${userId} (${request.roleKey}/${request.modelId}): ${result.error}`,
+      );
+    }
+
+    if (result.usage.totalTokens !== null) {
+      span.setAttribute('ai.total_tokens', result.usage.totalTokens);
+    }
+    span.end();
+
+    // As in `transcribe` and `synthesize`: the row is written, the id is not
+    // surfaced. The row records that a session was MINTED — the tokens the
+    // conversation then spends are billed to the learner's key by a browser
+    // this process never hears from, which is why `usage` here is all-null
+    // rather than a number this class could invent.
+    await this.recordUsage(
+      userId,
+      request,
+      result.usage,
+      latencyMs,
+      result.success,
+      result.errorCode,
+    );
+
+    return result;
+  }
+
   // ---------------------------------------------------------------------------
   // Internals
   // ---------------------------------------------------------------------------
@@ -1223,8 +1400,9 @@ export abstract class BaseAiProvider implements AiProvider {
   /**
    * The common half of a "this provider cannot do that" failure.
    *
-   * SHARED BY BOTH SPEECH METHODS so the code, the usage shape and the wording
-   * cannot drift apart into two subtly different refusals. Each caller spreads
+   * SHARED BY THE TWO SPEECH METHODS AND BY {@link createRealtimeSession} so
+   * the code, the usage shape and the wording cannot drift apart into three
+   * subtly different refusals. Each caller spreads
    * it and adds its own null payload fields, because those differ by surface.
    *
    * ALL-NULL USAGE, and here that is not the usual "we were not told" — it is

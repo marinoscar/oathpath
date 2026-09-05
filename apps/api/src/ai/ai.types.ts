@@ -680,3 +680,298 @@ export interface AiSynthesisResult {
   /** The provider's verbatim message, redacted. Null on success. */
   error: string | null;
 }
+
+// -----------------------------------------------------------------------------
+// Realtime sessions (issue #156, epic #60 — E11 "Realtime voice interview")
+// -----------------------------------------------------------------------------
+//
+// One more shape on the same never-throw surface, and the odd one out: nothing
+// below carries a prompt, a recording or a completion, because this surface
+// does not run inference at all. It MINTS PERMISSION for a browser to run it.
+// The learner's own machine opens the realtime connection and speaks to the
+// model directly; this process only asks the provider for a short-lived
+// credential scoped to a session configuration we authored, and hands that
+// credential back.
+//
+// WHY THAT SHAPE AT ALL, RATHER THAN PROXYING THE AUDIO: a speech-to-speech
+// interview is a bidirectional stream that has to interrupt and be interrupted
+// within a few hundred milliseconds. Relaying it through this API would add a
+// hop in both directions to every packet and would put a learner's live voice
+// through a server that, per `docs/specs/voice.md` §4, deliberately stores no
+// audio and has no reason to handle any.
+//
+// THE CONSEQUENCE IS THE ONE RULE THIS SECTION EXISTS TO ENFORCE: something
+// that reaches a browser is being minted here. A long-lived OpenAI key — the
+// learner's own, or worse the server key — handed to a browser is a credential
+// with no expiry, no scope and no revocation short of rotating it, sitting in
+// a tab's memory where any script on the page can read it. So the boundary is
+// drawn IN THE TYPE below rather than in a call site's discipline.
+
+/**
+ * One tool a realtime session may call.
+ *
+ * SEPARATE FROM `AiCompletionRequest`'s message list because a realtime tool
+ * is part of the SESSION's configuration, not of a turn: it is fixed when the
+ * client secret is minted and cannot be renegotiated mid-conversation without
+ * a new session. Declaring it here keeps the request type honest about what
+ * the provider actually needs at mint time.
+ *
+ * `parameters` is a JSON Schema object, typed as a record rather than as a zod
+ * schema: unlike {@link AiStructuredCompletionRequest}, nothing on this path
+ * ever validates a reply — the tool call is answered by the browser, over the
+ * realtime connection, and never passes through this process.
+ */
+export interface AiRealtimeTool {
+  /** The function name the model calls. */
+  name: string;
+
+  /**
+   * When to call it and what to say while calling, in the model's terms.
+   *
+   * Carried rather than left to the instructions because the provider gives a
+   * tool its own description field and models weight it: folding the guidance
+   * into the system prompt instead is how a tool ends up never being called
+   * for a reason nothing in the transcript explains.
+   */
+  description: string;
+
+  /** The call's parameters, as a JSON Schema object. */
+  parameters: Record<string, unknown>;
+}
+
+/**
+ * A request to mint one realtime session credential, on one caller's key.
+ *
+ * EVERY FIELD IS OURS. The instructions are the officer's system prompt this
+ * application authors, the tools are the ones it implements, and the model id
+ * comes from the admin's binding for the `realtime` role — exactly as
+ * {@link AiSynthesisRequest} resolves its own. Nothing a learner typed or said
+ * appears here, and there is no field for the caller's credential: the key is
+ * a parameter of the provider METHOD, resolved from the credential store, and
+ * never a property of a request object that a future caller could populate by
+ * hand.
+ */
+export interface AiRealtimeSessionRequest {
+  /** The model role this call serves: `'realtime'`. */
+  roleKey: string;
+
+  /** The bound model id. Resolved by the caller from the settings row. */
+  modelId: string;
+
+  /**
+   * The session's system prompt — the officer's standing instructions.
+   *
+   * REQUIRED, NOT OPTIONAL. A realtime session created without instructions
+   * gets the provider's own defaults (a generic, cheerful assistant), which on
+   * this surface means a learner rehearsing a naturalization interview would
+   * be talking to something that is not conducting one. An empty prompt is a
+   * bug that presents as a strange conversation, not as an error, so the type
+   * refuses to let a caller omit it by accident.
+   */
+  instructions: string;
+
+  /**
+   * The tools this session may call. Empty is legitimate — a conversation with
+   * no structured actions is still a conversation.
+   *
+   * REQUIRED, NOT OPTIONAL, for the opposite reason to `instructions`: `[]`
+   * says "this session deliberately has none", and an absent field would let
+   * "I forgot to pass the tools" look identical to it at the one call site
+   * that decides what the model can do.
+   */
+  tools: AiRealtimeTool[];
+
+  /**
+   * The provider's voice id, e.g. `'alloy'`.
+   *
+   * OPTIONAL, WITH THE DEFAULT CHOSEN BY THE PROVIDER IMPLEMENTATION rather
+   * than by each caller — the same rule, and the same reason, as
+   * {@link AiSynthesisRequest.voice}: a voice is a product decision made once,
+   * and letting every call site pick one is how the same application ends up
+   * conducting interviews in one voice and reading questions in another.
+   */
+  voice?: string;
+
+  /**
+   * How long the minted credential stays usable, in seconds.
+   *
+   * A LIFETIME, NOT AN EXPIRY INSTANT: the caller cannot know the instant the
+   * provider will stamp on the secret (it is anchored to the provider's own
+   * clock, at the moment of minting), so asking for a duration is the only
+   * request that can be honoured exactly. Omitted means the provider's own
+   * default, which is short by design.
+   *
+   * SHORTER IS SAFER HERE AND COSTS NOTHING. The secret only has to survive
+   * long enough for the browser to open its connection; a session already
+   * under way is not cut off when it expires. See
+   * {@link AiRealtimeSessionResult} for what the number is bounding.
+   */
+  expiresInSeconds?: number;
+}
+
+/**
+ * The outcome of minting one realtime session credential.
+ *
+ * NEVER THROWN, always returned — the same never-throw contract every result
+ * type on this surface carries.
+ *
+ * -----------------------------------------------------------------------------
+ * THE EPHEMERAL / LONG-LIVED BOUNDARY IS ENFORCED BY THIS TYPE'S SHAPE
+ * -----------------------------------------------------------------------------
+ *
+ * What comes back from here is destined for a browser. That makes this the one
+ * result type in the AI module whose success payload is a credential, and the
+ * distinction between the two kinds of credential in this application is the
+ * whole of its security story:
+ *
+ *   * the LONG-LIVED key — the learner's own OpenAI key, or the server key at
+ *     `('ai', 'openai')` — lives encrypted in the credential store, is read
+ *     only inside `AiDispatchService` and the provider methods, and can spend
+ *     without limit until a human revokes it;
+ *   * the EPHEMERAL secret below is minted per session, expires in minutes,
+ *     and is scoped to the session configuration we asked for.
+ *
+ * THERE IS NO FIELD HERE A LONG-LIVED KEY COULD TRAVEL IN, AND THAT IS
+ * DELIBERATE. Not `apiKey`, not a generic `credential`, not a `session` blob
+ * echoing back what the provider was sent — one named string whose name says
+ * what it is. A compile-time proof of the absence sits at the bottom of this
+ * file ({@link AI_REALTIME_CARRIES_NO_LONG_LIVED_KEY}), because the mistake
+ * this forecloses is not exotic: "just send the key, the browser needs to
+ * talk to OpenAI" is the shortest path to a working prototype, and it is
+ * indistinguishable from correct code in every test that only checks whether
+ * the audio flows.
+ *
+ * -----------------------------------------------------------------------------
+ * `clientSecret` IS NEVER LOGGED, NEVER A SPAN ATTRIBUTE, AND NEVER REDACTED
+ * INTO AN ERROR STRING
+ * -----------------------------------------------------------------------------
+ *
+ * Short-lived is not harmless: for the minutes it is valid, this string is a
+ * bearer credential that can open a realtime session and spend the learner's
+ * quota. A trace backend and a log aggregator both retain far longer than that
+ * window, and both are read by people who have no business holding it.
+ *
+ * `BaseAiProvider.createRealtimeSession` therefore registers it with the
+ * request's `SecretRedactor` THE MOMENT IT EXISTS, so that an error
+ * raised after minting — while writing the usage row, say — cannot quote it
+ * back the way a provider's own error text can quote an API key. The span
+ * carries the model id and the role and nothing else, exactly as the speech
+ * spans carry shape rather than content.
+ */
+export interface AiRealtimeSessionResult {
+  success: boolean;
+
+  /**
+   * The ephemeral client secret, on success. `null` on failure.
+   *
+   * NEVER `''` STANDING IN FOR A FAILURE, for the same reason
+   * {@link AiTranscriptionResult.text} is not: a caller must be able to tell
+   * "no session" from "a session whose secret is empty", and only `success`
+   * and `errorCode` can make that distinction if the failure path does not
+   * also produce a string.
+   */
+  clientSecret: string | null;
+
+  /**
+   * When {@link clientSecret} stops being usable. `null` on failure.
+   *
+   * A `Date`, NOT THE PROVIDER'S EPOCH SECONDS. The provider reports a unix
+   * timestamp in seconds; every other instant in this codebase is a `Date`,
+   * and a bare number that is seconds where the platform's own is
+   * milliseconds is the error that produces an expiry a thousandfold wrong in
+   * whichever direction nobody checked. Converting once, here, means no call
+   * site gets the chance.
+   *
+   * RETURNED RATHER THAN RE-DERIVED FROM `expiresInSeconds`: the provider
+   * anchors the expiry to its own clock at mint time, so a caller computing
+   * `now + requested` would disagree with the truth by whatever the round trip
+   * and the clock skew came to — in the direction that matters, telling a
+   * browser it still has time it does not have.
+   */
+  expiresAt: Date | null;
+
+  /**
+   * The model the session was actually minted for. `null` on failure.
+   *
+   * ECHOED BACK RATHER THAN ASSUMED BY THE CALLER. The browser has to name a
+   * model when it opens the connection, and deriving it from the settings row
+   * a second time on the client is a second place the answer can be stale —
+   * an admin who rebinds `realtime` between the mint and the connect would
+   * otherwise have the browser connect to a model the secret was not minted
+   * against, which fails at the provider with an error about neither.
+   */
+  modelId: string | null;
+
+  /**
+   * Token counts as the provider reported them.
+   *
+   * ALL-NULL IS THE ORDINARY CASE, and here it is not even "we were not told":
+   * minting a credential runs no inference and consumes no tokens. The tokens
+   * this session goes on to spend are billed against the learner's key by
+   * conversation the browser holds and this process never sees — which is a
+   * real gap in per-user accounting, named here rather than papered over with
+   * an invented number. See {@link AiUsage}: `0` would claim we know the
+   * session cost nothing.
+   */
+  usage: AiUsage;
+
+  /**
+   * A short, stable classification of the failure, for the usage row. Null on
+   * success. A CODE, NOT A MESSAGE — see {@link AiCompletionResult.errorCode}.
+   */
+  errorCode: string | null;
+
+  /**
+   * The provider's verbatim message, redacted and truncated. Null on success.
+   *
+   * THE ONLY FIELD ON THIS TYPE THAT MAY REACH A LOG, and the redaction
+   * covering it includes the minted secret as well as the API key — see the
+   * type's own header.
+   */
+  error: string | null;
+}
+
+// -----------------------------------------------------------------------------
+// Compile-time proof that no long-lived credential can travel on this surface
+// -----------------------------------------------------------------------------
+//
+// The same technique `ai-settings.schema.ts` uses to keep a secret out of the
+// settings blob, pointed at the opposite risk: not a secret going INTO storage
+// but a secret coming OUT to a browser. Adding any of the names below to
+// either realtime type makes `AiRealtimeCarriesNoLongLivedKey` resolve to
+// `never` and this file stops compiling.
+//
+// `clientSecret` is deliberately NOT in the forbidden list, and the omission is
+// the point: the ephemeral secret is what this surface exists to produce. What
+// must never appear beside it is a field a long-lived key would naturally be
+// put in — the request growing an `apiKey` so a caller can "pass its own", or
+// the result growing a `key`/`token` because the provider's own payload had
+// one.
+//
+// If you are here because this line went red: you are about to hand a
+// browser a credential that does not expire. The provider mints an ephemeral
+// one; use that.
+
+type LongLivedKeyFieldNames =
+  | 'apiKey'
+  | 'openaiApiKey'
+  | 'userApiKey'
+  | 'key'
+  | 'password'
+  | 'secret'
+  | 'token'
+  | 'credential'
+  | 'authorization'
+  | 'accessKeyId'
+  | 'secretAccessKey';
+
+export type AiRealtimeCarriesNoLongLivedKey =
+  Extract<
+    keyof AiRealtimeSessionResult | keyof AiRealtimeSessionRequest,
+    LongLivedKeyFieldNames
+  > extends never
+    ? true
+    : never;
+
+export const AI_REALTIME_CARRIES_NO_LONG_LIVED_KEY: AiRealtimeCarriesNoLongLivedKey =
+  true;

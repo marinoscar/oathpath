@@ -69,6 +69,35 @@ export async function countStorageObjectsUploadedBy(
 }
 
 /**
+ * How many `english_attempts` rows any of the given users have, in total.
+ *
+ * Added for issue #149 (epic #59 / E10 "Reading and writing tests") for the
+ * identical structural reason {@link countStorageObjectsUploadedBy} exists:
+ * `docs/specs/english-test.md` §3 states that a low-confidence reading
+ * attempt writes NOTHING — "no row, no `outcome: 'incorrect'`, nothing" — and
+ * `POST /api/english/attempts`'s `misheard` response is consistent with that
+ * claim without proving it. A response that omits `attemptId` is equally
+ * consistent with a row having been written anyway and simply not linked
+ * back into what the client happens to read. Only the table itself settles
+ * it, which is what this function is for, and the only thing it is for.
+ *
+ * Scoped to a caller-supplied list of user ids for the same isolation reason
+ * `countStorageObjectsUploadedBy` is: so this assertion cannot be made to
+ * pass (or fail) by another spec file's own English practice activity
+ * running concurrently in the same database.
+ */
+export async function countEnglishAttemptsByUser(
+  userIds: readonly string[],
+): Promise<number> {
+  if (userIds.length === 0) return 0;
+  const { rows } = await pool.query<{ count: string }>(
+    'SELECT COUNT(*)::int AS count FROM english_attempts WHERE user_id = ANY($1::uuid[])',
+    [userIds],
+  );
+  return Number(rows[0]?.count ?? 0);
+}
+
+/**
  * Release the pool's connections.
  *
  * Call once, from a top-level `test.afterAll` — an open `pg.Pool` holds live

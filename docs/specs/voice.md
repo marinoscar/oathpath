@@ -917,12 +917,19 @@ load-bearing rather than a preference:
 
 ## 13. Out of scope (deliberately)
 
-- **Realtime speech-to-speech is #60 (E11).** The session lifecycle for a
-  live, interruptible spoken conversation, ephemeral session tokens, and the
-  tool-call contract that drives a realtime model belong entirely to #60's
-  own design spec. This epic wires `transcribe` and `speak` — two
-  request/response speech surfaces — never `realtime`, which stays `wired:
-  false` and untouched by anything in this document.
+- **Realtime speech-to-speech was #60 (E11), and has since shipped.** The
+  session lifecycle for a live, interruptible spoken conversation, ephemeral
+  session tokens, and the tool-call contract that drives a realtime model
+  belonged entirely to #60's own design spec
+  (`docs/specs/realtime-interview.md`), never to this one — this epic wired
+  `transcribe` and `speak`, two request/response speech surfaces, and left
+  `realtime` at `wired: false` for E11 to pick up. **That is no longer the
+  live state of the registry**: E11 flipped `realtime` to `wired: true` the
+  same way this epic flips `transcribe`/`speak` — no schema change, no
+  migration, `systemReady` untouched because `realtime`'s capability is not
+  a text one (`docs/specs/realtime-interview.md` §1). This paragraph is
+  historical, describing this epic's own scope at the time it shipped, not a
+  claim about the registry's state today.
 - **Reading and writing tests are #59 (E10).** Vocabulary-sourced sentence
   generation, word-error-rate reading scoring, and dictated writing scoring
   are #59's scope; this document's transcription surface is a building block

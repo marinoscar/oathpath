@@ -14,7 +14,12 @@ import { capabilityForRole } from './ai-model-roles';
 import type { AiModelRole } from './ai-model-roles';
 import { AiSettingsService } from './ai-settings.service';
 import type { AiProviderKind } from './ai-settings.schema';
-import type { AiMessage, AiStreamEvent, AiUsage } from './ai.types';
+import type {
+  AiMessage,
+  AiRealtimeTool,
+  AiStreamEvent,
+  AiUsage,
+} from './ai.types';
 import type { AiProvider } from './providers/ai-provider.interface';
 import { OpenAiProvider } from './providers/openai.provider';
 
@@ -330,6 +335,85 @@ export interface AiSynthesizeRunOk {
 }
 
 /**
+ * What a caller supplies to {@link AiDispatchService.createRealtimeSession}:
+ * the session's configuration, and nothing that identifies or authenticates
+ * anybody.
+ *
+ * NO MODEL, NO PROVIDER, NO KEY, NO ROLE-OVERRIDE FIELD — the header's rule for
+ * the third time, and the one surface where breaking it would be worst. A
+ * caller able to name its own model here would bind a browser-facing,
+ * per-minute-billed realtime session to whatever the admin configured for a
+ * more expensive role; the failure would arrive on the learner's own OpenAI
+ * bill, and nothing in the result would say why.
+ *
+ * `instructions` and `tools` are both REQUIRED for the reasons
+ * `AiRealtimeSessionRequest` gives on the provider surface: an absent prompt is
+ * a generic assistant conducting something that is not an interview, and an
+ * absent tool list is indistinguishable from a deliberately empty one at the
+ * one call site that decides what the model may do.
+ */
+export interface AiRealtimeRunRequest {
+  /** The officer's standing instructions. Ours, never a learner's words. */
+  instructions: string;
+
+  /** The tools this session may call, with their JSON-schema arguments. */
+  tools: AiRealtimeTool[];
+
+  /** The provider's voice id. Omitted lets the provider choose. */
+  voice?: string;
+
+  /**
+   * How long the minted credential should stay usable, in seconds. Omitted
+   * takes the provider's own default, which is short by design.
+   *
+   * A LIFETIME, NOT AN INSTANT — see {@link AiRealtimeSessionRequest.expiresInSeconds}.
+   * The expiry that comes BACK is the provider's own, anchored to its clock.
+   */
+  expiresInSeconds?: number;
+}
+
+/**
+ * One realtime session was minted.
+ *
+ * NO `usage`, UNLIKE {@link AiTranscribeRunOk} AND {@link AiSynthesizeRunOk},
+ * and that is not an oversight. Minting a credential runs no inference and
+ * consumes no tokens, so every field of `AiUsage` is null here by construction
+ * rather than by "the provider did not tell us" — and a caller handed three
+ * always-null numbers would reasonably read them as this session's cost, which
+ * is the one thing they are not. The tokens the conversation goes on to spend
+ * are billed against the learner's key by a browser this process never hears
+ * from; `ai_usage_events` still gets its row, written by `BaseAiProvider`,
+ * recording that a session was minted.
+ *
+ * NOTHING ELSE IS ON THIS TYPE EITHER. What a browser needs to open the
+ * connection is the secret, when it stops working, and which model it was
+ * minted against — see `docs/specs/realtime-interview.md` §3.
+ */
+export interface AiRealtimeRunOk {
+  status: 'ok';
+
+  /**
+   * The ephemeral, single-session client secret.
+   *
+   * A BEARER CREDENTIAL FOR AS LONG AS IT IS VALID. It is never logged, never a
+   * span attribute and never an audit row — see this method's own doc comment
+   * and `AiRealtimeSessionResult`'s header.
+   */
+  clientSecret: string;
+
+  /** When {@link clientSecret} stops being usable, as the PROVIDER reported it. */
+  expiresAt: Date;
+
+  modelId: string;
+}
+
+/** The outcome of one realtime mint. Same reuse of the two failure shapes. */
+export type AiRealtimeRunResult =
+  | AiRealtimeRunOk
+  | AiRunFailed
+  | AiRunUnavailable;
+
+/**
  * The outcome of one transcription.
  *
  * `AiRunFailed` AND `AiRunUnavailable` ARE REUSED VERBATIM rather than copied
@@ -401,7 +485,26 @@ const EMPTY_SYNTHESIS_CODE = 'empty_synthesis';
 const EMPTY_TRANSCRIPTION_CODE = 'empty_transcription';
 
 /**
- * The two speech roles, named once.
+ * The code for a mint that reported success and produced no usable session.
+ *
+ * ITS OWN CODE, alongside {@link EMPTY_SYNTHESIS_CODE} and for the same
+ * reason: an operator reading grouped `ai_usage_events` needs "the realtime
+ * endpoint answered without a secret" to be distinguishable from an empty
+ * completion or silent audio, because the three send whoever is on call to
+ * three different places.
+ *
+ * A SUCCESS WITH NO SECRET, OR WITH NO EXPIRY, IS A FAILURE HERE. Not a
+ * partial result to salvage: a browser handed a secret with no expiry has no
+ * way to know when to re-mint (`docs/specs/realtime-interview.md` §3's
+ * re-mint-while-`in_progress` rule is unimplementable without one), and a
+ * caller handed an expiry with no secret has nothing to connect with. Letting
+ * either half through would make {@link AiRealtimeRunOk}'s two non-nullable
+ * fields a lie every call site would then have to re-check.
+ */
+const EMPTY_REALTIME_SESSION_CODE = 'empty_realtime_session';
+
+/**
+ * The two speech roles and the realtime one, named once.
  *
  * CONSTANTS RATHER THAN LITERALS AT FOUR CALL SITES (the `resolve` call, the
  * provider request's `roleKey`, and both failure paths, per method). These
@@ -413,6 +516,7 @@ const EMPTY_TRANSCRIPTION_CODE = 'empty_transcription';
  */
 const TRANSCRIBE_ROLE = 'transcribe';
 const SPEAK_ROLE = 'speak';
+const REALTIME_ROLE = 'realtime';
 
 /** Usage for a call that never reached a provider. ALL NULL, NEVER ZERO. */
 const EMPTY_USAGE: AiUsage = {
@@ -831,6 +935,128 @@ export class AiDispatchService {
     }
   }
 
+  /**
+   * Mint one ephemeral realtime session credential for `userId`, in the
+   * `realtime` role. NEVER THROWS (issue #157, epic #60).
+   *
+   * A sibling of {@link run} for the same reason {@link transcribe} and
+   * {@link synthesize} are, and resolved through the same {@link resolve}: the
+   * same five checks in the same order, the caller's own key last, and the same
+   * four `unavailable` causes reused verbatim rather than copied into a
+   * realtime-shaped twin.
+   *
+   * -------------------------------------------------------------------------
+   * THIS METHOD RUNS NO INFERENCE. IT MINTS PERMISSION FOR A BROWSER TO.
+   * -------------------------------------------------------------------------
+   *
+   * Every other method here sends a prompt and gets an answer. This one asks
+   * the provider for a short-lived credential scoped to a session
+   * configuration this application authored, and hands it back so the
+   * learner's own machine can open the realtime connection directly. The audio
+   * never passes through this process — `docs/specs/realtime-interview.md`
+   * §13's rejected "proxying audio through the API" row says why.
+   *
+   * THE CALLER SUPPLIES A CONFIGURATION AND NOTHING ELSE — no `modelId` field,
+   * ever, and no reach for the organisation's credential. The reason is the
+   * file header's, and it is sharper on this surface than on any other: a
+   * realtime session bills by the minute of audio, so a mint that silently ran
+   * on the organisation's key would write `ai_usage_events.userId = <the
+   * learner>` for a conversation the administrator paid for, and the discrepancy
+   * would grow for as long as the learner kept talking.
+   *
+   * -------------------------------------------------------------------------
+   * THE MINTED SECRET IS REGISTERED WITH THIS CALL'S REDACTOR THE MOMENT IT
+   * EXISTS
+   * -------------------------------------------------------------------------
+   *
+   * `BaseAiProvider.createRealtimeSession` already does this with its OWN
+   * redactor, and this line is not that one repeated: the redactor below is
+   * the one {@link dispatchFailure} formats a throw through, and a throw
+   * raised in THIS method after the provider returned — a future edit between
+   * here and the return — is a string this file, not the provider, is about to
+   * hand to a logger. Registering costs nothing when there is no secret
+   * (`protect` ignores null), and is the difference between a short-lived
+   * credential and a logged one when there is.
+   *
+   * NOTHING ABOUT THE SECRET IS LOGGED, SPANNED OR RETURNED IN AN ERROR. The
+   * failure paths below carry a user id, a role, a model id and a stable code,
+   * exactly as every other method's do.
+   *
+   * @param userId the caller, ALWAYS PASSED EXPLICITLY — see {@link run}.
+   */
+  async createRealtimeSession(
+    userId: string,
+    request: AiRealtimeRunRequest,
+  ): Promise<AiRealtimeRunResult> {
+    const redact = new SecretRedactor();
+
+    try {
+      const resolved = await this.resolve(userId, REALTIME_ROLE, redact);
+      if ('status' in resolved) return resolved;
+
+      const result = await resolved.provider.createRealtimeSession(
+        userId,
+        resolved.apiKey,
+        {
+          roleKey: REALTIME_ROLE,
+          modelId: resolved.modelId,
+          instructions: request.instructions,
+          tools: request.tools,
+          voice: request.voice,
+          expiresInSeconds: request.expiresInSeconds,
+        },
+      );
+
+      // See the doc comment. On both branches, before anything reads the
+      // provider's own error text or could raise one of our own.
+      redact.protect(result.clientSecret);
+
+      // BOTH HALVES CHECKED, for the reason {@link EMPTY_REALTIME_SESSION_CODE}
+      // gives: neither is usable without the other, and `AiRealtimeRunOk`
+      // promises both are present.
+      if (
+        result.success &&
+        typeof result.clientSecret === 'string' &&
+        result.clientSecret.length > 0 &&
+        result.expiresAt !== null
+      ) {
+        return {
+          status: 'ok',
+          clientSecret: result.clientSecret,
+          expiresAt: result.expiresAt,
+          // THE RESOLVED BINDING, not `result.modelId`, so this field means
+          // the same thing it means on every other `ok` result here — which
+          // model this dispatcher chose. The provider echoes the same id back;
+          // preferring its echo would make one method's `modelId` a provider
+          // report and every other method's a settings read.
+          modelId: resolved.modelId,
+        };
+      }
+
+      return this.providerFailure(
+        userId,
+        REALTIME_ROLE,
+        resolved.modelId,
+        result.success ? EMPTY_REALTIME_SESSION_CODE : (result.errorCode ?? 'error'),
+        result.success
+          ? // WHICH HALF WAS MISSING, NEVER THE HALF THAT WAS PRESENT. An
+            // operator needs the shape; the secret is not diagnosable
+            // information, it is a credential.
+            `The provider reported success and returned ${
+              typeof result.clientSecret !== 'string' ||
+              result.clientSecret.length === 0
+                ? 'no client secret'
+                : 'no expiry'
+            }.`
+          : (result.error ?? 'The provider reported a failure with no message.'),
+        // Not surfaced on this surface either — see {@link transcribe}.
+        null,
+      );
+    } catch (err) {
+      return this.dispatchFailure(userId, REALTIME_ROLE, err, redact);
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // Internals
   // ---------------------------------------------------------------------------
@@ -839,8 +1065,8 @@ export class AiDispatchService {
    * Resolve the deployment's configuration and the caller's key, or say why
    * the run cannot happen.
    *
-   * ONE HELPER FOR ALL THREE PUBLIC METHODS, and that is the reason it exists.
-   * Three copies of these five checks would drift — in WHICH checks they make
+   * ONE HELPER FOR EVERY PUBLIC METHOD, and that is the reason it exists.
+   * Six copies of these five checks would drift — in WHICH checks they make
    * and, worse, in what ORDER — and the drift would present as a learner told
    * "you have no key" on one screen and "AI is switched off" on the next, for
    * the same deployment in the same second.

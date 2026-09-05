@@ -105,6 +105,41 @@ export const FALLBACK_OFFICER_LINES: Record<
 };
 
 /**
+ * What the officer says to INTRODUCE a reading or writing segment that is
+ * actually being conducted (issue #158, epic #60 / E11).
+ *
+ * -----------------------------------------------------------------------------
+ * THE SIBLING OF `FALLBACK_OFFICER_LINES.reading`/`.writing`, NOT A REPLACEMENT
+ * -----------------------------------------------------------------------------
+ *
+ * Those two are the honest "this rehearsal does not include that test" lines a
+ * SKIPPED segment produces, and they stay exactly as they are: the text
+ * transport still skips both segments, and a realtime interview run against an
+ * empty sentence bank skips them too, because a segment with no content is a
+ * segment this rehearsal genuinely does not include. These two are what the
+ * officer says when there IS a sentence — `docs/specs/realtime-interview.md`
+ * §5, which makes both segments real on the realtime transport.
+ *
+ * Code-owned, in this file, for the reason its header gives for every other
+ * line here: what the officer ASKS FOR is never model-generated, so changing it
+ * means editing this array in a diff in front of a reviewer.
+ *
+ * The writing line says the sentence will be read aloud and may be repeated,
+ * and says nothing about it being displayed — because it is not. `english.
+ * service.ts`'s own rule is inherited unmodified: "On a writing attempt this is
+ * the REVEAL — the first time the learner sees the sentence they were
+ * dictated." On this transport the sentence reaches the model to be SPOKEN and
+ * is deliberately not written into the interview transcript at all; see
+ * `InterviewsService`'s realtime handler.
+ */
+export const ENGLISH_SEGMENT_LINES: Record<'reading' | 'writing', string> = {
+  reading:
+    'Now I would like you to read one sentence aloud in English. Please read it exactly as it is written.',
+  writing:
+    'Now I would like you to write one sentence in English. I will say it aloud; ask me and I will repeat it.',
+};
+
+/**
  * The fallback line for one turn, with the interview's opening greeting used
  * in place of the phase line on the very first turn.
  *

@@ -712,3 +712,118 @@ describe('FakeAiProvider.synthesize', () => {
     );
   });
 });
+
+// =============================================================================
+// Realtime sessions (issue #156, epic #60 — E11)
+// =============================================================================
+//
+// The same promise as everything above, on the surface where it matters most:
+// the value produced is a CREDENTIAL. A fixture that drew one at random would
+// leave every later suite able to assert only that SOME string reached the
+// browser, never that the one the server minted did.
+// =============================================================================
+
+/** A session request, with the officer prompt E11 will really send. */
+function sessionRequest(overrides: Record<string, unknown> = {}) {
+  return {
+    roleKey: 'realtime',
+    modelId: 'gpt-4o-realtime-preview',
+    instructions: 'You are a USCIS officer conducting an interview.',
+    tools: [],
+    ...overrides,
+  } as Parameters<FakeAiProvider['createRealtimeSession']>[2];
+}
+
+describe('FakeAiProvider.createRealtimeSession', () => {
+  it('mints a stable, obviously-fake secret with no network and no clock', async () => {
+    const p = provider();
+
+    const first = await p.createRealtimeSession(ALICE, KEY, sessionRequest());
+    const second = await p.createRealtimeSession(ALICE, KEY, sessionRequest());
+
+    expect(first.success).toBe(true);
+    // `ek_fake_`, never a string shaped like a real OpenAI client secret: one
+    // of those is a string somebody eventually pastes into a bug report
+    // believing it is live.
+    expect(first.clientSecret).toMatch(/^ek_fake_[0-9a-f]{16}$/);
+    // Byte-identical across calls — including the expiry, which is anchored to
+    // a constant rather than to the wall clock.
+    expect(second).toEqual(first);
+  });
+
+  it('varies the secret with the binding, and only with the binding', async () => {
+    const p = provider();
+
+    const base = await p.createRealtimeSession(ALICE, KEY, sessionRequest());
+    const otherModel = await p.createRealtimeSession(
+      ALICE,
+      KEY,
+      sessionRequest({ modelId: 'gpt-4o-mini-realtime-preview' }),
+    );
+    // The instructions are the part a test author iterates on. A secret that
+    // moved every time somebody reworded the officer's prompt would be a
+    // fixture nothing could assert against.
+    const reworded = await p.createRealtimeSession(
+      ALICE,
+      KEY,
+      sessionRequest({ instructions: 'A completely different prompt.' }),
+    );
+
+    expect(otherModel.clientSecret).not.toBe(base.clientSecret);
+    expect(reworded.clientSecret).toBe(base.clientSecret);
+  });
+
+  it('expires at a fixed instant that is still in the future', async () => {
+    // FIXED, so a test can assert an exact `Date`; FUTURE, so a caller that
+    // rightly refuses an expired secret is not broken by the fake alone —
+    // a divergence from production is precisely what this class avoids.
+    const p = provider();
+
+    const result = await p.createRealtimeSession(
+      ALICE,
+      KEY,
+      sessionRequest({ expiresInSeconds: 60 }),
+    );
+
+    expect(result.expiresAt).toEqual(new Date('2099-01-01T00:01:00.000Z'));
+    expect(result.expiresAt?.getTime()).toBeGreaterThan(Date.now());
+  });
+
+  it('defaults the lifetime when the caller asks for none', async () => {
+    const p = provider();
+
+    const result = await p.createRealtimeSession(ALICE, KEY, sessionRequest());
+
+    // Ten minutes, roughly the provider's own default, so a caller that omits
+    // the field sees a deadline of the same order it will see in production.
+    expect(result.expiresAt).toEqual(new Date('2099-01-01T00:10:00.000Z'));
+  });
+
+  it('echoes the model and reports no token usage', async () => {
+    const p = provider();
+
+    const result = await p.createRealtimeSession(ALICE, KEY, sessionRequest());
+
+    expect(result.modelId).toBe('gpt-4o-realtime-preview');
+    // Minting runs no inference. All-null is the honest answer, and `0` would
+    // claim we know the session cost nothing.
+    expect(result.usage).toEqual({
+      promptTokens: null,
+      completionTokens: null,
+      totalTokens: null,
+    });
+    expect(result.errorCode).toBeNull();
+    expect(result.error).toBeNull();
+  });
+
+  it('records the mint against the realtime role', async () => {
+    const usage = usageStub();
+    const p = provider(usage);
+
+    await p.createRealtimeSession(ALICE, KEY, sessionRequest());
+
+    expect(usage.record).toHaveBeenCalledWith(
+      expect.objectContaining({ roleKey: 'realtime', success: true }),
+    );
+  });
+});

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { Injectable, Logger } from '@nestjs/common';
 
 import type { SecretRedactor } from '../../common/crypto/secret-redactor';
@@ -12,6 +13,8 @@ import type {
   AiModelCatalogResult,
   AiModelDescriptor,
   AiReachabilityRequest,
+  AiRealtimeSessionRequest,
+  AiRealtimeSessionResult,
   AiStructuredCompletionRequest,
   AiSynthesisRequest,
   AiSynthesisResult,
@@ -407,6 +410,41 @@ const FAKE_SPEECH_BYTES: readonly number[] = [
   0xff, 0xfb, 0x90, 0x64, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 ];
 
+/**
+ * The instant every fake realtime session's expiry is measured from.
+ *
+ * A CONSTANT RATHER THAN `Date.now()`, for the same reason
+ * {@link CATALOG_EPOCH_MS} is one: a test asserting on `expiresAt` must be
+ * able to assert on an exact instant, and a wall clock would make that
+ * assertion either impossible or a tolerance nobody can justify.
+ *
+ * FAR IN THE FUTURE ON PURPOSE, which is the one thing the catalog's epoch did
+ * not have to be. A caller is right to refuse a client secret whose deadline
+ * has passed, and an anchor in the past would make every fake session fail a
+ * check the real provider passes — a divergence between the fake and
+ * production is precisely what this class exists not to introduce.
+ * 2099-01-01T00:00:00Z.
+ */
+const REALTIME_EPOCH_MS = Date.UTC(2099, 0, 1);
+
+/**
+ * The lifetime a fake session gets when the caller asks for none.
+ *
+ * Roughly OpenAI's own default, so a caller that omits `expiresInSeconds`
+ * against the fake sees a deadline of the same order it will see in
+ * production. Ten minutes.
+ */
+const DEFAULT_REALTIME_TTL_SECONDS = 600;
+
+/**
+ * How much of the request digest goes into a fake client secret.
+ *
+ * Long enough to be visibly distinct between two different sessions in a test
+ * failure's diff, short enough to read at a glance. It is a fixture, not a
+ * credential — nothing verifies it.
+ */
+const FAKE_SECRET_DIGEST_LENGTH = 16;
+
 @Injectable()
 export class FakeAiProvider extends BaseAiProvider {
   protected readonly logger = new Logger(FakeAiProvider.name);
@@ -739,6 +777,50 @@ export class FakeAiProvider extends BaseAiProvider {
       error: null,
     };
   }
+
+  /**
+   * A minted-looking realtime session, derived entirely from the request
+   * (#156, epic #60).
+   *
+   * NO NETWORK, NO CLOCK, NO RANDOMNESS — the same three properties every
+   * other method here has, and the reason they matter more on this surface
+   * than on any other: the value returned is a CREDENTIAL, and a fixture that
+   * drew one at random would produce a test suite where "the secret the server
+   * minted reached the browser" cannot be asserted at all, only that some
+   * string did.
+   *
+   * The secret is a digest of the model id and the role key, so two different
+   * bindings give two visibly different secrets while each stays stable across
+   * runs. It is prefixed `ek_fake_` rather than `ek_`, because a string that
+   * looked exactly like a real OpenAI client secret is a string somebody will
+   * eventually paste into a bug report believing it is one.
+   *
+   * The expiry is {@link REALTIME_EPOCH_MS} plus the requested lifetime —
+   * fixed, and far enough ahead that a caller which (correctly) refuses an
+   * expired secret still works against the fake.
+   */
+  protected async runRealtimeSession(
+    apiKey: string,
+    request: AiRealtimeSessionRequest,
+    redact: SecretRedactor,
+  ): Promise<AiRealtimeSessionResult> {
+    redact.protect(apiKey);
+
+    const seconds = request.expiresInSeconds ?? DEFAULT_REALTIME_TTL_SECONDS;
+
+    return {
+      success: true,
+      clientSecret: fakeClientSecret(request),
+      expiresAt: new Date(REALTIME_EPOCH_MS + seconds * 1000),
+      // Echoed back exactly as `OpenAiProvider` echoes the provider's own
+      // answer, so a caller reading the model off the result behaves the same
+      // against both.
+      modelId: request.modelId,
+      usage: REALTIME_USAGE,
+      errorCode: null,
+      error: null,
+    };
+  }
 }
 
 // -----------------------------------------------------------------------------
@@ -823,6 +905,39 @@ const SPEECH_USAGE: AiUsage = {
   completionTokens: null,
   totalTokens: null,
 };
+
+/**
+ * Usage for a realtime mint: all null, matching `OpenAiProvider`.
+ *
+ * Same reasoning as {@link SPEECH_USAGE} and then some — minting a client
+ * secret runs no inference at all, so there is nothing a real provider could
+ * report and nothing this one should invent. The tokens a realtime session
+ * spends are spent by a browser this process never hears from.
+ */
+const REALTIME_USAGE: AiUsage = {
+  promptTokens: null,
+  completionTokens: null,
+  totalTokens: null,
+};
+
+/**
+ * A stable, obviously-fake client secret for one session request.
+ *
+ * Derived from the model id and the role key — the two fields that identify
+ * WHICH BINDING was minted against — and from nothing else. Not the
+ * instructions and not the tools: those are the parts a caller is most likely
+ * to iterate on while writing a test, and a secret that changed every time
+ * someone reworded the officer's prompt would be a fixture nobody could assert
+ * against.
+ */
+function fakeClientSecret(request: AiRealtimeSessionRequest): string {
+  const digest = createHash('sha256')
+    .update(`${request.modelId}\u0000${request.roleKey}`)
+    .digest('hex')
+    .slice(0, FAKE_SECRET_DIGEST_LENGTH);
+
+  return `ek_fake_${digest}`;
+}
 
 /** Characters to tokens, with a floor of 1 for anything non-empty. */
 function estimateTokens(characters: number): number {
