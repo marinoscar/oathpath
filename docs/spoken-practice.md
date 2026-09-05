@@ -10,23 +10,27 @@ This page explains what actually happens when you do.
 ## How it works
 
 When a question offers a microphone, you can answer by speaking instead of
-typing. OathPath listens to what you said and turns it into text.
+typing. Say your answer, and OathPath turns it into text and grades it right
+away — there is no separate screen where you have to stop, read back a
+transcript, and press a button before it counts.
 
-**Before anything is graded, you see that text and get to check it.** If it
-looks right, you confirm it. If it does not — maybe a word got dropped,
-maybe your accent tripped up the listening — you can fix it right there,
-before it counts as your answer. Nothing is graded on what you said until
-you have had the chance to say "yes, that's what I meant" or to correct it.
+**If OathPath got it wrong, you get another try, right there on the same
+question.** Maybe it dropped a word, maybe your accent tripped up the
+listening, maybe you just want another go — either way, say it again and
+that new answer is the one that counts. Correcting it costs you nothing:
+your practice history and your progress read exactly as if you had gotten
+it right the first time. Nothing about the misheard attempt sticks to you.
 
-## Being misheard is not the same as being wrong
+## Correcting a mishearing never counts against you
 
-Sometimes the system will get something wrong that has nothing to do with
-whether you knew the answer — a word it didn't catch, a phrase it heard
-strangely. When that happens and it's clear the transcription was unreliable,
-OathPath records it as a possible mishearing, not as an incorrect answer, and
-gives you another chance to answer the question. That distinction matters:
-your progress should reflect what you know, not how clearly a microphone
-happened to pick you up that day.
+Sometimes what gets marked wrong has nothing to do with whether you knew the
+answer — a word the listening missed, a phrase it heard strangely. That is
+not the same thing as being wrong, and OathPath treats it that way: a
+mishearing you correct is never held against you. It does not cost you a
+streak, it does not make a question you actually know look shaky, and it
+never quietly counts as a mistake somewhere you can't see. Your progress
+reflects what you know, not how clearly a microphone happened to pick you up
+that day.
 
 You are never penalized for an accent, for background noise, or for a
 recognition mistake that was not yours to begin with.
@@ -44,13 +48,21 @@ Likewise, if you would like a question read aloud to you before you answer,
 that is available too — and it costs you nothing to use, whether or not you
 choose to answer by voice.
 
+## Choosing how it sounds
+
+If you like hearing questions read aloud, you don't have to take the default
+voice or the default pace. In your voice settings, you can pick which voice
+reads to you and how quickly it speaks — slower, if a question at
+conversational speed goes by too fast to follow, or faster, if you'd rather
+move on. It's your practice; make it sound the way that helps you.
+
 ## Your recording is never kept
 
 **When you speak an answer, OathPath turns what you said into text, and then
 the recording itself is discarded.** It is not saved to look at later, not
 uploaded anywhere beyond the moment it takes to produce the text, and not
-stored on your device. What OathPath keeps is the text you confirmed — the
-same as if you had typed it — never the audio of your voice.
+stored on your device. What OathPath keeps is the text your answer was
+graded on — the same as if you had typed it — never the audio of your voice.
 
 There is no feature anywhere in OathPath that lets you, or anyone else, play
 back a recording of you speaking. That is deliberate: your voice, recorded

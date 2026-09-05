@@ -1407,14 +1407,20 @@ owner than "an administrator has not configured speech".
 That one sends `no-store` because it reads back arbitrary text a client sent;
 these bytes are a reading of public civics content, identical for every learner.
 The long lifetime (`private, max-age=31536000, immutable`) is claimed **only
-when the URL genuinely determines the bytes** — a `civics_question` scope, whose
-prompt cannot change, requested with an explicit `voice`. A
-`national`/`state`-scope **answer** can be corrected by an admin, and a request
-that named no `voice` resolves one from your own saved preference; either gets a
-short max-age instead, because a browser cache is keyed by URL rather than by the
-text's hash. `private` in every case — the response requires an `Authorization`
-header. **None of this affects the server-side cache**, which is content-addressed
-and never serves stale audio regardless.
+when the URL genuinely determines the bytes**, which is a fact about the
+**question**, not about which `scope` was requested: it takes the question's
+own `dynamicScope` being `none` — a question whose answer is fixed and never
+corrected — **and** the request naming an explicit `voice`. A
+`civics_question`-scope request for a `national`/`state`-scope question gets
+the short max-age too, even though its *prompt* itself never changes: the
+condition is checked once, against the question, for both scopes uniformly,
+rather than trusting `civics_question` on the strength of the prompt alone. A
+request that named no `voice` resolves one from your own saved preference and
+also gets the short max-age, because a browser cache is keyed by URL rather
+than by the text's hash and a saved preference can change between two
+requests for the identical URL. `private` in every case — the response
+requires an `Authorization` header. **None of this affects the server-side
+cache**, which is content-addressed and never serves stale audio regardless.
 
 **Still an upgrade, never the only way to hear a question**
 ([`docs/specs/voice.md`](specs/voice.md#2-browser-speechsynthesis-is-the-default-text-to-speech)
@@ -2448,6 +2454,9 @@ question, prompt only. A `completed` or `abandoned` session returns
         "failureCause": null,
         "aiFeedback": null,
         "aiUsageEventId": null,
+        "transcript": null,
+        "asrConfidence": null,
+        "retryOfAttemptId": null,
         "answeredAt": "2026-09-01T14:01:00.000Z",
         "answerSnapshot": {
           "resolvedAt": "2026-09-01T14:01:00.000Z",
@@ -2487,6 +2496,15 @@ call that produced it. See [`docs/specs/ai-evaluation.md`](specs/ai-evaluation.m
 | `failureCause` | string \| null | Why the response missed. One of `not_known`, `not_recalled`, `expression`, `misheard`, `nervous`, `unknown` — or `null`. `null` on a `correct` verdict (nothing failed, so nothing to explain) as well as on every non-AI-graded attempt. **`null` and `"unknown"` are different answers**: `null` means no grader ran; `"unknown"` means one ran and honestly could not classify the miss. `misheard` and `nervous` are declared in the enum but never produced by this ladder — they need E9's transcription confidence and E8's interview timing respectively; a model that names one is coerced to `"unknown"` before persistence. |
 | `aiFeedback` | object \| null | The grader's full structured verdict, verbatim — `{"verdict": "correct" \| "partial" \| "incorrect", "failureCause": "…", "feedback": "…"}` — the same object validated against the grading schema, stored whole rather than as the `feedback` sentence alone. `null` on every non-AI-graded attempt. Never the prompt, never a raw model completion. |
 | `aiUsageEventId` | uuid \| null | The `ai_usage_events` row this grading call wrote. `null` both when no grader ran and when the row write itself failed — the graded evidence is never held back for its own accounting. |
+
+**Three more fields, issue #104 (epic #58, E9), null together for a typed
+attempt or a skip:**
+
+| Field | Type | Description |
+|---|---|---|
+| `transcript` | string \| null | For a spoken attempt, **the text that was graded, as the learner left it** (redefined by E12, epic #280, issue #285 — see `docs/specs/voice.md` §8's amendment note). Identical to `responseText` on a spoken attempt today; kept as a separate column so a future epic grading something other than the graded transcript never has to guess which one a historical row meant. |
+| `asrConfidence` | number \| null | The recogniser's own confidence in `transcript`, `0`–`1`. **`null` means unknown, never low** — only a reported value below the threshold contributes to `failureCause: "misheard"` below. On the wire for a client to explain its own behaviour to itself, never to show a learner a raw confidence number. |
+| `retryOfAttemptId` | uuid \| null | The earlier attempt at this question, in this session, that this one supersedes. Set only on a retry — see the request body's own `retryOfAttemptId` entry above for what admits one, and for the mastery-replay consequence E12/#285 added. The superseded attempt stays in the table and in this same response; it is excluded only from `progress.answered`, the session's stored `summary`, and (since #285) from `question_mastery`'s scheduling history. |
 
 Example of an AI-graded attempt (`gradingMethod: "ai"`, `outcome: "correct"`
 from rung 2 despite `matchAnswer` missing on rung 1):
@@ -2575,6 +2593,39 @@ to rung 1's result rather than erroring the request.
 | `hintUsed` | boolean | No (default `false`) | The learner opened a hint before submitting. Changes no `outcome` |
 | `durationMs` | integer ≥ 0 | No | Milliseconds from question shown to submit. **Omit, never send `0`**, when the client cannot measure it — `0` would claim the learner answered instantly |
 
+**Five more fields, all issue #104 (epic #58, E9 "Voice foundation")**, none
+of them a verdict — they are facts about the learner's own session the
+server cannot otherwise observe, because the audio itself is never stored
+(see [`AI Speech`](#ai-speech) above):
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `inputMode` | `"typed"` \| `"spoken"` | No (default `"typed"`) | How the learner produced this answer. Every client written before E9 keeps working unchanged |
+| `promptMode` | `"read"` \| `"heard"` | No (default `"read"`) | How the QUESTION reached the learner. Independent of `inputMode` — all four combinations are real |
+| `transcript` | string (max 2000 chars) | Required when `inputMode: "spoken"` and not `skipped` | **Redefined by E12 (epic #280, issue #285):** the text that was graded, as the learner left it — never a raw guess the learner corrected away, but no longer defined in terms of a confirm step that runs on every path. Identical to `responseText` on a spoken attempt today |
+| `asrConfidence` | number, `0`–`1` | No | The recogniser's own confidence in `transcript`. **Absent means unknown, and unknown is never treated as low** — only a reported value below the threshold routes an attempt to `failureCause: "misheard"` (see below). Rejected together with `inputMode: "typed"` or `skipped: true` |
+| `retryOfAttemptId` | uuid | No | This attempt is a retry of an earlier attempt at the **same question in the same session**, which it supersedes. Admitted only when it names an attempt belonging to this caller, this session and this question, which is not itself a retry and has not already been superseded — anything else is the same 409 the one-attempt-per-question guard already throws. **Not restricted to a spoken attempt or to a misheard one** — the server-side guard was never conditioned on `failureCause` or confidence, only on ownership, chain length and single-supersession |
+
+**A retry (`retryOfAttemptId` set) does more than supersede the row it
+names.** Since E12 (epic #280, issue #285), the transaction that writes it
+also calls `recomputeMasteryForQuestion`
+(`apps/api/src/practice/mastery/recompute.ts`) — a full replay of every
+`practice_attempts` row ever recorded for that question, excluding every
+superseded row, rebuilding `question_mastery` from scratch as if the
+superseded attempt had never happened. Before this, only a session's
+**summary** counts excluded a superseded attempt; its effect on the spaced-
+repetition schedule (`correctStreak`, `lapses`, `state`, `dueAt`) stood
+permanently, even after a retry corrected it. This matters beyond the
+low-confidence case the retry mechanism was first built for: a confidently
+**wrong** transcription — an accent the recogniser heard clearly and
+mis-transcribed — grades `incorrect` without ever being flagged `misheard`,
+and until #285 that regression was never undone by a correction. A retry
+now costs the learner exactly nothing, regardless of why the original
+attempt was corrected. See
+[`docs/specs/voice-hands-free.md`](specs/voice-hands-free.md) §2 for the
+full worked example and why a replay, not an attempted inverse, is what
+makes that guarantee exact rather than approximate.
+
 There is no `outcome`, `gradingMethod`, or any other verdict field in this
 body — the client reports what happened, never the result. There is also no
 `selfMarkCorrect` flag: self-mark is a distinct, later call against the
@@ -2605,9 +2656,11 @@ once the planned count is reached.
 - 400 Bad Request — invalid body, or a question outside this session's test
   version or category
 - 404 Not Found — no such session for this caller, or no such question
-- 409 Conflict — the session is not `in_progress`, or this question was
-  already answered in it (one attempt per question per session — answering
-  it again means starting a new session)
+- 409 Conflict — the session is not `in_progress`; this question was already
+  answered in it and `retryOfAttemptId` was absent or did not name that exact
+  attempt (one attempt per question per session, plus one traceable retry of
+  it — answering a third time means starting a new session); or the named
+  `retryOfAttemptId` is itself a retry or has already been retried
 
 ---
 
@@ -2654,6 +2707,9 @@ know" inseparable on the one row that has to carry both facts independently.
     "failureCause": null,
     "aiFeedback": null,
     "aiUsageEventId": null,
+    "transcript": null,
+    "asrConfidence": null,
+    "retryOfAttemptId": null,
     "answeredAt": "2026-09-01T14:02:00.000Z",
     "answerSnapshot": { "...": "unchanged from when the attempt was created" }
   }

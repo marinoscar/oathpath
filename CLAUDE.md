@@ -613,24 +613,31 @@ for the operator-facing walkthrough.
 ### Voice (Per User)
 - `POST /api/ai/speech/transcribe` - Turn one recording into text on the caller's own AI key; nothing is graded and nothing is stored (multipart, capped at 10 MB / 120 seconds, both enforced before any provider call)
 - `POST /api/ai/speech/synthesize` - Read one short piece of text aloud on the caller's own AI key; an optional premium upgrade over the browser's free `speechSynthesis`, never the only way to hear a question
+- `GET /api/ai/speech/voices` - The voices the configured provider can speak in, so a client can render a picker (issue #283, epic #280); a plain JSON body, not a `status` union — it makes no inference call and spends nobody's key
+- `GET /api/ai/speech/audio` - A civics question or its first accepted answer, read aloud from a deployment-wide, content-addressed cache (issue #284, epic #280); the first request for a given question/voice/model pays for synthesis on that caller's own key, every request after that — from anybody — is served from storage for free
 
-Both are `@Auth()` with no permissions, and no route accepts a user id —
+All four are `@Auth()` with no permissions, and no route accepts a user id —
 every authenticated learner practises with their own voice on their own
 key, exactly as they own their own practice attempts and their own AI
-credentials, and gating either route would leave a Viewer unable to
-practise at all. Both responses are typed `ok`/`unavailable`/`failed`
+credentials, and gating any of them would leave a Viewer unable to
+practise at all. The two `POST` routes and `GET /ai/speech/audio` are typed
+`ok`/`unavailable`/`failed` (plus, on the audio route only, `state_required`)
 discriminated unions, always HTTP 200 — never a 4xx/5xx for an AI reason,
 the same posture every other AI surface in this codebase takes. **A caller
 MUST switch on `status` and never assume the `ok` member** — issue #277 is
 the shipped case where a client type that skipped this became a
-`TypeError` on a learner's screen (`docs/specs/voice.md` §9.1). Binding
-either role is optional and never affects `systemReady`, which is a
+`TypeError` on a learner's screen (`docs/specs/voice.md` §9.1).
+`GET /ai/speech/voices` is the one route in the group that is not a
+`status` union: it reads a settings row and a list the provider hard-codes
+about itself, so there is no state a `cause` would describe. Binding
+`transcribe` or `speak` is optional and never affects `systemReady`, which is a
 statement about the `tutor`/`grader` text roles only; see
 [`docs/specs/voice.md`](docs/specs/voice.md) §1 for the degradation rule and
 [`docs/runbooks/configuring-voice.md`](docs/runbooks/configuring-voice.md)
 for the operator-facing walkthrough. See
-[`docs/specs/voice.md`](docs/specs/voice.md) §9-§10 and
-[`docs/API.md`](docs/API.md#ai-speech).
+[`docs/specs/voice.md`](docs/specs/voice.md) §9-§10,
+[`docs/specs/voice-hands-free.md`](docs/specs/voice-hands-free.md) §4-§5
+(epic #280) and [`docs/API.md`](docs/API.md#ai-speech).
 
 ### Account (Per User)
 - `GET /api/account/data-summary` - Per-table row counts a reset would erase, plus the exact confirmation phrase each scope requires
@@ -768,6 +775,20 @@ a Viewer, the default role, unable to practise at all. There is no "use
 voice" privilege in this product's authorization model. See
 [`docs/specs/voice.md`](docs/specs/voice.md) §10.
 
+**Epic #280 (E12 "Hands-free voice practice") adds no permission strings
+either, for the same reason.** `GET /api/ai/speech/voices` and
+`GET /api/ai/speech/audio` are `@Auth()` with no permissions and no user-id
+parameter, exactly like every other route on this controller — every
+authenticated learner picks their own voice and hears the same shared
+civics content every other learner does, so gating either route would leave
+a Viewer unable to use the picker or hear a question at all. The mastery
+replay `recomputeMasteryForQuestion` adds no controller and no permission
+string of its own either, for the identical reason `AiDispatchService`
+doesn't (above): it has no HTTP surface, and is called only from inside
+`PracticeService.recordAttempt`'s existing transaction, inheriting that
+route's own `@Auth()`-with-no-permissions gate. See
+[`docs/specs/voice-hands-free.md`](docs/specs/voice-hands-free.md) §8.
+
 **English adds no permission strings either, for the same reason.** All
 three `/api/english/*` routes are `@Auth()` with no permissions: every
 authenticated learner owns their own reading and writing attempts,
@@ -814,7 +835,7 @@ See [`docs/specs/account-reset.md`](docs/specs/account-reset.md) §11.
 - `civics_questions` - One version's questions: number, category, prompt, `senior_eligible`, `dynamic_scope` (`none`/`national`/`state`)
 - `civics_answers` - Accepted answers per question/state/slot; `effective_to IS NULL` means currently correct (no `is_current` flag — see `docs/specs/civics-content.md` §3)
 - `practice_sessions` - One row per practice run (Quick 5 or by-category): kind, status, planned count, cached completion `summary`
-- `practice_attempts` - One row per question ever answered, from a session or (from E8) a mock interview — the single evidence table E5/E6/E7 read and E8 writes into. `mock_interview_id` (nullable, E8, epic #57) is set only when `source: mock_interview`, and `response_text` is `null` for either a skip or a `mock_interview` attempt whose interview declined transcript retention — two distinct meanings for the same null, both documented on the column itself. Three columns record the AI grading rung (E4, epic #53), null together on every deterministically-graded attempt: `failure_cause` (why it missed, from a closed six-value enum — `null` means no grader ran, `unknown` means one ran and honestly couldn't tell), `ai_feedback` (the grader's structured verdict, verbatim; omitted entirely, not merely null, for a `mock_interview` attempt with retention off), `ai_usage_event_id` (the `ai_usage_events` row that call wrote). Three more columns (E9, epic #58) hold no audio and never will: `transcript` (the text the learner CONFIRMED after the recogniser's guess — never the raw, unedited output; identical to `response_text` on a spoken attempt today, kept as a separate column because a later epic grading something other than the confirmed transcript must not have to guess which one a historical row meant), `asr_confidence` (the recogniser's own confidence, 0-1; `null` means unknown and never triggers the `misheard` mapping below — unknown is not low), `retry_of_attempt_id` (self-referential FK, `onDelete: SetNull`; set when this attempt is a spoken retry that supersedes an earlier attempt at the same question — the superseding row is excluded from a practice session's summary counts, so a mishearing and its correction read as one answered question). A low-confidence, non-`correct` outcome gets `failure_cause: 'misheard'` set server-side, overriding any cause the AI grader supplied — `outcome` itself is untouched and no `PracticeOutcome` enum value was added for this. See [`docs/specs/voice.md`](docs/specs/voice.md) §3, §8.
+- `practice_attempts` - One row per question ever answered, from a session or (from E8) a mock interview — the single evidence table E5/E6/E7 read and E8 writes into. `mock_interview_id` (nullable, E8, epic #57) is set only when `source: mock_interview`, and `response_text` is `null` for either a skip or a `mock_interview` attempt whose interview declined transcript retention — two distinct meanings for the same null, both documented on the column itself. Three columns record the AI grading rung (E4, epic #53), null together on every deterministically-graded attempt: `failure_cause` (why it missed, from a closed six-value enum — `null` means no grader ran, `unknown` means one ran and honestly couldn't tell), `ai_feedback` (the grader's structured verdict, verbatim; omitted entirely, not merely null, for a `mock_interview` attempt with retention off), `ai_usage_event_id` (the `ai_usage_events` row that call wrote). Three more columns (E9, epic #58) hold no audio and never will: `transcript` (**redefined by E12, epic #280, issue #285**: the text that was graded, as the learner left it — never the raw, unedited guess a learner corrected away, but no longer defined in terms of a confirm-before-grade step that does not run on every path; identical to `response_text` on a spoken attempt today, kept as a separate column because a later epic grading something other than the graded transcript must not have to guess which one a historical row meant), `asr_confidence` (the recogniser's own confidence, 0-1; `null` means unknown and never triggers the `misheard` mapping below — unknown is not low), `retry_of_attempt_id` (self-referential FK, `onDelete: SetNull`; set when this attempt is a spoken retry that supersedes an earlier attempt at the same question — the superseding row is excluded from a practice session's summary counts, and, since E12/#285, from spaced repetition too: `recomputeMasteryForQuestion` (`apps/api/src/practice/mastery/recompute.ts`) replays the question's entire `question_mastery` history excluding every superseded row, so a mishearing and its correction read as one answered question everywhere, not only on the summary screen). `retry_of_attempt_id` is also what records that the learner did not leave the superseded row's `transcript` standing — **deliberately with no second `transcript_confirmed` boolean column**, which would encode the same fact twice in two representations that could disagree. A low-confidence, non-`correct` outcome gets `failure_cause: 'misheard'` set server-side, overriding any cause the AI grader supplied — `outcome` itself is untouched and no `PracticeOutcome` enum value was added for this. See [`docs/specs/voice.md`](docs/specs/voice.md) §3, §8 and [`docs/specs/voice-hands-free.md`](docs/specs/voice-hands-free.md) §2-§3.
 - `question_mastery` - One row per `(user, question)` pair once that question first produces a schedulable outcome (E5, epic #54): `state` (`new`/`learning`/`review`/`lapsed`/`mastered`), `due_at`, `interval_days`, `ease`, `correct_streak`, `lapses`, `total_attempts`, `distinct_correct_days` (the column that makes "correct on ≥3 distinct days" enforceable), `last_outcome`, `last_attempt_at`. No row means `new` — never a row that says so. Updated synchronously, inside the same transaction as the `practice_attempts` write that triggers it, by `nextSchedule` (`apps/api/src/practice/mastery/scheduler.ts`); see `docs/specs/memory-model.md` §2-§3
 - `readiness_snapshots` - One row per computed readiness score (E6, epic #55): `score` (0-100, structurally capped at 75 for a learner with none of `english`/`spoken`/`interview` — `spoken`/`interview` sum to 0.20 weight and are 0 with no spoken-answer or mock-interview evidence, and `english`, real since #141/E10, is earnable independently of either, so a `capReason: 'typed_only'` learner can still reach 80 with full `english` credit; `english` deliberately does not itself lift `capReason` — see `docs/specs/readiness-model.md` §2.9), the full `components`/`evidenceCounts` breakdown for all eight components, `cap_reason` (`'typed_only'`/`null`), `top_recommendation`, and the learner's `stage` at computation time, all frozen so a past snapshot stays self-explaining after the mastery rows it summarized move on. `narrative`/`narrative_generated_at` are nullable and filled in lazily, on the caller's own AI key, only from the request path (never the nightly cron). See `docs/specs/readiness-model.md` §4-§5
 - `daily_activity` - One row per `(user, local calendar day)` (E7, epic #56): `activity_date` (`@db.Date`, the learner's LOCAL day, not an instant), `tz_used` (the IANA zone that day was actually computed in, frozen at write time rather than re-derived from the learner's possibly-since-changed profile), `practice_seconds`/`attempts`/`correct`, `goal_met` (monotonic — once true, never flips back for the same row), `freeze_used` (true only when this row exists to record that a streak freeze covered a day with no practice at all). `@@unique([userId, activityDate])` is both the ordinary-accrual upsert key and the freeze-settlement idempotency key. Has no foreign key, relation, or column reachable from `readiness_snapshots` or the readiness engine — not an input to readiness, structurally, never merely by convention; see `docs/ARCHITECTURE.md` §5.6. See `docs/specs/habit-streaks.md` §2-§4
@@ -823,6 +844,7 @@ See [`docs/specs/account-reset.md`](docs/specs/account-reset.md) §11.
 - `mock_interview_turns` - One row per line of an interview's conversation, in order (E8, epic #57): `role` (`officer`/`applicant`), `phase`, `question_id` (set only on a civics officer turn), `attempt_id` (set only on a civics applicant turn — the `practice_attempts` row it produced), and `text`, which is written empty (not null) for an applicant turn when the interview's `transcript_retained` is `false` — the turn's structure survives; the learner's words do not. See `docs/specs/mock-interview.md` §8.2
 - `english_sentences` - The composed reading/writing sentences a learner practises on (E10, epic #59): `kind` (`reading`/`writing`), `version`, `ordinal`, `text`, and `vocab_tags` — the official USCIS vocabulary categories this sentence's own words resolve to, **derived by the loader from the same word-by-word validation pass that enforces the content rule**, never hand-authored, so a tag set cannot drift from the words it describes. The provenance triple (`source_url`, `retrieved_at`, `content_sha256`) does **not** mean what it means on `civics_questions`: USCIS publishes vocabulary LISTS and no sentence list at all, so a sentence here is composed rather than transcribed and its authority is the list it was built from — the triple points at that list's official PDF and the exact bytes retrieved for it. Upserted on `(kind, version, ordinal)`. The sentences file's `composition.status` and each vocabulary file's `provenance.transcription.status` are read by the loader since #261, not merely carried: an untrusted status refuses the whole three-file bundle, and refuses it unconditionally under `NODE_ENV=production`. See `docs/specs/english-test.md` §1 (§1.2 on why the shipped 36 are `HUMAN_VERIFIED` rather than `HUMAN_COMPOSED_AND_REVIEWED`, §1.5 on the gate) and §5
 - `english_attempts` - One row per scored reading or writing attempt (E10, epic #59): `kind`, `response_text` (for writing exactly what the learner typed; for reading the learner-CONFIRMED transcript, never the recogniser's raw guess), `asr_confidence` (reading only, `null` means unknown and never low), `wer`, `diff_ops` (the word-level alignment, so a screen can show *which* word rather than only a number), `outcome` (`EnglishOutcome` — three values, no `skipped`), `replay_count`, `answered_at`. **A low-confidence reading attempt writes no row here at all** — `misheard` is the absence of a record, the one place this codebase diverges from `practice_attempts`, where `misheard` is a `failure_cause` on a row that IS written; `docs/specs/english-test.md` §3 gives the reason. No audio column, no `storage_objects` reference, and never will be. See `docs/specs/english-test.md` §5
+- `speech_audio_assets` - A deployment-wide, content-addressed cache of civics question/answer audio (E12, epic #280, issue #284): `scope` (`civics_question`/`civics_answer`), `ref_id` (a `civics_questions.id` — **no foreign key to it**: this row is a cache entry keyed by content, not a child record, and an FK's `onDelete` behavior would either leak orphaned bytes on `SetNull` or block a legitimate content retirement on `Restrict`), `voice`, `model_id` (the `speak` model bound *at generation time* — part of the key so a later rebind never serves a clip a different model produced), `format`, and `content_sha256` (**the load-bearing part of the key**: a hash of the exact text synthesized, so a corrected dynamic answer resolves to a different row automatically with no invalidation logic to write — the row for the old text simply stops being addressed by anything). `storage_key` points at the bytes behind the `StorageProvider` port directly, never through `storage_objects` and its ownership-scoped service — that table's "no admin bypass" read/write rule is correct for a learner's own upload and wrong for shared civics content every learner must be able to read regardless of who first requested it, and threading a bypass through its shared helper would (per this file's own RBAC section) make it a read-and-write bypass in one edit. `generated_by_user_id` (nullable, `onDelete: SetNull`) is **attribution, not ownership** — it records who paid for the one call that produced the clip, for cost/support questions only; every learner who can already read the underlying civics question may read the cached asset with no ownership check at all, and the row outlives the account that happened to generate it. See [`docs/specs/voice-hands-free.md`](docs/specs/voice-hands-free.md) §4.
 
 ## Access Control: Email Allowlist
 
@@ -923,18 +945,23 @@ Note: `DATABASE_URL` is constructed automatically from these variables at runtim
 4. Add frontend UI if user-facing
 
 A new **user-settings namespace** (a top-level key like `dataTables`,
-`navigation`, `notifications`, or `study`) is narrower than step 1-3 above
-suggests and has its own fixed shape: declare it once in
+`navigation`, `notifications`, `study`, or `voice`) is narrower than step 1-3
+above suggests and has its own fixed shape: declare it once in
 `apps/api/src/common/schemas/user-settings-namespaces.schema.ts`, never with
 a `.default()` (absent must mean "use the built-in default, resolved at
 read time" — see that file's header), and no `.default()` means no
 migration either. `study` (epic #56 / E7 "Habit") — `reminderHour` and
 `reminderEnabled`, read by the hourly `PracticeReminderTask` — is the
 newest worked example, alongside the pre-existing `dataTables` and
-`navigation`. Do not re-derive the list of files a new namespace touches
-here: `docs/specs/habit-streaks.md` §7 names the six explicitly, as a
-checklist rather than a count to take on faith, and that document is the
-one to extend if a seventh namespace ever needs the same walk-through.
+`navigation`. `voice` (E12, epic #280, issue #282) is the next one after
+it — six independent scalar preferences (`autoSubmitSpoken`,
+`preferPremiumVoice`, `preferredVoice`, `speechRate`, `readQuestionsAloud`,
+`readAnswersAloud`) governing how a learner experiences spoken questions and
+answers, on the identical no-`.default()` pattern. Do not re-derive the list
+of files a new namespace touches here: `docs/specs/habit-streaks.md` §7
+names the six explicitly, as a checklist rather than a count to take on
+faith, and that document is the one to extend if a seventh namespace ever
+needs the same walk-through.
 
 ### Using the Clock
 
