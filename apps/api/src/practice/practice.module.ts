@@ -8,6 +8,7 @@ import { SettingsModule } from '../settings/settings.module';
 import { AttemptGradingService } from './attempt-grading.service';
 import { PracticeController } from './practice.controller';
 import { PracticeService } from './practice.service';
+import { PracticeRealtimeService } from './realtime/practice-realtime.service';
 
 /**
  * The practice loop's API surface (issue #73, epic #52 / E3).
@@ -116,6 +117,21 @@ import { PracticeService } from './practice.service';
  * settings to practice, to AI, to readiness or to engagement, so the edge this
  * line adds is a leaf.
  *
+ * `PracticeRealtimeService` (issue #353, epic #345 / E15) is the module's third
+ * provider and the only one that injects `AiDispatchService` DIRECTLY. That is
+ * worth stating rather than leaving to be noticed, because the paragraph above
+ * says neither of this module's services may inject the provider token — and
+ * that rule is unchanged: this service asks the dispatcher to mint a credential
+ * for the `realtime` ROLE and never names a model, a provider or a key, exactly
+ * as `AttemptGradingService` asks for the `grader` role.
+ *
+ * It is NOT exported. Nothing outside this module mints a practice session's
+ * realtime credential, and the day something does, the export should be a
+ * deliberate edit rather than a capability that was already sitting there. It
+ * is also deliberately a separate class from `PracticeService` rather than a
+ * method on it: that class holds no dispatcher at all (see its own header), and
+ * E15 does not change it.
+ *
  * It buys a TONE and never a grade. `grading.ts`'s
  * `GRADING_PERSONA_SCOPE_NOTICE` says so in the prompt, `gradingVerdictSchema`
  * still has exactly three fields, and `AttemptGradingService.resolvePersona`
@@ -132,7 +148,7 @@ import { PracticeService } from './practice.service';
     SettingsModule,
   ],
   controllers: [PracticeController],
-  providers: [AttemptGradingService, PracticeService],
+  providers: [AttemptGradingService, PracticeService, PracticeRealtimeService],
   exports: [AttemptGradingService, PracticeService],
 })
 export class PracticeModule {}
