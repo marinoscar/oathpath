@@ -39,7 +39,8 @@ export class AiUsageController {
     summary: 'Your own recorded AI usage',
     description:
       'Token counts and call counts for **your** account over a window, with breakdowns ' +
-      'by model and by the role each call served.\n\n' +
+      'by model and by the role each call served, plus a `timeline` of day-by-day calls ' +
+      'and tokens (UTC calendar days, zero-filled) for a trend chart.\n\n' +
       '**This is recorded usage, not a bill.** Token counts are not dollars, this ' +
       'application carries no price table, and `callsWithUnknownUsage` counts calls whose ' +
       'consumption was never reported — a call that fails mid-stream records nothing rather ' +
