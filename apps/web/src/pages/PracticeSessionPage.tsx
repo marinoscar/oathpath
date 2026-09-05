@@ -439,13 +439,14 @@ export default function PracticeSessionPage() {
   /**
    * Has this session had a real user gesture yet? (#287)
    *
-   * ARMS THE ANSWER'S AUTOPLAY, and nothing else. Browsers refuse sound until
-   * the document has been interacted with, so `AttemptFeedback` is told whether
-   * one has happened rather than left to guess. It is set in `submitAttempt`
-   * because that funnel is reached from a click or a form submit and from
-   * nowhere else — the gesture that produced the verdict IS the gesture that
-   * permits reading it out. A blocked play is silent either way; this only
-   * keeps the page from asking for sound it knows will be refused.
+   * ARMS THE AUTOPLAY OF BOTH PLAYERS — the question's (#311) and the
+   * answer's. Browsers refuse sound until the document has been interacted
+   * with, so each player is told whether one has happened rather than left to
+   * guess. It is set in `submitAttempt` because that funnel is reached from a
+   * click or a form submit and from nowhere else — the gesture that produced
+   * the verdict IS the gesture that permits reading it out. A blocked play is
+   * silent either way; this only keeps the page from asking for sound it knows
+   * will be refused.
    */
   const [hasUserGesture, setHasUserGesture] = useState(false);
 
@@ -1184,6 +1185,21 @@ export default function PracticeSessionPage() {
                 // recording it as `heard` would put a claim in the evidence
                 // table that never happened.
                 onPlayed={() => setPromptWasHeard(true)}
+                // ONLY FOR A LEARNER WHO ASKED, and only once the document has
+                // had a gesture — the same two halves, in the same order, that
+                // `AttemptFeedback` gates the ANSWER's mount on, because the
+                // browser refuses sound until it has been interacted with
+                // either way. Until #311 this mount passed no `autoPlay` at
+                // all, so `voice.readQuestionsAloud` was a switch on
+                // `/settings/voice` that did nothing and explained nothing.
+                //
+                // QUESTION 1 STILL DOES NOT SPEAK BY ITSELF: `hasUserGesture`
+                // is set in `submitAttempt` and nowhere else, so nothing has
+                // armed it before the first answer. #313 sets it from the
+                // Start/mode tap, which is where question 1 gets its gesture —
+                // and which also removes the mid-question flip today's late
+                // gesture causes.
+                autoPlay={voicePrefs.readQuestionsAloud && hasUserGesture}
               />
             </Box>
 
