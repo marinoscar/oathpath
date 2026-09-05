@@ -186,7 +186,11 @@ function renderSession(options: Options = {}) {
     systemReady: true,
     enabled: true,
     providerConfigured: true,
-    unboundRoles: ['speak'],
+    // `realtime` unbound alongside `speak` (#355, epic #345 / E15): the
+    // ladder in `PracticeSessionPage.tsx` resolves Voice to the LIVE transport
+    // whenever a `realtime` model is bound, and this file is about how the
+    // QUESTION is read aloud on the request/response one.
+    unboundRoles: ['speak', 'realtime'],
   };
 
   server.use(

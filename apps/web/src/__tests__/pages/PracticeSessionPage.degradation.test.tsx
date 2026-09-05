@@ -139,6 +139,13 @@ function renderPage(cell: Cell) {
   const unboundRoles: string[] = [
     ...(cell.transcribeBound ? [] : ['transcribe']),
     ...(cell.speakBound ? [] : ['speak']),
+    // `realtime` PINNED UNBOUND (#355, epic #345 / E15). This file's matrix is
+    // (transcribe x speak x key); the ladder in `PracticeSessionPage.tsx`
+    // resolves Voice to the LIVE transport whenever a `realtime` model is
+    // bound, so leaving it out here would move all eight cells onto a
+    // transport this file is not about. The realtime rungs are covered by
+    // `PracticeSessionPage.realtime.test.tsx`.
+    'realtime',
   ];
 
   const status: AiStatus = {

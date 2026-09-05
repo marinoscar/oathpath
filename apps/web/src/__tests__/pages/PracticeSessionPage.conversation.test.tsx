@@ -488,8 +488,14 @@ function installHandlers(options: Options = {}) {
     // utterance below takes the browser path and this file's fake is the only
     // voice in play. The premium path is `QuestionAudio`'s own business and is
     // covered where it belongs.
+    // `realtime` PINNED UNBOUND (#355, epic #345 / E15): this file exercises
+    // E13's request/response loop, and the ladder in `PracticeSessionPage.tsx`
+    // resolves Voice to the LIVE transport whenever a `realtime` model is
+    // bound. The realtime rungs are `PracticeSessionPage.realtime.test.tsx`'s.
     unboundRoles:
-      options.transcribeBound === false ? ['transcribe', 'speak'] : ['speak'],
+      options.transcribeBound === false
+        ? ['transcribe', 'speak', 'realtime']
+        : ['speak', 'realtime'],
   };
 
   server.use(

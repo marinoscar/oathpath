@@ -332,7 +332,14 @@ function renderSession(options: Options = {}) {
     systemReady: true,
     enabled: true,
     providerConfigured: true,
-    unboundRoles: options.transcribeBound === false ? ['transcribe'] : [],
+    // `realtime` PINNED UNBOUND (#355, epic #345 / E15): this file is about
+    // E9/E12's per-question spoken flow, and the ladder in
+    // `PracticeSessionPage.tsx` resolves Voice to the LIVE transport whenever a
+    // `realtime` model is bound. See `PracticeSessionPage.realtime.test.tsx`.
+    unboundRoles:
+      options.transcribeBound === false
+        ? ['transcribe', 'realtime']
+        : ['realtime'],
   };
 
   let statusReads = 0;
@@ -372,7 +379,7 @@ function renderSession(options: Options = {}) {
       statusReads += 1;
       if (options.unbindTranscribeOnRefresh && statusReads > 1) {
         return HttpResponse.json({
-          data: { ...status, unboundRoles: ['transcribe'] },
+          data: { ...status, unboundRoles: ['transcribe', 'realtime'] },
         });
       }
       return HttpResponse.json({ data: status });
