@@ -1,5 +1,5 @@
 /**
- * The seven `user_settings.voice` controls, and the voice picker.
+ * The eight `user_settings.voice` controls, and the voice picker.
  *
  * Issue #288, epic #280. Rendered by `pages/VoiceSettingsPage.tsx` inside the
  * shared `UserSettingsSection` chrome — the same split
@@ -83,6 +83,7 @@ import {
   DEFAULT_VOICE_PREFER_PREMIUM,
   DEFAULT_VOICE_READ_ANSWERS_ALOUD,
   DEFAULT_VOICE_READ_QUESTIONS_ALOUD,
+  DEFAULT_VOICE_SOUND_CUES,
   DEFAULT_VOICE_SPEECH_RATE,
   VOICE_SPEECH_RATE_MAX,
   VOICE_SPEECH_RATE_MIN,
@@ -187,6 +188,7 @@ export function VoiceSettings({
   const idPrefix = useId();
   const autoSubmitHelpId = `${idPrefix}-auto-submit-help`;
   const conversationHelpId = `${idPrefix}-conversation-help`;
+  const soundCuesHelpId = `${idPrefix}-sound-cues-help`;
   const readQuestionsHelpId = `${idPrefix}-read-questions-help`;
   const readAnswersHelpId = `${idPrefix}-read-answers-help`;
   const premiumHelpId = `${idPrefix}-premium-help`;
@@ -410,6 +412,50 @@ export function VoiceSettings({
               Practice starts on Voice instead of Text, so you can put the phone
               down and answer out loud. You can switch back to typing at any
               moment, and nothing you have already answered is lost.
+            </Typography>
+          </Box>
+
+          {/* SOUND CUES (#357, epic #345).
+
+              IN THIS CARD for the same reason `conversationMode` is: it
+              answers the same question its two neighbours do — what happens
+              when you answer out loud. The cues exist only inside the
+              hands-free loop, so a learner who never turns that on never hears
+              one, and a settings destination of their own would be a page
+              about three tones.
+
+              `writeFor` like every other control here, so turning them back on
+              sends the null-delete rather than pinning this learner to today's
+              `true`. See rule C in the file header. */}
+          <Box sx={{ mt: 2 }}>
+            <FormControlLabel
+              disabled={isSaving}
+              label="Play sounds while I practise hands-free"
+              control={
+                <Switch
+                  checked={resolved.soundCues}
+                  onChange={(_event, next) =>
+                    onChange({
+                      soundCues: writeFor(next, DEFAULT_VOICE_SOUND_CUES),
+                    })
+                  }
+                  // `slotProps.input` for the same reason as its neighbours
+                  // above: MUI forwards unknown props to the ROOT span, leaving
+                  // the element that carries `role="switch"` undescribed.
+                  slotProps={{ input: { 'aria-describedby': soundCuesHelpId } }}
+                />
+              }
+            />
+            <Typography
+              id={soundCuesHelpId}
+              variant="body2"
+              color="text.secondary"
+              sx={{ maxWidth: '62ch' }}
+            >
+              Short tones mark when the microphone opens, while we are working
+              out your answer, and when a session ends, so you can keep the
+              phone in your pocket. Turn them off for a quiet room — questions
+              and answers are still read aloud either way.
             </Typography>
           </Box>
         </CardContent>

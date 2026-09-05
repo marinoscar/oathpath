@@ -259,19 +259,21 @@ export type StudyPatchValue = z.infer<typeof studyPatchSchema>;
 // User Settings Namespace: `voice` (issue #282, epic #280 "Spoken Civics Audio")
 // =============================================================================
 //
-// Seven independent scalar preferences, all about how a learner experiences
+// Eight independent scalar preferences, all about how a learner experiences
 // SPOKEN questions and answers — whether a spoken answer grades itself the
 // instant they release the mic, whether they hear the premium synthesized
 // voice or the browser's own free one, which provider voice they hear if the
 // premium path is available, how fast it speaks, whether either side of
-// a civics card plays itself automatically, and (`conversationMode`, issue
+// a civics card plays itself automatically, (`conversationMode`, issue
 // #307, epic #304 "Conversation mode") whether a practice session starts in
-// hands-free Voice mode rather than the typed one. None of the seven governs
-// whether audio is CACHED (`speech_audio_assets`, issue #282's other half) —
-// this namespace is entirely about local playback and input behaviour a
-// learner controls for themselves.
+// hands-free Voice mode rather than the typed one, and (`soundCues`, issue
+// #357, epic #345) whether the hands-free loop's short tones sound at all.
+// None of the eight governs whether audio is CACHED
+// (`speech_audio_assets`, issue #282's other half) — this namespace is
+// entirely about local playback and input behaviour a learner controls for
+// themselves.
 //
-// SAME SHAPE AS `study`, SAME MERGE STRATEGY. Seven independently-optional
+// SAME SHAPE AS `study`, SAME MERGE STRATEGY. Eight independently-optional
 // scalar fields with no nested map to deep-merge — `mergeNavigation` and
 // `mergeStudy` already establish the field-wise pattern this namespace
 // reuses (see `user-settings.service.ts`), never `mergeDataTables`'
@@ -363,6 +365,27 @@ export const DEFAULT_VOICE_READ_ANSWERS_ALOUD = false;
 export const DEFAULT_VOICE_CONVERSATION_MODE = false;
 
 /**
+ * Whether the conversation loop's short tones — the cues that tell a learner
+ * who is not looking at the screen what the app is doing — sound at all
+ * (issue #357, epic #345 "Hands-free practice").
+ *
+ * `true`, unlike its two opt-in neighbours above, because the cues exist to
+ * cover spans in which the app is deliberately silent for several seconds at a
+ * time: a transcription round trip, an AI grader call, a permission prompt
+ * that has not been answered. Hands-free, an uncued wait and a crashed session
+ * are the same experience, so defaulting these off would ship the mode with
+ * its failure-vs-waiting signal turned off for everybody who never opens
+ * settings.
+ *
+ * It is a preference at all because the opposite case is just as real: a
+ * learner practising in a quiet room, in company, or on headphones at night
+ * should be able to keep the spoken questions and lose the tones without
+ * silencing the whole application. Turning it off is total — with cues off the
+ * browser is not asked to build an oscillator at all, let alone a silent one.
+ */
+export const DEFAULT_VOICE_SOUND_CUES = true;
+
+/**
  * Shape bound for a provider voice id, e.g. `alloy`.
  *
  * SHAPE VALIDATED, MEMBERSHIP NOT — the same rule
@@ -402,6 +425,7 @@ export const voiceSchema = z
     readQuestionsAloud: z.boolean().optional(),
     readAnswersAloud: z.boolean().optional(),
     conversationMode: z.boolean().optional(),
+    soundCues: z.boolean().optional(),
   })
   .strict();
 
@@ -432,6 +456,7 @@ export const voicePatchSchema = z
     readQuestionsAloud: z.boolean().nullable().optional(),
     readAnswersAloud: z.boolean().nullable().optional(),
     conversationMode: z.boolean().nullable().optional(),
+    soundCues: z.boolean().nullable().optional(),
   })
   .strict();
 
