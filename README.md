@@ -8,6 +8,7 @@ OathPath is an AI-powered citizenship preparation companion that helps users stu
 - **Voice practice, always optional** — hear a question read aloud and answer it out loud instead of typing; the transcript is shown for you to confirm or correct before anything is graded, and the recording itself is never kept. See [Practicing With Your Voice](docs/spoken-practice.md).
 - **Reading and writing practice** — one composed sentence read aloud and scored word by word, one sentence dictated and typed back with the text deliberately withheld until after you submit. Near-misses pass, a diff shows which word, and a mishearing is never recorded as a mistake. See [Practicing Reading and Writing](docs/reading-writing-practice.md).
 - **Realistic AI mock interviews** — a simulated naturalization interview with a debrief afterward, typed on every installation and, where an administrator has configured it, spoken as a live, interruptible conversation. See [Practicing a Spoken Mock Interview](docs/spoken-mock-interview.md).
+- **A coach whose voice you choose** — supportive, academic, playful, or blunt, on both explanations and the short reaction after an answer; the voice never changes your score or what counts as correct. See [Choosing Your Coach](docs/choosing-your-coach.md).
 - **Explainable, capped readiness tracking** — a readiness score that shows its own components and never claims more confidence than the evidence behind it supports.
 - **Daily goals and streaks** — habit support that never influences the readiness score itself.
 
@@ -21,6 +22,7 @@ OathPath is an AI-powered citizenship preparation companion that helps users stu
 - [Practicing With Your Voice](docs/spoken-practice.md) — what spoken practice does, and what happens to your voice.
 - [Practicing Reading and Writing](docs/reading-writing-practice.md) — what the reading and writing segments test, and why the writing sentence is hidden until after you submit.
 - [Practicing a Spoken Mock Interview](docs/spoken-mock-interview.md) — what a live, spoken mock interview is, why OathPath (not the AI) chooses the questions and the result, and what happens to your voice.
+- [Choosing Your Coach](docs/choosing-your-coach.md) — the four coach voices, why the blunt one is still never personal, and why none of them can change your score.
 - [Runbook: Configuring voice](docs/runbooks/configuring-voice.md) — for an administrator deciding whether to bind the `transcribe`/`speak` AI roles, including what reading/writing practice needs (nothing new).
 - [Runbook: Configuring the spoken mock interview](docs/runbooks/configuring-realtime-interview.md) — for an administrator deciding whether to bind the `realtime` AI role, its cost, the ephemeral-secret security boundary, and the nginx headers a custom reverse proxy must reproduce.
 - [Runbook: Updating civics content](docs/runbooks/updating-civics-content.md) — for a maintainer correcting a civics answer or revising the question bank.

@@ -189,6 +189,44 @@ export type CoachSettingsPatch = {
   [K in keyof CoachSettings]?: CoachSettings[K] | null;
 };
 
+/**
+ * One persona as `GET /api/ai/coach/personas` serves it (#320, epic #305).
+ *
+ * FOUR FIELDS, NEVER FIVE. Each registry entry server-side also carries a
+ * `promptFragment` — the paragraph appended to a grader's or a tutor's system
+ * message — and it is never on the wire. Neither is the reaction bank:
+ * selection from it is deterministic and happens on the server, so a client
+ * holding it could pick its own line, which is precisely the "two reactions
+ * to one event" defect that determinism exists to prevent.
+ *
+ * THE WEB DECLARES NO PERSONA LIST OF ITS OWN. The registry lives in the API
+ * and is read over this endpoint — the same rule `ai-model-roles.ts` states
+ * for the model-role registry, for the same reason: a duplicate in
+ * `config/` with a test asserting the two agree is detection rather than
+ * prevention.
+ */
+export interface CoachPersonaOption {
+  /** The value to store in `coach.persona`. Persisted, and therefore stable. */
+  key: CoachPersona;
+  /** The name on the card. */
+  label: string;
+  /** What choosing it changes, in the learner's terms. */
+  description: string;
+  /**
+   * One line in that voice, so a learner can read what they are picking.
+   *
+   * Reading it costs nothing and it is always visible. HEARING it costs one
+   * synthesis on the learner's own key, which is why that is a button and
+   * never something focus or hover triggers.
+   */
+  sampleLine: string;
+}
+
+/** The body of `GET /api/ai/coach/personas`. */
+export interface CoachPersonasResponse {
+  personas: CoachPersonaOption[];
+}
+
 // =============================================================================
 // Notifications — the registry (#124) and the stored preferences (#126, epic #109)
 // =============================================================================
@@ -2072,6 +2110,31 @@ export interface PracticeAttempt {
 
   answeredAt: string;
   answerSnapshot: PracticeAnswerSnapshot;
+
+  // ---------------------------------------------------------------------------
+  // The coach's voice (#320, epic #305 "The Coach's personality")
+  // ---------------------------------------------------------------------------
+
+  /**
+   * One short line in the learner's chosen coach voice, about what just
+   * happened — or null when they have turned reactions off.
+   *
+   * PRESENT ON EVERY ATTEMPT, INCLUDING `gradingMethod: 'exact'`, and that is
+   * the whole point of it. Every other coaching field on this row is null on a
+   * deterministically graded attempt, because no grader ran — which is correct,
+   * and which left the common case saying nothing beyond the verdict.
+   *
+   * COMPUTED SERVER-SIDE AT READ TIME AND NEVER PERSISTED. There is no column
+   * behind it. It is selected by a pure function seeded by this attempt's own
+   * id, so the same attempt carries the same line on the immediate response
+   * and on every later re-read — which is what lets the live screen and the
+   * summary review agree without anything being stored to make them.
+   *
+   * IT NEVER CARRIES A FACT. The verdict, the accepted answers and the failure
+   * cause are the fields above. A reaction states no answer and changes no
+   * judgement; render it beside the verdict, never in place of one.
+   */
+  coachReaction: { text: string; persona: CoachPersona } | null;
 }
 
 /**

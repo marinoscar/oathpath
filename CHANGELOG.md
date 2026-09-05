@@ -84,6 +84,32 @@ calibration copes with a real windy street, exactly as
 acceptance journeys E10 and E12 each added to `tests/e2e/specs/*.spec.ts`,
 no Playwright journey spec exercises the hands-free loop.
 
+- **A coach whose voice a learner chooses (E14, epic #305).** Four
+  personas — `supportive` (the default; exactly today's voice, unchanged
+  for anyone who never opens the setting), `academic`, `playful`, and
+  `unfiltered` (opt-in only, never suggested) — colour the grader's
+  feedback, the tutor's civics explanation, and a new short reaction line
+  shown after most practice attempts. `GET /api/ai/coach/personas` lists
+  the four voices; `coach.persona` and `coach.reactions` (Settings →
+  Coach) are the new user-settings fields. No persona ever changes a
+  verdict, an accepted answer, or a readiness figure — a seven-rule
+  invariant floor, unchanged across all four voices, forbids commenting on
+  a learner's English, their origin or status, or their odds of becoming a
+  citizen, on every persona including `unfiltered`. See
+  [`docs/specs/coach-personality.md`](docs/specs/coach-personality.md) and
+  [Choosing Your Coach](docs/choosing-your-coach.md).
+
+  **On the reaction bank's content review, stated plainly rather than
+  implied:** every line in `apps/api/src/ai/coach/reaction-lines.ts`,
+  `unfiltered`'s included, was written and read against the invariant floor
+  by Claude (Anthropic's coding agent), working at the repository owner's
+  direction and under his standing authorization to merge without his own
+  review — not by an independent human reviewer. An automated banned-topic
+  lint runs over every shipped line as part of the test suite and fails
+  the build on a match; that check is real and enforced today. A human
+  read of the bank — `unfiltered`'s lines specifically — has not happened
+  and is recommended before this feature reaches a public release.
+
 ### Changed
 
 - **Rebranded to OathPath.** The application, its CLI, its database and its
