@@ -8,10 +8,20 @@ import {
 import { Prisma } from '@prisma/client';
 
 import { type DynamicScope } from '../civics/answer-resolution';
+import {
+  coachCorrectRunLengths,
+  coachEventForAttempt,
+} from '../ai/coach/attempt-event';
+import { resolveCoachPersona, type CoachPersonaDef } from '../ai/coach/personas';
+import { reactionLine } from '../ai/coach/select-line';
+import { coachEventForSessionSummary } from '../ai/coach/session-event';
+import type { CoachReactionResponse } from '../ai/dto/coach-reaction.dto';
 import { Clock } from '../common/clock/clock';
+import { DEFAULT_COACH_REACTIONS } from '../common/schemas/user-settings-namespaces.schema';
 import { PrismaService } from '../prisma/prisma.service';
 import { EngagementService } from '../engagement/engagement.service';
 import { ReadinessService } from '../readiness/readiness.service';
+import { UserSettingsService } from '../settings/user-settings/user-settings.service';
 import { AttemptGradingService } from './attempt-grading.service';
 import { excludeUnanswerable } from './question-selection';
 import { type GradingVerdict } from './grading';
@@ -176,7 +186,82 @@ export class PracticeService {
     // `recordAttempt` and `completeSession`, after each one's own write
     // commits, and never allowed to fail either; see {@link accrueActivity}.
     private readonly engagement: EngagementService,
+    // ONE READ, TWO FIELDS (issue #320, epic #305 / E14): the learner's own
+    // `coach.persona` and `coach.reactions`, which decide the VOICE of the
+    // reaction line attached to every attempt and completed session this
+    // service returns — and nothing else. Not the outcome, not the grade, not
+    // the schedule.
+    //
+    // The namespace's own service rather than a cast of the JSONB column here,
+    // for the reason `readCoachPreferences`'s own comment gives and
+    // `AttemptGradingService` already follows: the sparse-namespace contract
+    // (absent means "use the built-in default", never "off") belongs to that
+    // service, and a second reader of the column is the first place it can be
+    // interpreted differently.
+    //
+    // `SettingsModule` is already imported by this module for exactly this
+    // service (#319) — see `practice.module.ts`'s own note on why that edge is
+    // a leaf and cannot cycle.
+    private readonly userSettings: UserSettingsService,
   ) {}
+
+  // ---------------------------------------------------------------------------
+  // The coach's voice (issue #320, epic #305 / E14)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * The learner's resolved persona and whether they want reactions at all.
+   *
+   * ---------------------------------------------------------------------------
+   * A FAILED SETTINGS READ DEGRADES. IT NEVER FAILS THE ATTEMPT.
+   * ---------------------------------------------------------------------------
+   *
+   * Identical in shape and in reasoning to `AttemptGradingService.resolvePersona`
+   * one layer down: a preference must never be able to cost a learner their
+   * answer. An attempt that was graded, recorded, scheduled and accrued is not
+   * going to become a 500 because a JSONB read hiccuped on the way to choosing
+   * which of four sentences to say about it — the default voice with reactions
+   * on is a complete, correct experience, and it is what every learner who has
+   * never opened the settings page gets anyway.
+   *
+   * LOGGED AT DEBUG, for the reason that method's own comment gives: a
+   * deployment where this fails has a database problem that is announcing
+   * itself far more loudly elsewhere, and a warning per answered question
+   * trains whoever reads these logs to ignore them.
+   *
+   * `readCoachPreferences` and never `getSettings`, which CREATES a row on a
+   * miss — a `user_settings` row written because somebody answered a civics
+   * question is a write nobody asked for, on the product's hottest path.
+   */
+  private async resolveCoachContext(userId: string): Promise<CoachContext> {
+    try {
+      const coach = await this.userSettings.readCoachPreferences(userId);
+
+      return {
+        // `resolveCoachPersona` owns "absent means supportive" for the whole
+        // codebase — an absent namespace, an absent field, and a key written
+        // by a newer build all resolve there rather than at call sites that
+        // could each answer it differently.
+        persona: resolveCoachPersona(coach?.persona),
+        // `?? DEFAULT_COACH_REACTIONS` and not `!== false`: the default lives
+        // in the schema file beside the namespace that declares it, so a later
+        // decision to default reactions off reaches every learner who never
+        // chose, from one edit.
+        reactions: coach?.reactions ?? DEFAULT_COACH_REACTIONS,
+      };
+    } catch (err) {
+      this.logger.debug(
+        `Could not read coach preferences for user ${userId}; reacting in the default voice (${
+          err instanceof Error ? err.message : 'unknown error'
+        })`,
+      );
+
+      return {
+        persona: resolveCoachPersona(undefined),
+        reactions: DEFAULT_COACH_REACTIONS,
+      };
+    }
+  }
 
   // ---------------------------------------------------------------------------
   // Sessions
@@ -288,8 +373,15 @@ export class PracticeService {
       'Practice session started',
     );
 
+    // A session that has just opened has no summary and therefore no
+    // completion reaction, but the context is still resolved: `toSessionResponse`
+    // takes it unconditionally rather than being given a nullable one, so there
+    // is no call site where "we did not look" and "reactions are off" could be
+    // confused for each other.
+    const coach = await this.resolveCoachContext(userId);
+
     return {
-      session: toSessionResponse(session),
+      session: toSessionResponse(session, coach),
       nextQuestion: toQuestion(ordered[0]),
       progress: { answered: 0, planned: session.plannedCount },
     };
@@ -334,9 +426,13 @@ export class PracticeService {
       this.prisma.practiceSession.count({ where: { userId } }),
     ]);
 
+    // ONE READ FOR THE WHOLE PAGE, not one per row. Up to 100 sessions map
+    // through the same two values.
+    const coach = await this.resolveCoachContext(userId);
+
     return {
       items: rows.map((row: any) => ({
-        ...toSessionResponse(row),
+        ...toSessionResponse(row, coach),
         answeredCount: row.attempts.length,
         correctCount: row.attempts.filter(
           (attempt: { outcome: string }) => attempt.outcome === 'correct',
@@ -407,9 +503,22 @@ export class PracticeService {
       answeredQuestionIds,
     );
 
+    const coach = await this.resolveCoachContext(userId);
+
+    // THE RUN, COMPUTED OVER THE SAME ROWS `dropSuperseded` JUST COUNTED
+    // (issue #320, epic #305 / E14). This is the re-read path, so it is where
+    // the determinism guarantee is actually observable: an attempt that read
+    // `answer.correct_run` live must read `answer.correct_run` here too, and it
+    // does because both sides run the same pure function over the same
+    // supersession rule. A run computed over the raw rows would count a
+    // superseded mishearing and could disagree with the live screen by one.
+    const runLengths = coachCorrectRunLengths(dropSuperseded(attempts));
+
     return {
-      session: toSessionResponse(session),
-      attempts: attempts.map((attempt: any) => toAttemptResponse(attempt)),
+      session: toSessionResponse(session, coach),
+      attempts: attempts.map((attempt: any) =>
+        toAttemptResponse(attempt, coach, runLengths.get(attempt.id) ?? 0),
+      ),
       nextQuestion,
       progress: { answered, planned: session.plannedCount },
     };
@@ -447,7 +556,11 @@ export class PracticeService {
     const session = await this.requireSession(userId, sessionId);
 
     if (session.status === 'completed') {
-      return toSessionResponse(session);
+      // The idempotent path. The stored summary is returned unchanged — and so
+      // is the reaction derived from it, because both are functions of the same
+      // frozen numbers and the same session id. A double-tap on "finish" cannot
+      // produce a second, different line.
+      return toSessionResponse(session, await this.resolveCoachContext(userId));
     }
 
     if (session.status !== 'in_progress') {
@@ -527,7 +640,7 @@ export class PracticeService {
       }),
     );
 
-    return toSessionResponse(completed);
+    return toSessionResponse(completed, await this.resolveCoachContext(userId));
   }
 
   // ---------------------------------------------------------------------------
@@ -946,10 +1059,23 @@ export class PracticeService {
 
     const sessionAttempts = await this.prisma.practiceAttempt.findMany({
       where: { sessionId: session.id, userId },
+      // ORDERED, since #320. `dropSuperseded` and the question-id set below do
+      // not care, but `coachCorrectRunLengths` does: a run is "consecutive",
+      // which is a claim about the order the learner answered in, and the same
+      // order `getSession` reads them back in — that agreement is what makes
+      // the live line and the re-read line the same line.
+      orderBy: [{ answeredAt: 'asc' }, { id: 'asc' }],
       // `id` and `retryOfAttemptId` are read for `dropSuperseded` below, not
       // for display — see that function, and `getSession`/`completeSession`,
-      // which count the same rows the same way.
-      select: { id: true, questionId: true, retryOfAttemptId: true },
+      // which count the same rows the same way. `outcome` is read only by the
+      // run computation; it is NOT a second source of truth for the verdict,
+      // which lives on the row this method already created.
+      select: {
+        id: true,
+        questionId: true,
+        retryOfAttemptId: true,
+        outcome: true,
+      },
     });
 
     // EVERY attempted question, superseded ones INCLUDED. This set is what
@@ -968,8 +1094,18 @@ export class PracticeService {
     // disagree.
     const answered = dropSuperseded(sessionAttempts).length;
 
+    const coach = await this.resolveCoachContext(userId);
+
+    // The run this attempt is the newest of, counted over the session's
+    // non-superseded attempts in answered order — the SAME rows and the SAME
+    // pure function `getSession` uses, which is the whole reason this number is
+    // computed from the rows rather than from a counter kept in this method.
+    const correctRunLength =
+      coachCorrectRunLengths(dropSuperseded(sessionAttempts)).get(attempt.id) ??
+      0;
+
     return {
-      attempt: toAttemptResponse(attempt),
+      attempt: toAttemptResponse(attempt, coach, correctRunLength),
       // Earned: the attempt is recorded, so showing what was accepted is
       // feedback rather than a hint. The same list that was just frozen into
       // the snapshot, so the screen and the permanent record cannot disagree.
@@ -1041,7 +1177,10 @@ export class PracticeService {
     if (attempt.outcome === 'correct') {
       if (attempt.gradingMethod === 'self') {
         // Already exactly what this call asks for. Return it unchanged.
-        return toAttemptResponse(attempt);
+        return toAttemptResponse(
+          attempt,
+          await this.resolveCoachContext(userId),
+        );
       }
 
       throw new BadRequestException(
@@ -1098,7 +1237,13 @@ export class PracticeService {
       'Practice attempt self-marked correct',
     );
 
-    return toAttemptResponse(updated);
+    // NO RUN IS COMPUTED FOR A SELF-MARK, and passing 0 is not a shortcut.
+    // `coachEventForAttempt` resolves a `gradingMethod: 'self'` attempt to
+    // `answer.self_marked` before it ever looks at the outcome or the run, so
+    // there is no number this call site could pass that would change the line.
+    // Querying the session's attempts to compute one would be a query whose
+    // result is discarded by construction.
+    return toAttemptResponse(updated, await this.resolveCoachContext(userId));
   }
 
   // ---------------------------------------------------------------------------
@@ -1574,8 +1719,59 @@ function toQuestion(question: QuestionRow): PracticeQuestion {
   };
 }
 
-/** `practice_sessions` row → wire shape. */
-function toSessionResponse(session: any): PracticeSessionResponse {
+/**
+ * The learner's coach settings, resolved once per request and threaded into
+ * the mappers (issue #320, epic #305 / E14).
+ *
+ * PASSED IN RATHER THAN READ INSIDE THE MAPPERS, and that is deliberate: the
+ * mappers are plain functions over a row, and a mapper that could reach a
+ * database is a mapper that can issue one query per attempt while rendering a
+ * session's twenty of them. One read per request, at the top; every line
+ * derived from the same two values.
+ */
+interface CoachContext {
+  readonly persona: CoachPersonaDef;
+  readonly reactions: boolean;
+}
+
+/**
+ * One reaction line, or null when the learner has turned reactions off.
+ *
+ * The single place `coach.reactions === false` becomes `null` on the wire.
+ * Null rather than an empty string, and not simply omitting the field: a
+ * client branches on `null` and renders nothing, where an empty string is a
+ * line it might reserve space for. See `ai/dto/coach-reaction.dto.ts`.
+ *
+ * Nothing here is stored. `reactionLine` is pure and deterministic in `seed`,
+ * so the same row produces the same text on every read without a column to
+ * hold it — `docs/specs/coach-personality.md` §7 and §9.
+ */
+function toCoachReaction(
+  coach: CoachContext,
+  event: string,
+  seed: string,
+): CoachReactionResponse | null {
+  if (!coach.reactions) return null;
+
+  return {
+    text: reactionLine(coach.persona.key, event, seed),
+    persona: coach.persona.key,
+  };
+}
+
+/**
+ * `practice_sessions` row → wire shape.
+ *
+ * `coach` is threaded through for the session's own completion reaction, which
+ * exists only once there is a summary to derive it from — see the field's own
+ * comment in `dto/practice-session.dto.ts`.
+ */
+function toSessionResponse(
+  session: any,
+  coach: CoachContext,
+): PracticeSessionResponse {
+  const summary = (session.summary as PracticeSessionSummary | null) ?? null;
+
   return {
     id: session.id,
     kind: session.kind,
@@ -1588,12 +1784,37 @@ function toSessionResponse(session: any): PracticeSessionResponse {
     // Null while `in_progress` — there is nothing to summarise yet, and an
     // empty object standing in for "no summary" would be indistinguishable from
     // a genuinely empty completed session (§2.1).
-    summary: (session.summary as PracticeSessionSummary | null) ?? null,
+    summary,
+    // COMPUTED HERE, FROM THE SUMMARY, ON EVERY READ — never written into the
+    // stored `summary` JSON. No summary means no reaction: the three
+    // `session.complete_*` events are a pure function of `correct`/`answered`,
+    // so an `in_progress` session has nothing to react to yet.
+    //
+    // Seeded by the SESSION id, so the response to `POST .../complete` and
+    // every later read of that session say the same thing.
+    coachReaction:
+      summary === null
+        ? null
+        : toCoachReaction(
+            coach,
+            coachEventForSessionSummary(summary),
+            session.id,
+          ),
   };
 }
 
-/** `practice_attempts` row (with its question) → wire shape. */
-function toAttemptResponse(attempt: any): PracticeAttemptResponse {
+/**
+ * `practice_attempts` row (with its question) → wire shape.
+ *
+ * `correctRunLength` is supplied by the CALLER because only the caller holds
+ * the session's other attempts — see `coachCorrectRunLengths`. A caller with
+ * no run to offer (a self-mark, whose event never reads it) passes 0.
+ */
+function toAttemptResponse(
+  attempt: any,
+  coach: CoachContext,
+  correctRunLength = 0,
+): PracticeAttemptResponse {
   return {
     id: attempt.id,
     sessionId: attempt.sessionId,
@@ -1634,6 +1855,24 @@ function toAttemptResponse(attempt: any): PracticeAttemptResponse {
     // whatever `civics_answers` says today — that is the entire point of the
     // column (§6).
     answerSnapshot: attempt.answerSnapshot as PracticeAnswerSnapshot,
+    // THE ONE DERIVED FIELD ON THIS ROW, and the only one that is not stored
+    // anywhere (issue #320, epic #305 / E14). Every other field above is read
+    // off the row; this one is computed from three of them plus the learner's
+    // persona, on every read, seeded by the row's own id so the live screen and
+    // the summary re-read agree — `docs/specs/coach-personality.md` §7 and §9.
+    coachReaction: toCoachReaction(
+      coach,
+      coachEventForAttempt({
+        outcome: attempt.outcome,
+        gradingMethod: attempt.gradingMethod,
+        // `?? null` for the same reason the wire field above carries it: a row
+        // selected without the column must read as "no grader ran", not
+        // `undefined`.
+        failureCause: attempt.failureCause ?? null,
+        correctRunLength,
+      }),
+      attempt.id,
+    ),
   };
 }
 

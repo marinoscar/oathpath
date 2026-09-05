@@ -10,6 +10,7 @@ import { AiSettingsService } from './ai-settings.service';
 import { AiConnectionTestService } from './ai-connection-test.service';
 import { AiDispatchService } from './ai-dispatch.service';
 import { AiUserKeyController } from './ai-user-key.controller';
+import { CoachController } from './coach/coach.controller';
 import { AiUserKeyService } from './ai-user-key.service';
 import { AiStatusService } from './ai-status.service';
 import { AiUsageController } from './ai-usage.controller';
@@ -153,6 +154,19 @@ export function resolveAiProvider(
     // history is a controller where a future "usage for user X" route looks
     // like it belongs.
     AiUsageController,
+    // The coach persona registry's read surface (#320, epic #305 / E14).
+    //
+    // Registered here, with the other two `@Auth()`-no-permissions controllers
+    // under `/api/ai`, and separate from both for the reason the note above
+    // gives: one file, one gate, so a route added to the wrong one is a
+    // visibly wrong file. This one is the narrowest in the module — it injects
+    // NOTHING and returns a projection of `coach/personas.ts`, a constant.
+    //
+    // It needs no provider registered below because there is no service: the
+    // registry is pure data by design (`personas.ts`'s own header: "This file
+    // is intentionally NOT a Nest provider"), and standing up DI for a
+    // constant is what that header declines to do.
+    CoachController,
     // `AiSpeechController` USED TO BE REGISTERED HERE (#95, epic #58) and now
     // is not — it moved to `SpeechAudioModule` in #284, and only its
     // REGISTRATION moved; the file is still `ai/ai-speech.controller.ts` and

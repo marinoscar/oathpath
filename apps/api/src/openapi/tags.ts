@@ -117,6 +117,17 @@ export const TAG_GROUPS: OpenApiTagGroup[] = [
           'can read another user\'s key through this API.',
       },
       {
+        name: 'Coach',
+        description:
+          'The four voices a learner can ask their study companion to speak in — the list ' +
+          '`/settings/coach` renders. Read-only, and identical for every caller: it is ' +
+          'product copy, not configuration. No permission gates it, because choosing how the ' +
+          'application talks to you is not a privilege, and every route here **takes no user ' +
+          'id**. The prompt text each persona appends to an AI system message, and the ' +
+          'curated reaction bank the lines are drawn from, are server-side only and are ' +
+          'never returned.',
+      },
+      {
         name: 'Account',
         description:
           "The \"Danger zone\": a preview of what a reset would touch, and the reset " +
