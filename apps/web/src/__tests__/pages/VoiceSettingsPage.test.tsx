@@ -370,6 +370,40 @@ describe('VoiceSettingsPage (#288)', () => {
     expect(stored.voice).toBeUndefined();
   });
 
+  it('round-trips `soundCues` and sends the NULL-DELETE at its default (#357)', async () => {
+    const user = userEvent.setup();
+    // The one control on this page whose default is ON, so the first click is
+    // an opt-OUT — the direction that has to store something, and the direction
+    // whose null-delete is the second click rather than the first.
+    const first = renderPage();
+
+    const cues = await screen.findByLabelText(
+      'Play sounds while I practise hands-free',
+    );
+    expect(cues).toBeChecked();
+
+    await user.click(cues);
+
+    await waitFor(() => expect(patchBodies).toHaveLength(1));
+    expect(patchBodies[0]).toEqual({ voice: { soundCues: false } });
+    expect(stored.voice).toEqual({ soundCues: false });
+
+    // Read back from the server's own answer, and it survives a fresh mount —
+    // which is what makes a quiet room stay quiet on the next session.
+    first.unmount();
+    renderPage();
+    const reloaded = await screen.findByLabelText(
+      'Play sounds while I practise hands-free',
+    );
+    expect(reloaded).not.toBeChecked();
+
+    // …and turning them back on is a DELETE, never a stored `true`.
+    await user.click(reloaded);
+    await waitFor(() => expect(patchBodies).toHaveLength(2));
+    expect(patchBodies[1]).toEqual({ voice: { soundCues: null } });
+    expect(stored.voice).toBeUndefined();
+  });
+
   it('stores a chosen voice, and deletes the field when the standard voice is chosen again', async () => {
     const user = userEvent.setup();
     renderPage();
