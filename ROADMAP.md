@@ -87,14 +87,17 @@ a v2.
 | E10 | Reading and writing tests | Vocabulary-sourced sentences, word-error-rate reading scoring, dictated writing scoring, the readiness `english` component | E9 | done<sup>**</sup> | [#59](https://github.com/marinoscar/oathpath/issues/59) |
 | E11 | Realtime voice interview | `realtime` wired, ephemeral session tokens, the E8 engine driving a realtime model over tool calls — closes Milestone B and the MVP | #25, E8, E9, E10 | done<sup>††</sup> | [#60](https://github.com/marinoscar/oathpath/issues/60) |
 | E12 | Hands-free voice practice | Auto-submit replaces confirm-before-grade as the default (with a zero-cost correction via `recomputeMasteryForQuestion`), a shared content-addressed cache for civics question/answer audio, and a learner-chosen premium voice | E9, E5 | done<sup>‡‡</sup> | [#280](https://github.com/marinoscar/oathpath/issues/280) |
+| E13 | Conversation mode | A session-wide, one-tap `Text \| Voice` control: a persistent microphone stream, a calibrated voice-activity detector with barge-in, a `speakingQuestion → listening → processing → speakingAnswer → advancing` state machine, synthesised earcons, a foreground-only wake lock, and the `voice.conversationMode` preference — no API change | E9, E12 | in progress | [#304](https://github.com/marinoscar/oathpath/issues/304) |
 
 **E12 is the first epic filed after the MVP boundary.** E1–E11 closed
 Milestone A and Milestone B — the whole MVP, per [§2](#2-what-the-mvp-is) —
 before this epic was opened, so E12 belongs to neither milestone: it is
 post-MVP work, refining a surface (spoken practice) the MVP already shipped,
-not completing a requirement the MVP boundary was drawn around. See
-[`docs/specs/voice-hands-free.md`](docs/specs/voice-hands-free.md) for its
-full design.
+not completing a requirement the MVP boundary was drawn around. E13 is the
+second, on the identical basis. See
+[`docs/specs/voice-hands-free.md`](docs/specs/voice-hands-free.md) for E12's
+full design and [`docs/specs/conversation-mode.md`](docs/specs/conversation-mode.md)
+for E13's.
 
 Status legend: `not started` — no child issue in progress; `in progress` —
 at least one child issue has an open PR or merged work; `done` — the epic
@@ -956,4 +959,36 @@ nothing — mechanically, not by exception. `docs/specs/voice.md` §3, §3.1,
 §3.2, §3.3, §8, and its own `Decisions locked` #3 each carry an amendment note
 pointing here rather than being silently rewritten; see
 [`docs/specs/voice-hands-free.md`](docs/specs/voice-hands-free.md) for the
+full design.
+
+**2026-09-05 — `voice.md` §5's per-question sentence (and its own `Decisions
+locked` #6) changed; a locked decision that changes is itself worth a record,
+per this section's own rule.** E13 (#304) ships a session-wide `Text | Voice`
+control — Conversation mode — so learners can start a practice session with
+one tap and answer every question by voice without a per-question picker
+action. `docs/specs/voice.md` §5 previously stated, normatively, that "the
+picker between the two is per-question, not a session-wide mode lock." That
+sentence was no longer true of shipped behaviour the moment E13's control
+existed, and leaving it standing unamended would have left the repository's
+own design spec contradicting the product it describes, with nothing on
+record saying which one was authoritative — the identical failure mode the
+E9→E12 entry above already names and the identical reason E12 amended §3
+formally rather than editing around it. The change was forced, not chosen for
+convenience: `Decisions locked` #6 ("Voice is always optional") already
+governs whether a learner can be forced into voice at all, and it says
+nothing about how coarse the picker offering the choice is allowed to be —
+narrowing "always optional" into "always optional, and always chosen one
+question at a time" was a stronger reading than the original decision ever
+stated, and E13's own design record makes the distinction explicit rather
+than leaving a reader to infer it. Three constraints are preserved
+unweakened by the amendment: no session-level mode flag is added to
+`practice_sessions` (the mode is client UI state plus the per-*user*
+`voice.conversationMode` preference, defaulting `false`, added to the
+existing `voice` namespace with no migration); `PracticeAttempt.inputMode`
+stays the only per-row record of how a given attempt was actually answered;
+and the text path ("Type instead") stays reachable on every question, at
+every phase of a conversation-mode session, exactly as before.
+`docs/specs/voice.md` §5 and its own `Decisions locked` #6 each carry an
+amendment note pointing here rather than being silently rewritten; see
+[`docs/specs/conversation-mode.md`](docs/specs/conversation-mode.md) for the
 full design.
