@@ -235,6 +235,93 @@ export const aiSynthesizeRequestSchema = z
   // learn that immediately instead of believing it worked.
   .strict();
 
+// -----------------------------------------------------------------------------
+// GET /api/ai/speech/voices — the picker's catalog (issue #283, epic #280)
+// -----------------------------------------------------------------------------
+//
+// A PLAIN 200 JSON BODY, NOT A `status` DISCRIMINATED UNION — the one response
+// on this controller that is not one, so it is worth saying why rather than
+// leaving a reader to assume an oversight.
+//
+// The union exists on the other two routes to carry an `AiUnavailableCause`:
+// four states in which NO INFERENCE CALL WAS ATTEMPTED, each of which a client
+// must render differently ("store a key" vs "your administrator has not
+// finished setting this up"). This route attempts no inference in the first
+// place. It reads a settings row and an array a provider hard-codes about
+// itself; it resolves no credential, spends nobody's key, and writes no
+// `ai_usage_events` row. There is no state it can be in that a cause would
+// describe.
+//
+// A provider that cannot speak at all is `voices: []`, NOT
+// `capability_unsupported`. That is not the union smuggled in through a
+// sentinel — it is the honest answer: a deployment with no premium voices to
+// choose from still reads every question aloud through the browser's own
+// `speechSynthesis` (`docs/specs/voice.md` §2), so an empty picker offering
+// browser voices only is the CORRECT outcome and not a degraded one. Nothing
+// renders a warning for it.
+
+/** One voice a learner can pick. Mirrors `AiVoiceDescriptor` in `ai.types.ts`. */
+export const aiSpeechVoiceSchema = z.object({
+  /**
+   * The provider's own id, sent back as `voice` on
+   * `POST /api/ai/speech/synthesize`.
+   *
+   * The same charset {@link aiSynthesizeRequestSchema}'s `voice` accepts — a
+   * value this endpoint offered but that one refuses would be a 400 the learner
+   * cannot explain. The provider specs assert their lists against that
+   * expression; this schema publishes the shape rather than re-deriving the
+   * membership rule the DTO deliberately does not own.
+   */
+  id: z.string(),
+
+  /** User-facing name, e.g. `Alloy`. */
+  label: z.string(),
+
+  /** One short user-facing sentence describing how it sounds. */
+  description: z.string(),
+});
+
+/**
+ * The voices this deployment can offer, and whether it can offer any.
+ *
+ * `speakBound` and an empty `voices` are DIFFERENT FACTS and both are carried,
+ * because a picker renders them differently: no `speak` binding means the
+ * premium path is switched off for everybody on this deployment, while an empty
+ * list means the configured provider has no voices at all. Either way the
+ * browser reads the question aloud, and neither is an error.
+ */
+export const aiSpeechVoicesResponseSchema = z.object({
+  /**
+   * What the configured provider can speak in. EMPTY IS ORDINARY — see the
+   * section header.
+   */
+  voices: z.array(aiSpeechVoiceSchema),
+
+  /**
+   * Has an administrator bound a model to the `speak` role?
+   *
+   * Read from the same `unboundRoles` set `GET /api/ai/status` publishes, so
+   * the two surfaces cannot disagree about it. NOT `systemReady`, which is
+   * computed over the text roles only and deliberately says nothing about
+   * voice (`docs/specs/voice.md` §1).
+   *
+   * `false` IS NOT AN ERROR STATE. It means this deployment has no premium
+   * voice, which is the state of every fresh install; the picker still has the
+   * browser's own voices to offer and must not report anything as broken.
+   */
+  speakBound: z.boolean(),
+
+  /**
+   * The voice used when the learner has expressed no preference, or `null`
+   * when there are no voices.
+   *
+   * A member of {@link voices}, and the SAME constant the provider's own
+   * synthesis falls back to — so a picker marking one option "default" is
+   * marking the one the learner is actually hearing.
+   */
+  defaultVoice: z.string().nullable(),
+});
+
 export type AiSpeechUnavailableCause = z.infer<
   typeof aiSpeechUnavailableCauseSchema
 >;
@@ -249,6 +336,10 @@ export type AiSynthesizeUnavailableResponse = z.infer<
 >;
 export type AiSynthesizeRequestInput = z.infer<
   typeof aiSynthesizeRequestSchema
+>;
+export type AiSpeechVoice = z.infer<typeof aiSpeechVoiceSchema>;
+export type AiSpeechVoicesResponse = z.infer<
+  typeof aiSpeechVoicesResponseSchema
 >;
 
 // -----------------------------------------------------------------------------
@@ -273,6 +364,14 @@ export class AiSpeechUnavailableDto extends createZodDto(
 export class AiSpeechFailedDto extends createZodDto(aiSpeechFailedSchema) {}
 export class AiSynthesizeRequestDto extends createZodDto(
   aiSynthesizeRequestSchema,
+) {}
+
+/**
+ * The voices response. A SINGLE CLASS, not one per union member, because this
+ * response is not a union — see the section that declares its schema.
+ */
+export class AiSpeechVoicesResponseDto extends createZodDto(
+  aiSpeechVoicesResponseSchema,
 ) {}
 
 // -----------------------------------------------------------------------------
@@ -313,7 +412,19 @@ type KeysOfUnion<T> = T extends unknown ? keyof T : never;
 
 export type AiSpeechResponsesCarryNoAudioOrSecret =
   Extract<
-    KeysOfUnion<AiTranscribeResponse | AiSynthesizeUnavailableResponse>,
+    KeysOfUnion<
+      | AiTranscribeResponse
+      | AiSynthesizeUnavailableResponse
+      // The voices response and, separately, ONE ENTRY OF ITS LIST (#283).
+      // Both are needed: `KeysOfUnion` sees only the top level, so without
+      // `AiSpeechVoice` here a `modelId` or an `apiKey` added to a voice
+      // descriptor would sail past this proof while sitting inside the very
+      // response it guards. That response is read by every authenticated
+      // learner, including a Viewer, so "which model can speak this voice" —
+      // administrator-facing configuration — must not reach it either.
+      | AiSpeechVoicesResponse
+      | AiSpeechVoice
+    >,
     ForbiddenFieldNames
   > extends never
     ? true

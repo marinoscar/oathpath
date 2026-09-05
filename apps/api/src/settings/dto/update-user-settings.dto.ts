@@ -9,6 +9,8 @@ import {
   notificationsPatchSchema,
   studySchema,
   studyPatchSchema,
+  voiceSchema,
+  voicePatchSchema,
 } from '../../common/schemas/user-settings-namespaces.schema';
 
 // Full replacement (PUT)
@@ -25,6 +27,7 @@ export const updateUserSettingsSchema = z.object({
   navigation: navigationSchema.optional(),
   notifications: notificationsSchema.optional(),
   study: studySchema.optional(),
+  voice: voiceSchema.optional(),
 });
 
 export class UpdateUserSettingsDto extends createZodDto(
@@ -59,6 +62,13 @@ export const patchUserSettingsSchema = z.object({
   //      built-in default. Writing `9` instead would pin the learner to
   //      today's default hour forever.
   study: studyPatchSchema.nullable().optional(),
+  // `voice` deletes at two levels (issue #282, epic #280), identically to
+  // `study`:
+  //   `voice: null`                        -> clear the namespace
+  //   `voice: { speechRate: null }`        -> delete one field, restoring the
+  //      built-in default. Writing `0.95` instead would pin the learner to
+  //      today's default rate forever.
+  voice: voicePatchSchema.nullable().optional(),
 });
 
 export class PatchUserSettingsDto extends createZodDto(

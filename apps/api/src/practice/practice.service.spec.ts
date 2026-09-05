@@ -240,6 +240,10 @@ describe('PracticeService', () => {
         findMany: jest.fn().mockResolvedValue([]),
         findUnique: jest.fn().mockResolvedValue(null),
         upsert: jest.fn().mockResolvedValue(null),
+        // ADDED BY ISSUE #285. `recomputeMasteryForQuestion` removes the row
+        // when every attempt at a question turns out to be superseded or
+        // refused — `new` is the absence of a row, never a row that says so.
+        deleteMany: jest.fn().mockResolvedValue({ count: 0 }),
       },
     };
     prisma.$transaction = jest.fn(async (cb: any) => cb(prisma));
@@ -1279,12 +1283,22 @@ describe('PracticeService', () => {
       mockOwnedSession(sessionRow());
       prisma.civicsQuestion.findUnique.mockResolvedValue(question());
       prisma.civicsAnswer.findMany.mockResolvedValue([answerRow({ text: 'Congress' })]);
-      prisma.practiceAttempt.create.mockImplementation(async ({ data }: any) => ({
-        ...attemptRow(),
-        ...data,
-        id: 'new-attempt',
-        question: question(),
-      }));
+      // APPENDS TO `rows` SINCE ISSUE #285, rather than only returning the row.
+      // `recordAttempt` now replays the question's whole history inside the
+      // same transaction, so a `create` that did not put its row where a
+      // subsequent `findMany` can see it would model a database that forgets
+      // its own write — and the replay would run against a history missing
+      // the very attempt that triggered it.
+      prisma.practiceAttempt.create.mockImplementation(async ({ data }: any) => {
+        const created = {
+          ...attemptRow(),
+          ...data,
+          id: 'new-attempt',
+          question: question(),
+        };
+        rows.push(created);
+        return created;
+      });
 
       // One prior attempt at Q_NONE in this session, by this user — the row a
       // legitimate retry names.
@@ -1432,11 +1446,12 @@ describe('PracticeService', () => {
       // `progress.answered` after the retry is written. The superseded row is
       // still in the table — it is evidence that a mishearing happened — it
       // just stops being counted.
-      prisma.practiceAttempt.findMany.mockImplementation(async () => [
-        ...rows,
-        attemptRow({ id: OTHER_ID, retryOfAttemptId: ORIGINAL_ID, outcome: 'correct' }),
-      ]);
-
+      //
+      // No staged correction row any more (issue #285): `create` now appends
+      // the row it wrote to `rows`, so the correction this assertion is about
+      // is the REAL one this call produced. Staging a second one alongside it
+      // would count the same correction twice and make the assertion fail for
+      // a reason that has nothing to do with supersession.
       const result = await service.recordAttempt(
         USER_A,
         SESSION_ID,
@@ -1444,6 +1459,180 @@ describe('PracticeService', () => {
       );
 
       expect(result.progress.answered).toBe(1);
+    });
+  });
+
+  // ===========================================================================
+  // recordAttempt — a retry also REPLAYS the question (issue #285, epic #280)
+  // ===========================================================================
+  //
+  // `recompute.spec.ts` proves what the replay computes. These tests prove
+  // that `recordAttempt` actually RUNS it, and only for a retry — a replay
+  // that were correct but never wired would pass every test in that file and
+  // still leave the learner charged for their accent.
+  //
+  // The scenario is the one epic #280 makes reachable: a spoken answer
+  // auto-submitted with HIGH confidence (0.9) and mis-transcribed.
+  // `isMisheardAttempt` correctly declines to call it misheard, so it WAS
+  // scheduled — the damaged `question_mastery` row below is what it left.
+  describe('recordAttempt — the mastery replay a retry triggers', () => {
+    const ORIGINAL_ID = 'd1111111-1111-4111-8111-111111111111';
+
+    let rows: Record<string, unknown>[];
+
+    beforeEach(() => {
+      mockOwnedSession(sessionRow());
+      prisma.civicsQuestion.findUnique.mockResolvedValue(question());
+      prisma.civicsAnswer.findMany.mockResolvedValue([answerRow({ text: 'Congress' })]);
+      prisma.learnerProfile.findUnique.mockResolvedValue({
+        stateCode: 'CA',
+        testVersionCode: TV,
+        seniorExemption: false,
+        stage: 'learning',
+      });
+
+      rows = [
+        attemptRow({
+          id: ORIGINAL_ID,
+          outcome: 'incorrect',
+          responseText: 'the head of the executive ranch',
+          inputMode: 'spoken',
+          promptMode: 'heard',
+          transcript: 'the head of the executive ranch',
+          // ABOVE the 0.6 threshold. Not misheard, therefore scheduled.
+          asrConfidence: 0.9,
+        }),
+      ];
+
+      prisma.practiceAttempt.findFirst.mockImplementation(async ({ where }: any) => {
+        const hit = rows.find(
+          (row: any) =>
+            (where.id === undefined || row.id === where.id) &&
+            (where.userId === undefined || row.userId === where.userId) &&
+            (where.sessionId === undefined || row.sessionId === where.sessionId) &&
+            (where.questionId === undefined || row.questionId === where.questionId) &&
+            (where.retryOfAttemptId === undefined ||
+              (row.retryOfAttemptId ?? null) === where.retryOfAttemptId),
+        );
+        return hit ?? null;
+      });
+      prisma.practiceAttempt.findMany.mockImplementation(async () => rows);
+      prisma.practiceAttempt.create.mockImplementation(async ({ data }: any) => {
+        const created = { ...attemptRow(), ...data, id: 'new-attempt', question: question() };
+        rows.push(created);
+        return created;
+      });
+
+      // The damage the mis-transcribed attempt did on its way in: a question
+      // this learner had answered correctly on two earlier days was pulled
+      // back from `review` to `lapsed`, with a lapse charged for it.
+      prisma.questionMastery.findUnique.mockResolvedValue({
+        state: 'lapsed',
+        dueAt: new Date('2026-06-02T12:00:00Z'),
+        intervalDays: 1,
+        ease: 2.5,
+        correctStreak: 0,
+        lapses: 1,
+        totalAttempts: 3,
+        distinctCorrectDays: 2,
+        lastOutcome: 'incorrect',
+        lastAttemptAt: NOW,
+      });
+    });
+
+    /** The LAST `question_mastery` payload written — the replay's, when one ran. */
+    function lastMastery(): Record<string, unknown> {
+      const calls = prisma.questionMastery.upsert.mock.calls;
+      return calls[calls.length - 1][0].update;
+    }
+
+    it('overwrites the damaged row with a replay that never saw the superseded attempt', async () => {
+      await service.recordAttempt(
+        USER_A,
+        SESSION_ID,
+        attemptInput({
+          responseText: 'Congress',
+          inputMode: 'spoken',
+          promptMode: 'heard',
+          transcript: 'Congress',
+          asrConfidence: 0.95,
+          retryOfAttemptId: ORIGINAL_ID,
+        }),
+      );
+
+      // Two writes: `scheduleMastery`'s incremental one (which still owns the
+      // journey-stage transition), then the replay's, which is the authority.
+      expect(prisma.questionMastery.upsert).toHaveBeenCalledTimes(2);
+
+      // THE LAPSE IS GONE. Scheduling forward from the damaged row would have
+      // left `lapses: 1` standing forever — the learner permanently worse off
+      // for a speech-recognition error, in the one place they can neither see
+      // nor appeal.
+      expect(lastMastery()).toMatchObject({
+        lapses: 0,
+        correctStreak: 1,
+        state: 'learning',
+        distinctCorrectDays: 1,
+        totalAttempts: 1,
+        lastOutcome: 'correct',
+      });
+    });
+
+    it('leaves the superseded attempt in the table, with its outcome untouched', async () => {
+      await service.recordAttempt(
+        USER_A,
+        SESSION_ID,
+        attemptInput({
+          responseText: 'Congress',
+          inputMode: 'spoken',
+          transcript: 'Congress',
+          asrConfidence: 0.95,
+          retryOfAttemptId: ORIGINAL_ID,
+        }),
+      );
+
+      expect(prisma.practiceAttempt.update).not.toHaveBeenCalled();
+      const original = rows.find((row: any) => row.id === ORIGINAL_ID) as any;
+      expect(original.outcome).toBe('incorrect');
+      expect(original.asrConfidence).toBe(0.9);
+    });
+
+    it('does NOT replay for an ordinary attempt that names no retry target', async () => {
+      // The untouched path. A replay on every attempt would be a full history
+      // read on every answer, for a correction that has not happened.
+      rows = [];
+
+      await service.recordAttempt(
+        USER_A,
+        SESSION_ID,
+        attemptInput({ responseText: 'Congress' }),
+      );
+
+      expect(prisma.questionMastery.upsert).toHaveBeenCalledTimes(1);
+      expect(prisma.questionMastery.deleteMany).not.toHaveBeenCalled();
+    });
+
+    it('still runs when the retry itself is refused, and may then remove the row', async () => {
+      // The retry was misheard too (0.2), so `scheduleMastery` writes nothing
+      // — but the replay still runs, finds that every attempt at this question
+      // is either superseded or refused, and deletes the row the confidently
+      // mis-transcribed attempt had created.
+      await service.recordAttempt(
+        USER_A,
+        SESSION_ID,
+        attemptInput({
+          responseText: 'the head of the executive branch office',
+          inputMode: 'spoken',
+          transcript: 'the head of the executive branch office',
+          asrConfidence: 0.2,
+          retryOfAttemptId: ORIGINAL_ID,
+        }),
+      );
+
+      expect(prisma.questionMastery.upsert).not.toHaveBeenCalled();
+      expect(prisma.questionMastery.deleteMany).toHaveBeenCalledWith({
+        where: { userId: USER_A, questionId: Q_NONE },
+      });
     });
   });
 

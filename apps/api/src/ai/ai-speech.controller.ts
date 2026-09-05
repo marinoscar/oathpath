@@ -2,6 +2,7 @@ import {
   BadRequestException,
   Body,
   Controller,
+  Get,
   HttpCode,
   HttpStatus,
   Post,
@@ -32,6 +33,7 @@ import {
 import {
   AiSpeechFailedDto,
   AiSpeechUnavailableDto,
+  AiSpeechVoicesResponseDto,
   AiSynthesizeRequestDto,
   AiTranscribeOkDto,
   MAX_SYNTHESIS_TEXT_LENGTH,
@@ -43,6 +45,7 @@ import {
 //
 //   POST /api/ai/speech/transcribe   @Auth(), no permissions
 //   POST /api/ai/speech/synthesize   @Auth(), no permissions
+//   GET  /api/ai/speech/voices       @Auth(), no permissions   (#283, epic #280)
 //
 // -----------------------------------------------------------------------------
 // `@Auth()` WITH NO PERMISSIONS, AND NO ROUTE ACCEPTS A USER ID
@@ -337,6 +340,70 @@ export class AiSpeechController {
       .status(HttpStatus.OK)
       .header('Content-Type', 'application/json; charset=utf-8')
       .send({ data: result });
+  }
+
+  /**
+   * The voices a learner may pick from (#283, epic #280).
+   *
+   * -------------------------------------------------------------------------
+   * A PLAIN 200 JSON BODY, AND THE ONLY ROUTE HERE THAT IS NOT A `status` UNION
+   * -------------------------------------------------------------------------
+   *
+   * Stated outright because both of its neighbours ARE unions and a reader
+   * will assume this one was forgotten. It was not: nothing about this route
+   * can be "unavailable" in the `AiUnavailableCause` sense. It makes no
+   * inference call, resolves no credential, spends nobody's key and writes no
+   * `ai_usage_events` row — it reads a settings row and an array the provider
+   * hard-codes about itself. There is no state a cause would describe, so a
+   * union here would publish four branches no client could ever receive.
+   *
+   * A provider that cannot speak is `voices: []`, which is
+   * `capability_unsupported` expressed as an empty list rather than an error —
+   * and it is the CORRECT outcome, not a failure: the picker then offers the
+   * browser's own voices, which is what reads every question aloud on a fresh
+   * install anyway (`docs/specs/voice.md` §2). `speakBound: false` is
+   * likewise ordinary and renders no warning.
+   *
+   * -------------------------------------------------------------------------
+   * WHY THE WEB READS THIS OVER AN ENDPOINT
+   * -------------------------------------------------------------------------
+   *
+   * The list belongs to the provider. A copy in `apps/web/src/config` with a
+   * test asserting the two agree is DETECTION rather than prevention — the
+   * copies can still disagree in a working tree, in a branch, and in any build
+   * where the test is not run — which is `ai-model-roles.ts`'s own argument for
+   * serving the role registry the same way, and `aiSynthesizeRequestSchema`'s
+   * for validating a voice id's shape but never its membership.
+   */
+  @Get('voices')
+  @Auth()
+  @ApiOperation({
+    summary: 'List the voices this deployment can speak in',
+    description:
+      'The voices the configured AI provider offers for **premium** text-to-speech, so a ' +
+      'client can render a picker. **Nothing is spent and nothing is called** — this reads ' +
+      'static, provider-authored data and your own AI key is not involved.\n\n' +
+      '**Unlike the other two routes here, this is a plain JSON body, not a `status` ' +
+      'union.** There is no state it can report that would need one.\n\n' +
+      '`voices` is **empty** when the configured provider has no text-to-speech at all, and ' +
+      '`speakBound` is `false` when an administrator has not bound a model to the `speak` ' +
+      'role. **Neither is an error.** The browser’s own `speechSynthesis` reads questions ' +
+      'aloud on every deployment with no configuration at all, so a client should offer ' +
+      'browser voices and say nothing about what is missing.\n\n' +
+      '`defaultVoice` is the id used when a synthesis request names none — the same value ' +
+      'the provider itself falls back to, so a picker can mark it without guessing.',
+  })
+  @ApiOkResponse({
+    description:
+      'The voices, whether the `speak` role is bound, and the default voice id.',
+    type: AiSpeechVoicesResponseDto,
+  })
+  async voices() {
+    // NO `@CurrentUser`, and that is not an omission: there is no per-caller
+    // answer here. Every authenticated learner on this deployment reads the
+    // same list, and taking a user id would create the "voices for user X"
+    // parameter this controller's header says none of its routes have.
+    return this.speech.listVoices();
   }
 
   // ---------------------------------------------------------------------------

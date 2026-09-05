@@ -25,6 +25,8 @@ import {
   NotificationsValue,
   StudyPatchValue,
   StudyValue,
+  VoicePatchValue,
+  VoiceValue,
 } from '../../common/schemas/user-settings-namespaces.schema';
 import type { NotificationChannel } from '../../notifications/notification-events';
 
@@ -59,6 +61,7 @@ export class UserSettingsService {
         ? { notifications: value.notifications }
         : {}),
       ...(value.study !== undefined ? { study: value.study } : {}),
+      ...(value.voice !== undefined ? { voice: value.voice } : {}),
       updatedAt,
       version,
     };
@@ -201,6 +204,11 @@ export class UserSettingsService {
     const mergedStudy = this.mergeStudy(current.study, dto.study);
     if (mergedStudy !== undefined) {
       merged.study = mergedStudy;
+    }
+
+    const mergedVoice = this.mergeVoice(current.voice, dto.voice);
+    if (mergedVoice !== undefined) {
+      merged.voice = mergedVoice;
     }
 
     // Enforce the caps AFTER the merge — see assertDataTableLimit.
@@ -364,6 +372,86 @@ export class UserSettingsService {
       delete merged.reminderEnabled;
     } else if (patch.reminderEnabled !== undefined) {
       merged.reminderEnabled = patch.reminderEnabled;
+    }
+
+    return Object.keys(merged).length > 0 ? merged : undefined;
+  }
+
+  /**
+   * Merge the `voice` namespace (issue #282, epic #280) field-wise.
+   *
+   * Six independent scalar choices, none of them a nested map — the
+   * identical shape `mergeStudy` already establishes, and merged the same
+   * way for the same reason: a learner who PATCHes `{ voice: { speechRate:
+   * 1.1 } }` must keep the voice and auto-submit preference they already
+   * set, so replacing the namespace wholesale (`mergeDataTables`' strategy)
+   * would silently discard them.
+   *
+   * - patch absent           -> keep the stored namespace untouched
+   * - patch is `null`        -> clear the whole namespace
+   * - field omitted          -> stored value untouched
+   * - field set to a value   -> replaces the stored value
+   * - field set to `null`    -> deletes the field, so the learner falls back
+   *   to the matching `DEFAULT_VOICE_*` constant rather than to a
+   *   hard-coded stored copy of today's default
+   *
+   * A SEPARATE METHOD RATHER THAN A SHARED GENERIC HELPER, for the identical
+   * reason `mergeStudy`'s own comment gives for not reusing `mergeNavigation`:
+   * each method names its namespace's fields explicitly, so a field added to
+   * the schema without a matching line here fails to compile instead of
+   * being silently accepted and dropped.
+   *
+   * As with its neighbours, an empty result collapses to `undefined` so the
+   * namespace disappears rather than persisting as `{}`.
+   */
+  private mergeVoice(
+    current: VoiceValue | undefined,
+    patch: VoicePatchValue | null | undefined,
+  ): VoiceValue | undefined {
+    if (patch === undefined) {
+      return current;
+    }
+
+    if (patch === null) {
+      return undefined;
+    }
+
+    const merged: VoiceValue = { ...(current ?? {}) };
+
+    if (patch.autoSubmitSpoken === null) {
+      delete merged.autoSubmitSpoken;
+    } else if (patch.autoSubmitSpoken !== undefined) {
+      merged.autoSubmitSpoken = patch.autoSubmitSpoken;
+    }
+
+    if (patch.preferPremiumVoice === null) {
+      delete merged.preferPremiumVoice;
+    } else if (patch.preferPremiumVoice !== undefined) {
+      merged.preferPremiumVoice = patch.preferPremiumVoice;
+    }
+
+    if (patch.preferredVoice === null) {
+      delete merged.preferredVoice;
+    } else if (patch.preferredVoice !== undefined) {
+      merged.preferredVoice = patch.preferredVoice;
+    }
+
+    if (patch.speechRate === null) {
+      delete merged.speechRate;
+    } else if (patch.speechRate !== undefined) {
+      merged.speechRate = patch.speechRate;
+    }
+
+    if (patch.readQuestionsAloud === null) {
+      delete merged.readQuestionsAloud;
+    } else if (patch.readQuestionsAloud !== undefined) {
+      merged.readQuestionsAloud = patch.readQuestionsAloud;
+    }
+
+    if (patch.readAnswersAloud === null) {
+      delete merged.readAnswersAloud;
+    } else if (patch.readAnswersAloud !== undefined) {
+      merged.readAnswersAloud = patch.readAnswersAloud;
     }
 
     return Object.keys(merged).length > 0 ? merged : undefined;

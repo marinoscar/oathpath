@@ -31,6 +31,8 @@ import {
   MAX_TRANSCRIBE_BYTES,
 } from '../src/ai/ai-speech.service';
 import { MAX_SYNTHESIS_TEXT_LENGTH } from '../src/ai/dto/ai-speech.dto';
+import type { AiCapabilityFamily } from '../src/ai/ai-model-roles';
+import type { AiCapabilitySet } from '../src/ai/providers/ai-provider.interface';
 import type { PrismaService } from '../src/prisma/prisma.service';
 
 // =============================================================================
@@ -771,5 +773,264 @@ describe('Speech API — over the real dispatcher and a real provider', () => {
     });
     // NOTHING RAN, so nothing is owed and no row was written.
     expect(prismaMock.aiUsageEvent.create).not.toHaveBeenCalled();
+  });
+});
+
+// =============================================================================
+// GET /api/ai/speech/voices (integration) — issue #283, epic #280
+// =============================================================================
+//
+// The route the voice picker reads instead of a hand-copied list in
+// `apps/web/src/config`. Three properties, over real HTTP:
+//
+//   * a VIEWER — the least-privileged seeded role — gets a 200, because voice
+//     adds no permission string (`docs/specs/voice.md` §10) and gating this
+//     would leave the default role unable to choose a voice at all;
+//   * an unbound `speak` role is `speakBound: false` AND STILL A 200 WITH A
+//     POPULATED LIST, because "which voices does this provider have" and "has
+//     an administrator bound a model" are different questions and the picker
+//     renders them differently;
+//   * a provider with no `tts` capability is `voices: []` — `capability_unsupported`
+//     expressed as an empty list rather than an error, since the browser's own
+//     `speechSynthesis` still reads every question aloud.
+//
+// A REAL `FakeAiProvider` rather than a dispatcher double, because the answer
+// comes from the provider's own declaration and a double would be asserting
+// against a list written in this file.
+// =============================================================================
+
+/** The fake's capabilities, minus `tts`. */
+const NO_TTS_CAPABILITIES: AiCapabilitySet = new Set<AiCapabilityFamily>([
+  'text',
+  'realtime',
+  'transcribe',
+  'embedding',
+  'other',
+]);
+
+/**
+ * The fake with its speech capability removed.
+ *
+ * A SUBCLASS RATHER THAN A HAND-WRITTEN DOUBLE, so the `[]` under test comes
+ * from `BaseAiProvider.listVoices`' real capability gate over a provider that
+ * genuinely does declare voices — which is the only way to tell that gate apart
+ * from "this double had no voices to return".
+ */
+class NoTtsFakeProvider extends FakeAiProvider {
+  readonly capabilities = NO_TTS_CAPABILITIES;
+}
+
+describe('GET /api/ai/speech/voices — over a real provider', () => {
+  let context: TestContext;
+  let learner: TestUser;
+
+  const getSecret = jest.fn();
+
+  const server = () => context.app.getHttpServer();
+
+  beforeAll(async () => {
+    context = await createTestApp({
+      useMockDatabase: true,
+      overrideProviders: [
+        {
+          provide: OpenAiProvider,
+          useValue: new FakeAiProvider(
+            new AiUsageService(prismaMock as unknown as PrismaService),
+          ),
+        },
+        { provide: CredentialsService, useValue: { getSecret } },
+      ],
+    });
+  });
+
+  afterAll(async () => {
+    await closeTestApp(context);
+  });
+
+  beforeEach(async () => {
+    resetPrismaMock();
+    setupBaseMocks();
+    setupAiSettings();
+
+    getSecret.mockReset();
+    getSecret.mockResolvedValue('sk-learner-abcdefghijklmnopqrst');
+
+    learner = await createMockViewerUser(context, 'learner@example.com');
+  });
+
+  it('rejects an unauthenticated caller', async () => {
+    await request(server()).get('/api/ai/speech/voices').expect(401);
+  });
+
+  it('lets a Viewer read it — voice adds no permission string', async () => {
+    const response = await request(server())
+      .get('/api/ai/speech/voices')
+      .set(authHeader(learner.accessToken))
+      .expect(200);
+
+    expect(response.body.data.voices.length).toBeGreaterThan(0);
+    expect(response.body.data.speakBound).toBe(true);
+    expect(response.body.data.defaultVoice).toEqual(expect.any(String));
+  });
+
+  it('returns every voice with an id, a label and a description', async () => {
+    const response = await request(server())
+      .get('/api/ai/speech/voices')
+      .set(authHeader(learner.accessToken))
+      .expect(200);
+
+    for (const voice of response.body.data.voices) {
+      expect(voice).toEqual({
+        id: expect.any(String),
+        label: expect.any(String),
+        description: expect.any(String),
+      });
+    }
+  });
+
+  it('names a default that is one of the voices it returned', async () => {
+    const response = await request(server())
+      .get('/api/ai/speech/voices')
+      .set(authHeader(learner.accessToken))
+      .expect(200);
+
+    expect(
+      response.body.data.voices.map((voice: { id: string }) => voice.id),
+    ).toContain(response.body.data.defaultVoice);
+  });
+
+  it('reads no credential — nobody`s key is spent to list voices', async () => {
+    await request(server())
+      .get('/api/ai/speech/voices')
+      .set(authHeader(learner.accessToken))
+      .expect(200);
+
+    expect(getSecret).not.toHaveBeenCalled();
+    expect(prismaMock.aiUsageEvent.create).not.toHaveBeenCalled();
+  });
+
+  it('is `speakBound: false` with an unbound role, and still a 200 with voices', async () => {
+    // THE DISTINCTION THE PICKER RENDERS. An unbound `speak` is the state of
+    // every fresh install: the provider still has voices, the premium path is
+    // simply not configured, and nothing about that is an error — the browser
+    // reads the question aloud either way (`docs/specs/voice.md` §2).
+    setupAiSettings({
+      ...READY_AI_SETTINGS,
+      models: { ...READY_AI_SETTINGS.models, speak: null },
+    });
+
+    const response = await request(server())
+      .get('/api/ai/speech/voices')
+      .set(authHeader(learner.accessToken))
+      .expect(200);
+
+    expect(response.body.data.speakBound).toBe(false);
+    expect(response.body.data.voices.length).toBeGreaterThan(0);
+  });
+
+  it('is `speakBound: false` without ever being a `status` union', async () => {
+    // Every other route on this controller answers with `{ status, … }`. This
+    // one never does, and a client written against a union would branch on a
+    // field that is not there.
+    setupAiSettings({
+      ...READY_AI_SETTINGS,
+      models: { ...READY_AI_SETTINGS.models, speak: null },
+    });
+
+    const response = await request(server())
+      .get('/api/ai/speech/voices')
+      .set(authHeader(learner.accessToken))
+      .expect(200);
+
+    expect(response.body.data).not.toHaveProperty('status');
+    expect(response.body.data).not.toHaveProperty('cause');
+  });
+
+  it('is an empty list when no provider is configured', async () => {
+    setupAiSettings({ ...READY_AI_SETTINGS, provider: null });
+
+    const response = await request(server())
+      .get('/api/ai/speech/voices')
+      .set(authHeader(learner.accessToken))
+      .expect(200);
+
+    expect(response.body.data.voices).toEqual([]);
+    expect(response.body.data.defaultVoice).toBeNull();
+  });
+
+  it('still lists voices when the master switch is off', async () => {
+    // Reading a static array spends nothing, so `enabled: false` is not a
+    // reason to empty the picker — what such a deployment cannot do is
+    // synthesise, which `POST /ai/speech/synthesize` answers with
+    // `cause: 'ai_disabled'`.
+    setupAiSettings({ ...READY_AI_SETTINGS, enabled: false });
+
+    const response = await request(server())
+      .get('/api/ai/speech/voices')
+      .set(authHeader(learner.accessToken))
+      .expect(200);
+
+    expect(response.body.data.voices.length).toBeGreaterThan(0);
+  });
+
+  it('is an empty list, not a 500, when the settings row is unreadable', async () => {
+    // `AiSettingsService.get` throws on a stored-but-invalid row. A picker is
+    // not the surface that should surface that: it has nothing to offer, which
+    // is what an empty list says.
+    setupAiSettings({ provider: 'not-a-provider' });
+
+    const response = await request(server())
+      .get('/api/ai/speech/voices')
+      .set(authHeader(learner.accessToken))
+      .expect(200);
+
+    expect(response.body.data.voices).toEqual([]);
+  });
+});
+
+describe('GET /api/ai/speech/voices — on a provider with no tts capability', () => {
+  let context: TestContext;
+  let learner: TestUser;
+
+  const server = () => context.app.getHttpServer();
+
+  beforeAll(async () => {
+    context = await createTestApp({
+      useMockDatabase: true,
+      overrideProviders: [
+        {
+          provide: OpenAiProvider,
+          useValue: new NoTtsFakeProvider(
+            new AiUsageService(prismaMock as unknown as PrismaService),
+          ),
+        },
+      ],
+    });
+  });
+
+  afterAll(async () => {
+    await closeTestApp(context);
+  });
+
+  beforeEach(async () => {
+    resetPrismaMock();
+    setupBaseMocks();
+    setupAiSettings();
+
+    learner = await createMockViewerUser(context, 'learner@example.com');
+  });
+
+  it('answers 200 with an empty list, never an error', async () => {
+    // `capability_unsupported` expressed as an empty list. The picker then
+    // offers the browser's own voices, which is the CORRECT outcome — a
+    // deployment on a chat-only provider is a smaller product, not a broken
+    // one.
+    const response = await request(server())
+      .get('/api/ai/speech/voices')
+      .set(authHeader(learner.accessToken))
+      .expect(200);
+
+    expect(response.body.data.voices).toEqual([]);
+    expect(response.body.data.defaultVoice).toBeNull();
   });
 });

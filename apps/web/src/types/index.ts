@@ -1139,6 +1139,61 @@ export type SynthesizeResponse =
   | SpeechUnavailable
   | SpeechFailed;
 
+/**
+ * One voice a learner can choose, from `GET /api/ai/speech/voices` (#283).
+ *
+ * `id` is the PROVIDER's own id, and it goes back out unchanged as the `voice`
+ * field of a synthesis request. Nothing here interprets it: the list is served
+ * by the API precisely so that no copy of it lives in this bundle, where it
+ * would be correct the day it was written and silently wrong the day the
+ * provider added or renamed a voice — the same argument the AI model-role
+ * registry is served over an endpoint for.
+ */
+export interface SpeechVoice {
+  id: string;
+  /** User-facing name, e.g. `Alloy`. */
+  label: string;
+  /** One short sentence describing how it sounds. Render it; it is why the picker is usable. */
+  description: string;
+}
+
+/**
+ * `GET /api/ai/speech/voices` — A PLAIN BODY, NOT A `status` UNION.
+ *
+ * The one AI response in this file with no `status` to switch on, and it is
+ * worth stating rather than leaving a reader to assume it was missed. The
+ * union exists on {@link TranscribeResponse} and {@link SynthesizeResponse} to
+ * carry an {@link AiUnavailableCause}: four states in which no inference call
+ * was attempted. This route attempts none — it reads static, provider-authored
+ * data on nobody's key — so there is no cause it could ever report.
+ *
+ * NEITHER AN EMPTY `voices` NOR `speakBound: false` IS AN ERROR, and a caller
+ * that renders either as one is wrong in the way `docs/specs/voice.md` §2
+ * forbids by name. The browser's own `speechSynthesis` reads every question
+ * aloud on every deployment with no configuration at all; a deployment with no
+ * premium voices simply has nothing extra to offer, and saying so out loud
+ * would send a learner to fix something that is not broken.
+ */
+export interface SpeechVoicesResponse {
+  /** What the configured provider can speak in. Empty is ordinary. */
+  voices: SpeechVoice[];
+
+  /**
+   * Has an administrator bound a model to the `speak` role?
+   *
+   * The same fact `AiStatus.unboundRoles` carries for `'speak'`, read off the
+   * response a picker is already fetching. `false` is the state of every fresh
+   * install.
+   */
+  speakBound: boolean;
+
+  /**
+   * The id used when the learner has expressed no preference, or `null` when
+   * there are no voices. A member of {@link voices} whenever it is not null.
+   */
+  defaultVoice: string | null;
+}
+
 // =============================================================================
 // Journey — the learner profile and its two reference lists (epic #50)
 // =============================================================================

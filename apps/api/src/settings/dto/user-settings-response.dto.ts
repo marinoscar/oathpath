@@ -5,6 +5,7 @@ import {
   navigationSchema,
   notificationsSchema,
   studySchema,
+  voiceSchema,
 } from '../../common/schemas/user-settings-namespaces.schema';
 
 export const userSettingsResponseSchema = z.object({
@@ -26,6 +27,10 @@ export const userSettingsResponseSchema = z.object({
   // learner has chosen neither an hour nor an on/off state, so both controls
   // render the built-in default rather than a stored value.
   study: studySchema.optional(),
+  // Absent here is INFORMATION too: it tells a voice-settings page that this
+  // learner has expressed no spoken-audio preference, so every control
+  // renders its built-in default rather than a stored value.
+  voice: voiceSchema.optional(),
   updatedAt: z.iso.datetime(),
   version: z.number(),
 });

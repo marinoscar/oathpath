@@ -25,6 +25,7 @@ import type {
   AiTranscriptionRequest,
   AiTranscriptionResult,
   AiUsage,
+  AiVoiceDescriptor,
 } from './ai.types';
 import type { AiUsageService } from './ai-usage.service';
 import type {
@@ -188,6 +189,33 @@ export abstract class BaseAiProvider implements AiProvider {
   protected abstract readonly providerName: string;
 
   /**
+   * The voices this provider can speak in, as it hard-codes them (#283).
+   *
+   * A `readonly` FIELD RATHER THAN A `run*` HOOK, and the naming is the tell:
+   * every `protected abstract` method below is prefixed `run` because it MAY
+   * THROW and is wrapped by a never-throw public counterpart. This one cannot
+   * throw — it is a literal array — so borrowing that prefix would advertise a
+   * hazard that is not there and imply a wrapper that does not exist.
+   *
+   * A provider with no `tts` capability declares `[]`. It may also declare a
+   * list and simply not declare the capability; {@link listVoices} answers `[]`
+   * for it either way, so the two cannot disagree on the wire.
+   */
+  protected abstract readonly speechVoices: readonly AiVoiceDescriptor[];
+
+  /**
+   * The id {@link BaseAiProvider.synthesize} falls back to when a request names
+   * no voice, or `null` for a provider with no voices.
+   *
+   * MUST BE THE SAME CONSTANT THE SUBCLASS'S OWN `runSynthesis` DEFAULTS TO.
+   * That is the whole point of the member existing: the picker's "this is what
+   * you hear now" and the synthesiser's actual fallback are one value, so a
+   * provider cannot end up telling a learner they are hearing Alloy while
+   * speaking as Nova.
+   */
+  protected abstract readonly defaultSpeechVoice: string | null;
+
+  /**
    * Can this provider serve `family`?
    *
    * Implemented once here rather than per provider: a subclass writing its own
@@ -196,6 +224,44 @@ export abstract class BaseAiProvider implements AiProvider {
    */
   supports(family: AiCapabilityFamily): boolean {
     return this.capabilities.has(family);
+  }
+
+  /**
+   * The provider's voices, or `[]` when it cannot speak at all (#283).
+   *
+   * IMPLEMENTED ONCE HERE, for the same reason {@link supports} is: the
+   * capability check is the part a subclass would get subtly wrong — most
+   * plausibly by omitting it and returning a list a chat-only provider can
+   * never speak in — and the base class already owns that check for every
+   * other capability-gated method on this surface.
+   *
+   * NO `try`/`catch`, deliberately, where {@link transcribe} and
+   * {@link synthesize} both have one. There is nothing here to catch: no key,
+   * no client, no I/O, no subclass code that runs. Wrapping it anyway would
+   * suggest a failure mode readers should account for.
+   *
+   * A COPY IS RETURNED, so a caller that sorts or splices the list in place —
+   * a picker rendering it alphabetically, say — cannot mutate the provider's
+   * own declaration for every later request in the process.
+   */
+  listVoices(): AiVoiceDescriptor[] {
+    if (!this.supports('tts')) return [];
+
+    return [...this.speechVoices];
+  }
+
+  /**
+   * The voice a synthesis request with no `voice` gets. See
+   * {@link AiProvider.defaultVoice}.
+   *
+   * Gated on the capability for the same reason {@link listVoices} is: a
+   * provider that cannot speak has no default to name, and `null` there says
+   * exactly what `[]` says beside it.
+   */
+  defaultVoice(): string | null {
+    if (!this.supports('tts')) return null;
+
+    return this.defaultSpeechVoice;
   }
 
   // ---------------------------------------------------------------------------

@@ -5,9 +5,11 @@ import type {
   AiSynthesizeRunResult,
   AiTranscribeRunResult,
 } from './ai-dispatch.service';
+import { AiSettingsService } from './ai-settings.service';
 import type {
   AiSpeechFailedResponse,
   AiSpeechUnavailableResponse,
+  AiSpeechVoicesResponse,
   AiSynthesizeRequestInput,
   AiTranscribeResponse,
 } from './dto/ai-speech.dto';
@@ -144,6 +146,16 @@ export const ACCEPTED_AUDIO_CONTENT_TYPES: readonly string[] = [
   'video/webm',
 ];
 
+/**
+ * The model role the premium voice path runs on.
+ *
+ * A CONSTANT RATHER THAN THE LITERAL AT ITS ONE CALL SITE, because the string
+ * is persisted — it keys the admin's `models` map and lands in
+ * `ai_usage_events.roleKey` — and `unboundRoles` reports it by exactly this
+ * spelling. See `ai-model-roles.ts`: renaming a role key is a migration.
+ */
+const SPEAK_ROLE = 'speak';
+
 /** What the controller hands over once it has read the multipart body. */
 export interface TranscribeUpload {
   /**
@@ -184,7 +196,17 @@ export interface SynthesizedSpeech {
 export class AiSpeechService {
   private readonly logger = new Logger(AiSpeechService.name);
 
-  constructor(private readonly dispatch: AiDispatchService) {}
+  constructor(
+    private readonly dispatch: AiDispatchService,
+    // ADDED FOR THE VOICES ROUTE ONLY (#283). It answers one question —
+    // whether an administrator has bound the `speak` role — and it answers it
+    // out of `describeReadiness`'s own `unboundRoles`, the same set
+    // `GET /api/ai/status` publishes. Recomputing "is `speak` bound" from a
+    // settings row here would be a second implementation of a rule that has
+    // already moved once (E9 narrowed `systemReady` and left `unboundRoles`
+    // alone), and the two would disagree the next time it moves.
+    private readonly aiSettings: AiSettingsService,
+  ) {}
 
   /**
    * Turn one uploaded recording into text, on the caller's own key.
@@ -231,6 +253,50 @@ export class AiSpeechService {
     });
 
     return describeSynthesis(result);
+  }
+
+  /**
+   * The voices a learner may pick from, and whether the premium path is
+   * configured at all (#283, epic #280).
+   *
+   * -------------------------------------------------------------------------
+   * NO CALLER, NO KEY, NO COST — WHICH IS WHY IT IS NOT A `status` UNION
+   * -------------------------------------------------------------------------
+   *
+   * The other two methods here take a `userId` because they spend that
+   * learner's credential. This one reads a settings row and an array the
+   * provider hard-codes about itself: nothing is resolved, nothing is spent,
+   * nothing is recorded, and there is no state an `AiUnavailableCause` would
+   * describe. See `dto/ai-speech.dto.ts` for the same argument at the wire.
+   *
+   * -------------------------------------------------------------------------
+   * AN EMPTY LIST AND AN UNBOUND ROLE ARE BOTH ORDINARY
+   * -------------------------------------------------------------------------
+   *
+   * Neither is reported as a failure and neither throws. A deployment with no
+   * provider, no `tts` capability, or no `speak` binding still reads every
+   * question aloud through the browser's own `speechSynthesis`
+   * (`docs/specs/voice.md` §2) — the picker simply has nothing premium to
+   * offer, which is what `voices: []` / `speakBound: false` say.
+   */
+  async listVoices(): Promise<AiSpeechVoicesResponse> {
+    // In parallel: they read different things and neither depends on the
+    // other, and this sits behind a settings screen a learner is waiting on.
+    const [catalog, readiness] = await Promise.all([
+      this.dispatch.listVoices(),
+      this.aiSettings.describeReadiness(),
+    ]);
+
+    return {
+      voices: catalog.voices,
+      // `unboundRoles`, NEVER `systemReady`. `systemReady` is computed over
+      // the text roles only and is deliberately silent about voice
+      // (`docs/specs/voice.md` §1) — reading it here would report a deployment
+      // with a perfectly good `speak` binding as having none whenever its
+      // `tutor` model was unbound, and vice versa.
+      speakBound: !readiness.unboundRoles.includes(SPEAK_ROLE),
+      defaultVoice: catalog.defaultVoice,
+    };
   }
 
   // ---------------------------------------------------------------------------

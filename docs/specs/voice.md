@@ -271,6 +271,19 @@ every unbound role identically.
 
 ## 3. Confirm-before-grade
 
+> **Amended by E12 (epic #280).** `autoSubmitSpoken` (defaulting `true`)
+> replaced confirm-before-grade as the DEFAULT flow: a spoken answer is now
+> graded the instant its transcript arrives, with correction offered
+> *after* grading rather than before it. The flow this section describes is
+> preserved in full as the opt-out (`autoSubmitSpoken: false`) — nothing
+> below is deleted, and every mechanism this section specifies still runs,
+> unchanged, on that path. **The anti-penalty requirement itself is
+> unchanged; only its mechanism moved** — see
+> `docs/specs/voice-hands-free.md` §1 (what changed) and §2 (where the
+> guarantee now lives, mechanically, for the default path). This note
+> amends `Decisions locked` #3 below; see §11's own amendment marker on that
+> row.
+
 `VISION.md` line 228, quoted verbatim, is the requirement this section
 exists to satisfy:
 
@@ -309,6 +322,15 @@ rather than silently accepting it. See the worked example below for exactly
 how the two interact.
 
 ### 3.1 Worked example
+
+> **Amended by E12 (epic #280).** The confirmation screen below renders only
+> when `autoSubmitSpoken` is `false`. On the default (`true`) path, a
+> low-confidence transcript is graded immediately rather than shown for
+> confirmation first — low confidence changes the COPY of the post-grade
+> correction affordance offered afterward (an explicit "we may have misheard
+> you" framing, rather than the generic retry offered after any spoken
+> attempt), not whether grading happens at all. See
+> `docs/specs/voice-hands-free.md` §1.
 
 Question: "Who is in charge of the executive branch?" The learner says "the
 President." `POST /api/ai/speech/transcribe` calls
@@ -458,6 +480,22 @@ filter or exclusion needs to be added to `readiness.service.ts` for §3.2's
 supersession rule to hold there; it already only reads the kind of row a
 superseded attempt never is.
 
+> **Amended by E12 (epic #280).** "The row that *can* be superseded is the
+> low-confidence one" is narrower than what is now true: a retry is offered
+> after **any** non-`correct` spoken attempt, not only a misheard one (see
+> the `voice-hands-free.md` §3.3-area note below), so the superseded row can
+> now be a confidently-wrong transcript too. The claim that a `correct`
+> outcome is never superseded is unchanged and still holds — nothing offers
+> a retry for an attempt that already graded correct, on either version of
+> this rule, so this paragraph's readiness-model conclusion is unaffected.
+> **Supersession now ALSO reverses the superseded attempt's mastery effect**,
+> via `AttemptGradingService.recomputeMasteryForQuestion` — a replay of the
+> question's full mastery history that excludes every superseded row,
+> regardless of whether it was misheard. This is new: under E9, a superseded
+> row was always the exact row `masterySkipReason` had already withheld from
+> scheduling, so there was never a scheduled effect to reverse. See
+> `docs/specs/voice-hands-free.md` §2 and its worked example, §2.1.
+
 ### 3.3 The one-attempt-per-question rule, relaxed for exactly one case
 
 `PracticeService.recordAttempt` (`apps/api/src/practice/practice.service.ts`)
@@ -483,6 +521,19 @@ superseded) is a second `ConflictException` under the same guard, because
 the practice flow only ever offers a retry immediately after a low-confidence
 transcription (§3.1) — there is no UI path that asks a learner to retry an
 attempt a session has already moved past.
+
+> **Amended by E12 (epic #280).** That last clause described E9's own web
+> UI, not this guard, and the UI has since changed: a retry is now offered
+> after **any** non-`correct` spoken attempt — misheard or plainly wrong —
+> for as long as the learner is still on that question, not only immediately
+> after a low-confidence transcription. `requireRetryTarget`'s own guard,
+> described in full above, is **unchanged** by this: it was never conditioned
+> on `failureCause` or confidence to begin with, only on ownership, chain
+> length, and single-supersession — the sentence above simply understated
+> what the guard already permitted. There is still no UI path that offers a
+> retry once a session has moved past the question, and there is still no
+> path that retries an already-superseded or already-retry attempt. See
+> `docs/specs/voice-hands-free.md` §2.
 
 ## 4. Audio is never stored
 
@@ -808,6 +859,15 @@ raw recognition separately from the edited answer — must not have to guess
 which of the two a historical row meant, which it could not do if the two
 facts were collapsed into one column now.
 
+> **Amended by E12 (epic #280).** `transcript`'s meaning narrows to "the
+> text that was graded, as the learner left it" — still never the raw,
+> unedited guess a learner corrected away, but no longer defined in terms of
+> a confirm step that, under `autoSubmitSpoken: true`, does not happen before
+> grading. `retryOfAttemptId` is what records that the learner did not leave
+> it standing, and no second column (a `transcript_confirmed` boolean was
+> considered and rejected) was added to say so redundantly. See
+> `docs/specs/voice-hands-free.md` §3.
+
 ## 9. The endpoints
 
 ```
@@ -973,7 +1033,7 @@ load-bearing rather than a preference:
 |---|---|---|
 | 1 | **Browser TTS is the default; `speak` is an optional upgrade.** | "Hear the question" must work on a fresh install with zero configuration and zero cost — an admin who has not touched AI settings at all must not be the reason a learner cannot hear a question read aloud. §2. |
 | 2 | **Wiring a voice role must not break existing installations.** | `systemReady` was computed over every `wiredModelRoles()` member; wiring `transcribe`/`speak` alone, without narrowing `systemReady` to the text roles in the same commit, would make every deployed installation report not-ready the instant this epic merges — for a capability nobody asked for yet, discovered by an admin who changed nothing. §1. |
-| 3 | **The transcript is confirmed by the learner before grading.** | This is the anti-penalty mechanism `VISION.md` line 228 requires. Grading raw ASR output treats a speech-recognition failure as a civics-knowledge failure — the exact conflation this epic exists to prevent. §3. |
+| 3 | **The transcript is confirmed by the learner before grading.** ***Amended by E12 (epic #280)*** — confirm-before-grade is now the opt-out (`autoSubmitSpoken: false`); the default flow grades immediately and moves the anti-penalty guarantee to `recomputeMasteryForQuestion`. See `docs/specs/voice-hands-free.md` §1, §2, and this document's own §3 amendment note. | This is the anti-penalty mechanism `VISION.md` line 228 requires. Grading raw ASR output treats a speech-recognition failure as a civics-knowledge failure — the exact conflation this epic exists to prevent. §3. |
 | 4 | **A low-confidence miss is flagged `failureCause: misheard` and withheld from mastery scheduling — `outcome` stays whatever grading honestly found.** | Without the scheduling withholding, an accent or a noisy microphone becomes a scheduling penalty (a reset streak, a lapse, a pulled-in `dueAt`) indistinguishable from not knowing the material — the recognizer's own uncertainty about the TEXT says nothing about the learner's recall, so `question_mastery` must never see it. §3, §3.1. |
 | 5 | **Audio is not stored.** | An unnecessary recording of someone's voice, made while they practice for a naturalization interview, is a liability this product has no use for and every reason to avoid — retaining it would create a sensitive data store with no corresponding feature need. §4. |
 | 6 | **Voice is always optional.** | `VISION.md`'s "type instead when voice is inconvenient" and "switch between voice and text without losing progress" are stated as user-facing requirements, not aspirations; a learner who cannot or does not want to use voice must have the identical practice experience by text. §5. |

@@ -86,6 +86,15 @@ a v2.
 | E9 | Voice foundation | `transcribe`/`speak` wired, audio capture and playback, spoken practice mode with transcript confirmation, misheard-vs-wrong distinction — opens Milestone B | #25, E4, E6 | done<sup>¶</sup> | [#58](https://github.com/marinoscar/oathpath/issues/58) |
 | E10 | Reading and writing tests | Vocabulary-sourced sentences, word-error-rate reading scoring, dictated writing scoring, the readiness `english` component | E9 | done<sup>**</sup> | [#59](https://github.com/marinoscar/oathpath/issues/59) |
 | E11 | Realtime voice interview | `realtime` wired, ephemeral session tokens, the E8 engine driving a realtime model over tool calls — closes Milestone B and the MVP | #25, E8, E9, E10 | done<sup>††</sup> | [#60](https://github.com/marinoscar/oathpath/issues/60) |
+| E12 | Hands-free voice practice | Auto-submit replaces confirm-before-grade as the default (with a zero-cost correction via `recomputeMasteryForQuestion`), a shared content-addressed cache for civics question/answer audio, and a learner-chosen premium voice | E9, E5 | in progress | [#280](https://github.com/marinoscar/oathpath/issues/280) |
+
+**E12 is the first epic filed after the MVP boundary.** E1–E11 closed
+Milestone A and Milestone B — the whole MVP, per [§2](#2-what-the-mvp-is) —
+before this epic was opened, so E12 belongs to neither milestone: it is
+post-MVP work, refining a surface (spoken practice) the MVP already shipped,
+not completing a requirement the MVP boundary was drawn around. See
+[`docs/specs/voice-hands-free.md`](docs/specs/voice-hands-free.md) for its
+full design.
 
 Status legend: `not started` — no child issue in progress; `in progress` —
 at least one child issue has an open PR or merged work; `done` — the epic
@@ -414,6 +423,7 @@ graph LR
     E9["E9 Voice foundation"]
     E10["E10 Reading/writing"]
     E11["E11 Realtime interview"]
+    E12["E12 Hands-free voice practice"]
 
     E1 --> E2
     E2 --> E3
@@ -434,6 +444,8 @@ graph LR
     E9 --> E11
     E10 --> E11
     AI --> E11
+    E9 --> E12
+    E5 --> E12
 
     subgraph MilestoneA["Milestone A — Text-complete"]
         E1
@@ -890,3 +902,24 @@ adds the "No test may run against a database" rule to
 [§7](#7-cross-cutting-rules); it does not remove the Playwright criterion
 from any epic, only reclassifies it honestly as a human discipline rather
 than an automated gate.
+
+**2026-09-05 — E9's `Decisions locked` #3 (confirm-before-grade) changed; a
+locked decision that changes is itself worth a record, per this section's own
+rule.** E12 (#280), the first epic filed after the MVP boundary, replaces
+confirm-before-grade with auto-submit (`autoSubmitSpoken`, defaulting `true`)
+as the default spoken-practice flow, keeping the original confirm step as an
+opt-out rather than deleting it. It changed because auto-submit, on its own,
+opens a gap `docs/specs/voice.md` §3's original mechanism did not have to
+address: a confidently-misheard transcript (an accent transcribed with HIGH
+confidence and the wrong words) can now reach grading and be scheduled as a
+real mastery regression before a learner has any chance to correct it —
+`isMisheardAttempt`'s low-confidence condition, unchanged, was never designed
+to catch a correction offered *after* grading, only a mishearing detected
+*before* it. The fix is `AttemptGradingService.recomputeMasteryForQuestion`,
+which replays a question's full mastery history excluding every superseded
+attempt whenever a retry corrects one, so a correction costs the learner
+nothing — mechanically, not by exception. `docs/specs/voice.md` §3, §3.1,
+§3.2, §3.3, §8, and its own `Decisions locked` #3 each carry an amendment note
+pointing here rather than being silently rewritten; see
+[`docs/specs/voice-hands-free.md`](docs/specs/voice-hands-free.md) for the
+full design.
