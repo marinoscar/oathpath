@@ -43,7 +43,16 @@ export default function LoginPage() {
   return (
     <Box
       sx={{
+        // `100dvh` where supported, `100vh` as the fallback (issue #359, epic
+        // #345 — the audit of every bare viewport-height rule in this app).
+        // Plain `100vh` measures against the LARGEST viewport, i.e. the one
+        // with the mobile browser's chrome retracted, so a centred card is
+        // pushed partly under the URL bar and the page scrolls even when its
+        // content fits. `common/Layout.tsx` models the same guard; this screen
+        // sits OUTSIDE the shell, so it owns its own viewport height and has
+        // to repeat it.
         minHeight: '100vh',
+        '@supports (min-height: 100dvh)': { minHeight: '100dvh' },
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',

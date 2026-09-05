@@ -153,10 +153,19 @@ describe('Layout', () => {
       const main = screen.getByTestId('outlet-content').closest('main')!;
       const rules = emittedRulesFor(main);
 
-      // pb: 10 → 80px, which clears the fixed BottomNav's height.
-      expect(rules).toMatch(/@media \(min-width:0px\)\{[^}]*padding-bottom:80px/);
-      // pb: 3 → 24px at sm and up, matching the other three sides.
-      expect(rules).toMatch(/@media \(min-width:600px\)\{[^}]*padding-bottom:24px/);
+      // 80px, which clears the fixed BottomNav's height, PLUS the safe-area
+      // inset issue #359 added on top of it. The breakpoint is unchanged — the
+      // whole point of asserting the emitted rules is that this `sm` and
+      // `BottomNav`'s `sm` are still the same 600px.
+      expect(rules).toMatch(
+        /@media \(min-width:0px\)\{[^}]*padding-bottom:calc\(80px \+ env\(safe-area-inset-bottom\)\)/,
+      );
+      // 24px at sm and up, matching the other three sides, plus the same inset:
+      // there is no bottom bar here, but a tablet in a standalone window still
+      // has a gesture bar of its own.
+      expect(rules).toMatch(
+        /@media \(min-width:600px\)\{[^}]*padding-bottom:calc\(24px \+ env\(safe-area-inset-bottom\)\)/,
+      );
     });
   });
 

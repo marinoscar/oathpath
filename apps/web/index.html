@@ -2,7 +2,18 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      `viewport-fit=cover` (issue #359, epic #345) is what makes
+      `env(safe-area-inset-*)` resolve to anything but zero. Without it iOS
+      letterboxes the page inside the safe area and every inset reads 0px, so
+      the padding `BottomNav.tsx` and `common/Layout.tsx` compute from those
+      insets silently becomes a no-op — the bug looks like the CSS being wrong
+      rather than like this line being missing.
+    -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+    />
     <!--
       `%APP_NAME%` is substituted at build/serve time by the `appName()` plugin
       in `vite.config.ts`, which reads the value from `@oathpath/shared`. Static HTML
@@ -30,6 +41,68 @@
       both the .css and the .woff2.
     -->
     <link rel="stylesheet" href="/fonts/inter.css" />
+
+    <!--
+      ===================================================================
+      PWA (issue #359, epic #345)
+      ===================================================================
+    -->
+
+    <!--
+      The manifest is GENERATED, not a file in `public/`: `name` and
+      `short_name` are the product name, and `@oathpath/shared`'s `APP_NAME` is
+      this repository's only copy of that. `pwa()` in `vite.config.ts` emits it
+      at build time and serves the same bytes from middleware in dev. See
+      `src/config/webManifest.ts`.
+    -->
+    <link rel="manifest" href="/manifest.webmanifest" />
+
+    <!--
+      TWO theme-colors, matched to the app's OWN surfaces rather than to one
+      brand colour. `theme_color` tints the window chrome directly above the
+      page, and the thing directly below it is the AppBar — which paints itself
+      `background.paper` (`components/navigation/AppBar.tsx`), i.e. #ffffff in
+      `theme/light.ts` and #1e1e1e in `theme/dark.ts`. A single hardcoded value
+      would leave a visible seam in one of the two themes.
+
+      KNOWN LIMIT, stated rather than left to be discovered: these follow the
+      OS preference, and a learner who overrides the theme inside the app
+      (`ThemeContext`'s explicit light/dark) gets chrome matching the OS, not
+      their override. The manifest format has one `theme_color` and no media
+      form, so tracking the in-app override would mean writing the meta from
+      JavaScript on every theme change; that is a separate, larger change than
+      this issue asks for.
+    -->
+    <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#1e1e1e" media="(prefers-color-scheme: dark)" />
+
+    <!-- Favicons. SVG first for the browsers that prefer it; PNGs for the rest. -->
+    <link rel="icon" type="image/svg+xml" href="/icons/icon.svg" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/icons/favicon-32.png" />
+    <link rel="icon" type="image/png" sizes="16x16" href="/icons/favicon-16.png" />
+
+    <!--
+      iOS reads none of the manifest for the home-screen icon, so this link is
+      the icon on an iPhone. Full bleed and opaque, because iOS applies its own
+      corner mask and composites transparency onto black.
+    -->
+    <link rel="apple-touch-icon" sizes="180x180" href="/icons/apple-touch-icon-180.png" />
+
+    <!--
+      `mobile-web-app-capable` is the standard name; `apple-mobile-web-app-capable`
+      is the one older iOS still reads. Both, deliberately.
+
+      `status-bar-style: default` and NOT `black-translucent`. Translucent
+      hands the status-bar strip to the page, which would require the AppBar to
+      pay `env(safe-area-inset-top)` itself — a top-inset change this issue
+      does not make, whose absence would put the clock over the toolbar.
+      `default` keeps the status bar opaque and the app below it, which is
+      correct with the chrome as it stands today.
+    -->
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="%APP_NAME%" />
   </head>
   <body>
     <div id="root"></div>
