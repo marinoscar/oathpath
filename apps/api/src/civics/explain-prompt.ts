@@ -137,6 +137,18 @@ export function buildExplainPrompt(input: ExplainPromptInput): AiMessage[] {
  * is `VISION.md`'s AI-personality section, which is a product commitment
  * ("never condescending about English ability"), not a preference a deployment
  * gets to opt out of.
+ *
+ * E14 (#305) does not contradict that claim; it adds a different one. A
+ * learner-CHOSEN delivery style (`docs/specs/coach-personality.md`) is not a
+ * deployment preference — it is opt-in, it defaults to exactly the voice
+ * below (a learner who never opens the setting sees no change here at all),
+ * and wherever it is wired into a call, it is appended AFTER this system
+ * message as its own fragment, with the invariant floor appended after THAT
+ * and declared in the prompt text to override it: the persona can colour the
+ * tutor's sentence, it cannot unsay the paragraph above. This comment reads
+ * the same whether or not that fragment has been wired into this specific
+ * call yet — see `docs/specs/coach-personality.md` for which calls it is and
+ * is not, and issue #319 for wiring it here.
  */
 function systemMessage(language: string, hasFocus: boolean): string {
   const paragraphs = [

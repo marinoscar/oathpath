@@ -155,6 +155,17 @@ export const APPLICANT_RESPONSE_CLOSE = '</applicant_response>';
  * admin-configurable officer persona and there must not be one: a deployment
  * that could make the officer chatty, encouraging or harsh would be a
  * deployment whose rehearsal no longer resembles the event it rehearses.
+ *
+ * THIS IS ALSO WHY E14 (#305) DOES NOT REACH HERE — PERMANENTLY, not as a
+ * scope gap a later issue closes. The rule above is tied to realism, not to
+ * taste: the officer is the one voice in this product standing in for a real,
+ * external event, and a learner is entitled to rehearse the actual thing
+ * rather than a flavoured version of it, which is exactly why E14's own
+ * `Decisions locked` #5 excludes the officer outright. It would have had
+ * nothing to colour regardless — {@link OFFICER_VERDICT_PROHIBITION} below
+ * means the officer gives no per-question feedback at all, on either
+ * transport, so there is no sentence here for a persona fragment to attach
+ * to in the first place. See `docs/specs/coach-personality.md` §10.
  */
 export const OFFICER_ROLE_DESCRIPTION =
   'a United States immigration officer conducting a naturalization interview ' +
@@ -360,6 +371,15 @@ export function buildOfficerPrompt(input: OfficerPromptInput): AiMessage[] {
  * "realistic, neutral mock USCIS interview experience", and a deployment that
  * could make the officer chatty, encouraging, or harsh would be a deployment
  * whose rehearsal no longer resembles the event it rehearses.
+ *
+ * E14 (#305), the learner-chosen coach personality, permanently excludes this
+ * function — see `OFFICER_ROLE_DESCRIPTION`'s own comment above for why the
+ * exclusion is tied to realism rather than scope, and
+ * `docs/specs/coach-personality.md` §10 for the decision record. It would
+ * have nothing to colour in any case: `officerSystemMessage` never emits
+ * per-question feedback for {@link OFFICER_VERDICT_PROHIBITION} to prohibit
+ * in the first place, and neither transport's officer produces the kind of
+ * sentence a persona fragment attaches to.
  */
 function officerSystemMessage(input: OfficerPromptInput): string {
   const paragraphs = [

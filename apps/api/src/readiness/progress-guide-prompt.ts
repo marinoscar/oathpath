@@ -69,6 +69,18 @@ export function buildProgressGuidePrompt(result: ReadinessResult): AiMessage[] {
  * to opt out of. The voice matches `journey/study-coach.ts` and
  * `journey/next-action.ts`'s own copy — encouraging but never hyped, honest
  * about a limitation rather than soft-pedaling it.
+ *
+ * That claim is about an ADMIN/DEPLOYMENT persona, and it still holds
+ * unweakened. E14 (#305)'s learner-chosen coach personality is a different
+ * axis, and this file is deliberately not one of the places it is wired in
+ * v1 — a scope decision, not a principle: the readiness narrative is a rarer,
+ * more consequential paragraph than a per-answer reaction, and E14 ships the
+ * two mechanisms that cover the actual coaching-gap surface (see
+ * `docs/specs/coach-personality.md` §10) without touching it. If a later
+ * epic does wire a persona here, it is appended after this system message as
+ * its own fragment, with the same invariant floor appended after that and
+ * declared in the prompt text to override it — identically to every other
+ * call E14 does reach.
  */
 function systemMessage(): string {
   return [
