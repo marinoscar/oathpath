@@ -2535,6 +2535,191 @@ export interface InterviewPage {
 }
 
 // =============================================================================
+// The realtime voice interview — mint and relay (issues #157/#158/#159, E11)
+// =============================================================================
+//
+// Hand-written mirrors of `apps/api/src/interviews/dto/interview-realtime-session.dto.ts`
+// and `interview-tool-call.dto.ts`, field for field against those Zod schemas.
+//
+// -----------------------------------------------------------------------------
+// THERE IS NO `apiKey` ON ANY SHAPE IN THIS BLOCK, AND THAT IS THE POINT
+// -----------------------------------------------------------------------------
+//
+// `docs/specs/realtime-interview.md` §12's second locked decision: "The browser
+// never sees the learner's API key — only an ephemeral, interview-scoped
+// secret." The API carries a compile-time proof that no long-lived credential
+// can travel on the mint response; this is the same closed list on the reading
+// side, so a field added to the server's response that nobody declared here is
+// a field the web cannot start reading by accident.
+//
+// {@link RealtimeSessionOk.clientSecret} is deliberately NOT an exception to
+// that rule. It expires in about a minute, it is scoped to one session
+// configuration this application authored for one interview, and it is useless
+// outside the handshake it exists for.
+// =============================================================================
+
+/** A session was minted. Three fields, and the list is closed. */
+export interface RealtimeSessionOk {
+  status: 'ok';
+  /**
+   * The ephemeral, single-session client secret.
+   *
+   * Handed straight to the provider's own handshake and NEVER stored: not in
+   * `localStorage`, not in `sessionStorage`, not in a cookie, not in a module
+   * variable that outlives the connection. A credential written to storage
+   * outlives the tab that needed it, and this one has no second use.
+   */
+  clientSecret: string;
+  /** When the secret stops being usable, as the PROVIDER reported it. */
+  expiresAt: string;
+  /** The realtime model the secret was minted against. Named on the handshake. */
+  modelId: string;
+}
+
+/**
+ * No mint was attempted, and why.
+ *
+ * NOT AN ERROR. `role_unbound` on a deployment whose administrator has not
+ * bound a realtime model is an ordinary, correctly-configured installation
+ * where the voice interview is not set up — and the client's correct response
+ * is the text transport, with the same interview id (§7).
+ */
+export interface RealtimeSessionUnavailable {
+  status: 'unavailable';
+  cause: AiUnavailableCause;
+  /** Always `realtime` — the role that could not be served. */
+  role: 'realtime';
+}
+
+/**
+ * The mint was attempted and did not produce a usable session.
+ *
+ * DISTINCT FROM `unavailable`, and the distinction is what the screen renders:
+ * "voice interviews are not set up here" is a state a learner can do nothing
+ * about, while "that did not work" is worth a retry before falling back.
+ */
+export interface RealtimeSessionFailed {
+  status: 'failed';
+  errorCode: string;
+  error: string;
+}
+
+export type RealtimeSessionResponse =
+  | RealtimeSessionOk
+  | RealtimeSessionUnavailable
+  | RealtimeSessionFailed;
+
+/** The three tools the realtime officer may call. */
+export type RealtimeToolName = 'next_question' | 'grade_answer' | 'end_phase';
+
+/**
+ * One tool call, as it goes on the wire to
+ * `POST /api/interviews/:id/realtime/tool-calls`.
+ *
+ * THERE IS NO `verdict` FIELD AND THERE NEVER WILL BE. The API's own DTO
+ * carries a compile-time proof of the absence; this mirror keeps the browser
+ * from being the layer that reintroduces one. The model reports what it HEARD;
+ * the engine's grading ladder decides whether that was right.
+ */
+export type RealtimeToolCallInput =
+  | { tool: 'next_question' }
+  | {
+      tool: 'grade_answer';
+      questionId: string;
+      transcript: string;
+      /** ABSENT MEANS UNKNOWN, never low. Never send 0 as a stand-in. */
+      confidence?: number;
+    }
+  | { tool: 'end_phase'; phase: InterviewPhase };
+
+/** What every honoured result carries: where the interview is now. */
+export interface RealtimeTurnStatusFields {
+  phase: InterviewPhase;
+  turnIndex: number;
+  /** PACING, never score — the same `InterviewProgress` the text screen reads. */
+  progress: InterviewProgress;
+  awaitingCompletion: boolean;
+}
+
+/** `next_question`, honoured: the exact words the officer should say. */
+export interface RealtimeNextQuestionResult extends RealtimeTurnStatusFields {
+  tool: 'next_question';
+  status: 'ok';
+  /**
+   * The officer's line, assembled server-side and to be spoken AS GIVEN.
+   *
+   * No part of it was written by a model: a civics question is
+   * `civics_questions.prompt` verbatim, a reading or writing sentence is
+   * `english_sentences.text` verbatim, and everything around them is
+   * code-owned copy.
+   */
+  text: string;
+  /**
+   * SAY THIS; NEVER RENDER IT. True only for the writing test's sentence.
+   *
+   * The writing test is a DICTATION, so a screen that printed this string
+   * would not be showing the learner the question — it would be showing them
+   * the answer (`docs/specs/english-test.md` §4). Honouring it is a DOM
+   * invariant the realtime screen enforces, exactly as `WritingPracticePage`
+   * enforces the same rule over `GET /api/english/next`.
+   */
+  speakOnly: boolean;
+  /** The id a subsequent `grade_answer` must name, or `null` for an unscored turn. */
+  itemId: string | null;
+}
+
+/** `grade_answer`, honoured: an acknowledgement, and nothing else. */
+export interface RealtimeGradeAnswerResult extends RealtimeTurnStatusFields {
+  tool: 'grade_answer';
+  status: 'ok';
+  /** The neutral sentence to speak. IDENTICAL WHATEVER THE OUTCOME WAS. */
+  ack: string;
+  /**
+   * Whether evidence was written. A statement about the RECORD, not the answer.
+   *
+   * `false` only for a reading attempt whose transcript the recogniser did not
+   * trust — no row is written and the segment stays outstanding. It never
+   * correlates with whether the learner was right, so nothing may render it as
+   * a verdict.
+   */
+  recorded: boolean;
+}
+
+/** `end_phase`, honoured: where the interview now is. */
+export interface RealtimeEndPhaseResult {
+  tool: 'end_phase';
+  status: 'ok';
+  nextPhase: InterviewPhase;
+  /** One sentence of orientation for the model. Never a summary of how it went. */
+  context: string;
+  awaitingCompletion: boolean;
+}
+
+/**
+ * Any tool, refused — and **HTTP 200**, never a 4xx.
+ *
+ * A refusal is an expected outcome of the contract rather than an error: the
+ * model must be told what to do instead, and {@link instruction} is the field
+ * that gets the interview moving again. A relay that treated this as a failure
+ * would discard it and leave the officer waiting on a tool result that never
+ * arrives.
+ */
+export interface RealtimeToolCallRejected {
+  tool: RealtimeToolName;
+  status: 'rejected';
+  /** A stable, group-able code. Never a message. */
+  reason: string;
+  error: string;
+  instruction: string;
+}
+
+export type RealtimeToolCallResponse =
+  | RealtimeNextQuestionResult
+  | RealtimeGradeAnswerResult
+  | RealtimeEndPhaseResult
+  | RealtimeToolCallRejected;
+
+// =============================================================================
 // English — `GET /api/english/next`, `POST /api/english/attempts`,
 // `GET /api/english/progress` (issue #136, epic #59 / E10)
 // =============================================================================

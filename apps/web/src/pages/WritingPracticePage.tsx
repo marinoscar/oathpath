@@ -153,11 +153,11 @@ import {
   Divider,
   Paper,
   Stack,
-  TextField,
   Typography,
 } from '@mui/material';
 
 import { LoadingSpinner } from '../components/common/LoadingSpinner';
+import { DictationAnswer } from '../components/english/DictationAnswer';
 import { SentenceDiff } from '../components/english/SentenceDiff';
 import { READING_PRACTICE_PATH } from '../components/english/paths';
 import {
@@ -293,12 +293,17 @@ export default function WritingPracticePage() {
   // Submitting
   // ---------------------------------------------------------------------------
 
-  const trimmed = response.trim();
   const replayCount = Math.max(0, playCount - 1);
 
-  const handleSubmit = async (event: React.FormEvent) => {
-    event.preventDefault();
-    if (!sentence || !trimmed) return;
+  /**
+   * Score one typed answer.
+   *
+   * Takes the answer as an argument rather than reading `response`, because
+   * `DictationAnswer` owns the form element and has already trimmed it — one
+   * definition of "what was submitted", in the component that submitted it.
+   */
+  const submitAnswer = async (answer: string) => {
+    if (!sentence || !answer) return;
 
     setSubmitting(true);
     setSubmitError(null);
@@ -309,7 +314,7 @@ export default function WritingPracticePage() {
         // No capitalisation fix, no punctuation fix, no spelling fix: the
         // scorer normalises both sides itself (§2.1) and a client that
         // "helped" first would be grading its own correction.
-        responseText: trimmed,
+        responseText: answer,
         // OURS TO SEND, unlike on the reading screen. See the file header for
         // what is counted and why nothing is gated on it.
         replayCount,
@@ -526,48 +531,19 @@ export default function WritingPracticePage() {
                 &mdash; they never change your result.
               </Typography>
 
-              <Box component="form" onSubmit={handleSubmit} sx={{ mt: 3 }}>
-                <TextField
-                  // A REAL `<label>`: MUI's `label` prop renders one bound to
-                  // the field, never a placeholder pretending to be one.
-                  label="What you heard"
-                  value={response}
-                  onChange={(event) => setResponse(event.target.value)}
-                  fullWidth
-                  multiline
-                  minRows={2}
-                  disabled={submitting || result !== null}
-                  // ALL FOUR OFF, ON THE REAL ELEMENT. `slotProps.htmlInput`
-                  // lands on the `<textarea>` itself; the same names on the
-                  // TextField wrapper would satisfy a careless test and be
-                  // ignored by every browser. See the file header for why each
-                  // one of the four is disqualifying rather than untidy.
-                  slotProps={{
-                    htmlInput: {
-                      autoComplete: 'off',
-                      autoCorrect: 'off',
-                      autoCapitalize: 'off',
-                      spellCheck: false,
-                    },
-                  }}
-                  helperText="Spelling and capitalisation are not judged, so write it the way you heard it."
-                />
-
-                <Stack
-                  direction={{ xs: 'column', sm: 'row' }}
-                  spacing={1}
-                  sx={{ mt: 2, alignItems: { xs: 'stretch', sm: 'center' } }}
-                >
-                  <Button
-                    type="submit"
-                    variant="contained"
-                    size="large"
-                    disabled={!trimmed || submitting || result !== null}
-                  >
-                    {submitting ? 'Checking…' : 'Check my writing'}
-                  </Button>
-                </Stack>
-              </Box>
+              {/* THE SHARED FIELD, not a copy of one. `DictationAnswer`
+                  carries the four autocorrect-off attributes and the reason
+                  each of them changes what is being measured; the realtime
+                  interview's writing segment (#159) mounts the same component,
+                  so the two screens cannot drift into testing two different
+                  things. It has no prop a sentence could travel in. */}
+              <DictationAnswer
+                value={response}
+                onChange={setResponse}
+                onSubmit={(answer) => void submitAnswer(answer)}
+                pending={submitting}
+                submitted={result !== null}
+              />
 
               {submitError && (
                 <Alert severity="error" sx={{ mt: 3 }}>

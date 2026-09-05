@@ -52,6 +52,17 @@ const WritingPracticePage = lazy(
 const InterviewStartPage = lazy(() => import("./pages/InterviewStartPage"));
 const InterviewPage = lazy(() => import("./pages/InterviewPage"));
 const InterviewDebriefPage = lazy(() => import("./pages/InterviewDebriefPage"));
+// Issue #159, epic #60 / E11 — the SPOKEN interview, a fourth screen under the
+// same Practice destination and owned by the same `/practice` prefix. A
+// separate route from `/practice/interviews/:id` rather than a mode of it: the
+// two hold opposite rules about the microphone and about the writing sentence,
+// and one component holding both is the shape in which "never render the
+// sentence" eventually gets rendered by accident. Falling back from voice to
+// text keeps the SAME interview id, because the engine's state is server-side
+// and a transport change is not a restart (`realtime-interview.md` §7).
+const RealtimeInterviewPage = lazy(
+  () => import("./pages/RealtimeInterviewPage"),
+);
 const AiKeySetupPage = lazy(() => import("./pages/AiKeySetupPage"));
 // Issue #72, epic #50 — the orientation screen behind `RequireOrientation`.
 const OrientationPage = lazy(() => import("./pages/OrientationPage"));
@@ -362,6 +373,37 @@ function AppRoutes() {
                         <Route
                           path="/practice/interviews/:id/debrief"
                           element={<InterviewDebriefPage />}
+                        />
+                        {/* The spoken interview (#159, epic #60 / E11). In the
+                        same `RequireOrientation` group and ungated beyond it
+                        for the identical reason the three routes above are:
+                        `POST /api/interviews/:id/realtime-session` and
+                        `POST /api/interviews/:id/realtime/tool-calls` are both
+                        `@Auth()` with NO permission, because a learner's own
+                        interview is exactly as unconditionally theirs as their
+                        own practice attempts — and `realtime` adds no
+                        permission string of its own
+                        (`docs/specs/realtime-interview.md` §3).
+
+                        NOT GATED ON THE `realtime` ROLE EITHER, and that is
+                        deliberate rather than an omission. Whether a model is
+                        bound is a per-deployment fact this bundle learns from
+                        `GET /api/ai/status`, and a route guard reading it would
+                        turn "your administrator has not set this up" into the
+                        catch-all redirect to `/` — a learner bounced to the
+                        home page with no explanation. The screen renders
+                        `AiNotReady` naming the role and offers the text
+                        interview instead, which is §7's own answer.
+
+                        `config/destinations.ts` GAINS NOTHING here either:
+                        `owns('/practice', …)` matches on segment boundaries and
+                        already covers this whole subtree, so the rail keeps
+                        highlighting Practice throughout a spoken interview.
+                        Content WITHIN the Practice destination, never a
+                        destination of its own. */}
+                        <Route
+                          path="/practice/interviews/:id/voice"
+                          element={<RealtimeInterviewPage />}
                         />
                         <Route path="/progress" element={<ProgressPage />} />
                         {/* The per-user settings surface (#96, epic #90) — the same
