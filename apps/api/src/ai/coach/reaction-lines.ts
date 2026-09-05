@@ -137,7 +137,7 @@ export const COACH_REACTION_LINES: Record<
       'Several correct in a row. That is what retention looks like.',
     ],
     'answer.partial': [
-      'Part of that landed. Tighten the rest and it’s yours.',
+      'Part of that landed. Read the rest and tighten it, and it’s yours.',
       'You’re most of the way there — read the rest and add the missing piece.',
       'The idea is right; the answer isn’t complete yet. Read the rest.',
     ],
@@ -269,7 +269,7 @@ export const COACH_REACTION_LINES: Record<
     ],
     'answer.skipped': [
       'Skipped! Strategic retreat. Read the answer while you’re back here.',
-      'We’ll pretend that didn’t happen. The question won’t — it’s coming back.',
+      'We’ll pretend that didn’t happen. The question won’t — read the answer before it comes back.',
       'Left blank. It’s already queuing up for a rematch, so take the answer now.',
     ],
     'answer.self_marked': [
@@ -337,7 +337,7 @@ export const COACH_REACTION_LINES: Record<
     ],
     'answer.skipped': [
       'Nothing? Then read the answer now, while it costs you nothing.',
-      'Skipped. That question is coming back, and it remembers.',
+      'Skipped. That question is coming back and it remembers — go read the answer.',
       'Blank. Fine — read the answer, and stop leaving them blank.',
     ],
     'answer.self_marked': [
