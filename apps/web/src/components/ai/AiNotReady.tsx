@@ -105,6 +105,34 @@ export interface AiNotReadyProps {
    * absent, behaviour is exactly what it has always been.
    */
   role?: string;
+
+  /**
+   * What to put on the `<Alert>`'s `role` — `"presentation"` when this is
+   * mounted INSIDE a caller's own live region.
+   *
+   * MUI's `Alert` sets `role="alert"` by default, which is itself a live
+   * region. That is right wherever this component stands on its own, and it is
+   * the default here for exactly that reason: `undefined` leaves every existing
+   * call site announcing exactly as it always has.
+   *
+   * It is wrong in one situation, which issue #277 created. `PracticeSessionPage`
+   * and `ReadingPracticePage` each mount this inside their own
+   * `<Box role="status" aria-live="polite">` — the region that already
+   * announces "Writing down what you said…", the amber retry alert and the
+   * transcript confirmation. A live region nested in a live region is how a
+   * screen-reader user is read the same sentence twice: once as the alert,
+   * once as the change to the region containing it. In that position the
+   * announcement is the OUTER region's job, and this component's contribution
+   * is the alert's LOOK — which is all `role="presentation"` leaves.
+   *
+   * DELIBERATELY NOT NAMED `role`. That name is taken, one field up, and means
+   * something entirely unrelated (which AI model role to ask about). Two props
+   * called `role` on one component is a trap, not a convenience.
+   *
+   * `VoiceUnavailableNotice` does NOT pass this and must not: it mounts at page
+   * level, outside any live region, where announcing itself is the whole point.
+   */
+  alertRole?: string;
 }
 
 /**
@@ -116,7 +144,7 @@ export interface AiNotReadyProps {
  * happen. With `role`, the same holds one level down: mount it unconditionally
  * and it says nothing unless that role is the thing that is missing.
  */
-export function AiNotReady({ feature, role }: AiNotReadyProps) {
+export function AiNotReady({ feature, role, alertRole }: AiNotReadyProps) {
   const { status, isLoading } = useAiStatus();
   const { hasPermission } = usePermissions();
 
@@ -135,7 +163,7 @@ export function AiNotReady({ feature, role }: AiNotReadyProps) {
   const what = feature ? `${feature} is` : 'This is';
 
   return (
-    <Alert severity="info" sx={{ my: 2 }}>
+    <Alert severity="info" role={alertRole} sx={{ my: 2 }}>
       <AlertTitle>{what} not available yet</AlertTitle>
 
       <Typography variant="body2" sx={{ mb: 1 }}>

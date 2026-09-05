@@ -302,7 +302,8 @@ import type {
   AiKeyStatus,
   AiStatus,
   AiUsage,
-  SpeechTranscription,
+  SynthesizeResponse,
+  TranscribeResponse,
   NotificationEventDef,
   AppNotification,
   NotificationListResponse,
@@ -829,15 +830,30 @@ export async function getAiUsage(days?: number): Promise<AiUsage> {
  * long note at the top of this file — sending JSON's content type over a
  * multipart body is unparseable at the other end.
  *
- * THE RESPONSE CARRIES NO AUDIO, in either direction of interpretation: nothing
- * comes back but `{ text, confidence }`, and nothing is stored anywhere by
- * making this call. `confidence` is `number | null` and **null means unknown,
- * never zero** — see `SpeechTranscription`, where getting that backwards is
- * spelled out as the thing that marks a good answer `misheard`.
+ * THREE SHAPES, ALL OF THEM HTTP 200, AND THE CALLER MUST SWITCH ON `status`
+ * (issue #277). `ok` carries the transcript; `unavailable` means no call was
+ * attempted (an unbound `transcribe`, the master switch off, no key of the
+ * caller's own) and is NOT an error; `failed` means the call happened and
+ * produced nothing usable. `docs/specs/voice.md` §9 spends the 200 on all three
+ * deliberately, so this function does not throw for any of them and a
+ * destructure straight off the promise — `const { text } = await …` — is
+ * exactly the bug this signature now makes uncompilable.
  *
- * NOT A GRADE AND NOT AN ANSWER. What comes back is what the recognizer heard,
- * and `docs/specs/voice.md` §3 requires the learner to confirm it before
+ * THE RESPONSE CARRIES NO AUDIO, in either direction of interpretation: nothing
+ * comes back but the fields of one of those three members, and nothing is
+ * stored anywhere by making this call. On the `ok` member `confidence` is
+ * `number | null` and **null means unknown, never zero** — see
+ * `SpeechTranscriptionOk`, where getting that backwards is spelled out as the
+ * thing that marks a good answer `misheard`.
+ *
+ * NOT A GRADE AND NOT AN ANSWER. What comes back on `ok` is what the recognizer
+ * heard, and `docs/specs/voice.md` §3 requires the learner to confirm it before
  * anything is graded on it.
+ *
+ * A genuine transport failure — 401, a malformed request, a dropped
+ * connection — still REJECTS with `ApiError`, unchanged. The union is about the
+ * 200-with-a-cause path only, and a caller needs both: one is a thing to retry,
+ * the other is a thing to explain.
  *
  * @param blob  the recording, held in memory only for this call's duration.
  * @param opts.fileName  what to call the part. Providers key their decoder off
@@ -849,7 +865,7 @@ export async function getAiUsage(days?: number): Promise<AiUsage> {
 export async function transcribeAudio(
   blob: Blob,
   opts: { fileName?: string; signal?: AbortSignal } = {},
-): Promise<SpeechTranscription> {
+): Promise<TranscribeResponse> {
   const form = new FormData();
   // One file part, named `audio`. NOT an arbitrary name: the endpoint iterates
   // the parts and REJECTS any file field it was not expecting (see
@@ -858,7 +874,7 @@ export async function transcribeAudio(
   // string load-bearing — a rename here is a 400 for every learner.
   form.append('audio', blob, opts.fileName ?? defaultAudioFileName(blob));
 
-  return api.post<SpeechTranscription>('/ai/speech/transcribe', form, {
+  return api.post<TranscribeResponse>('/ai/speech/transcribe', form, {
     signal: opts.signal,
   });
 }
@@ -873,20 +889,94 @@ export async function transcribeAudio(
  * the optional, provider-hosted, better-sounding upgrade on top — reached only
  * when an admin has bound the `speak` role AND the learner asked for it.
  *
- * ANSWERS BYTES, NOT JSON, which is why it passes `responseType: 'blob'`. A
- * `speak`-unbound deployment answers a 404-shaped "not available" rather than a
- * 500 (§9), and that arrives here as an `ApiError` a caller should treat as
- * "use the browser voice", never as a failure worth showing anybody.
+ * ANSWERS BYTES *OR* JSON, BOTH UNDER HTTP 200, AND `Content-Type` IS THE ONLY
+ * THING THAT TELLS THEM APART. That is not a quirk of this client: it is the
+ * contract on `AiSpeechController.synthesize`, which spends the 200 on an
+ * `unavailable`/`failed` outcome for the same reason `transcribe` does (§9) —
+ * a `speak`-unbound deployment is a correctly configured deployment, not a
+ * fault to be signalled with a status code.
+ *
+ * So the request still asks for a `Blob` (the success path is audio and must
+ * not be routed through `JSON.parse`), and this function then INSPECTS THE BLOB
+ * IT GOT: a JSON media type means the body is the same
+ * `{ data: { status, … } }` envelope every other endpoint answers with, read
+ * back out of the blob and returned as the `unavailable`/`failed` member.
+ * Issue #277: before this, a JSON envelope was handed straight to an
+ * `<audio>` element, which "worked" only because the resulting play error
+ * landed in a `catch` that fell back to the browser voice — the right outcome
+ * reached for the wrong reason, and one refactor away from silence.
+ *
+ * NOTHING IN HERE THROWS FOR AN AI REASON. A body that is not valid JSON, or
+ * parses to something with no recognisable `status`, resolves to a `failed`
+ * member rather than rejecting: every caller of this function treats any
+ * non-`ok` result as "use the browser voice", so this function becoming the
+ * thing that breaks playback would be strictly worse than any answer it could
+ * give. A genuine non-2xx (401, a network failure) still rejects with
+ * `ApiError`, unchanged.
  */
 export async function synthesizeSpeech(
   text: string,
   opts: { signal?: AbortSignal } = {},
-): Promise<Blob> {
-  return api.post<Blob>(
+): Promise<SynthesizeResponse> {
+  const blob = await api.post<Blob>(
     '/ai/speech/synthesize',
     { text },
     { responseType: 'blob', signal: opts.signal },
   );
+
+  // `application/json`, `application/json; charset=utf-8`, and whatever else a
+  // proxy decides to append. Matched on the prefix rather than on equality for
+  // that reason; anything else is audio and is the caller's to play.
+  if (!blob.type.toLowerCase().startsWith('application/json')) {
+    return { status: 'ok', audio: blob };
+  }
+
+  return parseSynthesisEnvelope(blob);
+}
+
+/**
+ * Read a non-`ok` synthesis result back out of the JSON blob it arrived in.
+ *
+ * Separate from its caller so the defensive branches are readable rather than
+ * nested three deep inside a function whose happy path is one line. Every exit
+ * is a `SynthesizeResponse`; there is no `throw` anywhere in it, deliberately —
+ * see the caller's doc comment.
+ */
+async function parseSynthesisEnvelope(blob: Blob): Promise<SynthesizeResponse> {
+  /** What a body we could not make sense of resolves to. */
+  const unreadable: SynthesizeResponse = {
+    status: 'failed',
+    // Not a code the API ever sends. It says where the confusion happened,
+    // which is the only useful thing to log about a body like this — and it is
+    // never shown to a learner, exactly as the API's own `error` is not.
+    errorCode: 'malformed_response',
+    error: 'The speech response could not be read.',
+  };
+
+  try {
+    const payload: unknown = JSON.parse(await blob.text());
+    // The standard envelope: the interesting object is under `data`. Some
+    // shapes arrive unwrapped, so try the payload itself as well rather than
+    // insisting on a wrapper that is not load-bearing here.
+    const candidate =
+      payload && typeof payload === 'object' && 'data' in payload
+        ? (payload as { data: unknown }).data
+        : payload;
+
+    if (!candidate || typeof candidate !== 'object') return unreadable;
+
+    const status = (candidate as { status?: unknown }).status;
+    // Only the two non-`ok` members can arrive as JSON — an `ok` synthesis is
+    // audio, by definition. A JSON body claiming `ok` is therefore as
+    // unreadable as one claiming nothing.
+    if (status === 'unavailable' || status === 'failed') {
+      return candidate as SynthesizeResponse;
+    }
+
+    return unreadable;
+  } catch {
+    return unreadable;
+  }
 }
 
 /**
