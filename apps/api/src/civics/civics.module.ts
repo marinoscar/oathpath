@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 
 import { AiModule } from '../ai/ai.module';
 import { PrismaModule } from '../prisma/prisma.module';
+import { SettingsModule } from '../settings/settings.module';
 import { CivicsAdminController } from './civics-admin.controller';
 import { CivicsAdminService } from './civics-admin.service';
 import { CivicsController } from './civics.controller';
@@ -47,6 +48,22 @@ import { CivicsService } from './civics.service';
  * that can reach a plaintext-credential path stays a list a person can read,
  * and this line is how this module appears on it.
  *
+ * `SettingsModule` IS imported (issue #319, epic #305 / E14), for exactly one
+ * read: `UserSettingsService.readCoachPreferences`, which tells
+ * `CivicsExplainService` which voice to write an explanation in. The
+ * namespace's own service rather than a second cast of `user_settings.value`
+ * at the call site — the same posture `SpeechAudioModule` already takes for
+ * `voice.preferredVoice`.
+ *
+ * NO CYCLE, and worth stating rather than assuming: `SettingsModule` imports
+ * NOTHING — its `@Module` has no `imports` array at all — and
+ * `UserSettingsService`'s only constructor dependency is `PrismaService`.
+ * There is no path back from settings to civics or to AI, so this edge is a
+ * leaf. Note also that it buys a TONE and never a fact: the grounding clause
+ * in `explain-prompt.ts`'s system message is identical for all four personas,
+ * and the user message — this question and these resolved answers — is
+ * byte-identical across them.
+ *
  * `CivicsExplainService` is NOT exported. Nothing outside this module should
  * be able to start a tutor stream on a learner's key without going through the
  * route that has the learner's own request in front of it — same posture as
@@ -54,7 +71,7 @@ import { CivicsService } from './civics.service';
  * one is about spend.
  */
 @Module({
-  imports: [PrismaModule, AiModule],
+  imports: [PrismaModule, AiModule, SettingsModule],
   controllers: [CivicsController, CivicsAdminController],
   providers: [CivicsService, CivicsAdminService, CivicsExplainService],
   exports: [CivicsService],

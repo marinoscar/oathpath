@@ -4,6 +4,7 @@ import { AiModule } from '../ai/ai.module';
 import { EngagementModule } from '../engagement/engagement.module';
 import { PrismaModule } from '../prisma/prisma.module';
 import { ReadinessModule } from '../readiness/readiness.module';
+import { SettingsModule } from '../settings/settings.module';
 import { AttemptGradingService } from './attempt-grading.service';
 import { PracticeController } from './practice.controller';
 import { PracticeService } from './practice.service';
@@ -97,9 +98,39 @@ import { PracticeService } from './practice.service';
  * §2.3's time slice rather than through `PracticeService` — the same posture
  * `ProgressService` takes toward `question_mastery` — so importing back would
  * be a cycle for a dependency it does not have.
+ *
+ * `SettingsModule` IS imported (issue #319, epic #305 / E14), for exactly one
+ * read: `UserSettingsService.readCoachPreferences`, which tells
+ * `AttemptGradingService` which voice to write the grader's `feedback`
+ * sentence in. The namespace's own service rather than a cast of the JSONB
+ * column at the call site — the same posture `SpeechAudioModule` already takes
+ * for `voice.preferredVoice`, and for the reason `readCoachPreferences`'s own
+ * comment gives: the sparse-namespace contract belongs to that service, and a
+ * second reader of the column is the first place it can be interpreted
+ * differently.
+ *
+ * NO CYCLE, and it is worth stating rather than assuming, because this module
+ * already imports four others. `SettingsModule` imports NOTHING — its
+ * `@Module` has no `imports` array at all — and `UserSettingsService`'s only
+ * constructor dependency is `PrismaService`. There is no path back from
+ * settings to practice, to AI, to readiness or to engagement, so the edge this
+ * line adds is a leaf.
+ *
+ * It buys a TONE and never a grade. `grading.ts`'s
+ * `GRADING_PERSONA_SCOPE_NOTICE` says so in the prompt, `gradingVerdictSchema`
+ * still has exactly three fields, and `AttemptGradingService.resolvePersona`
+ * degrades a failed settings read to the default persona rather than
+ * propagating it: a preference must never be able to cost a learner their
+ * answer.
  */
 @Module({
-  imports: [PrismaModule, AiModule, ReadinessModule, EngagementModule],
+  imports: [
+    PrismaModule,
+    AiModule,
+    ReadinessModule,
+    EngagementModule,
+    SettingsModule,
+  ],
   controllers: [PracticeController],
   providers: [AttemptGradingService, PracticeService],
   exports: [AttemptGradingService, PracticeService],
