@@ -30,7 +30,15 @@ export class ErrorBoundary extends Component<Props, State> {
             flexDirection: 'column',
             alignItems: 'center',
             justifyContent: 'center',
+            // `100dvh` where supported, `100vh` as the fallback (issue #359,
+            // epic #345 — the audit of every bare viewport-height rule in this
+            // app). This boundary wraps the whole route tree, so on a phone it
+            // is the only thing sizing the error screen; plain `100vh` measures
+            // against the largest viewport and pushes the Reload button under
+            // the browser chrome, which is a bad place for the only control on
+            // a screen someone reaches when everything else has failed.
             height: '100vh',
+            '@supports (height: 100dvh)': { height: '100dvh' },
             gap: 2,
           }}
         >

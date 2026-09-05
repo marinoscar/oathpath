@@ -184,7 +184,26 @@ function makeHarness() {
       recording.current = null;
       captureState.current = { status: 'idle' };
     }),
-    acquireStream: vi.fn(() => Promise.resolve({} as MediaStream)),
+    /**
+     * Resolves immediately unless a case holds it open.
+     *
+     * HOLDING IT IS THE PERMISSION PROMPT (issue #349, epic #345). The real
+     * `acquireStream` does not resolve until `getUserMedia` does, and on a
+     * first use that is a modal dialogue the learner has to read. The
+     * `preparing` phase exists for exactly that span, so a test cannot stand in
+     * it unless something can hold the promise.
+     */
+    acquireStream: vi.fn(() => {
+      if (!capture.holdAcquire) return Promise.resolve({} as MediaStream);
+      return new Promise<MediaStream>((resolve) => {
+        capture.releaseAcquire = () => resolve({} as MediaStream);
+      });
+    }),
+    holdAcquire: false,
+    releaseAcquire: null as (() => void) | null,
+    // Issue #347: the driver opens the pre-roll window when the microphone
+    // opens for the learner, so the first syllable is inside the blob.
+    startPreRoll: vi.fn(),
     releaseStream: vi.fn(),
     stream: {} as MediaStream | null,
   };
@@ -374,6 +393,72 @@ describe('useConversationSession — the happy loop, transition by transition', 
     // The wake lock is taken by entering a running phase, not by a separate call.
     expect(view.result.current.isRunning).toBe(true);
     expect(sentinels).toHaveLength(1);
+  });
+
+  it('sits in `preparing` while the permission prompt is open — it does NOT claim to be asking', async () => {
+    // ISSUE #349, epic #345. `start()` used to `setPhase('speakingQuestion')`
+    // one line before `acquireStream()`, so for the whole life of the browser's
+    // permission modal the phase said the question was being asked. It was not:
+    // no audio was playing, the microphone was not open, and a learner who
+    // believed the screen started answering into a device that did not exist.
+    const harness = makeHarness();
+    harness.capture.holdAcquire = true;
+    const view = mount(harness);
+
+    await act(async () => {
+      view.result.current.start();
+    });
+
+    expect(phaseOf(view)).toBe('preparing');
+    // Nothing has been said, which is the fact the old phase contradicted.
+    expect(harness.speech.calls).toEqual([]);
+    expect(harness.voiceActivity.arm).not.toHaveBeenCalled();
+
+    // AND IT IS RUNNING. `preparing` is a phase rather than a hold at `idle`
+    // precisely so these three stay true across the device round-trip: a second
+    // tap cannot open a second prompt, the wake lock is held, and a host renders
+    // Stop rather than a Start button that has already been pressed.
+    expect(view.result.current.isRunning).toBe(true);
+    expect(sentinels).toHaveLength(1);
+    await act(async () => {
+      view.result.current.start();
+    });
+    expect(harness.capture.acquireStream).toHaveBeenCalledTimes(1);
+
+    // The learner chooses Allow. Only now is the question asked.
+    harness.speech.hold = true;
+    await act(async () => {
+      harness.capture.releaseAcquire?.();
+    });
+
+    expect(phaseOf(view)).toBe('speakingQuestion');
+    expect(harness.speech.calls).toEqual([
+      { text: QUESTION_ONE.text, kind: 'question' },
+    ]);
+  });
+
+  it('leaves `preparing` for the named problem when the microphone could not be opened', async () => {
+    // A refusal is not a phase to be stranded in: the capture hook has already
+    // put one of the seven named problems into `state`, and the loop exits with
+    // that copy rather than sitting in `preparing` forever.
+    const harness = makeHarness();
+    harness.capture.holdAcquire = true;
+    const view = mount(harness);
+
+    await act(async () => {
+      view.result.current.start();
+    });
+    expect(phaseOf(view)).toBe('preparing');
+
+    await act(async () => {
+      harness.failCapture('permission_denied');
+      view.rerender(harness.props());
+    });
+
+    expect(phaseOf(view)).toBe('idle');
+    expect(view.result.current.notice?.problem).toEqual(
+      describeCaptureProblem('permission_denied'),
+    );
   });
 
   it('speakingQuestion → listening when playback ends, with the rising cue and the detector re-armed', async () => {
@@ -621,6 +706,81 @@ describe('useConversationSession — the recorder never runs while the app talks
     await speakAnswer(harness, view);
     // `speakAnswer` fires a second onset of its own; nothing else started it.
     expect(harness.capture.start).toHaveBeenCalledTimes(2);
+  });
+
+  // ---- The pre-roll — issue #347, epic #345 -------------------------------
+  //
+  // It moves the recorder EARLIER inside the window where it was always
+  // allowed to run, and nowhere else: `listening` is entered after
+  // `speech.stop()`, so the app is by definition not talking there.
+
+  it('opens the pre-roll window when the microphone opens for the learner', async () => {
+    const harness = makeHarness();
+    const view = mount(harness);
+    await startToListening(harness, view);
+
+    // The detector cannot report an onset until 145-190 ms after the learner
+    // began; the window has to already be filling by then or there is nothing
+    // in front of the onset to keep.
+    expect(harness.capture.startPreRoll).toHaveBeenCalledTimes(1);
+    expect(harness.capture.start).not.toHaveBeenCalled();
+  });
+
+  it('does NOT open it while the app is speaking', async () => {
+    const harness = makeHarness();
+    harness.speech.hold = true;
+    const view = mount(harness);
+
+    await act(async () => {
+      view.result.current.start();
+    });
+
+    expect(phaseOf(view)).toBe('speakingQuestion');
+    // The whole structural guarantee: no recorder of any kind runs over the
+    // app's own voice, so the app can never transcribe itself.
+    expect(harness.capture.startPreRoll).not.toHaveBeenCalled();
+    expect(harness.capture.start).not.toHaveBeenCalled();
+  });
+
+  it('opens one per turn, including the barge-in turn', async () => {
+    const harness = makeHarness();
+    harness.speech.hold = true;
+    const view = mount(harness);
+    await act(async () => {
+      view.result.current.start();
+    });
+
+    fire(view, { type: 'bargeIn', at: 1_000, level: 0.9 });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    // The learner is already mid-word, so the window opens and is promoted in
+    // the same breath — `start()` on a running pre-roll keeps its buffer.
+    expect(harness.capture.startPreRoll).toHaveBeenCalledTimes(1);
+    expect(harness.capture.start).toHaveBeenCalledTimes(1);
+  });
+
+  it('discards the window when nobody spoke', async () => {
+    // `voice.md` §4: half a second of a room nobody answered in is not a
+    // recording anybody asked for. `stop()` on a recorder that never reached
+    // an onset drops its bytes rather than handing them over.
+    const harness = makeHarness();
+    const view = mount(harness);
+    await startToListening(harness, view);
+
+    await act(async () => {
+      view.result.current.onVoiceActivityEvent({
+        type: 'onsetTimeout',
+        at: 9_000,
+        waitedMs: 8_000,
+      });
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    expect(harness.capture.stop).toHaveBeenCalled();
+    expect(harness.capture.start).not.toHaveBeenCalled();
+    expect(harness.transcribe).not.toHaveBeenCalled();
   });
 });
 
@@ -1012,6 +1172,11 @@ describe('useConversationSession — every involuntary exit is spoken', () => {
     'device_in_use',
     'insecure_origin',
     'unsupported',
+    // Issue #347's seventh. A hands-free learner is not reading the screen, so
+    // it has to be spoken with its own remedy exactly like the other six —
+    // and it must not be spoken in `device_in_use`'s words, which would send
+    // somebody walking down a street to go and close an application.
+    'recording_too_short',
   ];
 
   it.each(CODES)(
@@ -1043,7 +1208,7 @@ describe('useConversationSession — every involuntary exit is spoken', () => {
     },
   );
 
-  it('the six problems produce six distinct sentences', () => {
+  it('every problem produces a distinct sentence', () => {
     const sentences = new Set(
       CODES.map((code) => {
         const problem = describeCaptureProblem(code);
@@ -1102,6 +1267,21 @@ describe('useConversationSession — the learner is never held', () => {
     name: ConversationPhase;
     reach: (harness: Harness, view: Mounted) => Promise<void>;
   }> = [
+    {
+      // ISSUE #349's SEVENTH PHASE. A learner sitting in front of an
+      // unanswered permission dialogue is the MOST stranded a learner in this
+      // loop can be — nothing has been said, nothing is listening, and the
+      // modal is the browser's, not ours — so "every phase has a manual
+      // escape" has to include this one or the claim is worth less than it
+      // sounds.
+      name: 'preparing',
+      reach: async (harness, view) => {
+        harness.capture.holdAcquire = true;
+        await act(async () => {
+          view.result.current.start();
+        });
+      },
+    },
     {
       name: 'speakingQuestion',
       reach: async (harness, view) => {
@@ -1272,6 +1452,21 @@ describe('useConversationSession — unmount', () => {
     name: ConversationPhase;
     reach: (harness: Harness, view: Mounted) => Promise<void>;
   }> = [
+    {
+      // ISSUE #349's SEVENTH PHASE. A learner sitting in front of an
+      // unanswered permission dialogue is the MOST stranded a learner in this
+      // loop can be — nothing has been said, nothing is listening, and the
+      // modal is the browser's, not ours — so "every phase has a manual
+      // escape" has to include this one or the claim is worth less than it
+      // sounds.
+      name: 'preparing',
+      reach: async (harness, view) => {
+        harness.capture.holdAcquire = true;
+        await act(async () => {
+          view.result.current.start();
+        });
+      },
+    },
     {
       name: 'speakingQuestion',
       reach: async (harness, view) => {

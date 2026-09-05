@@ -272,6 +272,36 @@ export function getSharedAudioContext(): AudioContext | null {
 }
 
 /**
+ * The shared context's state WITHOUT creating one — `'none'` when none exists.
+ *
+ * Issue #349, epic #345. The device-readiness preflight has to be able to say
+ * "your browser has suspended this page's audio, so the cues you are relying on
+ * are silent" — and {@link getSharedAudioContext} cannot answer that question,
+ * because asking it CREATES a context (and opens an audio device) on a screen
+ * that has not played anything yet. A preflight whose act of looking changes
+ * what it is looking at is not a preflight.
+ *
+ * `'none'` is deliberately a THIRD answer rather than folded into `'suspended'`:
+ * a page that has never made a sound is not a page whose sound is broken, and
+ * reporting the first as the second would put a warning on every picker in the
+ * product.
+ *
+ * A closed context reports `'closed'` honestly, for the same reason — the
+ * conversation driver closes the shared context when it unmounts, and a screen
+ * asking afterwards deserves the truth rather than `'none'`.
+ */
+export function peekSharedAudioContextState(): AudioContextState | 'none' {
+  if (!sharedContext) return 'none';
+  try {
+    return sharedContext.state;
+  } catch {
+    // A stub or an exotic implementation whose `state` throws. We know a
+    // context exists and nothing more, which is not a reason to warn anybody.
+    return 'none';
+  }
+}
+
+/**
  * Close and forget the shared context.
  *
  * For teardown and for tests, which need each case to start from a context

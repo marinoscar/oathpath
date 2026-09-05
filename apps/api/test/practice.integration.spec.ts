@@ -1607,4 +1607,456 @@ describe('Practice (Integration)', () => {
       expect(mastery.size).toBe(0);
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // The realtime transport (issue #354, epic #345 / E15)
+  // ---------------------------------------------------------------------------
+
+  describe('realtime tool calls', () => {
+    /** Pinned so both transports stamp the SAME `answeredAt`. See below. */
+    const PINNED = '2026-06-01T12:00:00Z';
+
+    /** Post one tool call and return the envelope's `data`. */
+    async function toolCall(
+      user: TestUser,
+      sessionId: string,
+      body: Record<string, unknown>,
+      status = 200,
+    ) {
+      const response = await request(server())
+        .post(`/api/practice/sessions/${sessionId}/realtime/tool-calls`)
+        .set(authHeader(user.accessToken))
+        .set('x-test-clock', PINNED)
+        .send(body)
+        .expect(status);
+
+      return response.body.data;
+    }
+
+    /** Every `practice_attempts` row written so far, as the write saw it. */
+    function writtenAttempts(): Record<string, unknown>[] {
+      return (prismaMock.practiceAttempt.create as jest.Mock).mock.calls.map(
+        (args: any[]) => args[0].data,
+      );
+    }
+
+    // -------------------------------------------------------------------------
+    // THE EQUIVALENCE TEST
+    // -------------------------------------------------------------------------
+
+    it('writes the same row a typed POST .../attempts writes, column for column', async () => {
+      // ---------------------------------------------------------------------
+      // THE SINGLE MOST IMPORTANT TEST IN #354, AND HOW IT IS CONSTRUCTED
+      // ---------------------------------------------------------------------
+      //
+      // One learner, one transcript, one question, one pinned instant — driven
+      // twice, once through each transport, and the two `practice_attempts`
+      // writes compared as whole objects.
+      //
+      // WHY WHOLE OBJECTS AND NOT A LIST OF FIELDS. A test that named the
+      // columns it cared about would keep passing on the day `recordAttempt`
+      // grows a column that only one of the two paths sets — which is exactly
+      // the drift this epic exists to prevent, and exactly what a second
+      // grading ladder would look like from the outside. `create`'s `data` IS
+      // the row, so a column added later is compared automatically, by nobody
+      // having to remember.
+      //
+      // WHY THE CLOCK IS PINNED. `answeredAt` and the `resolvedAt` frozen into
+      // `answerSnapshot` both come from `Clock`, so two calls a few
+      // milliseconds apart differ honestly. Pinning both requests to the same
+      // instant removes the one difference that is not about the transport —
+      // and it means `answeredAt` is COMPARED rather than excluded, which is a
+      // stronger test than the issue asks for.
+      //
+      // WHY `sessionId` IS THE ONE EXCLUSION. A question may be answered once
+      // per session (`recordAttempt`'s own guard), so the same question
+      // answered twice is necessarily two sessions. `id` is not excluded
+      // because it is not in `data` at all — the database generates it.
+      // Everything else, `userId` and `questionId` included, must match.
+      const first = await startSession(learnerA, { kind: 'quick', plannedCount: 1 });
+      const sessionA = first.session.id;
+
+      // ---- transport 1: the realtime tool calls ---------------------------
+      //
+      // WHICH question comes from the TOOL RESULT, never from the session's own
+      // `nextQuestion`: `mastery/selector.ts` shuffles, so those two reads can
+      // legitimately name different questions. Whatever `next_question` served
+      // is what the coach spoke and what the answer is about.
+      const asked = await toolCall(learnerA, sessionA, { tool: 'next_question' });
+      const questionId = asked.questionId as string;
+      const transcript = correctAnswerFor(questionId);
+
+      await toolCall(learnerA, sessionA, {
+        tool: 'grade_answer',
+        questionId,
+        transcript,
+      });
+
+      await request(server())
+        .post(`/api/practice/sessions/${sessionA}/complete`)
+        .set(authHeader(learnerA.accessToken))
+        .set('x-test-clock', PINNED)
+        .expect(201);
+
+      // ---- transport 2: the ordinary attempt route ------------------------
+      const second = await startSession(learnerA, { kind: 'quick', plannedCount: 1 });
+
+      await request(server())
+        .post(`/api/practice/sessions/${second.session.id}/attempts`)
+        .set(authHeader(learnerA.accessToken))
+        .set('x-test-clock', PINNED)
+        .send({
+          questionId,
+          responseText: transcript,
+          transcript,
+          inputMode: 'spoken',
+          promptMode: 'heard',
+        })
+        .expect(201);
+
+      // ---- the comparison -------------------------------------------------
+      const [viaRealtime, viaHttp] = writtenAttempts();
+
+      // Both wrote something, and both wrote the SAME SET of columns. A path
+      // that omitted one entirely would fail here rather than compare equal on
+      // the columns it happened to share.
+      expect(Object.keys(viaRealtime).sort()).toEqual(
+        Object.keys(viaHttp).sort(),
+      );
+
+      // The columns whose values a wrong implementation would most plausibly
+      // get right by accident are named here, so a reader can see the
+      // comparison is not vacuous — but the assertion that MATTERS is the
+      // object comparison below, which covers every column including the ones
+      // nobody has written yet.
+      expect(viaRealtime).toMatchObject({
+        userId: learnerA.id,
+        questionId,
+        source: 'practice',
+        inputMode: 'spoken',
+        promptMode: 'heard',
+        outcome: 'correct',
+        gradingMethod: 'exact',
+        responseText: transcript,
+        transcript,
+        asrConfidence: null,
+        retryOfAttemptId: null,
+        revealed: false,
+        hintUsed: false,
+      });
+
+      const { sessionId: _realtimeSession, ...realtimeRow } = viaRealtime;
+      const { sessionId: _httpSession, ...httpRow } = viaHttp;
+
+      expect(realtimeRow).toEqual(httpRow);
+    });
+
+    it('a skip records outcome "skipped", never "incorrect"', async () => {
+      // The false claim this prevents: an empty answer graded is `incorrect` —
+      // evidence that somebody answered and missed — about a learner who
+      // declined to answer at all.
+      const created = await startSession(learnerA, { kind: 'quick', plannedCount: 1 });
+
+      const asked = await toolCall(learnerA, created.session.id, {
+        tool: 'next_question',
+      });
+
+      await toolCall(learnerA, created.session.id, {
+        tool: 'skip_question',
+        questionId: asked.questionId,
+      });
+
+      const [row] = writtenAttempts();
+
+      expect(row).toMatchObject({
+        outcome: 'skipped',
+        responseText: null,
+        transcript: null,
+        // FALSE, DELIBERATELY: the accepted answer is spoken after the row is
+        // written, and `revealed` is the precondition for self-marking.
+        revealed: false,
+        inputMode: 'spoken',
+        promptMode: 'heard',
+      });
+    });
+
+    it('speaks the composed turn, including the verdict', async () => {
+      // Issue #351's own fix reaching this transport: a learner who was wrong
+      // and a learner who was right must not hear byte-identical audio.
+      const created = await startSession(learnerA, { kind: 'quick', plannedCount: 2 });
+
+      const asked = await toolCall(learnerA, created.session.id, {
+        tool: 'next_question',
+      });
+
+      const wrong = await toolCall(learnerA, created.session.id, {
+        tool: 'grade_answer',
+        questionId: asked.questionId,
+        transcript: 'something that is not an accepted answer',
+      });
+
+      expect(wrong.say.length).toBeGreaterThan(1);
+      expect(wrong.say.join(' ')).toContain('didn’t match');
+      // AN ACTION, NEVER AN OUTCOME — and no verdict-shaped field anywhere.
+      expect(wrong.then).toBe('ask_next_question');
+      for (const forbidden of ['outcome', 'correct', 'score', 'failureCause']) {
+        expect(wrong).not.toHaveProperty(forbidden);
+      }
+    });
+
+    it('serves the question prompt verbatim, and repeats it for free', async () => {
+      const created = await startSession(learnerA, { kind: 'quick', plannedCount: 2 });
+
+      const asked = await toolCall(learnerA, created.session.id, {
+        tool: 'next_question',
+      });
+      const again = await toolCall(learnerA, created.session.id, {
+        tool: 'repeat_question',
+      });
+
+      // The question's own prompt, one element, no frame around it — and the
+      // repeat is the SAME words for the SAME question, not a fresh draw from
+      // a shuffled selector.
+      const prompt = QUESTIONS.find((q) => q.id === asked.questionId)!.prompt;
+
+      expect(asked.say).toEqual([prompt]);
+      expect(again).toMatchObject({ say: [prompt], questionId: asked.questionId });
+      expect(writtenAttempts()).toEqual([]);
+    });
+
+    it('refuses a second question while an answer is outstanding — as a 200', async () => {
+      const created = await startSession(learnerA, { kind: 'quick', plannedCount: 2 });
+
+      await toolCall(learnerA, created.session.id, { tool: 'next_question' });
+      const refused = await toolCall(learnerA, created.session.id, {
+        tool: 'next_question',
+      });
+
+      // EVERY REFUSAL IS A 200 WITH THREE FIELDS. A non-2xx would be flattened
+      // by the realtime relay into generic failure handling, and `instruction`
+      // — the field that gets the session moving again — would never reach the
+      // model.
+      expect(refused).toEqual({
+        status: 'rejected',
+        tool: 'next_question',
+        reason: 'answer_outstanding',
+        error: expect.any(String),
+        instruction: expect.any(String),
+      });
+    });
+
+    it('refuses an answer to a question the session is not waiting on', async () => {
+      const created = await startSession(learnerA, { kind: 'quick', plannedCount: 2 });
+
+      const asked = await toolCall(learnerA, created.session.id, {
+        tool: 'next_question',
+      });
+      const other = asked.questionId === Q1 ? Q2 : Q1;
+
+      const refused = await toolCall(learnerA, created.session.id, {
+        tool: 'grade_answer',
+        questionId: other,
+        transcript: correctAnswerFor(other),
+      });
+
+      expect(refused.reason).toBe('wrong_question');
+      // NEVER SILENTLY ATTRIBUTED — and nothing was recorded for either
+      // question.
+      expect(writtenAttempts()).toEqual([]);
+    });
+
+    it('refuses a blank transcript rather than recording a miss', async () => {
+      const created = await startSession(learnerA, { kind: 'quick', plannedCount: 2 });
+
+      const asked = await toolCall(learnerA, created.session.id, {
+        tool: 'next_question',
+      });
+
+      const refused = await toolCall(learnerA, created.session.id, {
+        tool: 'grade_answer',
+        questionId: asked.questionId,
+        transcript: '   ',
+      });
+
+      expect(refused.reason).toBe('empty_transcript');
+      expect(writtenAttempts()).toEqual([]);
+    });
+
+    it('answers a duplicate with already_answered, never a 4xx or 5xx', async () => {
+      // The conflict `recordAttempt` raises for a question this session has
+      // already recorded, caught and converted. A duplicate is ROUTINE on this
+      // transport — a retried tool call, a re-mint replaying the last turn —
+      // and a non-2xx into a live, per-minute-billing connection is not an
+      // acceptable answer to one.
+      const created = await startSession(learnerA, { kind: 'quick', plannedCount: 2 });
+
+      const asked = await toolCall(learnerA, created.session.id, {
+        tool: 'next_question',
+      });
+      const questionId = asked.questionId as string;
+      const transcript = correctAnswerFor(questionId);
+
+      await toolCall(learnerA, created.session.id, {
+        tool: 'grade_answer',
+        questionId,
+        transcript,
+      });
+
+      // The session has moved on, but the model has not: it replays the call
+      // it already made. `getSession` still resolves, the rules refuse it, and
+      // either way it is a 200 the relay can hand back.
+      const replay = await toolCall(learnerA, created.session.id, {
+        tool: 'grade_answer',
+        questionId,
+        transcript,
+      });
+
+      expect(replay.status).toBe('rejected');
+      expect(replay.instruction.length).toBeGreaterThan(0);
+      // ONE ROW, not two.
+      expect(writtenAttempts()).toHaveLength(1);
+    });
+
+    it('refuses "no questions left" while questions remain, and honours it after', async () => {
+      const created = await startSession(learnerA, { kind: 'quick', plannedCount: 1 });
+
+      const early = await toolCall(learnerA, created.session.id, {
+        tool: 'end_session',
+        reason: 'no_questions_left',
+      });
+
+      expect(early.reason).toBe('questions_remain');
+
+      const asked = await toolCall(learnerA, created.session.id, {
+        tool: 'next_question',
+      });
+      const questionId = asked.questionId as string;
+
+      await toolCall(learnerA, created.session.id, {
+        tool: 'grade_answer',
+        questionId,
+        transcript: correctAnswerFor(questionId),
+      });
+
+      const ended = await toolCall(learnerA, created.session.id, {
+        tool: 'end_session',
+        reason: 'no_questions_left',
+      });
+
+      expect(ended.status).toBe('ok');
+      expect(ended.then).toBe('session_complete');
+
+      // COMPLETED, WITH A SUMMARY — the same method `POST .../complete` calls.
+      const detail = await request(server())
+        .get(`/api/practice/sessions/${created.session.id}`)
+        .set(authHeader(learnerA.accessToken))
+        .expect(200);
+
+      expect(detail.body.data.session.status).toBe('completed');
+      expect(detail.body.data.session.summary.answered).toBe(1);
+    });
+
+    it('is idempotent under a double end_session', async () => {
+      const created = await startSession(learnerA, { kind: 'quick', plannedCount: 5 });
+
+      const first = await toolCall(learnerA, created.session.id, {
+        tool: 'end_session',
+        reason: 'learner_asked',
+      });
+      const second = await toolCall(learnerA, created.session.id, {
+        tool: 'end_session',
+        reason: 'learner_asked',
+      });
+
+      // The SECOND call sees a session that is no longer `in_progress` and
+      // refuses — which is the honest answer, and is still a 200 the relay can
+      // hand the model. What must not happen is a second completion, a moved
+      // `completedAt`, or an exception.
+      expect(first.status).toBe('ok');
+      expect(second.status).toBe('rejected');
+      expect(second.reason).toBe('session_not_in_progress');
+
+      const detail = await request(server())
+        .get(`/api/practice/sessions/${created.session.id}`)
+        .set(authHeader(learnerA.accessToken))
+        .expect(200);
+
+      expect(detail.body.data.session.status).toBe('completed');
+    });
+
+    it('refuses every tool once the session is closed', async () => {
+      const created = await startSession(learnerA, { kind: 'quick', plannedCount: 2 });
+
+      await request(server())
+        .post(`/api/practice/sessions/${created.session.id}/complete`)
+        .set(authHeader(learnerA.accessToken))
+        .expect(201);
+
+      for (const body of [
+        { tool: 'next_question' },
+        { tool: 'repeat_question' },
+        { tool: 'grade_answer', questionId: Q1, transcript: 'anything' },
+        { tool: 'skip_question', questionId: Q1 },
+        { tool: 'end_session', reason: 'learner_asked' },
+      ]) {
+        const refused = await toolCall(learnerA, created.session.id, body);
+        expect(refused.reason).toBe('session_not_in_progress');
+      }
+
+      expect(writtenAttempts()).toEqual([]);
+    });
+
+    it('404s another learner’s session, and 401s an anonymous caller', async () => {
+      const created = await startSession(learnerA, { kind: 'quick', plannedCount: 1 });
+
+      await request(server())
+        .post(`/api/practice/sessions/${created.session.id}/realtime/tool-calls`)
+        .set(authHeader(learnerB.accessToken))
+        .send({ tool: 'next_question' })
+        .expect(404);
+
+      await request(server())
+        .post(`/api/practice/sessions/${created.session.id}/realtime/tool-calls`)
+        .send({ tool: 'next_question' })
+        .expect(401);
+    });
+
+    it('400s a body carrying a verdict, or an argument from another tool', async () => {
+      const created = await startSession(learnerA, { kind: 'quick', plannedCount: 1 });
+      const questionId = created.nextQuestion.id;
+
+      // Every one of these is refused by the DTO, before any rule runs, so
+      // which question is named is irrelevant.
+      for (const body of [
+        { tool: 'grade_answer', questionId, transcript: 'x', correct: true },
+        { tool: 'grade_answer', questionId, transcript: 'x', confidence: 0.9 },
+        { tool: 'skip_question', questionId, transcript: 'x' },
+        { tool: 'next_question', userId: learnerB.id },
+        { tool: 'reveal_answer', questionId },
+      ]) {
+        await request(server())
+          .post(`/api/practice/sessions/${created.session.id}/realtime/tool-calls`)
+          .set(authHeader(learnerA.accessToken))
+          .send(body)
+          .expect(400);
+      }
+
+      expect(writtenAttempts()).toEqual([]);
+    });
+
+    it('is never cached', async () => {
+      const created = await startSession(learnerA, { kind: 'quick', plannedCount: 1 });
+
+      const response = await request(server())
+        .post(`/api/practice/sessions/${created.session.id}/realtime/tool-calls`)
+        .set(authHeader(learnerA.accessToken))
+        .send({ tool: 'next_question' })
+        .expect(200);
+
+      // The body carries the question a learner is being asked and, on the way
+      // in, the words they said. Neither belongs in a shared cache, and every
+      // call is answered against state the previous call moved.
+      expect(response.headers['cache-control']).toBe('no-store');
+    });
+  });
 });

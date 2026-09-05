@@ -1,6 +1,17 @@
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { defineConfig, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
 import { APP_NAME } from '@oathpath/shared';
+import { renderWebManifest } from './src/config/webManifest';
+import { renderOfflineShell } from './src/sw/offlineShell';
+import {
+  buildServiceWorkerSource,
+  STATIC_SHELL_URLS,
+  SELF_DESTROYING_SERVICE_WORKER,
+} from './src/sw/buildServiceWorker';
 
 /**
  * Substitutes `%APP_NAME%` in `index.html` with `APP_NAME` from `@oathpath/shared`
@@ -39,8 +50,127 @@ function appName(): Plugin {
   };
 }
 
+
+/**
+ * The PWA build step (issue #359, epic #345): the web app manifest, the offline
+ * shell and the service worker.
+ *
+ * WHY A HAND-WRITTEN PLUGIN RATHER THAN `vite-plugin-pwa`.
+ *
+ * The plugin would have been the default choice, and it does support Vite 8.
+ * Two things ruled it out here:
+ *
+ *   - The load-bearing requirement of this issue is "no API response is ever
+ *     written to a cache", asserted by a test. `generateSW` emits a Workbox
+ *     worker that exists only in `dist/`, so the code carrying that policy
+ *     would never appear in a diff and a test could only read a build artefact.
+ *     `injectManifest` puts the worker back in the repository — at which point
+ *     the worker is hand-written anyway and the plugin is doing the ~40 lines
+ *     below plus three new packages.
+ *   - Those three packages (`vite-plugin-pwa`, `workbox-build`,
+ *     `workbox-window`) install into a `node_modules` shared, by symlink, with
+ *     every other worktree in this repository.
+ *
+ * What is emitted:
+ *
+ *   dist/manifest.webmanifest  from `src/config/webManifest.ts`
+ *   dist/offline.html          from `src/sw/offlineShell.ts`
+ *   dist/sw.js                 from `src/sw/service-worker.js`, with its build
+ *                              id and precache manifest substituted in
+ *
+ * In DEV all three are served from middleware instead, so `/manifest.webmanifest`
+ * and `/offline.html` are never missing — except `sw.js`, which is the
+ * self-destroying worker unless `VITE_ENABLE_SW=true`. See
+ * `src/sw/registerServiceWorker.ts` for the matching client-side gate and for
+ * why the default is off in dev and in test.
+ */
+function pwa(): Plugin {
+  const here = resolve(fileURLToPath(import.meta.url), '..');
+  const readServiceWorkerSource = () =>
+    readFileSync(resolve(here, 'src/sw/service-worker.js'), 'utf8');
+
+  return {
+    name: 'oathpath-pwa',
+
+    configureServer(server) {
+      const enabled = process.env.VITE_ENABLE_SW === 'true';
+      server.middlewares.use((req, res, next) => {
+        const path = (req.url ?? '').split('?')[0];
+        if (path === '/manifest.webmanifest') {
+          res.setHeader('Content-Type', 'application/manifest+json');
+          res.end(renderWebManifest(APP_NAME));
+          return;
+        }
+        if (path === '/offline.html') {
+          res.setHeader('Content-Type', 'text/html');
+          res.end(renderOfflineShell(APP_NAME));
+          return;
+        }
+        if (path === '/sw.js') {
+          res.setHeader('Content-Type', 'text/javascript');
+          // Never cached, in either branch — a worker the browser will not
+          // re-fetch is a worker that can never be replaced.
+          res.setHeader('Cache-Control', 'no-cache');
+          res.end(
+            enabled
+              ? buildServiceWorkerSource(readServiceWorkerSource(), {
+                  buildId: 'dev',
+                  precacheUrls: STATIC_SHELL_URLS,
+                })
+              : SELF_DESTROYING_SERVICE_WORKER,
+          );
+          return;
+        }
+        next();
+      });
+    },
+
+    generateBundle(_options, bundle) {
+      // THE ENTRY CHUNK AND THE STYLESHEETS ONLY — not every chunk in the
+      // bundle. `App.tsx` lazy-loads ~30 route chunks; precaching all of them
+      // would download the whole application on first visit to support an
+      // offline mode this epic explicitly does not build. Lazy chunks are still
+      // cached on demand by the worker's `asset` class, which is cache-first.
+      const shellAssets = Object.values(bundle)
+        .filter(
+          (output) =>
+            (output.type === 'chunk' && output.isEntry) ||
+            (output.type === 'asset' && output.fileName.endsWith('.css')),
+        )
+        .map((output) => `/${output.fileName}`)
+        .sort();
+
+      const precacheUrls = [...STATIC_SHELL_URLS, ...shellAssets];
+      // Derived from the precache list itself, so a deployment that changed
+      // nothing produces the same cache names and does not needlessly evict a
+      // learner's shell, while any real change retires the old caches on
+      // `activate`.
+      const buildId = createHash('sha256')
+        .update(precacheUrls.join('\n'))
+        .digest('hex')
+        .slice(0, 12);
+
+      this.emitFile({
+        type: 'asset',
+        fileName: 'manifest.webmanifest',
+        source: renderWebManifest(APP_NAME),
+      });
+      this.emitFile({
+        type: 'asset',
+        fileName: 'offline.html',
+        source: renderOfflineShell(APP_NAME),
+      });
+      this.emitFile({
+        type: 'asset',
+        fileName: 'sw.js',
+        source: buildServiceWorkerSource(readServiceWorkerSource(), { buildId, precacheUrls }),
+      });
+    },
+  };
+}
+
 export default defineConfig({
-  plugins: [react(), appName()],
+  plugins: [react(), appName(), pwa()],
   // `@oathpath/shared` is CommonJS, and it reaches us as an npm WORKSPACE SYMLINK.
   // Vite treats a linked package as project source rather than as a dependency,
   // so it skips dep pre-bundling for it and serves `index.js` to the browser as

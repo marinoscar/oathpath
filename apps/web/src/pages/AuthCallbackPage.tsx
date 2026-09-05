@@ -57,7 +57,10 @@ export default function AuthCallbackPage() {
           flexDirection: 'column',
           alignItems: 'center',
           justifyContent: 'center',
+          // See the note on the loading branch below: `100dvh` where
+          // supported, `100vh` as the fallback (issue #359).
           height: '100vh',
+          '@supports (height: 100dvh)': { height: '100dvh' },
           gap: 2,
           px: 2,
         }}
@@ -89,7 +92,14 @@ export default function AuthCallbackPage() {
         flexDirection: 'column',
         alignItems: 'center',
         justifyContent: 'center',
+        // `100dvh` where supported, `100vh` as the fallback (issue #359, epic
+        // #345 — the audit of every bare viewport-height rule in this app).
+        // Plain `100vh` measures against the largest viewport, so on a phone
+        // this "centred" spinner sits partly under the browser chrome.
+        // `common/Layout.tsx` models the same guard; this screen renders
+        // outside the shell and owns its own viewport height.
         height: '100vh',
+        '@supports (height: 100dvh)': { height: '100dvh' },
         gap: 2,
       }}
     >

@@ -97,7 +97,28 @@ export function Layout() {
             // same breakpoint `BottomNav` gates on. Keeping this coupled is what
             // stops 600–899px from carrying 80px of padding for a bar that is
             // not mounted there.
-            pb: { xs: 10, sm: 3 },
+            //
+            // ⚠️ THE BREAKPOINT IS UNCHANGED BY ISSUE #359. This is gate (3) of
+            // the five coupled gates listed above, and the PWA work adds a
+            // SAFE-AREA TERM to it, not a new size class: the values are still
+            // `theme.spacing(10)` below `sm` and `theme.spacing(3)` at and above
+            // it — exactly the `pb: { xs: 10, sm: 3 }` this replaces — with
+            // `env(safe-area-inset-bottom)` added on top of whichever applies.
+            // All five gates therefore still agree on 600px and none of them
+            // moved. It is written as an explicit `paddingBottom` rather than
+            // `pb` only because the shorthand cannot express a `calc()`.
+            //
+            // The inset is added at BOTH sizes on purpose. Below `sm` it clears
+            // the home indicator under the bottom bar; at and above `sm` there
+            // is no bar, but a tablet or foldable in a standalone window still
+            // has a gesture bar of its own, and the last line of a long page
+            // would otherwise end underneath it. On any device without an
+            // inset — every desktop browser — `env()` resolves to `0px` and the
+            // padding is byte-for-byte what it was before.
+            paddingBottom: {
+              xs: `calc(${theme.spacing(10)} + env(safe-area-inset-bottom))`,
+              sm: `calc(${theme.spacing(3)} + env(safe-area-inset-bottom))`,
+            },
           }}
         >
           <Outlet />

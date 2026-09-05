@@ -58,6 +58,16 @@
  * in `speakingQuestion` or `speakingAnswer`. `startRecording` refuses outright
  * in those two phases rather than trusting the call sites.
  *
+ * ISSUE #347 ADDED A PRE-ROLL, AND IT DOES NOT WEAKEN THAT. `toListening` asks
+ * the capture hook for `startPreRoll()`, which runs the recorder over the
+ * bounded window BEFORE the onset so the learner's first syllable — which a
+ * detector structurally cannot report in time — is in the uploaded blob. It is
+ * started on entry to `listening`, which is after `speech.stop()` and is a
+ * phase in which the app is by definition not talking, and every exit from
+ * `listening` discards or promotes it. So the recorder still never runs while
+ * the app speaks; it now starts a fraction of a second earlier within the
+ * window where it was always allowed to run.
+ *
  * THIS, NOT ECHO CANCELLATION, IS WHAT KEEPS THE APP FROM TRANSCRIBING ITSELF
  * (`docs/specs/conversation-mode.md` §2). `useAudioCapture` asks the device for
  * `echoCancellation` in both its modes and that helps, but it reduces bleed —
@@ -230,15 +240,35 @@ export const CONVERSATION_NOTICE_SESSION_COMPLETE =
 // ---------------------------------------------------------------------------
 
 /**
- * Where the loop is. Six states, exactly the six in
- * `docs/specs/conversation-mode.md` §4 — `idle` is both "never started" and
- * "stopped", because a stopped conversation has no residue: the stream is
- * closed, the wake lock is dropped and the next `start()` begins from nothing.
- * A separate `stopped` state would be a state whose only distinguishing
- * property is the notice, which is already its own field.
+ * Where the loop is. `idle` is both "never started" and "stopped", because a
+ * stopped conversation has no residue: the stream is closed, the wake lock is
+ * dropped and the next `start()` begins from nothing. A separate `stopped`
+ * state would be a state whose only distinguishing property is the notice,
+ * which is already its own field.
+ *
+ * SEVEN, NOT THE SIX OF `docs/specs/conversation-mode.md` §4 — issue #349,
+ * epic #345 added `preparing`, and it exists to stop this machine lying.
+ *
+ * `start()` used to `setPhase('speakingQuestion')` one line before calling
+ * `acquireStream()`, so for as long as the browser's permission modal stood
+ * open — which on a first use is a dialogue a learner has to read — the screen
+ * said "Asking you the question." while nothing was being asked, no audio was
+ * playing, and the microphone was not yet open. A learner who believed it
+ * started answering into a device that did not exist yet.
+ *
+ * `preparing` is the honest name for that span, and it is a PHASE rather than
+ * "hold at `idle` until the stream resolves" because `idle` is load-bearing in
+ * three other places: `start()` refuses a second tap from any non-`idle` phase,
+ * the wake lock is taken by `phase !== 'idle'`, and `isRunning` (which is what
+ * swaps Start for Stop) is the same expression. Holding at `idle` would make a
+ * doubled tap open two prompts, drop the wake lock for the duration of the
+ * device round-trip, and leave a Start button on screen that had already been
+ * pressed. §4's diagram is otherwise unchanged: `preparing` sits between the
+ * tap and `speakingQuestion`, and every transition after it is the same.
  */
 export type ConversationPhase =
   | 'idle'
+  | 'preparing'
   | 'speakingQuestion'
   | 'listening'
   | 'processing'
@@ -618,6 +648,12 @@ export function useConversationSession(
       opts.speech.stop();
       setPhase('listening');
       playListeningEarcon();
+      // BEFORE the detector is armed, and after `speech.stop()`: the pre-roll
+      // window has to already be filling when the learner starts, or there is
+      // nothing in front of the onset to keep (issue #347). Discarded by the
+      // `onsetTimeout` path below if nobody speaks; promoted by `start()` if
+      // they do.
+      opts.capture.startPreRoll();
       opts.voiceActivity.arm('listening');
       if (alreadySpeaking) startRecording();
     },
@@ -838,7 +874,13 @@ export function useConversationSession(
     const turn = beginTurn();
     // The phase moves first: it is what takes the wake lock, and it is what a
     // second tap on Start is refused by while the device is being opened.
-    setPhase('speakingQuestion');
+    //
+    // `preparing`, NOT `speakingQuestion` (issue #349). The question is asked
+    // by `askQuestion` below, on the other side of the device round-trip and
+    // whatever permission dialogue it raises; claiming it here would put
+    // "Asking you the question." on screen over a modal, with silence behind
+    // it. See {@link ConversationPhase}.
+    setPhase('preparing');
 
     void opts.capture.acquireStream().then(
       (stream) => {
@@ -919,6 +961,11 @@ export function useConversationSession(
           // A named timeout, NOT an empty recording: nothing was recorded, so
           // there is nothing to transcribe and certainly nothing to grade.
           if (phaseRef.current !== 'listening') return;
+          // …and the pre-roll goes with it. `stop()` on a recorder that never
+          // reached an onset DROPS its bytes rather than handing them over, so
+          // the half-second of room this turn accumulated does not survive
+          // into the nudge that follows (issue #347, `voice.md` §4).
+          optionsRef.current.capture.stop();
           void retryOrMoveOn(CONVERSATION_NUDGE_SILENCE, turn);
           return;
       }

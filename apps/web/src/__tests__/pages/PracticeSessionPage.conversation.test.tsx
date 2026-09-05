@@ -50,6 +50,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AiStatusProvider } from '../../contexts/AiStatusContext';
 import { AuthContext } from '../../contexts/AuthContext';
 import PracticeSessionPage from '../../pages/PracticeSessionPage';
+import { describeCaptureProblem } from '../../hooks/useAudioCapture';
 import { lightTheme } from '../../theme';
 import type {
   AiStatus,
@@ -86,6 +87,19 @@ const captureControl = vi.hoisted(() => {
     starts: 0,
     releases: 0,
     streamReleases: 0,
+    preRolls: 0,
+    /**
+     * Hold `acquireStream()` open — THE PERMISSION PROMPT, from the page's side
+     * (issue #349, epic #345).
+     *
+     * The real hook's `acquireStream` does not resolve until `getUserMedia`
+     * does, and on a first use `getUserMedia` does not resolve until the
+     * learner has read and answered a modal dialogue. That span used to render
+     * as "Asking you the question." with nothing being asked; a test cannot
+     * stand in it unless something can hold the promise, which is what this is.
+     */
+    holdAcquire: false,
+    releaseAcquire: null as (() => void) | null,
     set(next: { status: string; blob?: Blob }) {
       this.state = next;
       listeners.forEach((listener) => listener());
@@ -95,6 +109,9 @@ const captureControl = vi.hoisted(() => {
       this.starts = 0;
       this.releases = 0;
       this.streamReleases = 0;
+      this.preRolls = 0;
+      this.holdAcquire = false;
+      this.releaseAcquire = null;
     },
   };
 });
@@ -126,10 +143,19 @@ vi.mock('../../hooks/useAudioCapture', async (importOriginal) => {
       const releaseStream = useCallback(() => {
         captureControl.streamReleases += 1;
       }, []);
-      const acquireStream = useCallback(
-        async () => captureControl.stream,
-        [],
-      );
+      /** Issue #347's pre-roll window. Counted so the page's wiring is visible. */
+      const startPreRoll = useCallback(() => {
+        captureControl.preRolls += 1;
+      }, []);
+      const acquireStream = useCallback(async () => {
+        if (!captureControl.holdAcquire) return captureControl.stream;
+        // The prompt is open. It resolves when the case says the learner
+        // answered it, and not before.
+        await new Promise<void>((resolve) => {
+          captureControl.releaseAcquire = resolve;
+        });
+        return captureControl.stream;
+      }, []);
 
       return {
         state: captureControl.state,
@@ -143,6 +169,7 @@ vi.mock('../../hooks/useAudioCapture', async (importOriginal) => {
         release,
         stream: captureControl.stream,
         acquireStream,
+        startPreRoll,
         releaseStream,
       };
     },
@@ -246,6 +273,92 @@ function installSpeechSynthesis() {
         this.text = text;
       }
     };
+}
+
+// -----------------------------------------------------------------------------
+// The platform the DEVICE PREFLIGHT reads (issue #349, epic #345).
+//
+// `useMediaReadiness` is NOT mocked in this file — it runs for real, exactly as
+// it does in a browser, because what it reports gates the Start control it sits
+// beside. jsdom ships neither `MediaRecorder` nor `navigator.mediaDevices`, so
+// without this the preflight would (correctly) answer `unsupported` and refuse
+// every start in this file for a reason that has nothing to do with what these
+// cases are about.
+//
+// `getUserMedia` is a SPY and is never given a behaviour: the preflight must
+// never reach it, on any path in this file.
+// -----------------------------------------------------------------------------
+
+let getUserMedia: ReturnType<typeof vi.fn>;
+
+/**
+ * The live `PermissionStatus`, as a browser really behaves.
+ *
+ * ONE OBJECT WHOSE `state` CHANGES IN PLACE — that is the whole shape of the
+ * Permissions API, and it is what makes the two halves of #349's second moment
+ * distinguishable: a change that FIRES `change` reaches the rendered notice
+ * with no reload, and a change that does not is caught only by the synchronous
+ * re-check on the Start tap. A fixture that handed out a fresh object per query
+ * could model neither.
+ */
+const mediaControl = {
+  state: 'granted' as PermissionState,
+  audioInputs: 1,
+  listeners: new Set<() => void>(),
+  /** Flip the permission. `notify: false` is a revocation this tab never heard. */
+  setPermission(next: PermissionState, { notify = true } = {}) {
+    this.state = next;
+    if (notify) this.listeners.forEach((listener) => listener());
+  },
+};
+
+function installMediaEnvironment({
+  permission = 'granted' as PermissionState,
+  audioInputs = 1,
+} = {}) {
+  getUserMedia = vi.fn();
+  mediaControl.state = permission;
+  mediaControl.audioInputs = audioInputs;
+  mediaControl.listeners.clear();
+
+  Object.defineProperty(navigator, 'mediaDevices', {
+    value: {
+      getUserMedia,
+      // Read at CALL time, so a device pulled out between probes is visible to
+      // the next one rather than frozen at install.
+      enumerateDevices: vi.fn(async () =>
+        Array.from({ length: mediaControl.audioInputs }, () => ({
+          kind: 'audioinput',
+          deviceId: '',
+          label: '',
+        })),
+      ),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    },
+    configurable: true,
+  });
+  Object.defineProperty(navigator, 'permissions', {
+    value: {
+      query: vi.fn(async () => ({
+        get state() {
+          return mediaControl.state;
+        },
+        addEventListener: (type: string, listener: () => void) => {
+          if (type === 'change') mediaControl.listeners.add(listener);
+        },
+        removeEventListener: (type: string, listener: () => void) => {
+          if (type === 'change') mediaControl.listeners.delete(listener);
+        },
+      })),
+    },
+    configurable: true,
+  });
+  (window as unknown as { MediaRecorder: unknown }).MediaRecorder = class {};
+  Object.defineProperty(window, 'isSecureContext', {
+    value: true,
+    configurable: true,
+  });
 }
 
 /** Let whatever is speaking finish, the way a real engine eventually does. */
@@ -508,11 +621,16 @@ beforeEach(() => {
   transcribeCalls = 0;
   setStoredVoice();
   installSpeechSynthesis();
+  installMediaEnvironment();
 });
 
 afterEach(() => {
   Reflect.deleteProperty(window, 'speechSynthesis');
   Reflect.deleteProperty(window, 'SpeechSynthesisUtterance');
+  Reflect.deleteProperty(navigator, 'mediaDevices');
+  Reflect.deleteProperty(navigator, 'permissions');
+  Reflect.deleteProperty(window, 'MediaRecorder');
+  Reflect.deleteProperty(window, 'isSecureContext');
   vi.restoreAllMocks();
 });
 
@@ -806,4 +924,178 @@ describe('"Type instead" is reachable at every phase, and costs nothing', () => 
       expect(screen.queryByText(/conversation mode has stopped/i)).toBeNull();
     },
   );
+});
+
+// -----------------------------------------------------------------------------
+// The device preflight, at its SECOND moment — beside the Start control
+// (issue #349, epic #345).
+//
+// `PracticePage.readiness.test.tsx` covers the first moment (the picker) and
+// `hooks/useMediaReadiness.test.ts` covers the composition of the three signals.
+// What is asserted here is only what this SCREEN owes the learner:
+//
+//  1. **THE PHASE NEVER CLAIMS TO ASK A QUESTION IT HAS NOT ASKED.**
+//     `setPhase('speakingQuestion')` ran one line before `getUserMedia`, so
+//     while the browser's permission modal stood open the screen read "Asking
+//     you the question." — with no audio, no microphone, and nothing asked. A
+//     learner who believed it started answering into a device that did not
+//     exist yet.
+//  2. **A REVOKED PERMISSION STOPS THE START**, with the existing
+//     `permission_denied` copy. Permission can be revoked between the picker
+//     and this tap, which is why the check is re-run here rather than trusted.
+//  3. **RENDERING NEVER PROMPTS.** `getUserMedia` is not reachable from the
+//     preflight on any path — the prompt belongs to the tap, and the tap
+//     reaches it through the capture hook, not through the preflight.
+// -----------------------------------------------------------------------------
+
+describe('the device preflight, beside the Start control', () => {
+  it('does not say it is asking a question while the permission prompt is open', async () => {
+    const user = userEvent.setup();
+    installHandlers();
+    renderSession();
+
+    await chooseVoice(user);
+    speech.autoEnd = false;
+    speech.spoken = [];
+
+    // The prompt opens and stays open, exactly as a first-use dialogue does.
+    captureControl.holdAcquire = true;
+    await user.click(screen.getByRole('button', { name: /start hands-free/i }));
+
+    // THE ASSERTION THIS WHOLE SECTION EXISTS FOR. Honest copy about the
+    // microphone, and NOT the sentence about a question.
+    expect(await screen.findByText('Opening your microphone.')).toBeInTheDocument();
+    expect(screen.queryByText('Asking you the question.')).toBeNull();
+    // …and nothing has been said aloud either, which is the fact the old line
+    // was contradicting.
+    expect(speech.spoken).toEqual([]);
+
+    // The loop is nonetheless RUNNING: this is a phase, not a hold at `idle`,
+    // so a second tap cannot open a second prompt and the Stop control is the
+    // one on screen.
+    expect(screen.getByRole('button', { name: /^stop$/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /start hands-free/i })).toBeNull();
+
+    // The learner chooses Allow. Only now is the question asked.
+    await act(async () => {
+      captureControl.releaseAcquire?.();
+    });
+    await screen.findByText('Asking you the question.');
+    await waitFor(() => expect(speech.spoken).toContain(QUESTION_1.prompt));
+  });
+
+  it('refuses the start when the permission was revoked since the picker', async () => {
+    const user = userEvent.setup();
+    installHandlers();
+    renderSession();
+
+    await chooseVoice(user);
+    // The panel is ready: nothing is wrong yet.
+    const problem = describeCaptureProblem('permission_denied');
+    expect(screen.queryByText(problem.message)).toBeNull();
+
+    // Revoked between the picker and this tap, WITHOUT firing `change` — the
+    // exact window the synchronous re-check exists for, and the one a listener
+    // alone would miss. Nothing re-mounts and nothing re-renders on its own.
+    mediaControl.setPermission('denied', { notify: false });
+    expect(screen.queryByText(problem.message)).toBeNull();
+
+    await user.click(screen.getByRole('button', { name: /start hands-free/i }));
+
+    // The existing copy, verbatim — both halves.
+    expect(await screen.findByText(problem.message)).toBeInTheDocument();
+    expect(screen.getByText(problem.remedy)).toBeInTheDocument();
+    // And the loop did NOT arm: no phase, no speech, no stream.
+    expect(screen.queryByText('Opening your microphone.')).toBeNull();
+    expect(screen.queryByText('Asking you the question.')).toBeNull();
+    expect(screen.getByRole('button', { name: /start hands-free/i })).toBeInTheDocument();
+
+    // TYPING IS STILL RIGHT THERE. `docs/specs/voice.md` §5: no capture failure
+    // is ever a dead end, and a preflight is not allowed to become the first
+    // one that is.
+    expect(screen.getByRole('button', { name: /type instead/i })).toBeInTheDocument();
+  });
+
+  it('clears a refusal the moment the learner allows it in another tab', async () => {
+    const user = userEvent.setup();
+    installMediaEnvironment({ permission: 'denied' });
+    installHandlers();
+    renderSession();
+
+    await chooseVoice(user);
+    const problem = describeCaptureProblem('permission_denied');
+    expect(await screen.findByText(problem.message)).toBeInTheDocument();
+
+    // The learner opens site settings in another tab and allows it. NO RELOAD:
+    // `PermissionStatus`'s `change` is the whole mechanism. A message that
+    // survived the fix would read as the product being broken, which is exactly
+    // what a learner who just did what they were told would conclude.
+    act(() => mediaControl.setPermission('granted'));
+
+    await waitFor(() => expect(screen.queryByText(problem.message)).toBeNull());
+
+    // …and the start it refused a moment ago now works.
+    speech.autoEnd = false;
+    speech.spoken = [];
+    await user.click(screen.getByRole('button', { name: /start hands-free/i }));
+    await screen.findByText('Asking you the question.');
+  });
+
+  it('tells a learner with no input device before the loop is armed', async () => {
+    const user = userEvent.setup();
+    // Nothing attached from the first render, which is how a learner without a
+    // headset actually arrives on this screen.
+    installMediaEnvironment({ permission: 'prompt', audioInputs: 0 });
+    installHandlers();
+    renderSession();
+
+    await chooseVoice(user);
+
+    const problem = describeCaptureProblem('no_device');
+    expect(await screen.findByText(problem.message)).toBeInTheDocument();
+    expect(screen.getByText(problem.remedy)).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: /start hands-free/i }));
+    expect(screen.queryByText('Opening your microphone.')).toBeNull();
+    expect(speech.spoken).not.toContain(QUESTION_1.prompt);
+  });
+
+  it('never calls getUserMedia by rendering — the prompt belongs to the tap', async () => {
+    const user = userEvent.setup();
+    installHandlers();
+    renderSession();
+
+    await chooseVoice(user);
+    await screen.findByRole('button', { name: /start hands-free/i });
+
+    // The preflight has run (it is what put the panel in its ready state) and
+    // has still not touched the device.
+    expect(getUserMedia).not.toHaveBeenCalled();
+  });
+
+  it('leaves text mode completely untouched', async () => {
+    const user = userEvent.setup();
+    // A denied microphone AND no input device: the worst case the preflight can
+    // report, on a screen whose learner is typing.
+    installMediaEnvironment({ permission: 'denied', audioInputs: 0 });
+    installHandlers();
+    renderSession();
+
+    await screen.findByRole('heading', { level: 2, name: QUESTION_1.prompt });
+
+    // Text is the mode, and nothing about the microphone is said on it: the
+    // panel that carries the notice is not mounted at all.
+    expect(
+      await screen.findByRole('button', { name: /^text$/i }),
+    ).toHaveAttribute('aria-pressed', 'true');
+    expect(
+      screen.queryByText(describeCaptureProblem('permission_denied').message),
+    ).toBeNull();
+
+    // And the typed answer still submits.
+    await user.type(screen.getByLabelText(/your answer/i), 'the Constitution');
+    await user.click(screen.getByRole('button', { name: /^submit$/i }));
+    await waitFor(() => expect(posted).toHaveLength(1));
+    expect(posted[0].inputMode).toBe('typed');
+  });
 });
