@@ -238,6 +238,23 @@ number that could drift between two call sites that each typed `1500`.
 
 ## 4. The state machine
 
+> **Amended by E15 (epic #345).** This state machine governs the
+> **request/response transport only** — this document's own subject, and
+> the one every learner without a `realtime` model bound still uses in
+> full, unchanged. E15 adds a second, realtime-backed hands-free mode
+> (`docs/specs/realtime-practice.md`) whose state shape is deliberately
+> different, not merely a realtime implementation of the five states
+> below: it has **no `processing` phase**, because a realtime
+> `grade_answer` tool call resolves inside the live connection the model
+> is already speaking over, with no separate transcribe-then-grade
+> round-trip to wait out — the provider's own turn detection replaces the
+> driver-owned `listening`/`processing` split entirely
+> (`docs/specs/realtime-practice.md` §8.1). A reader who is not sure which
+> machine a given screen or hook is running should check which speech
+> transport is bound, not assume this one — `realtime` bound means
+> `docs/specs/realtime-practice.md` governs, `realtime` unbound (with
+> `transcribe` bound) means this section does.
+
 Reproduced from epic #304 verbatim — this is the contract every hook in
 this epic builds toward, not a paraphrase of it:
 
@@ -532,11 +549,39 @@ load-bearing rather than a preference:
 
 ## 15. Out of scope (deliberately)
 
-- **The realtime transport (E11).** Conversation mode is built on the
-  request/response speech surface E9 shipped and E12 made the default; a
-  realtime-backed hands-free mode is a different transport with its own
-  session lifecycle (`docs/specs/realtime-interview.md`) and a later
-  epic's scope, not this one's.
+> **Replaced by E15 (epic #345).** The bullet immediately below originally
+> read: "The realtime transport (E11). Conversation mode is built on the
+> request/response speech surface E9 shipped and E12 made the default; a
+> realtime-backed hands-free mode is a different transport with its own
+> session lifecycle (`docs/specs/realtime-interview.md`) and a later
+> epic's scope, not this one's." That "later epic" has since been filed
+> and has its own design record — `docs/specs/realtime-practice.md` — so
+> the sentence is replaced below rather than left standing as a forward
+> reference to work that, by the time a reader finds it, already exists.
+> Nothing else in this document is amended by E15 beyond this bullet and
+> §4's own note on which transport its state machine governs (§4 below) —
+> every mechanism §1-§14 describe (the persistent stream, the calibrated
+> VAD, earcons, the wake lock, the `voice.conversationMode` preference)
+> stays exactly what it was, unconditionally the request/response
+> transport's own machinery, never realtime's.
+
+- **The realtime transport (E11) is no longer out of scope for this
+  *product* — it is out of scope for *this document*.** E15 (epic #345)
+  ships a second, realtime-backed hands-free mode for ordinary practice
+  sessions, built on the identical ephemeral-secret transport
+  `docs/specs/realtime-interview.md` established for mock interviews. Its
+  full design — the five-tool contract, the single-`recordAttempt` rule,
+  the spoken-turn composer, the degradation ladder between the two voice
+  transports, cost bounds, and the probabilistic (rather than structural)
+  echo-suppression trade-off full duplex requires — lives entirely in
+  `docs/specs/realtime-practice.md`, not here. This document remains the
+  complete and unmodified design record for the request/response
+  transport specifically: E15 adds a sibling, not a replacement, and a
+  learner whose deployment has no `realtime` model bound gets the
+  identical conversation-mode experience this document has always
+  described, unchanged (`docs/specs/realtime-practice.md` §8's
+  degradation ladder is precisely what falls back to this document's own
+  loop when realtime is unavailable).
 - **Background or screen-locked operation.** §8 names this as a platform
   constraint the wake lock mitigates, not one this epic fixes — a phone
   locked in a pocket suspends timers, audio, and `MediaRecorder` on every
