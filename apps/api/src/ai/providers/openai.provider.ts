@@ -770,6 +770,36 @@ export class OpenAiProvider extends BaseAiProvider {
    * THROWS FREELY. `BaseAiProvider.transcribe` turns a throw into a recorded
    * failure with null text, null confidence and null token counts.
    */
+  /**
+   * Can THIS model report a confidence? (issue #348, epic #345.)
+   *
+   * The same fact {@link wantsVerboseTranscription} already encodes, published
+   * under the name that says what a caller wants to know. There is deliberately
+   * no second rule here: "can produce `verbose_json`" and "can report a
+   * confidence" are the same question on this provider, because
+   * `deriveConfidence` reads `segments[].avg_logprob` and only the verbose
+   * shape carries segments. Two predicates would be two things to keep in
+   * agreement, and the failure of that agreement is silent by construction.
+   *
+   * `whisper-1` → `true`. The `gpt-4o-transcribe` / `gpt-4o-mini-transcribe`
+   * line → `false`, which is the honest answer and the one this deployment's
+   * learners are affected by: bound to that family, nothing in
+   * `docs/specs/voice.md` §3's misheard path can fire.
+   *
+   * ONE KNOWN INACCURACY, NARROW AND DELIBERATE. A model whose id this rule has
+   * not heard of is reported `true` and may still refuse `verbose_json` at call
+   * time — the case {@link runTranscription}'s single retry exists for. It then
+   * reports `confidence: null` on a deployment that claimed it could measure.
+   * That is a strictly better failure than the reverse (claiming `false` for
+   * `whisper-1` and suppressing a signal that is really there), it is confined
+   * to unknown or third-party OpenAI-compatible endpoints, and the per-call
+   * `null` is still handled correctly everywhere by the "unknown is not low"
+   * rule.
+   */
+  override reportsTranscriptionConfidence(modelId: string): boolean {
+    return wantsVerboseTranscription(modelId);
+  }
+
   protected async runTranscription(
     apiKey: string,
     request: AiTranscriptionRequest,
@@ -798,6 +828,19 @@ export class OpenAiProvider extends BaseAiProvider {
       file,
       model: request.modelId,
       ...(request.languageHint ? { language: request.languageHint } : {}),
+      // A BIAS, NEVER A CONSTRAINT (issue #348, epic #345). OpenAI treats
+      // `prompt` as prior context for the decoder: it makes the in-domain
+      // spellings a civics answer is full of — `Woodrow Wilson`, `the Bill of
+      // Rights` — cheaper to produce, and it forbids nothing. The recogniser
+      // can still return words that appear nowhere in it, and it MUST: a
+      // learner who says something wrong has to be heard saying it, or the
+      // grading ladder one layer up is being handed its own answer back.
+      //
+      // Nothing in this file, or downstream of it, compares the transcript to
+      // this string, filters on it, or retries when the two disagree. See
+      // `AiTranscriptionRequest.prompt` for where the text comes from (the
+      // caller's own civics rows, server-side, never a request field).
+      ...(request.prompt ? { prompt: request.prompt } : {}),
     };
 
     if (!wantsVerboseTranscription(request.modelId)) {

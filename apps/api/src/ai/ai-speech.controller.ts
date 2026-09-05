@@ -33,6 +33,7 @@ import {
   MAX_TRANSCRIBE_SECONDS,
 } from './ai-speech.service';
 import { SpeechAudioService } from './speech-audio.service';
+import { TranscriptionContextService } from './transcription-context.service';
 import {
   AiSpeechAudioQueryDto,
   AiSpeechFailedDto,
@@ -112,6 +113,18 @@ const LANGUAGE_FIELD = 'languageHint';
 const DURATION_FIELD = 'durationSeconds';
 
 /**
+ * The form field naming the civics question this recording answers (#348).
+ *
+ * AN ID, NEVER TEXT — the whole reason a field was acceptable here at all. The
+ * server resolves it into the question and its accepted answers and builds the
+ * recogniser's biasing prompt from those rows; a `prompt` field would let a
+ * caller put arbitrary text into a provider request and steer its own
+ * recogniser. `TranscribeUploadCarriesNoPrompt` (`ai-speech.service.ts`) makes
+ * adding one a build failure.
+ */
+const QUESTION_FIELD = 'questionId';
+
+/**
  * Multipart parser errors this controller answers as a 400.
  *
  * A MAP RATHER THAN A RETHROW, because every one of these reaches the client
@@ -181,6 +194,14 @@ export class AiSpeechController {
     // source is), and the two answer different questions — one shapes what a
     // caller sent, the other resolves what the database says and remembers it.
     private readonly audio: SpeechAudioService,
+    // The recogniser's hints (#348, epic #345): the caller's own spoken
+    // language, and the vocabulary one civics question is worth biasing
+    // toward. A THIRD SERVICE rather than a method on either of the two above,
+    // for the reason `speech-audio.module.ts` already gives about the second:
+    // it reaches `CivicsService`, and `AiSpeechService` — provided by
+    // `AiModule` — cannot, without making `AiModule` and `CivicsModule` a
+    // cycle.
+    private readonly recognition: TranscriptionContextService,
   ) {}
 
   /**
@@ -220,13 +241,24 @@ export class AiSpeechController {
       'produce a usable answer. **All three are HTTP 200**; a non-2xx here would discard ' +
       'the cause, which is the one fact this response exists to carry.\n\n' +
       '`confidence` is `null` when the model reports none. **That means unknown — it is ' +
-      'never 0 and never 1.**',
+      'never 0 and never 1.** `confidenceAvailable` says whether the model bound on ' +
+      '**this deployment** can report one at all: when it is `false`, `confidence` will ' +
+      'be `null` on every call and the misheard protection cannot fire here — read the ' +
+      'transcript back to the learner and let them correct it instead.\n\n' +
+      '**Send `questionId` when you know it.** The server resolves it to the question ' +
+      'and its accepted answers — for you, in your own state — and uses those words to ' +
+      'BIAS the recogniser toward the proper nouns a civics answer is full of. It is ' +
+      'only a bias: a transcript that is not an accepted answer still comes back exactly ' +
+      'as it was heard. There is deliberately **no field for the biasing text itself**.',
   })
   @ApiBody({
     description:
       'One audio file in the `audio` field. Optional `languageHint` (ISO-639-1, e.g. ' +
-      '`en`) and `durationSeconds` fields may be sent **before** the file part; a ' +
-      'declared duration can only make the request more restricted, never less.',
+      '`en`), `durationSeconds` and `questionId` fields may be sent **before** the file ' +
+      'part; a declared duration can only make the request more restricted, never less. ' +
+      'An omitted `languageHint` is resolved from your own learner profile rather than ' +
+      'left unset. A `questionId` that names nothing is ignored, never refused — a stale ' +
+      'hint must not cost you a recording you have already made.',
     schema: {
       type: 'object',
       required: [AUDIO_FIELD],
@@ -234,6 +266,11 @@ export class AiSpeechController {
         [AUDIO_FIELD]: { type: 'string', format: 'binary' },
         [LANGUAGE_FIELD]: { type: 'string', example: 'en' },
         [DURATION_FIELD]: { type: 'number', example: 12.5 },
+        [QUESTION_FIELD]: {
+          type: 'string',
+          format: 'uuid',
+          example: '3f1b7c2e-8a4d-4f9e-9c11-2b6d5a0e7f83',
+        },
       },
     },
   })
@@ -264,7 +301,13 @@ export class AiSpeechController {
   ) {
     const upload = await this.readUpload(req);
 
-    return this.speech.transcribe(userId, upload);
+    // RESOLVED AFTER THE BODY, BEFORE THE DISPATCH. `readUpload` may throw a
+    // 400 for a malformed part, and a request that is going to be refused must
+    // not spend two queries first — the same "every refusal costs nothing"
+    // ordering `AiSpeechService.assertAcceptable` is built around.
+    const context = await this.recognition.resolve(userId, upload.questionId);
+
+    return this.speech.transcribe(userId, upload, context);
   }
 
   /**
@@ -694,6 +737,7 @@ export class AiSpeechController {
           : 'recording',
       languageHint: readLanguageHint(part),
       declaredDurationSeconds: readDeclaredDuration(part),
+      questionId: readQuestionId(part),
     };
   }
 }
@@ -729,6 +773,34 @@ function readLanguageHint(part: MultipartFile): string | undefined {
     throw new BadRequestException(
       `"${LANGUAGE_FIELD}" must be a two-letter ISO-639-1 code, e.g. "en".`,
     );
+  }
+
+  return raw.toLowerCase();
+}
+
+/**
+ * The civics question this recording answers, validated for shape (#348).
+ *
+ * REJECTED RATHER THAN DROPPED when it is not a UUID, for the same reason
+ * {@link readLanguageHint} rejects `"English"`: a client whose field never
+ * worked should learn so on the first request instead of wondering why accuracy
+ * never improved. A well-formed id that names nothing is a different matter and
+ * is dropped silently — see `TranscriptionContextService.resolvePrompt`, which
+ * must not spend a learner's already-made recording on a stale hint.
+ *
+ * The shape check is deliberately local rather than borrowed from a zod schema:
+ * this is a multipart FORM FIELD, read from a stream before any DTO exists, and
+ * the two other readers beside it are hand-written for the same reason.
+ */
+function readQuestionId(part: MultipartFile): string | undefined {
+  const raw = readField(part, QUESTION_FIELD);
+
+  if (raw === undefined || raw.length === 0) return undefined;
+
+  if (
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(raw)
+  ) {
+    throw new BadRequestException(`"${QUESTION_FIELD}" must be a UUID.`);
   }
 
   return raw.toLowerCase();
