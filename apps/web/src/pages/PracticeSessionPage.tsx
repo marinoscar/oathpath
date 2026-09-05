@@ -375,10 +375,15 @@ function voiceAttemptFields(args: {
  */
 const CONVERSATION_PHASE_TEXT: Record<ConversationPhase, string> = {
   idle: '',
-  speakingQuestion: 'Reading the question aloud.',
+  // DELIBERATELY NOT `QuestionAudio`'s own "Reading the question aloud." — the
+  // loop mounts that component, so the two lines sit on the same screen at the
+  // same moment, and two live regions saying the identical sentence is one
+  // announcement a screen-reader user hears twice with no way to tell which
+  // control it came from.
+  speakingQuestion: 'Asking you the question.',
   listening: 'Listening. Answer when you are ready.',
   processing: 'Working out how that went.',
-  speakingAnswer: 'Reading the answer.',
+  speakingAnswer: 'Telling you the answer.',
   advancing: 'Moving on to the next question.',
 };
 
@@ -1261,6 +1266,15 @@ export default function PracticeSessionPage() {
     });
   };
 
+  /**
+   * The loop's last word, when there is no question left to render it beside.
+   *
+   * `null` unless Voice is the mode and there is something to say — see the
+   * panel itself for why the notice outlives the question.
+   */
+  const conversationNotice =
+    answerMode === 'voice' && transcribeBound ? conversation.notice : null;
+
   /** One tap: the gesture that arms audio, and the loop. */
   const handleStartConversation = () => {
     setHasUserGesture(true);
@@ -1527,7 +1541,7 @@ export default function PracticeSessionPage() {
           </Alert>
         )}
 
-        {question && (
+        {(question || conversationNotice) && (
           <Box sx={{ mb: 3 }}>
             {/* MOUNTED UNCONDITIONALLY. It renders null unless `transcribe` is
                 KNOWN to be unbound, which is why it can sit here rather than
@@ -1540,7 +1554,7 @@ export default function PracticeSessionPage() {
                 explanation for the missing option: with `transcribe` unbound
                 there is no Voice to choose, and "why not" belongs where the
                 choice would have been rather than further down the page. */}
-            <VoiceUnavailableNotice />
+            {question && <VoiceUnavailableNotice />}
 
             {/* THE SESSION-WIDE PICKER (#313, epic #304 / E13).
 
@@ -1561,7 +1575,7 @@ export default function PracticeSessionPage() {
                 nothing to choose between, the whole group goes: a one-button
                 picker is a control that cannot be operated, and the notice
                 above has already said why. */}
-            {transcribeBound && (
+            {question && transcribeBound && (
               <ToggleButtonGroup
                 exclusive
                 size="small"
@@ -1603,6 +1617,14 @@ export default function PracticeSessionPage() {
                 this branch and empty until there is something to say. */}
             {answerMode === 'voice' && transcribeBound && (
               <Paper variant="outlined" sx={{ mt: 2, p: { xs: 2, sm: 2.5 } }}>
+                {/* THE CONTROLS NEED A QUESTION; THE NOTICE DOES NOT. The loop
+                    stopping BECAUSE the session ran out of questions is exactly
+                    the case where `question` is already null, and a panel that
+                    unmounted with it would take the one sentence explaining
+                    what just happened off the screen at the moment it was
+                    said. */}
+                {question && (
+                  <>
                 <Typography variant="body2" color="text.secondary">
                   Hands-free practice reads each question aloud, listens for
                   your answer, and moves on by itself. You can stop, or go back
@@ -1640,6 +1662,8 @@ export default function PracticeSessionPage() {
                     Type instead
                   </Button>
                 </Stack>
+                  </>
+                )}
 
                 <Box role="status" aria-live="polite" sx={{ mt: 1 }}>
                   {CONVERSATION_PHASE_TEXT[conversation.phase] && (

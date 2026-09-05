@@ -219,10 +219,15 @@ describe('VoiceSettingsPage (#288)', () => {
   // Every control, with a real label
   // ===========================================================================
 
-  it('renders all six controls, each reachable by its accessible label', async () => {
+  it('renders all seven controls, each reachable by its accessible label', async () => {
     renderPage();
 
     expect(await findAutoSubmit()).toBeInTheDocument();
+    // The seventh, since #313 (epic #304 / E13) — in this card rather than a
+    // new one, because it answers the same question its neighbour does.
+    expect(
+      screen.getByLabelText('Start practice sessions hands-free'),
+    ).toBeInTheDocument();
     expect(
       screen.getByLabelText('Read questions to me automatically'),
     ).toBeInTheDocument();
@@ -271,6 +276,11 @@ describe('VoiceSettingsPage (#288)', () => {
     ).not.toBeChecked();
     expect(
       screen.getByLabelText('Read the answer to me automatically'),
+    ).not.toBeChecked();
+    // `DEFAULT_VOICE_CONVERSATION_MODE` is `false`: a learner who has never
+    // opted in must not find their microphone opening itself.
+    expect(
+      screen.getByLabelText('Start practice sessions hands-free'),
     ).not.toBeChecked();
     expect(
       (screen.getByRole('slider', { name: 'Speaking speed' }) as HTMLInputElement)
@@ -329,6 +339,34 @@ describe('VoiceSettingsPage (#288)', () => {
     // `null`, NOT `false`. Writing today's default back pins the learner to it
     // forever, including after a later release moves it.
     expect(patchBodies[0]).toEqual({ voice: { readQuestionsAloud: null } });
+    expect(stored.voice).toBeUndefined();
+  });
+
+  it('round-trips `conversationMode` and sends the NULL-DELETE at its default (#313)', async () => {
+    const user = userEvent.setup();
+    const first = renderPage();
+
+    const hands = await screen.findByLabelText('Start practice sessions hands-free');
+    expect(hands).not.toBeChecked();
+
+    await user.click(hands);
+
+    await waitFor(() => expect(patchBodies).toHaveLength(1));
+    expect(patchBodies[0]).toEqual({ voice: { conversationMode: true } });
+    expect(stored.voice).toEqual({ conversationMode: true });
+
+    // Read back from the server's own answer, not from local form state — and
+    // it survives a fresh mount, which is what makes the practice screen land
+    // in Voice on the next session.
+    first.unmount();
+    renderPage();
+    const reloaded = await screen.findByLabelText('Start practice sessions hands-free');
+    expect(reloaded).toBeChecked();
+
+    // …and back off is a DELETE, never a stored `false`.
+    await user.click(reloaded);
+    await waitFor(() => expect(patchBodies).toHaveLength(2));
+    expect(patchBodies[1]).toEqual({ voice: { conversationMode: null } });
     expect(stored.voice).toBeUndefined();
   });
 
