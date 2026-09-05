@@ -26,7 +26,7 @@ product. A conversational voice that graded you by ear could, in principle,
 be generous on a bad day and strict on a good one, with no way for you to
 know why. OathPath does not work that way: replay the identical interview
 twice and you get the identical questions and the identical verdict, because
-a person — not a model's mood — is never who decided either one.
+neither one was ever the model's to decide.
 
 ## Being misheard is never recorded as a wrong answer
 
