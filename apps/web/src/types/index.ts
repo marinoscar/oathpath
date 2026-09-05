@@ -2234,6 +2234,48 @@ export interface PracticeSession {
   completedAt: string | null;
   /** Null while `in_progress` — there is nothing to summarise yet. */
   summary: PracticeSessionSummary | null;
+
+  // ---------------------------------------------------------------------------
+  // The coach's closing word (#352, epic #345 "The conversation the coach has")
+  // ---------------------------------------------------------------------------
+
+  /**
+   * The coach's reaction to how the whole session went — or null.
+   *
+   * THE FIELD THIS TYPE WAS MISSING, and the reason about a quarter of the
+   * reaction bank was unreachable copy for two epics: the server has computed
+   * it since #320 and `practice-session.dto.ts` has declared it just as long,
+   * but this interface did not carry it, so nothing rendered it and nothing
+   * said it. The end of a session was silent.
+   *
+   * NULL WHENEVER {@link summary} IS NULL, and not by coincidence: the three
+   * `session.complete_*` events are a pure function of the summary's own
+   * `correct`/`answered`, so a session with nothing to summarise has nothing
+   * to react to. Also null when the learner has turned reactions off, which is
+   * a request for silence and must render as nothing at all — not a
+   * placeholder, not an empty region reserving space for a line that is never
+   * coming.
+   *
+   * COMPUTED SERVER-SIDE AT READ TIME AND NEVER PERSISTED, exactly as an
+   * attempt's is. It is seeded by the SESSION id, so the response to
+   * `POST .../complete` and every later read of the summary say the same thing
+   * without a column to hold it.
+   */
+  coachReaction: { text: string; persona: CoachPersona } | null;
+
+  /**
+   * What the coach SAYS when this session ends, in order — composed
+   * server-side, exactly as an attempt's `spokenTurn` is.
+   *
+   * `[]` IS ORDINARY, and is the answer whenever {@link coachReaction} is
+   * null. A client speaks an empty array as silence and never substitutes a
+   * line of its own.
+   *
+   * It carries no tally on purpose. The band is already in the line the coach
+   * says; the digits are on the summary screen, where they can be read at the
+   * learner's own pace rather than listened to.
+   */
+  spokenTurn: string[];
 }
 
 /**
