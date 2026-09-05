@@ -1047,4 +1047,252 @@ describe('User Settings Integration', () => {
       });
     });
   });
+
+  // ===========================================================================
+  // voice namespace (issue #282, epic #280 "Spoken Civics Audio")
+  // ===========================================================================
+  //
+  // Same "six-file change, one silent symptom" reasoning the `study` block
+  // above states in full: a write returns 200, `userSettingsSchema.parse()`
+  // strips any namespace key it does not know about, and the next GET simply
+  // reports nothing changed. Every write below is followed by a real GET for
+  // that reason, never by an assertion on what was passed to Prisma.
+  //
+  // Same placement rule too: outside `describe('PATCH ...')`, whose
+  // `beforeEach` replaces `findUnique` with a one-shot value and breaks the
+  // stateful registry a round trip needs.
+  describe('voice namespace', () => {
+    it('round-trips every field through PATCH and a subsequent GET', async () => {
+      const user = await createMockTestUser(context);
+      setupMockUserSettings(user.id, DEFAULT_USER_SETTINGS);
+
+      await request(context.app.getHttpServer())
+        .patch('/api/user-settings')
+        .set(authHeader(user.accessToken))
+        .send({
+          voice: {
+            autoSubmitSpoken: false,
+            preferPremiumVoice: false,
+            preferredVoice: 'alloy',
+            speechRate: 1.2,
+            readQuestionsAloud: true,
+            readAnswersAloud: true,
+          },
+        })
+        .expect(200);
+
+      const response = await request(context.app.getHttpServer())
+        .get('/api/user-settings')
+        .set(authHeader(user.accessToken))
+        .expect(200);
+
+      expect(response.body.data.voice).toEqual({
+        autoSubmitSpoken: false,
+        preferPremiumVoice: false,
+        preferredVoice: 'alloy',
+        speechRate: 1.2,
+        readQuestionsAloud: true,
+        readAnswersAloud: true,
+      });
+    });
+
+    it('persists voice through PUT and returns it on a subsequent GET', async () => {
+      const user = await createMockTestUser(context);
+      setupMockUserSettings(user.id, DEFAULT_USER_SETTINGS);
+
+      await request(context.app.getHttpServer())
+        .put('/api/user-settings')
+        .set(authHeader(user.accessToken))
+        .send({
+          theme: 'system',
+          profile: { useProviderImage: true },
+          voice: { speechRate: 1.0 },
+        })
+        .expect(200);
+
+      const response = await request(context.app.getHttpServer())
+        .get('/api/user-settings')
+        .set(authHeader(user.accessToken))
+        .expect(200);
+
+      expect(response.body.data.voice).toEqual({ speechRate: 1.0 });
+    });
+
+    it('patches one field without discarding the others', async () => {
+      // The reason `mergeVoice` is field-wise rather than replace-wholesale:
+      // a learner changing their speech rate must keep the voice id and
+      // auto-submit preference they already chose.
+      const user = await createMockTestUser(context);
+      setupMockUserSettings(user.id, DEFAULT_USER_SETTINGS);
+
+      await request(context.app.getHttpServer())
+        .patch('/api/user-settings')
+        .set(authHeader(user.accessToken))
+        .send({ voice: { preferredVoice: 'nova', autoSubmitSpoken: false } })
+        .expect(200);
+
+      await request(context.app.getHttpServer())
+        .patch('/api/user-settings')
+        .set(authHeader(user.accessToken))
+        .send({ voice: { speechRate: 1.3 } })
+        .expect(200);
+
+      const response = await request(context.app.getHttpServer())
+        .get('/api/user-settings')
+        .set(authHeader(user.accessToken))
+        .expect(200);
+
+      expect(response.body.data.voice).toEqual({
+        preferredVoice: 'nova',
+        autoSubmitSpoken: false,
+        speechRate: 1.3,
+      });
+    });
+
+    it('patching a field to null restores the built-in default by deleting it', async () => {
+      const user = await createMockTestUser(context);
+      setupMockUserSettings(user.id, DEFAULT_USER_SETTINGS);
+
+      await request(context.app.getHttpServer())
+        .patch('/api/user-settings')
+        .set(authHeader(user.accessToken))
+        .send({ voice: { speechRate: 1.4, preferredVoice: 'nova' } })
+        .expect(200);
+
+      await request(context.app.getHttpServer())
+        .patch('/api/user-settings')
+        .set(authHeader(user.accessToken))
+        .send({ voice: { speechRate: null } })
+        .expect(200);
+
+      const response = await request(context.app.getHttpServer())
+        .get('/api/user-settings')
+        .set(authHeader(user.accessToken))
+        .expect(200);
+
+      // The rate is GONE, not stored as today's default value — which is
+      // what lets a future change to DEFAULT_VOICE_SPEECH_RATE reach this
+      // learner.
+      expect(response.body.data.voice).toEqual({ preferredVoice: 'nova' });
+    });
+
+    it('emptying the namespace collapses it back to absent', async () => {
+      const user = await createMockTestUser(context);
+      setupMockUserSettings(user.id, DEFAULT_USER_SETTINGS);
+
+      await request(context.app.getHttpServer())
+        .patch('/api/user-settings')
+        .set(authHeader(user.accessToken))
+        .send({ voice: { speechRate: 1.1 } })
+        .expect(200);
+
+      await request(context.app.getHttpServer())
+        .patch('/api/user-settings')
+        .set(authHeader(user.accessToken))
+        .send({ voice: { speechRate: null } })
+        .expect(200);
+
+      const response = await request(context.app.getHttpServer())
+        .get('/api/user-settings')
+        .set(authHeader(user.accessToken))
+        .expect(200);
+
+      // Absent, never `{}` — two spellings of "no opinion" is how a
+      // settings page and the playback code would end up disagreeing about
+      // whether a learner has one.
+      expect(response.body.data.voice).toBeUndefined();
+    });
+
+    it('an untouched account persists no voice namespace at all, and no row is written to make that true', async () => {
+      // The sparse contract, end to end. `DEFAULT_USER_SETTINGS` carries no
+      // `voice` key, and touching an unrelated preference must not
+      // materialise one — a stored `speechRate: 0.95` would freeze this
+      // learner at today's default rate forever, and a stored
+      // `autoSubmitSpoken: true` would do the same for that preference.
+      const user = await createMockTestUser(context);
+      setupMockUserSettings(user.id, DEFAULT_USER_SETTINGS);
+
+      await request(context.app.getHttpServer())
+        .patch('/api/user-settings')
+        .set(authHeader(user.accessToken))
+        .send({ theme: 'dark' })
+        .expect(200);
+
+      const response = await request(context.app.getHttpServer())
+        .get('/api/user-settings')
+        .set(authHeader(user.accessToken))
+        .expect(200);
+
+      expect(response.body.data.theme).toBe('dark');
+      expect(response.body.data).not.toHaveProperty('voice');
+    });
+
+    describe('validation', () => {
+      it.each([
+        ['a space', 'a b'],
+        ['a slash', 'nova/2'],
+        ['an empty string', ''],
+      ])('rejects a preferredVoice containing %s with a 400', async (_label, preferredVoice) => {
+        const user = await createMockTestUser(context);
+        setupMockUserSettings(user.id, DEFAULT_USER_SETTINGS);
+
+        await request(context.app.getHttpServer())
+          .patch('/api/user-settings')
+          .set(authHeader(user.accessToken))
+          .send({ voice: { preferredVoice } })
+          .expect(400);
+      });
+
+      it.each([
+        ['below the minimum', 0.4],
+        ['above the maximum', 2.1],
+      ])('rejects a speechRate %s with a 400', async (_label, speechRate) => {
+        const user = await createMockTestUser(context);
+        setupMockUserSettings(user.id, DEFAULT_USER_SETTINGS);
+
+        await request(context.app.getHttpServer())
+          .patch('/api/user-settings')
+          .set(authHeader(user.accessToken))
+          .send({ voice: { speechRate } })
+          .expect(400);
+      });
+
+      it('rejects an out-of-range speechRate on PUT as well as PATCH', async () => {
+        const user = await createMockTestUser(context);
+        setupMockUserSettings(user.id, DEFAULT_USER_SETTINGS);
+
+        await request(context.app.getHttpServer())
+          .put('/api/user-settings')
+          .set(authHeader(user.accessToken))
+          .send({
+            theme: 'system',
+            profile: { useProviderImage: true },
+            voice: { speechRate: 3 },
+          })
+          .expect(400);
+      });
+
+      it('rejects a misspelled voice key', async () => {
+        const user = await createMockTestUser(context);
+        setupMockUserSettings(user.id, DEFAULT_USER_SETTINGS);
+
+        await request(context.app.getHttpServer())
+          .patch('/api/user-settings')
+          .set(authHeader(user.accessToken))
+          .send({ voice: { autoSubmit: false } })
+          .expect(400);
+      });
+
+      it('rejects a non-boolean readQuestionsAloud', async () => {
+        const user = await createMockTestUser(context);
+        setupMockUserSettings(user.id, DEFAULT_USER_SETTINGS);
+
+        await request(context.app.getHttpServer())
+          .patch('/api/user-settings')
+          .set(authHeader(user.accessToken))
+          .send({ voice: { readQuestionsAloud: 'yes' } })
+          .expect(400);
+      });
+    });
+  });
 });
