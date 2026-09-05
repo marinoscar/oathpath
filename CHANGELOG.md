@@ -33,6 +33,57 @@ undocumented — the identical standard `docs/specs/realtime-interview.md`
 
 ## [Unreleased]
 
+### Added
+
+- **Conversation mode — hands-free spoken practice (E13, epic #304).** A
+  session-wide `Text | Voice` control on a practice session: with `Voice`
+  selected, tapping **Start hands-free** arms a persistent microphone
+  stream, a calibrated voice-activity detector (with barge-in — talking
+  over a question cancels it and starts listening), synthesised earcons,
+  and a screen wake lock, and the app reads each question, listens for the
+  spoken answer, grades it, speaks the accepted answer, and moves on with
+  no further taps. `voice.conversationMode` (issue #307, `false` by
+  default) is the seventh field on the existing `voice` user-settings
+  namespace; turning it on only decides which mode a session *loads* with
+  — a learner still taps **Start hands-free** to arm the loop, so the
+  preference buys one tap instead of two, never a zero-tap session.
+  Fixed as a side effect: `voice.readQuestionsAloud` is now actually
+  honoured (`QuestionAudio`'s `autoPlay` prop was resolved but never wired
+  to the practice page's mount), and `QuestionAudio` now exposes an
+  `onFinished` callback and a `stop()` handle so a caller can tell when
+  playback ends and cancel it mid-read. No API route or permission string
+  was added. See
+  [`docs/specs/conversation-mode.md`](docs/specs/conversation-mode.md).
+
+**Manual microphone checklist: not run, for either E12 or E13.**
+`ROADMAP.md`'s own E12 footnote already records that a person has not run
+E12's real-microphone verification against a real deployment — that gap
+is restated here, not newly discovered. E13 has the identical gap, and
+this entry is where issue #315 asked it to be recorded: this environment
+has no microphone, no Docker daemon, and no compose stack, so nobody ran
+`docs/specs/conversation-mode.md` §16's acoustic checklist for this
+release either — what follows is not a defect list but a record of what a
+later reader should not assume was verified:
+
+1. Ambient-floor VAD calibration on a quiet room versus a noisy or windy
+   one — unverified against real audio.
+2. Deliberate barge-in (talking over a question mid-read) versus ambient
+   noise not falsely triggering it — unverified against a real speaker and
+   a real microphone.
+3. The ~8 s onset timeout and the spoken re-listen nudge it triggers on
+   silence — unverified end to end.
+4. A full one-tap session, start to finish, on a real device — not run.
+
+What *was* run: the state-machine unit tests
+(`useConversationSession.test.ts`, `useVoiceActivity.test.ts`,
+`useWakeLock.test.ts`, `PracticeSessionPage.conversation.test.tsx`), which
+drive the detector and the driver against synthetic level sequences — a
+real test of the logic, and, honestly, not a test of whether the
+calibration copes with a real windy street, exactly as
+`docs/specs/conversation-mode.md` §16 says of itself. Unlike the
+acceptance journeys E10 and E12 each added to `tests/e2e/specs/*.spec.ts`,
+no Playwright journey spec exercises the hands-free loop.
+
 ### Changed
 
 - **Rebranded to OathPath.** The application, its CLI, its database and its
