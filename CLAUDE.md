@@ -639,6 +639,20 @@ for the operator-facing walkthrough. See
 [`docs/specs/voice-hands-free.md`](docs/specs/voice-hands-free.md) §4-§5
 (epic #280) and [`docs/API.md`](docs/API.md#ai-speech).
 
+### AI Coach (Per User)
+- `GET /api/ai/coach/personas` - The four voices a learner may ask their coach to speak in (`supportive`, the default, first), each with its `key`, `label`, `description`, and one readable `sampleLine` — never the `promptFragment` and never the reaction bank (issue #320, epic #305, E14 "The Coach's personality")
+
+The one new route this epic adds. The other surface E14 ships is not a
+route: `coachReaction: { text, persona } | null` is a **field** on the
+existing `POST /api/practice/sessions/{id}/attempts` response, computed at
+read time from the attempt's own id, its outcome, and the caller's
+`coach.persona` setting — **never persisted**, no column added to
+`practice_attempts` — and `null` exactly when the caller has set
+`coach.reactions` to `false`. See [`docs/API.md`](docs/API.md#ai-coach) and
+[`docs/API.md`](docs/API.md#post-practicesessionsidattempts) for the field,
+and [`docs/specs/coach-personality.md`](docs/specs/coach-personality.md) §9
+for why it is computed rather than frozen.
+
 ### Account (Per User)
 - `GET /api/account/data-summary` - Per-table row counts a reset would erase, plus the exact confirmation phrase each scope requires
 - `POST /api/account/reset` - Erase your own data (`scope: 'data'`) or your data and stored AI key (`scope: 'data_and_key'`); requires the matching typed phrase, verified server-side
@@ -813,6 +827,18 @@ id — `@CurrentUser('id')` is the only source of one, so there is no "reset
 another learner's data" action for a permission to gate in the first place.
 See [`docs/specs/account-reset.md`](docs/specs/account-reset.md) §11.
 
+**AI Coach adds no permission strings either, for the same reason.**
+`GET /api/ai/coach/personas` is `@Auth()` with no permissions and no user-id
+parameter: every authenticated learner chooses their own coach, exactly as
+they choose their own voice preference, and the list it returns is
+identical for every caller on the deployment — it reveals nothing about
+the administrator's AI configuration or any other learner. There is no
+"may choose a coach" privilege in this product's authorization model, and
+inventing one would leave a Viewer, the default role, unable to change how
+the application talks to them. See
+[`docs/specs/coach-personality.md`](docs/specs/coach-personality.md) and
+[`docs/API.md`](docs/API.md#ai-coach).
+
 ## Database Tables
 
 - `users` - User accounts with profile info
@@ -957,11 +983,15 @@ newest worked example, alongside the pre-existing `dataTables` and
 it — six independent scalar preferences (`autoSubmitSpoken`,
 `preferPremiumVoice`, `preferredVoice`, `speechRate`, `readQuestionsAloud`,
 `readAnswersAloud`) governing how a learner experiences spoken questions and
-answers, on the identical no-`.default()` pattern. Do not re-derive the list
-of files a new namespace touches here: `docs/specs/habit-streaks.md` §7
-names the six explicitly, as a checklist rather than a count to take on
-faith, and that document is the one to extend if a seventh namespace ever
-needs the same walk-through.
+answers, on the identical no-`.default()` pattern. `coach` (E14, epic #305,
+issue #317) is the one after that — two fields, `persona` (built-in default
+`'supportive'`) and `reactions` (built-in default `true`), governing how
+the companion frames an answer rather than how spoken practice sounds; see
+"Adding a coach persona" below for the persona registry itself. Do not
+re-derive the list of files a new namespace touches here:
+`docs/specs/habit-streaks.md` §7 names the six explicitly, as a checklist
+rather than a count to take on faith, and that document is the one to
+extend if a seventh namespace ever needs the same walk-through.
 
 ### Using the Clock
 
@@ -1206,6 +1236,121 @@ Live examples: `PracticeService.escalateToGrader` (the `grader` role,
 restate the dispatch design, the never-throw contract's mechanics, the
 grading ladder, or the failure-cause taxonomy here — all of it is
 [`docs/specs/ai-evaluation.md`](docs/specs/ai-evaluation.md).
+
+### Adding a coach persona
+
+A **persona** is one voice a learner may ask their coach to speak in — the
+grader's `feedback` sentence, the tutor's civics explanation, and the
+non-AI reaction line rendered after most attempts. Four ship today
+(`supportive`, the default; `academic`; `playful`; `unfiltered`, opt-in
+only). The full design — why two independent mechanisms exist, why the
+floor is enforced twice, why `coach` is its own namespace rather than a
+field on `voice`, why `coachReaction` is computed at read time and never
+persisted — is
+[`docs/specs/coach-personality.md`](docs/specs/coach-personality.md); do not
+restate it here. This section is the file-by-file checklist a new persona
+actually touches, named explicitly rather than left as a count to take on
+faith, the same shape `docs/specs/habit-streaks.md` §7 already commits to
+for a settings namespace.
+
+**The files, in the order a fifth persona would touch them:**
+
+1. **`apps/api/src/common/schemas/user-settings-namespaces.schema.ts`** —
+   add the key to `COACH_PERSONAS`. This list is a **literal here**,
+   declared before the AI module it would otherwise depend on exists — the
+   file's own header records why: it ships the `coach` namespace's settings
+   plumbing (issue #317) with no dependency on `apps/api/src/ai/coach/` at
+   all. `apps/api/src/ai/coach/personas.ts` is the **second list**, and the
+   two are bound by a **compile-time proof**
+   (`CoachPersonaRegistryCoversEnum`) that fails the build the moment they
+   diverge — a persona declared in one file with no matching entry in the
+   other is caught at compile time, not discovered by a learner whose
+   stored preference silently stops resolving.
+2. **`apps/api/src/ai/coach/personas.ts`** — one new `AI_COACH_PERSONAS`
+   entry: `key`, `label`, `description`, `promptFragment`, `sampleLine`.
+   **`supportive`'s `promptFragment` is deliberately the empty string** — it
+   is not "a persona that resembles today's voice," it **is** today's
+   voice, so a fragment there would be a second, paraphrased copy of the
+   tone `explain-prompt.ts` and `grading.ts` already state in their own
+   system messages, free to drift from them. Appending nothing changes
+   nothing, which is the actual requirement: a learner who never opens
+   `/settings/coach` must see byte-identical prompts to before this epic
+   shipped.
+3. **`apps/api/src/ai/coach/reaction-lines.ts`** — **every** `(persona,
+   event)` cell, all ten events (`answer.correct`, `answer.correct_run`,
+   `answer.partial`, `answer.incorrect`, `answer.skipped`,
+   `answer.self_marked`, `answer.misheard`, `session.complete_strong`,
+   `session.complete_mixed`, `session.complete_weak`), **at least three
+   lines each**. The coverage test in `reaction-lines.spec.ts` fails a
+   missing cell, so a persona shipped with a gap in its bank is a build
+   failure, not a blank line a learner discovers later. The banned-topic
+   lint (`banned-topics.ts`, run over the shipped bank in
+   `reaction-lines.spec.ts` and `personas.spec.ts`) is what makes the
+   invariant floor a **guarantee** rather than only a request for this
+   mechanism — see the floor paragraph below.
+4. **Nothing in `apps/web`.** The web reads the registry over
+   `GET /api/ai/coach/personas`; it must **never** hold a copy. The
+   argument is `ai-model-roles.ts`'s own, reused verbatim for a fourth
+   registry: a duplicate plus a test asserting the two agree is
+   **detection**, not **prevention** — the copies can still disagree in a
+   working tree, in a branch, and in any build where that test is not run.
+5. **`apps/api/src/ai/coach/personas.spec.ts`** and
+   **`apps/api/src/ai/coach/reaction-lines.spec.ts`** — extend both. The
+   first covers the registry (including the banned-topic lint over
+   `description`/`sampleLine`); the second covers the bank (the ten-event
+   coverage check and the banned-topic lint over every line).
+
+**The `promptFragment` is a style instruction, never licence.** It is
+written knowing that `COACH_INVARIANT_FLOOR` (`invariants.ts`) is appended
+**after** it in the system message, and that the floor's own first
+sentence declares it overrides everything the fragment asked for. A
+persona may ask for bluntness, humour, or formality; it may never ask for
+an exception to the seven rules that follow it.
+
+**`key` is persisted** — it is a literal value in a learner's
+`user_settings.value.coach.persona` row — so **renaming one is a
+migration, not a refactor**. This is worse than the identical warning
+`ai-model-roles.ts` gives for its own `key`: an unbound model role reports
+itself unbound, loudly, on `GET /api/ai/status`. A reverted persona reports
+**nothing at all** — the stored string stops matching anything in the
+registry, `resolveCoachPersona` falls back to `supportive`, and a learner
+who chose `playful` months ago is quietly returned to a voice they did not
+pick, with nothing in the response or the logs to explain why.
+
+**A persona never affects grading, scoring, readiness, or what counts as a
+correct answer — it changes wording only.** There is no `persona` parameter
+anywhere in `gradeDeterministic`, `escalateToGrader`, `nextSchedule`,
+`recomputeMasteryForQuestion`, the practice queue selector, or the
+readiness engine, and none should ever be added: a coach's tone is read
+*after* every one of those has already finished deciding what actually
+happened, never consulted while any of them decide it.
+
+**Three surfaces are deliberately excluded, permanently, not merely
+unwired in v1** (`docs/specs/coach-personality.md` §10 is the source for
+each; do not re-derive a different reason for any of them):
+
+- **The mock-interview officer, on both transports, and its debrief.** The
+  officer's own `OFFICER_VERDICT_PROHIBITION` means it gives no
+  per-question feedback at all — there is no sentence for a fragment to
+  colour — and the spec states the deeper reason is realism: a learner does
+  not choose the real officer's tone either, so letting them choose the
+  rehearsal officer's tone would make the rehearsal a worse model of the
+  event it exists to prepare someone for. The debrief inherits the
+  exclusion for the same reason it inherits the officer's other
+  constraints.
+- **Notifications.** The spec cites `VISION.md`'s "Notifications Should
+  Feel Intelligent" standard — "The goal is to help users return, not make
+  them feel guilty" — and states that a push notification voiced in
+  `unfiltered` risks exactly the guilt-inducing read that standard rules
+  out, for an audience that never chose to receive it in that voice.
+  `practice.daily_reminder`, `practice.review_due`, and `streak.at_risk`
+  stay in `VISION.md`'s own supportive worked-example tone regardless of a
+  learner's `coach.persona`.
+- **The readiness narrative**, per the spec, is a scope decision rather
+  than a principle — it is a rarer, heavier paragraph than a per-answer
+  reaction, and the two mechanisms this epic ships already cover the
+  coaching-gap surface that motivated it. A later epic wiring it would use
+  the identical fragment-plus-floor shape, not a new pattern.
 
 ### Adding a practice session kind
 
