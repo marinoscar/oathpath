@@ -104,7 +104,7 @@ import { LoadingSpinner } from '../components/common/LoadingSpinner';
 import { SentenceDiff } from '../components/english/SentenceDiff';
 import { PushToTalkButton } from '../components/voice/PushToTalkButton';
 import { VoiceUnavailableNotice } from '../components/voice/VoiceUnavailableNotice';
-import { isLowConfidence } from '../components/voice/confidence';
+import { spokenDoubt } from '../components/voice/confidence';
 import { useOptionalAiStatus } from '../contexts/AiStatusContext';
 import { useAudioCapture } from '../hooks/useAudioCapture';
 import { useIsMounted } from '../hooks/useIsMounted';
@@ -140,6 +140,15 @@ const PRACTICE_PATH = '/practice';
 interface SpokenDraft {
   /** 0..1, or NULL for "the recogniser did not say". NEVER coerce it to 0. */
   confidence: number | null;
+
+  /**
+   * Could this deployment's bound model have said, at all? (issue #348.)
+   *
+   * `false` is the ordinary case on the recommended `gpt-4o-transcribe`
+   * family, and it is why the confirmation copy below has three variants
+   * rather than two — see `spokenDoubt`.
+   */
+  confidenceAvailable: boolean;
 }
 
 /** How the words being submitted were arrived at. Copy only. */
@@ -311,7 +320,10 @@ export default function ReadingPracticePage() {
             // unknown is not low, and coercing it would greet every learner on
             // a provider that reports no score with "that may not be what you
             // said" about a transcript nothing was uncertain about.
-            setSpokenDraft({ confidence: result.confidence });
+            setSpokenDraft({
+              confidence: result.confidence,
+              confidenceAvailable: result.confidenceAvailable,
+            });
             return;
           }
 
@@ -387,7 +399,15 @@ export default function ReadingPracticePage() {
   const trimmed = response.trim();
   /** NULL MEANS UNKNOWN. Read out once, never coalesced to a number. */
   const draftConfidence = spokenDraft?.confidence ?? null;
-  const lowConfidence = isLowConfidence(draftConfidence);
+  /**
+   * Three states since #348: measured-and-low, measured-and-fine, and NOT
+   * MEASURABLE on this deployment — which is what the recommended transcription
+   * model reports for every recording. See `spokenDoubt`.
+   */
+  const draftDoubt = spokenDoubt(
+    draftConfidence,
+    spokenDraft?.confidenceAvailable,
+  );
 
   const submit = useCallback(
     async (text: string, from: Source, confidence: number | null) => {
@@ -674,14 +694,16 @@ export default function ReadingPracticePage() {
                     {!transcribing && !voiceError && spokenDraft && !result && (
                       <Alert severity="info" icon={false} role="presentation">
                         <AlertTitle>
-                          {lowConfidence
+                          {draftDoubt === 'low'
                             ? 'That may not be what you read.'
                             : 'Is this what you read?'}
                         </AlertTitle>
                         <Typography variant="body2">
-                          {lowConfidence
+                          {draftDoubt === 'low'
                             ? 'Your recording was hard to make out, so this is more likely our mistake than yours. Fix anything that is wrong below, or read it again — nothing has been scored yet.'
-                            : 'Check it below and fix anything we got wrong. Nothing is scored until you choose Check my reading.'}
+                            : draftDoubt === 'unmeasured'
+                              ? 'We cannot tell how clearly that came through, so please check it yourself before it is scored. Fix anything we got wrong below, or read it again — nothing is scored until you choose Check my reading.'
+                              : 'Check it below and fix anything we got wrong. Nothing is scored until you choose Check my reading.'}
                         </Typography>
                       </Alert>
                     )}
@@ -820,7 +842,20 @@ export default function ReadingPracticePage() {
                   {/* NOT AN OUTCOME AND NOT A FAILURE. The row does not exist.
                       `severity="info"` rather than `warning` for exactly that
                       reason: nothing went wrong with the learner's reading, and
-                      the screen must not imply that it did. */}
+                      the screen must not imply that it did.
+
+                      UNREACHABLE ON MOST DEPLOYMENTS, AND THAT IS RECORDED
+                      RATHER THAN FIXED (issue #348, epic #345). `misheard` is
+                      returned only for a MEASURED confidence below the
+                      threshold, and the recommended `gpt-4o-transcribe` family
+                      measures nothing — so on such a deployment this branch
+                      never renders. It is kept, not deleted: it is correct and
+                      reachable wherever `whisper-1` is bound, and deleting it
+                      would remove a real protection from those deployments to
+                      tidy away an unused branch on the others. What replaces
+                      it where it cannot fire is the confirmation step above,
+                      which now says plainly that nothing checked the
+                      transcript. See `docs/specs/voice.md` §3. */}
                   <Typography variant="h6" component="h2">
                     We are not sure we heard that correctly.
                   </Typography>

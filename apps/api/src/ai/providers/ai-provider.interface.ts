@@ -236,6 +236,43 @@ export interface AiProvider {
   ): Promise<AiTranscriptionResult>;
 
   /**
+   * Can the model bound to `transcribe` report a recognition confidence AT
+   * ALL, on this provider? (issue #348, epic #345.)
+   *
+   * ---------------------------------------------------------------------------
+   * THIS TURNS A SILENT NULL INTO A STATED FACT
+   * ---------------------------------------------------------------------------
+   *
+   * `AiTranscriptionResult.confidence` is `number | null`, and `null` means
+   * "unknown". Two very different situations produce that same `null`:
+   *
+   *   1. the bound model CAN score a recording and did not score this one, and
+   *   2. the bound model can never score anything, on any call, ever.
+   *
+   * Only (2) is a statement about the DEPLOYMENT, and it is the one that
+   * matters: `docs/specs/voice.md` §3's misheard protection is built entirely
+   * on a measured confidence, so on a deployment in state (2) that protection
+   * cannot fire — not rarely, never. Before this method existed, nothing
+   * anywhere said so, and a documented guarantee sat on top of a code path the
+   * recommended model made unreachable (issue #348's own problem statement).
+   *
+   * ---------------------------------------------------------------------------
+   * SYNCHRONOUS AND PURE, LIKE {@link listVoices}
+   * ---------------------------------------------------------------------------
+   *
+   * It answers from the model id and what the provider knows about its own
+   * model families. No key, no network, no caller — so there is nobody to bill,
+   * no usage row, and no way for it to fail. `BaseAiProvider` implements it as
+   * `false`, which is the safe direction: a provider that has not stated
+   * otherwise is reported as unable to measure, so a caller leans on the
+   * mechanism that works without a score (showing the learner what was heard
+   * and letting them correct it) rather than on one that silently never runs.
+   *
+   * @param modelId the model an administrator has bound to `transcribe`.
+   */
+  reportsTranscriptionConfidence(modelId: string): boolean;
+
+  /**
    * Read one piece of text aloud on the CALLER's key, and record the call.
    *
    * NEVER REJECTS, and a provider with no speech API returns
