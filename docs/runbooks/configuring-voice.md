@@ -45,6 +45,14 @@ Source of truth for every claim below:
 - [`docs/specs/voice-hands-free.md`](../specs/voice-hands-free.md) — the
   full E12 design record; this runbook states only what changes for you as
   an administrator, not restated here.
+- [`docs/specs/conversation-mode.md`](../specs/conversation-mode.md) — the
+  full E13 (epic #304) design record for the hands-free loop; §6 for
+  `voice.conversationMode`, §8 for the wake lock and its platform limit,
+  §10 for the `transcribe`-required degradation, §11 for the cost math;
+  §6 below states only what changes for you as an administrator.
+- `apps/web/src/hooks/useWakeLock.ts` — the wake lock's own header, read
+  directly to confirm §6 below's foreground-only limit rather than assumed
+  from the spec.
 
 ---
 
@@ -203,7 +211,78 @@ already reads; no new entry was added to `AI_MODEL_ROLES` for it (`CLAUDE.md`,
 and §6's checklist below needs only one added line, not a new section of its
 own.
 
-## 6. Summary checklist
+## 6. Conversation mode needs one more decision: `transcribe` is required
+
+Conversation mode (E13, epic #304) — the session-wide, one-tap hands-free
+loop at `/practice/sessions/:id` — is a **third caller** of the same two
+roles this runbook already covers, not a third role and not a third
+binding decision, with one difference from §5's "nothing new to configure"
+story worth stating on its own: unlike reading/writing practice, which
+degrades gracefully with `transcribe` unbound, conversation mode has
+nothing to fall back to — its entire premise is listening for a spoken
+answer — so `transcribe` is **required**, not merely useful, for this one
+surface.
+
+- **`transcribe` unbound.** The session-wide `Text | Voice` control simply
+  does not offer `Voice` as a choice — absent, not disabled, the identical
+  "hidden, not disabled" rule §1 already states for the per-question mic —
+  and `VoiceUnavailableNotice` explains why on the page, the same component
+  E9 already ships. This is caught **at the start of a session, never
+  mid-walk**: a learner already committed to walking and talking never
+  discovers partway through that recording has stopped working under them.
+  If you have never bound `transcribe`, conversation mode is simply not
+  offered on your installation — an ordinary, fully working state, not a
+  broken one.
+- **`transcribe` bound.** The `Voice` option renders. Choosing it does not,
+  by itself, start the hands-free loop — a learner still taps **Start
+  hands-free** to arm the persistent microphone stream, the voice-activity
+  detector, and the wake lock. `voice.conversationMode` (the learner's own
+  preference, off by default) only decides whether a session *loads* with
+  `Voice` already selected, so an opted-in learner's session costs exactly
+  one tap instead of two — it never skips the Start tap outright.
+- **`speak` is optional here too, on the identical terms §1 above already
+  states.** With `speak` unbound, conversation mode still runs
+  end to end: every question and every accepted answer is read aloud by
+  the browser's own `speechSynthesis`, at the learner's chosen rate — this
+  is the ordinary state of a fresh installation, not a degraded one. Binding
+  `speak` only upgrades which voice does the reading, exactly as it does
+  for the hand-driven flow.
+
+**The foreground-only limit, stated plainly, because a learner or a
+support request will eventually ask "why did my session stop":**
+conversation mode works only with the screen on and the practice tab in
+the foreground. It requests a screen wake lock the moment the loop starts
+and releases it the moment the loop stops, specifically so the display
+does not time out mid-session — but a wake lock keeps a *screen* awake, and
+cannot keep a *locked* device awake. The instant a learner presses the
+power button or the phone locks itself in a pocket, the operating system
+suspends the tab outright: timers stop, `MediaRecorder` stops, audio
+playback stops, and the browser drops the wake lock sentinel on its way
+down. **This is a platform constraint every web app on every mobile
+browser runs into, not a defect in this product** — a native app with a
+background audio session could hold a locked screen open; a web page
+cannot. If a learner reports the session "just stopping" for no reason,
+the first question to ask is whether the screen went dark or the phone was
+put away, not whether something crashed.
+
+**The cost note, worth stating before a bill rather than after one:**
+speech-to-text is per-call, on the learner's own key, and — unlike the
+civics question/answer audio cache §3 describes — is **not cached at
+all**. Every question conversation mode transcribes is a fresh
+transcription call, and a wrong or low-confidence answer's one allowed
+retry (`docs/specs/conversation-mode.md` §9) means that single question can
+cost **up to two** transcription calls rather than one. Put together,
+conversation mode costs a learner roughly **1-2× what the same session
+would have cost typed and read via the STT path alone** — its
+text-to-speech side is nearly free by comparison, because it is the
+identical browser-`speechSynthesis`-by-default, cached-civics-audio path
+every other spoken surface on this installation already uses, so the first
+learner to hear a given question in a given voice pays for it once and
+every learner after them, walking or not, hears the cached bytes. See
+[`docs/specs/conversation-mode.md`](../specs/conversation-mode.md) §11 for
+the full reasoning.
+
+## 7. Summary checklist
 
 - [ ] Decide whether spoken practice (voice **input**) is something you want
       to offer — if yes, bind a `transcribe`-capable model
@@ -220,6 +299,12 @@ own.
 - [ ] English reading and writing practice (`/practice/reading`,
       `/practice/writing`) automatically inherit whatever you decided above
       — nothing to configure separately for them (§5)
+- [ ] Conversation mode (the session-wide hands-free loop) needs
+      `transcribe` bound — with it unbound, `Voice` is simply absent from
+      the picker, caught at the start of a session and never mid-walk (§6)
+- [ ] Conversation mode works only with the screen on and the tab in the
+      foreground — a locked or backgrounded phone suspends it, and no web
+      app can prevent that (§6)
 - [ ] If testing locally with `AI_PROVIDER_FAKE=true`
       (`infra/compose/.env.example`), both roles are served by the built-in
       fake provider — no real OpenAI account needed to exercise either flow;
