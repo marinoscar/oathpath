@@ -44,7 +44,7 @@ function mockStatus(status: AiStatus) {
 }
 
 function renderIt(
-  props: { feature?: string; role?: string } = {},
+  props: { feature?: string; role?: string; alertRole?: string } = {},
   user = mockUser,
 ) {
   const auth = {
@@ -108,6 +108,36 @@ describe('AiNotReady — the sentence it exists for', () => {
     expect(
       await screen.findByText(/AI explanations is not available yet/i),
     ).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// `alertRole` (issue #277). MUI's `Alert` sets `role="alert"` by default,
+// which is itself a live region — right wherever this component stands on
+// its own, wrong when it is mounted INSIDE a caller's own
+// `role="status"`/`aria-live` region (`PracticeSessionPage`,
+// `ReadingPracticePage`), where a nested live region reads the same sentence
+// twice.
+// ---------------------------------------------------------------------------
+
+describe('AiNotReady — alertRole', () => {
+  beforeEach(() => mockStatus(UNBOUND));
+
+  it('defaults to `role="alert"` when `alertRole` is not passed — every existing call site', async () => {
+    renderIt();
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toBeInTheDocument();
+  });
+
+  it('uses `role="presentation"` when `alertRole` is passed, so it is not a second live region', async () => {
+    renderIt({ alertRole: 'presentation' });
+
+    // No `role="alert"` element exists — the alert's look renders, but the
+    // announcement is left to the caller's own live region.
+    expect(screen.queryByRole('alert')).toBeNull();
+    const alert = await screen.findByText(/not available yet/i);
+    expect(alert.closest('[role="presentation"]')).not.toBeNull();
   });
 });
 

@@ -195,12 +195,14 @@ import MicIcon from '@mui/icons-material/Mic';
 import { Link as RouterLink, Navigate, useNavigate, useParams } from 'react-router-dom';
 
 import { AttemptFeedback } from '../components/practice/AttemptFeedback';
-import { ExplainPanel } from '../components/ai/ExplainPanel';
+import { AiNotReady } from '../components/ai/AiNotReady';
+import { AI_KEY_SETTINGS_PATH, ExplainPanel } from '../components/ai/ExplainPanel';
 import { LoadingSpinner } from '../components/common/LoadingSpinner';
 import { PushToTalkButton } from '../components/voice/PushToTalkButton';
 import { QuestionAudio } from '../components/voice/QuestionAudio';
 import { VoiceUnavailableNotice } from '../components/voice/VoiceUnavailableNotice';
 import { isLowConfidence } from '../components/voice/confidence';
+import { useOptionalAiStatus } from '../contexts/AiStatusContext';
 import { usePracticeSession } from '../hooks/usePracticeSession';
 import { useAudioCapture } from '../hooks/useAudioCapture';
 import { useIsMounted } from '../hooks/useIsMounted';
@@ -213,6 +215,7 @@ import {
   transcribeAudio,
 } from '../services/api';
 import type {
+  AiUnavailableCause,
   PracticeAttemptResult,
   PracticeProgress,
   PracticeQuestion,
@@ -291,6 +294,13 @@ export default function PracticeSessionPage() {
   // status is still unknown, which is what makes the microphone appear a beat
   // late rather than appear dead.
   const { transcribeBound } = useVoiceAvailability();
+  /**
+   * Optional on purpose, exactly as in `ExplainPanel`: this page must not blank
+   * out when the status provider is absent (a test rendering it in isolation,
+   * a future embed). Used for one thing only — re-reading the status after the
+   * server has just contradicted it; see the effect below.
+   */
+  const aiStatus = useOptionalAiStatus();
 
   /** Which control the learner is using RIGHT NOW. Never resets the session. */
   const [answerMode, setAnswerMode] = useState<AnswerMode>('text');
@@ -298,8 +308,22 @@ export default function PracticeSessionPage() {
   const [promptWasHeard, setPromptWasHeard] = useState(false);
   /** A transcription request is in flight. */
   const [transcribing, setTranscribing] = useState(false);
-  /** A transcription that could not happen, said in the learner's terms. */
+  /** A transcription that was ATTEMPTED and failed, said in the learner's terms. */
   const [voiceError, setVoiceError] = useState<string | null>(null);
+  /**
+   * A transcription that was NEVER ATTEMPTED, and why (issue #277).
+   *
+   * SEPARATE FROM `voiceError` BECAUSE IT IS NOT AN ERROR. An unbound
+   * `transcribe`, a master switch an administrator turned off, or a missing key
+   * of the learner's own are all states in which nothing broke and nothing was
+   * spent — `docs/specs/voice.md` §1 calls a deployment with no voice roles
+   * bound a NORMAL installation. Folding it into `voiceError` would put it in
+   * the amber "hold the button and say it again" alert, which asks a learner to
+   * retry something that cannot succeed and implies their recording was at
+   * fault.
+   */
+  const [voiceUnavailable, setVoiceUnavailable] =
+    useState<AiUnavailableCause | null>(null);
   /** Set while the text in the answer field CAME FROM the microphone. */
   const [spokenDraft, setSpokenDraft] = useState<SpokenDraft | null>(null);
   /** The attempt the next submission supersedes, once a retry is taken up. */
@@ -327,6 +351,7 @@ export default function PracticeSessionPage() {
     setPromptWasHeard(false);
     setSpokenDraft(null);
     setVoiceError(null);
+    setVoiceUnavailable(null);
     setTranscribing(false);
     setRetryOf(null);
     releaseRecording();
@@ -403,30 +428,67 @@ export default function PracticeSessionPage() {
 
     setTranscribing(true);
     setVoiceError(null);
+    setVoiceUnavailable(null);
 
     void (async () => {
       try {
-        const { text, confidence } = await transcribeAudio(recording);
+        const result = await transcribeAudio(recording);
         if (!isMounted()) return;
 
-        const heard = text.trim();
-        if (!heard) {
-          // An empty transcript is not an error the API reports — it is what
-          // silence sounds like, and it is what a tap instead of a hold
-          // produces. Saying so is better than dropping the learner into a
-          // confirmation step over an empty box, which reads as the product
-          // having lost their answer.
-          setVoiceError('Nothing was picked up in that recording.');
-          return;
-        }
+        // THREE ENDINGS, AND ONLY ONE OF THEM IS AN ERROR (issue #277). All
+        // three arrive as HTTP 200 — `docs/specs/voice.md` §9 — so this switch
+        // is the only thing that tells them apart. Reading `text` off the
+        // response without it is what put `TypeError: Cannot read properties
+        // of undefined (reading 'trim')` in front of a learner, in the amber
+        // alert, about a deployment where nothing at all had gone wrong.
+        switch (result.status) {
+          case 'ok': {
+            const heard = result.text.trim();
+            if (!heard) {
+              // An empty transcript is not an error the API reports — it is
+              // what silence sounds like, and it is what a tap instead of a
+              // hold produces. Saying so is better than dropping the learner
+              // into a confirmation step over an empty box, which reads as the
+              // product having lost their answer.
+              setVoiceError('Nothing was picked up in that recording.');
+              return;
+            }
 
-        setResponse(heard);
-        // CONFIDENCE STRAIGHT THROUGH, `null` INCLUDED. Not `?? 0`: unknown is
-        // not low, and coercing it would greet every learner on a provider
-        // that reports no score with "that may not be what you said" about a
-        // transcript nothing was uncertain about. `confidence.ts` has the
-        // whole argument.
-        setSpokenDraft({ confidence });
+            setResponse(heard);
+            // CONFIDENCE STRAIGHT THROUGH, `null` INCLUDED. Not `?? 0`:
+            // unknown is not low, and coercing it would greet every learner on
+            // a provider that reports no score with "that may not be what you
+            // said" about a transcript nothing was uncertain about.
+            // `confidence.ts` has the whole argument.
+            setSpokenDraft({ confidence: result.confidence });
+            return;
+          }
+
+          case 'unavailable':
+            // NOT AN ERROR AND NOT A RETRY. Nothing was attempted, so there is
+            // nothing to attempt again — see `voiceUnavailable`'s own comment
+            // for why this may not share the amber alert.
+            setVoiceUnavailable(result.cause);
+            return;
+
+          case 'failed':
+            // ATTEMPTED, AND IT DID NOT WORK. This one IS worth another go,
+            // which is what the amber alert offers.
+            //
+            // `errorCode` AND `error` GO TO THE CONSOLE AND NOWHERE ELSE.
+            // `error` is a redacted provider sentence meant for diagnosis;
+            // somebody studying for their naturalization interview cannot act
+            // on it, and reading it would tell them their recording, their
+            // microphone or their key was at fault when the union already says
+            // otherwise.
+            console.warn(
+              '[voice] transcription failed',
+              result.errorCode,
+              result.error,
+            );
+            setVoiceError('That recording could not be turned into text.');
+            return;
+        }
       } catch (err) {
         if (!isMounted()) return;
         setVoiceError(
@@ -445,6 +507,29 @@ export default function PracticeSessionPage() {
       }
     })();
   }, [isMounted, recording, releaseRecording]);
+
+  /**
+   * The server has just told us something the cached AI status disagrees with.
+   *
+   * Re-read it. `transcribeBound` — and therefore the microphone, the
+   * Type/Speak toggle, and the page-level `VoiceUnavailableNotice` — all render
+   * from that cache, so without this the learner is left holding a control that
+   * has already been proven not to work, and the shared notice explaining why
+   * never appears. This is the same move `ExplainPanel` makes on its own
+   * `unavailable` frame, for the same reason and with the same shape: it fires
+   * once per cause, never in a loop, because `refresh` does not change
+   * `voiceUnavailable`.
+   *
+   * `no_user_key` is excluded because it is not a fact about the deployment at
+   * all — the roles are bound, the switch is on, and re-reading the status
+   * would change nothing. That cause is answered on screen instead.
+   */
+  const refreshAiStatus = aiStatus?.refresh;
+  useEffect(() => {
+    if (voiceUnavailable && voiceUnavailable !== 'no_user_key') {
+      void refreshAiStatus?.();
+    }
+  }, [voiceUnavailable, refreshAiStatus]);
 
   // The transcript takes the focus the moment it lands, so a learner reading
   // it with a screen reader — or one who just wants to fix a word — is already
@@ -618,6 +703,7 @@ export default function PracticeSessionPage() {
     setSpokenDraft(null);
     setResponse('');
     setVoiceError(null);
+    setVoiceUnavailable(null);
     releaseRecording();
   };
 
@@ -626,6 +712,7 @@ export default function PracticeSessionPage() {
     setSpokenDraft(null);
     setResponse('');
     setVoiceError(null);
+    setVoiceUnavailable(null);
     releaseRecording();
     setAnswerMode('text');
     inputRef.current?.focus();
@@ -661,6 +748,7 @@ export default function PracticeSessionPage() {
     setResponse('');
     setSpokenDraft(null);
     setVoiceError(null);
+    setVoiceUnavailable(null);
     setActionError(null);
     if (transcribeBound) setAnswerMode('voice');
   };
@@ -911,6 +999,66 @@ export default function PracticeSessionPage() {
                       <Typography variant="body2" color="text.secondary">
                         Writing down what you said…
                       </Typography>
+                    )}
+
+                    {/* NOT AN ERROR, SO NOT THE AMBER ALERT (issue #277).
+                        Nothing was attempted and nothing was spent, so this
+                        renders the SHARED `AiNotReady` — never a message
+                        written here, per `CLAUDE.md` and `voice.md`: the one
+                        sentence that component exists for, "this is not a
+                        problem with your key", is the first thing a rewrite
+                        drops, and this is the surface where a learner is most
+                        likely to conclude the opposite.
+
+                        EXACTLY ONE NOTICE AT A TIME. The page-level
+                        `VoiceUnavailableNotice` covers "unbound when the page
+                        loaded"; this covers "the call itself came back
+                        unavailable". They cannot both render, structurally:
+                        this block only exists while `transcribeBound` is true,
+                        and that notice only renders while it is false. The
+                        effect above re-reads the status precisely so the page
+                        moves from the second state to the first when the
+                        server has just told us the role is gone.
+
+                        `no_user_key` is answered separately below — see
+                        `ExplainPanel`'s header for why the shared component
+                        must not be the thing that says it.
+
+                        `alertRole="presentation"` for the same reason every
+                        other child of this Box carries it: the announcement is
+                        the region's job, and an `<Alert>`'s default
+                        `role="alert"` nested inside it is read twice. Note it
+                        is NOT the `role` prop beside it — that one names the AI
+                        model role. */}
+                    {!transcribing &&
+                      voiceUnavailable &&
+                      voiceUnavailable !== 'no_user_key' && (
+                        <AiNotReady role="transcribe" alertRole="presentation" />
+                      )}
+
+                    {!transcribing && voiceUnavailable === 'no_user_key' && (
+                      // The one cause that IS the learner's to fix, so it gets
+                      // the one message that offers them something to do.
+                      // `info`, not `warning`: their session is unaffected and
+                      // typing below works exactly as it always did.
+                      <Alert severity="info" role="presentation">
+                        <AlertTitle>
+                          Add your AI key to answer out loud
+                        </AlertTitle>
+                        <Typography variant="body2" sx={{ mb: 1 }}>
+                          Speech is transcribed on your own AI key, and there
+                          isn&rsquo;t one saved on your account yet. You can
+                          still type your answer below.
+                        </Typography>
+                        <Button
+                          size="small"
+                          variant="outlined"
+                          component={RouterLink}
+                          to={AI_KEY_SETTINGS_PATH}
+                        >
+                          Add your key
+                        </Button>
+                      </Alert>
                     )}
 
                     {!transcribing && voiceError && (

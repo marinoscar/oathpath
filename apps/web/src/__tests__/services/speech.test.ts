@@ -1,7 +1,8 @@
 /**
- * `transcribeAudio` / `synthesizeSpeech` — issue #99, epic #58 / E9.
+ * `transcribeAudio` / `synthesizeSpeech` — issue #99, epic #58 / E9; the
+ * `status`-union contract fixed by issue #277.
  *
- * Three things here are load-bearing and all three fail QUIETLY when they
+ * Four things here are load-bearing and all four fail QUIETLY when they
  * break, which is why each has a test of its own:
  *
  *   1. A `FormData` body must carry NO `Content-Type`. Only the browser knows
@@ -15,7 +16,17 @@
  *      session eventually takes. The retry used to build its headers from a
  *      second hand-written literal that hard-coded the JSON content type.
  *   3. `confidence: null` must arrive as `null`. A consumer that reads it as
- *      `0` marks a perfectly good answer `misheard` — see `SpeechTranscription`.
+ *      `0` marks a perfectly good answer `misheard` — see
+ *      `SpeechTranscriptionOk`.
+ *   4. BOTH ROUTES ANSWER A `status` UNION, ALWAYS AT HTTP 200 — `ok`,
+ *      `unavailable`, `failed` — and neither promise ever rejects for one of
+ *      those causes. Issue #277: every fixture in this file used to encode
+ *      `{ data: { text, confidence } }` with no `status` at all, which is not
+ *      what the API sends and is why the suite never caught the web client
+ *      reading `text` unconditionally and crashing on `.trim()` for any
+ *      non-`ok` result. The regression test below asserts directly against
+ *      that shape: a non-`ok` member must carry no `text` property, because
+ *      `text` being `undefined` is exactly what broke.
  */
 
 import { http, HttpResponse } from 'msw';
@@ -28,6 +39,7 @@ import {
   synthesizeSpeech,
   transcribeAudio,
 } from '../../services/api';
+import type { TranscribeResponse } from '../../types';
 
 function recording(type = 'audio/webm'): Blob {
   return new Blob(['pretend-opus-bytes'], { type });
@@ -63,13 +75,15 @@ describe('transcribeAudio', () => {
         contentType = request.headers.get('content-type');
         const form = await request.formData();
         filePresent = isBlobLike(form.get('audio'));
-        return HttpResponse.json({ data: { text: 'George Washington', confidence: 0.94 } });
+        return HttpResponse.json({
+          data: { status: 'ok', text: 'George Washington', confidence: 0.94 },
+        });
       }),
     );
 
     const result = await transcribeAudio(recording());
 
-    expect(result).toEqual({ text: 'George Washington', confidence: 0.94 });
+    expect(result).toEqual({ status: 'ok', text: 'George Washington', confidence: 0.94 });
     // The boundary is the whole point: `application/json` here is unparseable.
     expect(contentType).toMatch(/^multipart\/form-data; boundary=/);
     expect(filePresent).toBe(true);
@@ -96,12 +110,16 @@ describe('transcribeAudio', () => {
   it('keeps `confidence: null` as null — UNKNOWN IS NOT ZERO', async () => {
     server.use(
       http.post('*/api/ai/speech/transcribe', () =>
-        HttpResponse.json({ data: { text: 'the president', confidence: null } }),
+        HttpResponse.json({
+          data: { status: 'ok', text: 'the president', confidence: null },
+        }),
       ),
     );
 
     const result = await transcribeAudio(recording());
 
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') throw new Error('expected ok');
     expect(result.confidence).toBeNull();
     expect(result.confidence).not.toBe(0);
   });
@@ -125,7 +143,9 @@ describe('transcribeAudio', () => {
         }
         retryContentType = request.headers.get('content-type');
         retryHadFile = isBlobLike((await request.formData()).get('audio'));
-        return HttpResponse.json({ data: { text: 'retried', confidence: null } });
+        return HttpResponse.json({
+          data: { status: 'ok', text: 'retried', confidence: null },
+        });
       }),
     );
 
@@ -133,16 +153,84 @@ describe('transcribeAudio', () => {
     const result = await transcribeAudio(recording());
 
     expect(attempts).toBe(2);
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') throw new Error('expected ok');
     expect(result.text).toBe('retried');
     expect(retryContentType).toMatch(/^multipart\/form-data; boundary=/);
     // A `FormData` is re-serialized per send, so the second attempt carries the
     // same audio. (A raw stream body could not — which is why none is used.)
     expect(retryHadFile).toBe(true);
   });
+
+  // ---------------------------------------------------------------------------
+  // The two non-`ok` members — both HTTP 200, and the regression test.
+  // ---------------------------------------------------------------------------
+
+  it('resolves (never rejects) to `unavailable`, with `cause` and `role` intact', async () => {
+    server.use(
+      http.post('*/api/ai/speech/transcribe', () =>
+        HttpResponse.json({
+          data: { status: 'unavailable', cause: 'role_unbound', role: 'transcribe' },
+        }),
+      ),
+    );
+
+    const result = await transcribeAudio(recording());
+
+    expect(result).toEqual({
+      status: 'unavailable',
+      cause: 'role_unbound',
+      role: 'transcribe',
+    });
+  });
+
+  it('resolves (never rejects) to `failed`, with `errorCode` and `error` intact', async () => {
+    server.use(
+      http.post('*/api/ai/speech/transcribe', () =>
+        HttpResponse.json({
+          data: {
+            status: 'failed',
+            errorCode: 'provider_timeout',
+            error: 'upstream request to the provider timed out',
+          },
+        }),
+      ),
+    );
+
+    const result = await transcribeAudio(recording());
+
+    expect(result).toEqual({
+      status: 'failed',
+      errorCode: 'provider_timeout',
+      error: 'upstream request to the provider timed out',
+    });
+  });
+
+  it.each([
+    ['unavailable', { status: 'unavailable', cause: 'role_unbound', role: 'transcribe' }],
+    ['failed', { status: 'failed', errorCode: 'provider_timeout', error: 'timed out' }],
+  ] as const)(
+    'THE REGRESSION TEST — a %s result carries no `text` property at all',
+    async (_label, body) => {
+      // This is the exact shape whose `undefined` `text` a caller used to run
+      // `.trim()` on, throwing `TypeError: Cannot read properties of undefined
+      // (reading 'trim')` in front of a learner (issue #277). Asserted against
+      // the union itself, not against a page, so it fails here first.
+      server.use(
+        http.post('*/api/ai/speech/transcribe', () => HttpResponse.json({ data: body })),
+      );
+
+      const result: TranscribeResponse = await transcribeAudio(recording());
+
+      expect(result.status).not.toBe('ok');
+      expect('text' in result).toBe(false);
+      expect((result as { text?: unknown }).text).toBeUndefined();
+    },
+  );
 });
 
 describe('synthesizeSpeech', () => {
-  it('returns bytes, not a JSON envelope', async () => {
+  it('returns `{status: "ok", audio}`, not a bare blob', async () => {
     server.use(
       http.post('*/api/ai/speech/synthesize', async ({ request }) => {
         expect(await request.json()).toEqual({ text: 'Hello' });
@@ -152,22 +240,60 @@ describe('synthesizeSpeech', () => {
       }),
     );
 
-    const blob = await synthesizeSpeech('Hello');
+    const result = await synthesizeSpeech('Hello');
 
-    expect(isBlobLike(blob)).toBe(true);
-    expect(blob.size).toBe(16);
-    expect(blob.type).toBe('audio/mpeg');
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') throw new Error('expected ok');
+    expect(isBlobLike(result.audio)).toBe(true);
+    expect(result.audio.size).toBe(16);
+    expect(result.audio.type).toBe('audio/mpeg');
   });
 
-  it('rejects when `speak` is unbound, for the caller to shrug off', async () => {
+  it('resolves — never rejects — a 200 JSON `unavailable` body to the `unavailable` member', async () => {
+    // A `speak`-unbound deployment is HTTP 200 with `application/json`, told
+    // apart from a real audio success only by `Content-Type` — voice.md §9.
+    // The earlier version of this test asserted the WRONG contract (a
+    // rejected promise on a 404); issue #277 is that assertion, corrected.
     server.use(
       http.post('*/api/ai/speech/synthesize', () =>
-        HttpResponse.json({ message: 'Not available' }, { status: 404 }),
+        HttpResponse.json({
+          data: { status: 'unavailable', cause: 'role_unbound', role: 'speak' },
+        }),
       ),
     );
 
-    // A 404-shaped "not available", never a 500 — voice.md §9. `QuestionAudio`
-    // treats this as "use the browser voice" and shows nobody anything.
-    await expect(synthesizeSpeech('Hello')).rejects.toMatchObject({ status: 404 });
+    const result = await synthesizeSpeech('Hello');
+
+    expect(result).toEqual({ status: 'unavailable', cause: 'role_unbound', role: 'speak' });
+  });
+
+  it('resolves a malformed/non-JSON-parseable body to `failed`, never throwing', async () => {
+    // Not valid JSON at all, but still labelled `application/json` — the
+    // defensive branch `parseSynthesisEnvelope` exists for. Nothing in
+    // `synthesizeSpeech` may throw for an AI reason; every caller treats any
+    // non-`ok` member the same way (fall back to the browser voice).
+    server.use(
+      http.post('*/api/ai/speech/synthesize', () =>
+        HttpResponse.text('not actually json', {
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      ),
+    );
+
+    const result = await synthesizeSpeech('Hello');
+
+    expect(result.status).toBe('failed');
+    if (result.status !== 'failed') throw new Error('expected failed');
+    expect(result.errorCode).toBe('malformed_response');
+  });
+
+  it('still REJECTS with `ApiError` on a genuine non-2xx transport failure', async () => {
+    server.use(
+      http.post('*/api/ai/speech/synthesize', () =>
+        HttpResponse.json({ message: 'Unauthorized' }, { status: 401 }),
+      ),
+    );
+
+    await expect(synthesizeSpeech('Hello')).rejects.toMatchObject({ status: 401 });
   });
 });

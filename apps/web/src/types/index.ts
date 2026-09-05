@@ -987,14 +987,37 @@ export interface AiUsage {
 // =============================================================================
 
 /**
- * `POST /api/ai/speech/transcribe` — TWO FIELDS AND NOTHING ELSE.
+ * `POST /api/ai/speech/transcribe` — A UNION ON `status`, NOT A FLAT SHAPE.
  *
- * `docs/specs/voice.md` §9 fixes this shape: no usage event id, no model id, no
- * provider metadata, and — §4 — no audio, in either direction. The response is
- * narrow on purpose, so a later change to the endpoint has one compatibility
- * surface instead of six.
+ * Mirrors `apps/api/src/ai/dto/ai-speech.dto.ts`. The endpoint answers HTTP 200
+ * for all three members: an unbound `transcribe` role, a master switch that is
+ * off, or a provider call that came back empty are all things the SERVER
+ * successfully has an answer about, and `docs/specs/voice.md` §9 spends that
+ * status code deliberately so a caller reads one field instead of guessing from
+ * a status code what kind of nothing it received.
+ *
+ * WHAT THE OLD FLAT `{ text, confidence }` COST US (issue #277). This type used
+ * to claim the `ok` member was the only member, so both call sites destructured
+ * `text` straight off the response and called `.trim()` on it. On any
+ * non-`ok` result `text` is `undefined`, so the learner's spoken answer ended
+ * with `TypeError: Cannot read properties of undefined (reading 'trim')`
+ * rendered verbatim in the amber alert on their answer card — a JavaScript
+ * diagnostic shown to somebody studying for a naturalization interview, about a
+ * deployment whose administrator simply had not bound a model. Nothing was
+ * broken, nothing was spent, and the product said the opposite as loudly as it
+ * could.
+ *
+ * So there is no `SpeechTranscription` alias left to import. The rename is the
+ * mechanism: every reader becomes a compile error until it switches on
+ * `status`, which is how we know none were missed.
+ *
+ * {@link RealtimeSessionOk} / {@link RealtimeSessionUnavailable} /
+ * {@link RealtimeSessionFailed} are the same three-member shape for the
+ * realtime mint, for the same reasons, and are the worked example this follows.
  */
-export interface SpeechTranscription {
+export interface SpeechTranscriptionOk {
+  status: 'ok';
+
   /** What the recognizer heard. Shown to the learner to confirm BEFORE grading. */
   text: string;
 
@@ -1015,6 +1038,86 @@ export interface SpeechTranscription {
    */
   confidence: number | null;
 }
+
+/**
+ * No speech call was attempted, and why. Shared by both speech routes.
+ *
+ * NOT AN ERROR, and it must never be rendered as one. `role_unbound` on a
+ * deployment whose administrator has not bound a `transcribe` model is an
+ * ordinary, correctly-configured installation where speech recognition is not
+ * set up — `docs/specs/voice.md` §1 is explicit that such an installation is
+ * NORMAL, which is why `systemReady` deliberately does not depend on either
+ * voice role. Nothing was spent and nothing is broken; the remedy, where there
+ * is one, belongs to an administrator.
+ *
+ * The shared component that says so is `components/ai/AiNotReady.tsx` — never a
+ * message written on the surface that received this, per `CLAUDE.md`. The one
+ * cause that is the learner's own is `no_user_key`, and `ExplainPanel`'s header
+ * explains at length why that one gets its own short alert instead.
+ *
+ * `role` is carried so a caller that could have asked for either route knows
+ * which one it did not get. Identical in intent to
+ * {@link RealtimeSessionUnavailable}, whose `role` is the constant `'realtime'`
+ * for the same reason.
+ */
+export interface SpeechUnavailable {
+  status: 'unavailable';
+  cause: AiUnavailableCause;
+  /** Which of the two speech roles could not be served. */
+  role: 'transcribe' | 'speak';
+}
+
+/**
+ * The call WAS attempted and did not produce a result.
+ *
+ * DISTINCT FROM `unavailable`, and the distinction is the whole point of the
+ * union: "speech recognition is not set up here" is a state a learner can do
+ * nothing about, while "that did not work" is worth recording again.
+ *
+ * `errorCode` and `error` ARE FOR DIAGNOSIS, NOT FOR THE LEARNER. `error` is a
+ * redacted provider sentence; a learner studying for their naturalization
+ * interview cannot act on it, and putting it on screen is how they conclude
+ * their own recording, microphone, or key is at fault. Log it and render calm,
+ * specific copy of the surface's own — the same rule
+ * {@link RealtimeSessionFailed} carries.
+ */
+export interface SpeechFailed {
+  status: 'failed';
+  errorCode: string;
+  error: string;
+}
+
+/**
+ * Everything `transcribeAudio` can resolve to. SWITCH ON `status`.
+ *
+ * There is no member without a `status`, so a `switch` with a `default` that
+ * treats the shape as unrecognised is the honest way to read it, and TypeScript
+ * narrows `text`/`confidence` into existence only inside the `ok` arm.
+ */
+export type TranscribeResponse =
+  | SpeechTranscriptionOk
+  | SpeechUnavailable
+  | SpeechFailed;
+
+/**
+ * Everything `synthesizeSpeech` can resolve to. SWITCH ON `status`.
+ *
+ * The `ok` member carries the audio itself rather than a JSON body, because
+ * this is the one route in the application whose success path is bytes — see
+ * `synthesizeSpeech` in `services/api.ts` for how the two are told apart on the
+ * wire (by `Content-Type`, both under HTTP 200) and why the non-`ok` members
+ * arrive as a JSON blob that has to be read back out.
+ *
+ * A caller's correct response to either non-`ok` member is the browser's own
+ * `speechSynthesis` and NO MESSAGE AT ALL: `docs/specs/voice.md` §2 makes the
+ * provider voice a premium upgrade over a default that always works, so an
+ * unbound `speak` is not a degraded state and must never be reported to
+ * anybody.
+ */
+export type SynthesizeResponse =
+  | { status: 'ok'; audio: Blob }
+  | SpeechUnavailable
+  | SpeechFailed;
 
 // =============================================================================
 // Journey — the learner profile and its two reference lists (epic #50)
@@ -1681,7 +1784,7 @@ export interface PracticeAttempt {
   /**
    * How sure the recogniser was about that transcription, 0..1 — or null.
    *
-   * NULL MEANS UNKNOWN, NEVER ZERO, exactly as on {@link SpeechTranscription}.
+   * NULL MEANS UNKNOWN, NEVER ZERO, exactly as on {@link SpeechTranscriptionOk}.
    * On the wire so a client can explain its own behaviour to itself, NEVER so
    * it can be shown to a learner as a number: "41% confident" is a diagnostic
    * detail somebody studying for a naturalization interview has no way to act
@@ -1888,7 +1991,7 @@ export interface RecordPracticeAttemptInput {
    * OMITTED — never `0` — when the recogniser did not report one. A defaulted
    * `0` is not inert: it is below the threshold the server reads as a probable
    * mishearing, so it would route a perfectly good answer to
-   * `failureCause: 'misheard'`. See {@link SpeechTranscription.confidence}.
+   * `failureCause: 'misheard'`. See {@link SpeechTranscriptionOk.confidence}.
    */
   asrConfidence?: number;
 

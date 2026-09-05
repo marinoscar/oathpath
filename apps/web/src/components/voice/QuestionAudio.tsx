@@ -289,31 +289,45 @@ export function QuestionAudio({
     if (usePremium) {
       setIsPreparing(true);
       try {
-        const blob = await synthesizeSpeech(text);
+        const result = await synthesizeSpeech(text);
         if (request !== requestRef.current) return;
 
-        const played = await playBlob(blob, {
-          onStart: () => {
-            if (request !== requestRef.current) return;
-            setIsSpeaking(true);
-            onPlayed?.('premium');
-          },
-          onEnd: () => {
-            if (request !== requestRef.current) return;
-            setIsSpeaking(false);
-            revokeObjectUrl();
-          },
-          audioRef,
-          objectUrlRef,
-        });
+        // BRANCHED ON, NOT CAUGHT (issue #277). `unavailable` and `failed` are
+        // ordinary HTTP 200 answers carrying a cause, so the fall-through to
+        // the browser voice below is now reached BY DECISION. It used to be
+        // reached because a JSON envelope was handed to an `<audio>` element
+        // and the resulting play error landed in the `catch` — the right
+        // outcome for the wrong reason, one refactor away from silence.
+        //
+        // NEITHER OUTCOME IS SHOWN TO ANYBODY, and that is unchanged. A
+        // `speak`-unbound deployment answers "not available" and a provider can
+        // simply fail; the browser voice below reads the same question, so from
+        // the learner's side nothing went wrong — and a warning about a premium
+        // upgrade they may not know exists would be noise about a feature that
+        // is working. `docs/specs/voice.md` §2.
+        if (result.status === 'ok') {
+          const played = await playBlob(result.audio, {
+            onStart: () => {
+              if (request !== requestRef.current) return;
+              setIsSpeaking(true);
+              onPlayed?.('premium');
+            },
+            onEnd: () => {
+              if (request !== requestRef.current) return;
+              setIsSpeaking(false);
+              revokeObjectUrl();
+            },
+            audioRef,
+            objectUrlRef,
+          });
 
-        if (played) return;
+          if (played) return;
+        }
       } catch {
-        // A `speak`-unbound deployment answers "not available" and a provider
-        // can simply fail. NEITHER IS SHOWN TO ANYBODY: the browser voice below
-        // reads the same question, so from the learner's side nothing went
-        // wrong — and a warning about a premium upgrade they may not know
-        // exists would be noise about a feature that is working.
+        // Kept for what this always really caught: a transport failure
+        // (`ApiError`, a dropped connection) or a `playBlob` that could not
+        // start. Same silence, for the same reason as above — the browser voice
+        // is next, and it reads the same question.
       } finally {
         if (request === requestRef.current) setIsPreparing(false);
       }

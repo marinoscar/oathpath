@@ -270,7 +270,20 @@ function renderWriting(options: Options = {}) {
     }),
     http.post(`${API_BASE}/ai/speech/synthesize`, () => {
       calls.synthesize += 1;
-      return HttpResponse.json({ data: null }, { status: 500 });
+      // Matches the real contract (issue #277): `speak` unbound is a 200
+      // `application/json` `unavailable` envelope, never an error status —
+      // `docs/specs/voice.md` §9. This suite mostly does not care whether the
+      // call succeeds (dictation defaults to the browser's own voice), but
+      // the one test that puts `speak` in play with no browser voice at all
+      // needs it to actually answer audio.
+      if (options.speakBound) {
+        return HttpResponse.arrayBuffer(new ArrayBuffer(8), {
+          headers: { 'Content-Type': 'audio/mpeg' },
+        });
+      }
+      return HttpResponse.json({
+        data: { status: 'unavailable', cause: 'role_unbound', role: 'speak' },
+      });
     }),
     http.post(`${API_BASE}/english/attempts`, async ({ request }) => {
       calls.attempts += 1;
