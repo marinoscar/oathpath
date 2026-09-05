@@ -123,6 +123,15 @@ export interface VoiceSettings {
    * at all is a separate fact the practice screen answers for itself.
    */
   conversationMode?: boolean;
+  /**
+   * Whether the hands-free loop's short tones sound at all (#357, epic #345).
+   *
+   * Unlike its neighbours this one is a CAPABILITY-FREE wish: there is nothing
+   * to bind and no key to spend — the cues are synthesised in the browser — so
+   * the only thing that can silence them other than this preference is a
+   * platform with no `AudioContext`.
+   */
+  soundCues?: boolean;
 }
 
 /**
