@@ -80,9 +80,29 @@ What *was* run: the state-machine unit tests
 drive the detector and the driver against synthetic level sequences — a
 real test of the logic, and, honestly, not a test of whether the
 calibration copes with a real windy street, exactly as
-`docs/specs/conversation-mode.md` §16 says of itself. Unlike the
-acceptance journeys E10 and E12 each added to `tests/e2e/specs/*.spec.ts`,
-no Playwright journey spec exercises the hands-free loop.
+`docs/specs/conversation-mode.md` §16 says of itself. Issue #314
+(PR #342, commit `ae7821e`) closed the acceptance-journey gap by adding
+five conversation-mode scenarios to `tests/e2e/specs/voice.spec.ts`: the
+one-tap Quick 5 journey, asserting an instrumented tap count of exactly
+one; barge-in over the question cancelling playback and starting
+recording; a wrong answer re-listened to exactly once, with a second miss
+moving on; "Type instead" reachable from all five phases, parameterised
+into five generated tests; and a mic-permission denial exiting the loop
+with a spoken and a rendered reason. Like `civics-learn.spec.ts` before it
+(`ROADMAP.md` §3's E2 footnote), these five were written and registered
+but never executed: this environment has no Docker daemon and no compose
+stack, and `tests/e2e` is not run by CI. What was independently verified
+is that `tsc --noEmit -p tests/e2e/tsconfig.json` is clean and
+`npx playwright test --list` registers all five (57 tests across 13
+files).
+
+#314 also added Vitest coverage for cross-hook composition, the retry
+budget as a property, and unmount in every state (+28 tests; the web
+suite is now 151 files / 3024 passed / 3 skipped, up from a 2996
+baseline), and introduced one **test-only** product seam in
+`PracticeSessionPage.tsx` for the VAD level source, gated on
+`import.meta.env.PROD` exactly as `App.tsx` gates `TestLoginPage` — a
+production build eliminates it.
 
 - **A coach whose voice a learner chooses (E14, epic #305).** Four
   personas — `supportive` (the default; exactly today's voice, unchanged
