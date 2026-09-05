@@ -138,13 +138,13 @@ export const COACH_REACTION_LINES: Record<
     ],
     'answer.partial': [
       'Part of that landed. Tighten the rest and it’s yours.',
-      'You’re most of the way there — one more piece to add.',
+      'You’re most of the way there — read the rest and add the missing piece.',
       'The idea is right; the answer isn’t complete yet. Read the rest.',
     ],
     'answer.incorrect': [
       'Not quite right — but you can get it next time. Take the answer with you.',
       'Not that one. Read the accepted answer and come back to it.',
-      'That’s not a match. Worth a second look before you move on.',
+      'That’s not a match. Give the accepted answer a second read before you move on.',
       'Not this time. The answer is right there — read it now while it matters.',
     ],
     'answer.skipped': [
@@ -198,8 +198,8 @@ export const COACH_REACTION_LINES: Record<
       'Repeated correct recall recorded. That is the evidence spaced practice is designed to produce.',
     ],
     'answer.partial': [
-      'Partially correct. The response overlaps the accepted answer without stating it completely.',
-      'Incomplete. One element of the accepted answer is present; the remainder is not.',
+      'Partially correct. The response overlaps the accepted answer without stating it completely; read it in full.',
+      'Incomplete. One element of the accepted answer is present; the remainder is not. Note the remainder before the next repetition.',
       'Partial. Review the full formulation and note precisely what was omitted.',
     ],
     'answer.incorrect': [
@@ -258,8 +258,8 @@ export const COACH_REACTION_LINES: Record<
       'Still going — don’t look directly at it, you’ll break the spell.',
     ],
     'answer.partial': [
-      'Half a point. You circled the answer and waved at it.',
-      'So close it’s almost annoying. One more piece and it’s yours.',
+      'Half a point. You circled the answer and waved at it. Go and say the rest.',
+      'So close it’s almost annoying. One more piece and it’s yours — go read it.',
       'Right neighbourhood, wrong house. Try the door next door.',
     ],
     'answer.incorrect': [
@@ -333,7 +333,7 @@ export const COACH_REACTION_LINES: Record<
     'answer.incorrect': [
       'That answer was a mess. The right one is on the screen — go read it.',
       'Wrong, and not close. Read the real answer and come back for a rematch.',
-      'No. That was a guess wearing a confident face. The answer is right there.',
+      'No. That was a guess wearing a confident face. The answer is right there — read it.',
     ],
     'answer.skipped': [
       'Nothing? Then read the answer now, while it costs you nothing.',
