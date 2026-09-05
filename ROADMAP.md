@@ -87,7 +87,7 @@ a v2.
 | E10 | Reading and writing tests | Vocabulary-sourced sentences, word-error-rate reading scoring, dictated writing scoring, the readiness `english` component | E9 | done<sup>**</sup> | [#59](https://github.com/marinoscar/oathpath/issues/59) |
 | E11 | Realtime voice interview | `realtime` wired, ephemeral session tokens, the E8 engine driving a realtime model over tool calls — closes Milestone B and the MVP | #25, E8, E9, E10 | done<sup>††</sup> | [#60](https://github.com/marinoscar/oathpath/issues/60) |
 | E12 | Hands-free voice practice | Auto-submit replaces confirm-before-grade as the default (with a zero-cost correction via `recomputeMasteryForQuestion`), a shared content-addressed cache for civics question/answer audio, and a learner-chosen premium voice | E9, E5 | done<sup>‡‡</sup> | [#280](https://github.com/marinoscar/oathpath/issues/280) |
-| E13 | Conversation mode | A session-wide, one-tap `Text \| Voice` control: a persistent microphone stream, a calibrated voice-activity detector with barge-in, a `speakingQuestion → listening → processing → speakingAnswer → advancing` state machine, synthesised earcons, a foreground-only wake lock, and the `voice.conversationMode` preference — no API change | E9, E12 | in progress | [#304](https://github.com/marinoscar/oathpath/issues/304) |
+| E13 | Conversation mode | A session-wide, one-tap `Text \| Voice` control: a persistent microphone stream, a calibrated voice-activity detector with barge-in, a `speakingQuestion → listening → processing → speakingAnswer → advancing` state machine, synthesised earcons, a foreground-only wake lock, and the `voice.conversationMode` preference — no API change | E9, E12 | done<sup>§§</sup> | [#304](https://github.com/marinoscar/oathpath/issues/304) |
 | E14 | The Coach's personality | A learner-chosen coach delivery style (`supportive`/`academic`/`playful`/`unfiltered`, defaulting to today's voice) delivered through two mechanisms — a curated, no-AI-call reaction-line bank covering the deterministically-graded majority of attempts, and a persona prompt fragment appended to calls that already run (the grader's feedback sentence, the civics explanation stream) — both bounded by one invariant floor enforced twice, in the prompt and by a lint over the shipped reaction bank; the mock-interview officer, the debrief, and notifications are permanently excluded | E4, E12 (for the audio cache) | in progress | [#305](https://github.com/marinoscar/oathpath/issues/305) |
 
 **E12 is the first epic filed after the MVP boundary.** E1–E11 closed
@@ -389,6 +389,44 @@ auto-submit as the default spoken-practice flow, and moves the fairness
 guarantee `VISION.md` line 228 requires from that confirm step to
 `recomputeMasteryForQuestion`, which replays a question's mastery over its
 non-superseded attempts so a correction costs the learner nothing.
+
+<sup>§§</sup> **E13 is closed and marked `done` by the repository owner, with
+two of this section's human checks knowingly outstanding.** All ten child
+issues (#306–#315) are merged and CI is green on `main`; what follows is not
+a defect list but a record of what a later reader should not assume was
+verified:
+
+1. **The five conversation-mode scenarios in
+   `tests/e2e/specs/voice.spec.ts` have never been executed.** Issue #314
+   (PR #342) added them: the one-tap Quick 5 journey, asserting an
+   instrumented tap count of exactly one; barge-in over the question,
+   cancelling playback and starting recording; a wrong answer re-listened to
+   exactly once, with a second miss moving on; "Type instead" reachable from
+   all five phases, parameterised into five generated tests; and a
+   mic-permission denial exiting the loop with a spoken and a rendered
+   reason. They were written against the real component sources, and it was
+   independently verified that `tsc --noEmit -p tests/e2e/tsconfig.json` is
+   clean and `npx playwright test --list` registers all five (57 tests
+   across 13 files) — but the environment the work was done in had no Docker
+   daemon and no compose stack, so nobody ran the walk. This is the
+   identical status E2's own footnote above records for
+   `civics-learn.spec.ts`.
+2. **The manual microphone checklist has not been run, for E12 or E13.**
+   `docs/specs/conversation-mode.md` §16's acoustic checklist requires a
+   real microphone, a real speaker, and a real room, none of which existed
+   in that environment. Four things are therefore unverified: ambient-floor
+   VAD calibration in a quiet room versus a noisy or windy one; deliberate
+   barge-in versus ambient noise not falsely triggering it; the ~8 s onset
+   timeout and the spoken re-listen nudge it triggers on silence; and a
+   full one-tap session, start to finish, on a real device. `CHANGELOG.md`
+   carries the same record in its E13 entry, so the two agree rather than
+   contradict.
+
+What *was* verified: the state machine against synthetic level sequences
+(`useConversationSession.test.ts`, `useVoiceActivity.test.ts`,
+`useWakeLock.test.ts`, `PracticeSessionPage.conversation.test.tsx`) — a real
+test of the logic and, deliberately, not a claim about real rooms;
+`docs/specs/conversation-mode.md` §16 says as much of itself.
 
 ## 4. Why this order
 
