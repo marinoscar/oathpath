@@ -1184,8 +1184,16 @@ function pickMimeType(recorder: typeof MediaRecorder): string {
  * A module-level function rather than a step inside `start`, because since #308
  * `acquireStream()` reaches the device without going through `start` and has to
  * run exactly the same two checks in exactly the same order.
+ *
+ * EXPORTED since issue #349, epic #345, and for the same reason it was extracted
+ * in the first place: `useMediaReadiness` runs the identical two checks BEFORE a
+ * learner commits to a hands-free session, and a second implementation of them
+ * would be free to disagree with this one about which of `insecure_origin` and
+ * `unsupported` a browser has — the exact ordering mistake this function's own
+ * comment exists to prevent. It reads the platform and nothing else: no prompt,
+ * no device enumeration, no state.
  */
-function preflightCaptureProblem(): AudioCaptureProblemCode | null {
+export function preflightCaptureProblem(): AudioCaptureProblemCode | null {
   if (typeof window !== 'undefined' && window.isSecureContext === false) {
     return 'insecure_origin';
   }
