@@ -5,10 +5,16 @@
  * can answer is how the answer's player and the QUESTION's player behave as one
  * screen, and every assertion here is a way that could go wrong quietly:
  *
- *  1. **Two players, one voice.** The question's mount and the answer's mount
- *     are on screen together, so starting either must silence the other. The
- *     assertion is structural rather than about audio: at most ONE "Stop
- *     reading" button can exist at any instant.
+ *  1. **One player, one voice — REWRITTEN BY #358 (epic #345).** Until then
+ *     the question's mount and the answer's mount were on screen TOGETHER, and
+ *     these tests asserted that starting either silenced the other. #358
+ *     removed the overlap itself: the question's player is unmounted while a
+ *     verdict is up, because the thing worth hearing then is the answer, and
+ *     two text buttons with two status lines for one sentence is the clutter
+ *     that issue exists to cut. So the assertion is stronger and structural —
+ *     at most ONE `QuestionAudio` is mounted at any instant, and at most one
+ *     "Stop reading" button can therefore exist — and it is the page-level
+ *     half of #358's "one player at a time" acceptance criterion.
  *  2. **Moving on silences the answer.** Pressing Next unmounts the feedback,
  *     and a sentence still being read over the next question is disorienting.
  *  3. **Nothing records `promptMode: 'heard'` because the ANSWER played.** The
@@ -290,6 +296,21 @@ function stopButtons() {
   return screen.queryAllByRole('button', { name: /^stop reading$/i });
 }
 
+/**
+ * Every mounted `QuestionAudio`, counted by the one element each always
+ * renders: its button.
+ *
+ * The four names are the component's complete button vocabulary — the default
+ * copy, the answer's override, and the two transient states — so this counts
+ * players rather than any one of their states. #358's rule is that this is
+ * never more than 1.
+ */
+function audioPlayers() {
+  return screen.queryAllByRole('button', {
+    name: /^(read the question aloud|read the answer aloud|stop reading|preparing the voice…)$/i,
+  });
+}
+
 beforeEach(() => {
   spoken = [];
   live = [];
@@ -338,41 +359,38 @@ describe('the answer is read aloud in the result region', () => {
 });
 
 describe('one voice at a time', () => {
-  it('starting the question stops the answer, and starting the answer stops the question', async () => {
+  it('mounts exactly one player: the question before the verdict, the answer after it', async () => {
     const user = userEvent.setup();
     renderSession({ readAnswersAloud: false });
 
-    await answerQuestion(user, QUESTION_1.prompt);
-    const answerPlay = await screen.findByRole('button', {
-      name: /read the answer aloud/i,
-    });
-
-    // 1. The answer speaks. Exactly one player is stoppable.
-    await user.click(answerPlay);
-    await waitFor(() => expect(stopButtons()).toHaveLength(1));
+    // 1. Before the verdict there is one player, and it is the question's.
+    await screen.findByRole('heading', { level: 2, name: QUESTION_1.prompt });
+    expect(audioPlayers()).toHaveLength(1);
     expect(
       screen.getByRole('button', { name: /read the question aloud/i }),
     ).toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: /read the answer aloud/i }),
+    ).toBeNull();
 
-    // 2. The QUESTION now speaks — and the answer falls silent in the same act.
-    await user.click(screen.getByRole('button', { name: /read the question aloud/i }));
-    await waitFor(() =>
-      expect(
-        screen.getByRole('button', { name: /read the answer aloud/i }),
-      ).toBeInTheDocument(),
-    );
-    expect(stopButtons()).toHaveLength(1);
-    expect(spoken[spoken.length - 1].text).toBe(QUESTION_1.prompt);
+    // 2. After it there is still one player, and it is the answer's. #358: the
+    //    question's player is UNMOUNTED, not merely quiet — the verdict screen
+    //    has one thing worth hearing.
+    await answerQuestion(user, QUESTION_1.prompt);
+    await findAnswerPanel();
+    expect(audioPlayers()).toHaveLength(1);
+    expect(
+      screen.getByRole('button', { name: /read the answer aloud/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: /read the question aloud/i }),
+    ).toBeNull();
 
-    // 3. And back the other way.
+    // 3. It reads the ANSWER, and it is the only player that can be stopped.
     await user.click(screen.getByRole('button', { name: /read the answer aloud/i }));
-    await waitFor(() =>
-      expect(
-        screen.getByRole('button', { name: /read the question aloud/i }),
-      ).toBeInTheDocument(),
-    );
-    expect(stopButtons()).toHaveLength(1);
+    await waitFor(() => expect(stopButtons()).toHaveLength(1));
     expect(spoken[spoken.length - 1].text).toBe(ACCEPTED);
+    expect(audioPlayers()).toHaveLength(1);
   });
 
   it('never lets the auto-played answer talk over the question', async () => {
@@ -380,22 +398,26 @@ describe('one voice at a time', () => {
     renderSession();
 
     // Start the question reading, then grade an attempt so the answer
-    // auto-plays on top of it.
+    // auto-plays — which is the moment the question's player goes away.
     await screen.findByRole('heading', { level: 2, name: QUESTION_1.prompt });
     await user.click(screen.getByRole('button', { name: /read the question aloud/i }));
     expect(stopButtons()).toHaveLength(1);
 
+    const before = cancels;
     await user.type(screen.getByLabelText(/your answer/i), 'the big rules');
     await user.click(screen.getByRole('button', { name: /^submit$/i }));
 
     await findAnswerPanel();
     await waitFor(() => expect(spoken[spoken.length - 1].text).toBe(ACCEPTED));
-    // The question's player is back at rest, and only one player is stoppable.
-    await waitFor(() =>
-      expect(
-        screen.getByRole('button', { name: /read the question aloud/i }),
-      ).toBeInTheDocument(),
-    );
+
+    // The question's player is GONE — and it cancelled what it was reading on
+    // the way out (`QuestionAudio` stops on unmount), so the answer is not
+    // read over a question still in progress.
+    expect(
+      screen.queryByRole('button', { name: /read the question aloud/i }),
+    ).toBeNull();
+    expect(cancels).toBeGreaterThan(before);
+    expect(audioPlayers()).toHaveLength(1);
     expect(stopButtons()).toHaveLength(1);
   });
 });

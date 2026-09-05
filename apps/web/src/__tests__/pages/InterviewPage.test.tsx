@@ -252,11 +252,12 @@ afterEach(() => {
  * update a hardcoded list.
  */
 const PRACTICE_VERDICT_VOCABULARY: string[] = [
-  ...['correct', 'partial', 'incorrect', 'skipped', 'a-value-from-a-newer-server'].flatMap(
-    (outcome) => {
-      const display = outcomeDisplay(outcome);
-      return [display.label, display.detail];
-    },
+  // `label` ONLY since #358 (epic #345), because `label` is now all there is:
+  // `OutcomeDisplay.detail` — the sentence that restated the chip in prose —
+  // was deleted there, so a `display.detail` here would silently contribute
+  // `undefined` and quietly shrink this list rather than fail.
+  ...['correct', 'partial', 'incorrect', 'skipped', 'a-value-from-a-newer-server'].map(
+    (outcome) => outcomeDisplay(outcome).label,
   ),
   ...['self', 'ai'].map((method) => gradingMethodNote(method) ?? ''),
 ].filter(Boolean);
