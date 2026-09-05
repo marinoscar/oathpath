@@ -80,6 +80,8 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 
+import { useIsMounted } from './useIsMounted';
+
 /** What the caller can see. Never enough to build an error message from. */
 export interface UseWakeLockState {
   /** Does this browser expose the Screen Wake Lock API at all? */
@@ -121,6 +123,18 @@ export function useWakeLock(enabled: boolean): UseWakeLockState {
   const wantedRef = useRef(enabled);
   wantedRef.current = enabled;
 
+  /**
+   * Unmount is the second way a request in flight can become unwanted, and it
+   * cannot be read from `wantedRef`: nothing re-renders on the way out, so the
+   * flag is still whatever the last render set it to. Cleared by
+   * `useIsMounted`'s own cleanup — and, under `StrictMode`'s deliberate
+   * mount/unmount/mount, set back to true by its effect, which is exactly why
+   * this is a mounted ref rather than a `wantedRef.current = false` in the
+   * cleanup below. That version would leave a StrictMode remount believing the
+   * lock was no longer wanted and release every sentinel it was granted.
+   */
+  const isMounted = useIsMounted();
+
   const isSupported = getWakeLockApi() !== null;
 
   const release = useCallback(() => {
@@ -136,8 +150,20 @@ export function useWakeLock(enabled: boolean): UseWakeLockState {
     }
   }, []);
 
+  /**
+   * True between asking for a lock and being handed one.
+   *
+   * `sentinelRef` alone cannot answer "is one already coming?", and a second
+   * `acquire` during that window produces TWO sentinels — the second
+   * overwrites the first in the ref, and the first is then held for the life
+   * of the page with nothing left pointing at it to release it. `StrictMode`
+   * reaches this on every mount (effect, cleanup, effect), so it is the
+   * ordinary path in development, not an exotic race.
+   */
+  const requestingRef = useRef(false);
+
   const acquire = useCallback(async () => {
-    if (sentinelRef.current) return;
+    if (sentinelRef.current || requestingRef.current) return;
 
     const api = getWakeLockApi();
     if (!api) return;
@@ -153,16 +179,21 @@ export function useWakeLock(enabled: boolean): UseWakeLockState {
     }
 
     let sentinel: WakeLockSentinel;
+    requestingRef.current = true;
     try {
       sentinel = await api.request('screen');
     } catch {
       // Rejected: battery saver, a permissions policy, a backgrounded tab.
       // Non-fatal by design — the session continues, nothing is shown.
       return;
+    } finally {
+      requestingRef.current = false;
     }
 
-    if (!wantedRef.current) {
-      // The session ended (or this unmounted) while the request was in flight.
+    // Unwanted now, or superseded by a lock that arrived first: either way this
+    // sentinel must go back immediately. A held lock nobody has a reference to
+    // is released by nothing short of closing the tab.
+    if (!wantedRef.current || !isMounted() || sentinelRef.current) {
       try {
         void Promise.resolve(sentinel.release()).catch(() => undefined);
       } catch {
@@ -183,7 +214,7 @@ export function useWakeLock(enabled: boolean): UseWakeLockState {
       sentinelRef.current = null;
       setIsHeld(false);
     });
-  }, []);
+  }, [isMounted]);
 
   // Hold or drop the lock as the flag changes, and always drop it on unmount.
   useEffect(() => {
