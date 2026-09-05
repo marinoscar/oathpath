@@ -1,7 +1,11 @@
+import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { join, relative } from 'node:path';
+
 import { Logger } from '@nestjs/common';
 import { z } from 'zod';
 
 import {
+  DEFAULT_SPEECH_VOICE,
   OpenAiProvider,
   deriveConfidence,
   describeModel,
@@ -1902,5 +1906,182 @@ describe('OpenAiProvider.createRealtimeSession', () => {
 
     expect(constructedWith).toEqual([{ apiKey: USER_KEY }]);
     expect(credentials.getSecret).not.toHaveBeenCalled();
+  });
+});
+
+// =============================================================================
+// The voice catalog (#283, epic #280)
+// =============================================================================
+//
+// Two properties, and the second is the reason this block is here at all.
+//
+// 1. EVERY ID THE PICKER OFFERS IS ONE THE SYNTHESIS DTO ACCEPTS. That is the
+//    real coupling in this feature: `aiSynthesizeRequestSchema` validates a
+//    voice id's SHAPE and deliberately not its membership, so a voice this
+//    endpoint advertises but that DTO refuses would be a 400 the learner
+//    cannot explain — produced by choosing from a list the application handed
+//    them.
+//
+// 2. THE LIST LIVES IN EXACTLY ONE SOURCE FILE. A copy in the web bundle, or a
+//    second copy in a DTO, is correct the day it is written and silently wrong
+//    the day OpenAI adds or renames a voice. `ai-model-roles.ts` makes the same
+//    argument for the role registry; this asserts it rather than restating it.
+// =============================================================================
+
+/** The charset `aiSynthesizeRequestSchema`'s `voice` field accepts. */
+const VOICE_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
+
+/** The longest voice id that schema will accept. */
+const VOICE_ID_MAX_LENGTH = 64;
+
+describe('OpenAiProvider.listVoices', () => {
+  const p = () => new OpenAiProvider(credentialsReturning(null), usageStub());
+
+  it('returns a non-empty list', () => {
+    expect(p().listVoices().length).toBeGreaterThan(0);
+  });
+
+  it('gives every voice a non-empty id, label and description', () => {
+    // A blank description is worse than none: a picker renders an empty line
+    // and the learner is back to auditioning every voice to tell them apart.
+    for (const voice of p().listVoices()) {
+      expect(voice.id.trim()).not.toBe('');
+      expect(voice.label.trim()).not.toBe('');
+      expect(voice.description.trim()).not.toBe('');
+    }
+  });
+
+  it('gives every voice an id the synthesize DTO would accept', () => {
+    for (const voice of p().listVoices()) {
+      expect(voice.id).toMatch(VOICE_ID_PATTERN);
+      expect(voice.id.length).toBeLessThanOrEqual(VOICE_ID_MAX_LENGTH);
+    }
+  });
+
+  it('has no duplicate ids', () => {
+    const ids = p().listVoices().map((voice) => voice.id);
+
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it('reports a default that is one of the voices it offers', () => {
+    // The drift this forbids is a settings screen marking a voice "default"
+    // that the synthesiser does not actually fall back to.
+    const provider = p();
+
+    expect(provider.defaultVoice()).toBe(DEFAULT_SPEECH_VOICE);
+    expect(provider.listVoices().map((voice) => voice.id)).toContain(
+      DEFAULT_SPEECH_VOICE,
+    );
+  });
+
+  it('does not call the SDK or read a credential', () => {
+    // Static, provider-authored data — see `AiProvider.listVoices`. A future
+    // implementation that fetched the list would fail here, which is the point
+    // of the method being synchronous in the first place.
+    const credentials = credentialsReturning(SERVER_KEY);
+
+    new OpenAiProvider(credentials, usageStub()).listVoices();
+
+    expect(credentials.getSecret).not.toHaveBeenCalled();
+    expect(constructedWith).toHaveLength(0);
+  });
+});
+
+// -----------------------------------------------------------------------------
+// The one-source-file assertion
+// -----------------------------------------------------------------------------
+
+/** The repository roots a copy of the list could plausibly be hiding in. */
+const SOURCE_ROOTS = [
+  join(__dirname, '..', '..'), // apps/api/src
+  join(__dirname, '..', '..', '..', '..', 'web', 'src'), // apps/web/src
+];
+
+/**
+ * Every `.ts`/`.tsx` file under `dir` that is not itself a test.
+ *
+ * TESTS ARE EXCLUDED because this file is one: it names the ids in its own
+ * assertions, and a scan that counted them would fail for documenting the rule
+ * it enforces — the same trap `ai-user-key.controller.spec.ts` avoids by
+ * stripping comments before asserting on a source.
+ */
+function sourceFiles(dir: string): string[] {
+  let entries: string[];
+
+  try {
+    entries = readdirSync(dir);
+  } catch {
+    // A root that is not present in this checkout is not a failure: the API's
+    // own tree is the one that must be scanned, and `apps/web` is a bonus when
+    // it is there.
+    return [];
+  }
+
+  const found: string[] = [];
+
+  for (const entry of entries) {
+    if (entry === 'node_modules' || entry === 'dist') continue;
+
+    const full = join(dir, entry);
+
+    if (statSync(full).isDirectory()) {
+      found.push(...sourceFiles(full));
+      continue;
+    }
+
+    if (!/\.tsx?$/.test(entry)) continue;
+    if (/\.(spec|test)\.tsx?$/.test(entry)) continue;
+
+    found.push(full);
+  }
+
+  return found;
+}
+
+/**
+ * A file's source with comments removed.
+ *
+ * COMMENTS ARE STRIPPED for the reason `ai-user-key.controller.spec.ts` gives:
+ * the assertion is about what the code does, and `ai.types.ts` quite properly
+ * writes "the provider's voice id, e.g. `'alloy'`" in a doc comment. Matching
+ * that would fail the test for explaining itself. The stripper is crude and
+ * that is safe here — over-stripping can only hide a copy this test would have
+ * caught, never invent one.
+ */
+function strippedSource(path: string): string {
+  return readFileSync(path, 'utf8')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/^\s*\/\/.*$/gm, '');
+}
+
+describe('OpenAI`s voice list lives in exactly one source file', () => {
+  const scanned = SOURCE_ROOTS.flatMap((root) =>
+    sourceFiles(root).map((path) => ({ path, source: strippedSource(path) })),
+  );
+
+  const voiceIds = new OpenAiProvider(credentialsReturning(null), usageStub())
+    .listVoices()
+    .map((voice) => voice.id);
+
+  it('scans a real tree', () => {
+    // A guard on the guard: a broken path would make every assertion below
+    // pass over an empty list.
+    expect(scanned.length).toBeGreaterThan(100);
+  });
+
+  it.each(voiceIds)('names "%s" in one file only', (id) => {
+    const owners = scanned
+      .filter(
+        ({ source }) =>
+          source.includes(`'${id}'`) || source.includes(`"${id}"`),
+      )
+      .map(({ path }) => relative(join(__dirname, '..', '..', '..'), path));
+
+    // The failure this catches by name: a hand-copied list in
+    // `apps/web/src/config`, correct the day it is written and silently wrong
+    // the day OpenAI adds or renames a voice. The web reads
+    // `GET /api/ai/speech/voices` instead.
+    expect(owners).toEqual(['src/ai/providers/openai.provider.ts']);
   });
 });

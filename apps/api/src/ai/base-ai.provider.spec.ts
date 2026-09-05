@@ -96,11 +96,26 @@ interface InferenceHooks {
   ) => Promise<AiRealtimeSessionResult>;
 }
 
+/**
+ * The stub's declared voices (#283).
+ *
+ * Present on EVERY stub, including the `TEXT_ONLY` one, on purpose: the
+ * property under test below is that `listVoices` returns `[]` for a provider
+ * that does not declare `'tts'` EVEN THOUGH it has a list to return. A stub
+ * that declared no voices would pass that assertion for the wrong reason.
+ */
+const STUB_VOICES = [
+  { id: 'stub-one', label: 'Stub One', description: 'A stub voice.' },
+  { id: 'stub-two', label: 'Stub Two', description: 'Another stub voice.' },
+];
+
 /** A stub whose subclass hooks are supplied per test. */
 class StubProvider extends BaseAiProvider {
   protected readonly logger = new Logger('StubProvider');
   readonly kind: AiProviderKind = 'openai';
   protected readonly providerName = 'Stub';
+  protected readonly speechVoices = STUB_VOICES;
+  protected readonly defaultSpeechVoice = 'stub-one';
 
   /**
    * The recorder, exposed so a test can assert on the row this class writes.
@@ -1838,5 +1853,55 @@ describe('the realtime types carry no long-lived credential', () => {
     // suite too, since it imports the value. The `expect` below is what makes
     // the failure legible; the protection is the type.
     expect(AI_REALTIME_CARRIES_NO_LONG_LIVED_KEY).toBe(true);
+  });
+});
+
+// =============================================================================
+// listVoices / defaultVoice — the capability gate lives here, once (#283)
+// =============================================================================
+//
+// `BaseAiProvider` owns the `supports('tts')` check for both methods, exactly
+// as it owns the one `transcribe` and `synthesize` make. The failure this
+// guards against is a chat-only deployment offering a voice picker full of
+// options no provider can speak — a learner choosing one, hearing nothing
+// change, and having no way to find out why.
+// =============================================================================
+
+describe('BaseAiProvider.listVoices', () => {
+  it('returns the provider`s declared voices when it supports tts', () => {
+    const p = provider(async () => OK_CATALOG, undefined, ALL);
+
+    expect(p.listVoices()).toEqual(STUB_VOICES);
+    expect(p.defaultVoice()).toBe('stub-one');
+  });
+
+  it('returns [] for a provider without the tts capability', () => {
+    // The stub DOES declare voices (see STUB_VOICES) — the empty answer comes
+    // from the capability set and from nothing else, which is the whole point.
+    const p = provider(async () => OK_CATALOG, undefined, TEXT_ONLY);
+
+    expect(p.listVoices()).toEqual([]);
+    expect(p.defaultVoice()).toBeNull();
+  });
+
+  it('never throws, on either capability', () => {
+    // The never-throw rule this interface carries, held here BY CONSTRUCTION
+    // rather than by a try/catch — there is no key, no client and no I/O in
+    // either method. A future implementation that added one would fail here.
+    expect(() => provider(async () => OK_CATALOG, undefined, ALL).listVoices())
+      .not.toThrow();
+    expect(() =>
+      provider(async () => OK_CATALOG, undefined, TEXT_ONLY).listVoices(),
+    ).not.toThrow();
+  });
+
+  it('hands back a copy, so a caller cannot mutate the provider`s list', () => {
+    // A picker that sorts the array it was given must not reorder — or empty —
+    // what every later request in this process receives.
+    const p = provider(async () => OK_CATALOG, undefined, ALL);
+
+    p.listVoices().length = 0;
+
+    expect(p.listVoices()).toHaveLength(STUB_VOICES.length);
   });
 });
