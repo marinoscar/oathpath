@@ -344,6 +344,9 @@ import type {
   RealtimeSessionResponse,
   RealtimeToolCallInput,
   RealtimeToolCallResponse,
+  PracticeRealtimeSessionResponse,
+  PracticeRealtimeToolCallInput,
+  PracticeRealtimeToolCallResponse,
   EngagementSummary,
   AccountDataSummary,
   AccountResetScope,
@@ -1877,6 +1880,80 @@ export async function sendRealtimeToolCall(
 ): Promise<RealtimeToolCallResponse> {
   return api.post<RealtimeToolCallResponse>(
     `/interviews/${id}/realtime/tool-calls`,
+    call,
+  );
+}
+
+// =============================================================================
+// Realtime practice — mint and relay (issue #355, epic #345 / E15)
+// =============================================================================
+//
+// The same two calls the spoken interview makes, against the practice
+// session's own two routes — and deliberately NOT the same two functions.
+// `docs/specs/realtime-practice.md` §3's contract is five tools where the
+// interview's is three, its `grade_answer` carries no `confidence`, and its
+// results carry `say`/`then`/`questionId` rather than a phase and a turn
+// index. One pair of functions widened to serve both would be a pair whose
+// argument type could spell `end_phase` at a practice session, checked by
+// nothing.
+//
+// The learner's API key is not in this file and cannot be, for the reason the
+// interview's own block above states in full.
+// =============================================================================
+
+/**
+ * Mint one ephemeral realtime session for this practice session —
+ * `POST /api/practice/sessions/:id/realtime-session`.
+ *
+ * NO REQUEST BODY: the coach's instructions, the five tools and the session's
+ * lifetime are all the server's. There is no model parameter — the model is
+ * the one an administrator bound to the `realtime` role.
+ *
+ * ALL THREE OUTCOMES ARE HTTP 200 — read `status`. `unavailable` names a
+ * `cause` a non-2xx would have discarded, and it is not an error: it is the
+ * signal to take the next rung of the degradation ladder (§8) — E13's
+ * request/response loop, or typing — with the same session id and every
+ * recorded attempt intact.
+ *
+ * SAFE TO CALL AGAIN while the session is `in_progress`. A re-mint resolves
+ * the session's CURRENT server-side state, so a dropped connection resumes at
+ * whatever question is still unanswered rather than at the first one.
+ */
+export async function createPracticeRealtimeSession(
+  id: string,
+): Promise<PracticeRealtimeSessionResponse> {
+  return api.post<PracticeRealtimeSessionResponse>(
+    `/practice/sessions/${id}/realtime-session`,
+    // An empty object rather than nothing, so the request carries the JSON
+    // content type every other POST in this file does. The route accepts no
+    // fields; sending `{}` is how "there is nothing to configure" travels.
+    {},
+  );
+}
+
+/**
+ * Relay one tool call from a realtime practice session to the engine —
+ * `POST /api/practice/sessions/:id/realtime/tool-calls`.
+ *
+ * THE BROWSER IS A RELAY AND NOTHING MORE. It forwards the call the model
+ * emitted and hands the result back over the same data channel. It does not
+ * grade, does not choose a question, does not count what has been asked and
+ * does not decide the session is over — every one of those is the engine's,
+ * and `useRealtimePractice`'s own header states the same thing about the layer
+ * above this one.
+ *
+ * A REFUSAL IS A 200 WITH AN `instruction`, NOT AN ERROR. `status: 'rejected'`
+ * means the session's own state did not permit the call — a duplicate answer,
+ * a question that is not the outstanding one, an `end_session` claiming
+ * questions are gone when they are not — and the `instruction` is what gets
+ * the conversation moving again.
+ */
+export async function sendPracticeRealtimeToolCall(
+  id: string,
+  call: PracticeRealtimeToolCallInput,
+): Promise<PracticeRealtimeToolCallResponse> {
+  return api.post<PracticeRealtimeToolCallResponse>(
+    `/practice/sessions/${id}/realtime/tool-calls`,
     call,
   );
 }
