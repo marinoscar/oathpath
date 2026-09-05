@@ -303,6 +303,65 @@ export const practiceAttemptSchema = z.object({
 
   /** One line in the learner's chosen voice, or null. See above. */
   coachReaction: coachReactionSchema.nullable(),
+
+  // ---------------------------------------------------------------------------
+  // The spoken turn (issue #351, epic #345 "The conversation the coach has")
+  // ---------------------------------------------------------------------------
+  //
+  // WHAT THE COACH SAYS ABOUT THIS ATTEMPT, IN ORDER. Composed by
+  // `practice/spoken-turn.ts` — a pure function — and shipped here for the same
+  // reason `coachReaction` is: ADDITIVELY, computed at read time, persisted
+  // nowhere, with no column and no migration behind it.
+  //
+  // The defect it closes is stated in full in that file's header; the one-line
+  // version is that the hands-free loop used to speak
+  // `acceptedAnswers[0].text` and nothing else, so a right answer and a wrong
+  // answer produced byte-identical audio. Every fact needed to tell them apart
+  // was already on this shape (`outcome`, `failureCause`, `aiFeedback`,
+  // `coachReaction`) and every one of them was reachable only by something that
+  // RENDERS. These two fields are the same facts, ordered for something that
+  // SPEAKS.
+  //
+  // ON THE ATTEMPT RATHER THAN ON THE `POST .../attempts` WRAPPER, exactly as
+  // `coachReaction` is and for the identical reason: this schema is what
+  // `GET /api/practice/sessions/{id}` returns for every recorded attempt, so
+  // putting it here is what makes the re-read path carry a turn at all.
+  //
+  // NOTHING HERE IS AN INSTRUCTION TO SPEAK. A client that renders and never
+  // speaks ignores both fields; nothing else on this shape changed for it.
+
+  /**
+   * The lines the coach says about this attempt, in reading order.
+   *
+   * Never empty — the verdict is unconditional, which is the whole point. See
+   * `spoken-turn.ts` for the element order and who authors each element.
+   *
+   * A `string[]` rather than a single pre-joined string so a client can pace,
+   * interrupt, or emit an earcon between elements — and so `retryBoundary`
+   * below has something to index.
+   */
+  spokenTurn: z.array(z.string()),
+
+  /**
+   * Index into {@link spokenTurn} at which the retry-deferred tail begins, or
+   * `null` when no retry of this attempt is available.
+   *
+   * THIS FIELD IS THE SECOND DEFECT'S FIX. The loop used to read the accepted
+   * answer aloud and THEN invite a retry, which makes the retry a
+   * repeat-after-me and the `correct` attempt it records worthless as evidence.
+   *
+   * `null` → speak every line, there is nothing to wait for. A number `k` →
+   * speak `spokenTurn.slice(0, k)`, offer the retry, and speak
+   * `spokenTurn.slice(k)` only once retrying is off the table (the learner
+   * declined, or the client has spent its own per-question retry budget). `k`
+   * equal to `spokenTurn.length` is legitimate and means a retry is armed with
+   * nothing deferred.
+   *
+   * A non-null value is an OPPORTUNITY, never an instruction: whether a retry
+   * is actually offered is the client's call, because the per-question budget
+   * is the client's and this server cannot see it.
+   */
+  retryBoundary: z.number().int().min(0).nullable(),
 });
 
 export type PracticeSnapshotAnswer = z.infer<typeof practiceSnapshotAnswerSchema>;

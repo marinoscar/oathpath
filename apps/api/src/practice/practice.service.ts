@@ -25,6 +25,7 @@ import { UserSettingsService } from '../settings/user-settings/user-settings.ser
 import { AttemptGradingService } from './attempt-grading.service';
 import { excludeUnanswerable } from './question-selection';
 import { type GradingVerdict } from './grading';
+import { composeSpokenTurn } from './spoken-turn';
 import { isMisheardAttempt } from './mastery/mastery-skip';
 import { toAttemptOutcome } from './mastery/outcome-mapping';
 import { recomputeMasteryForQuestion } from './mastery/recompute';
@@ -1815,6 +1816,53 @@ function toAttemptResponse(
   coach: CoachContext,
   correctRunLength = 0,
 ): PracticeAttemptResponse {
+  // THE ONE DERIVED FIELD ON THIS ROW, and the only one that is not stored
+  // anywhere (issue #320, epic #305 / E14). Every other field below is read
+  // off the row; this one is computed from three of them plus the learner's
+  // persona, on every read, seeded by the row's own id so the live screen and
+  // the summary re-read agree — `docs/specs/coach-personality.md` §7 and §9.
+  //
+  // Pulled out of the object literal by #351 because the spoken turn needs the
+  // SAME line rather than a second selection of its own — see below.
+  const coachReaction = toCoachReaction(
+    coach,
+    coachEventForAttempt({
+      outcome: attempt.outcome,
+      gradingMethod: attempt.gradingMethod,
+      // `?? null` for the same reason the wire field below carries it: a row
+      // selected without the column must read as "no grader ran", not
+      // `undefined`.
+      failureCause: attempt.failureCause ?? null,
+      correctRunLength,
+    }),
+    attempt.id,
+  );
+
+  const snapshot = (attempt.answerSnapshot ?? null) as PracticeAnswerSnapshot | null;
+
+  const spokenTurn = composeSpokenTurn({
+    outcome: attempt.outcome,
+    gradingMethod: attempt.gradingMethod,
+    failureCause: attempt.failureCause ?? null,
+    aiFeedback: (attempt.aiFeedback as GradingVerdict | null) ?? null,
+    // Read out of the attempt's OWN frozen snapshot, never re-resolved against
+    // whatever `civics_answers` says today — the same rule the wire field
+    // `answerSnapshot` exists to enforce (`practice-attempt.dto.ts` §6). A row
+    // whose snapshot is somehow absent resolves to `state_required`, which
+    // suppresses the answer line: saying nothing is the honest failure here.
+    answerResolution: snapshot?.answerResolution ?? 'state_required',
+    acceptedAnswers: snapshot?.answers ?? [],
+    // What was heard, for a SPOKEN attempt only. `transcript` first — it is the
+    // text that was actually graded — falling back to `responseText` for a row
+    // written before E9 gave transcripts a column of their own.
+    heard:
+      attempt.inputMode === 'spoken'
+        ? (attempt.transcript ?? attempt.responseText ?? null)
+        : null,
+    retryArmed: isRetryArmed(attempt),
+    coachReaction,
+  });
+
   return {
     id: attempt.id,
     sessionId: attempt.sessionId,
@@ -1855,25 +1903,53 @@ function toAttemptResponse(
     // whatever `civics_answers` says today — that is the entire point of the
     // column (§6).
     answerSnapshot: attempt.answerSnapshot as PracticeAnswerSnapshot,
-    // THE ONE DERIVED FIELD ON THIS ROW, and the only one that is not stored
-    // anywhere (issue #320, epic #305 / E14). Every other field above is read
-    // off the row; this one is computed from three of them plus the learner's
-    // persona, on every read, seeded by the row's own id so the live screen and
-    // the summary re-read agree — `docs/specs/coach-personality.md` §7 and §9.
-    coachReaction: toCoachReaction(
-      coach,
-      coachEventForAttempt({
-        outcome: attempt.outcome,
-        gradingMethod: attempt.gradingMethod,
-        // `?? null` for the same reason the wire field above carries it: a row
-        // selected without the column must read as "no grader ran", not
-        // `undefined`.
-        failureCause: attempt.failureCause ?? null,
-        correctRunLength,
-      }),
-      attempt.id,
-    ),
+    // TWO DERIVED FIELDS FOLLOW, AND NEITHER IS STORED ANYWHERE. Both are
+    // computed above, from columns this row already carries — see there.
+    coachReaction,
+    // THE SECOND DERIVED FIELD, AND THE SECOND THAT IS STORED NOWHERE (issue
+    // #351, epic #345). Composed OUTSIDE ANY AI GATE, exactly as
+    // `coachReaction` above is: `composeSpokenTurn` makes no dispatch call, so
+    // an attempt graded deterministically on a deployment with no AI configured
+    // at all still gets a full spoken turn — which is precisely the attempt
+    // that used to get silence.
+    //
+    // Handed the coach line ALREADY SELECTED, rather than re-deriving it, so
+    // the line on screen and the line in the speaker are the same string by
+    // construction rather than by two agreeing computations.
+    spokenTurn: spokenTurn.lines,
+    retryBoundary: spokenTurn.retryBoundary,
   };
+}
+
+/**
+ * Whether the server would accept a retry of this attempt (issue #351).
+ *
+ * The SERVER's half of the question, mirroring `requireRetryTarget`'s own
+ * conditions rather than restating a client's: a retry is a new attempt that
+ * supersedes this one, and `requireRetryTarget` will refuse it unless the
+ * target is a practice attempt in a session, not itself a retry, and not
+ * already superseded. `revealed` is added on top for the reason self-mark
+ * needs it — a learner who has already seen the accepted answer is no longer
+ * being asked what they know.
+ *
+ * The CLIENT's half — a per-question retry budget, spent once — is invisible
+ * from here, which is exactly why `retryBoundary` describes an opportunity and
+ * never an instruction. A client that has spent its budget speaks the whole
+ * turn and offers nothing.
+ *
+ * A correct attempt is never retryable: there is nothing to improve, and
+ * `isMisheardAttempt`'s third condition already excludes it from the
+ * mishearing path that motivates retries in the first place.
+ */
+function isRetryArmed(attempt: any): boolean {
+  return (
+    attempt.source === 'practice' &&
+    attempt.sessionId !== null &&
+    attempt.inputMode === 'spoken' &&
+    (attempt.retryOfAttemptId ?? null) === null &&
+    attempt.revealed !== true &&
+    attempt.outcome !== 'correct'
+  );
 }
 
 /**
