@@ -1,6 +1,7 @@
 import { createZodDto } from 'nestjs-zod';
 import { z } from 'zod';
 
+import { coachReactionSchema } from '../../ai/dto/coach-reaction.dto';
 import { practiceAttemptSchema } from './practice-attempt.dto';
 import { practiceQuestionSchema } from './practice-question.dto';
 
@@ -99,6 +100,24 @@ export const practiceSessionSchema = z.object({
 
   /** Null while `in_progress` — there is nothing to summarise yet (§2.1). */
   summary: practiceSessionSummarySchema.nullable(),
+
+  /**
+   * The coach's reaction to how the session went (issue #320, epic #305).
+   *
+   * NULL WHENEVER {@link summary} IS NULL, and that is not a coincidence: the
+   * three `session.complete_*` events are a pure function of the summary's own
+   * `correct`/`answered` (`ai/coach/session-event.ts`), so a session with
+   * nothing to summarise has nothing to react to either. Also null when the
+   * learner has turned reactions off.
+   *
+   * COMPUTED AT READ TIME, BESIDE THE SUMMARY — never written into it. The
+   * stored `summary` column stays the tally it has always been; a line frozen
+   * into that JSON at completion would be copy no bank edit could ever reach
+   * again. Seeded by the SESSION id, so the completion response and every
+   * later read of the same session agree, exactly as an attempt's reaction is
+   * seeded by the attempt id.
+   */
+  coachReaction: coachReactionSchema.nullable(),
 });
 
 /**

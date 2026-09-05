@@ -1,6 +1,7 @@
 import { createZodDto } from 'nestjs-zod';
 import { z } from 'zod';
 
+import { coachReactionSchema } from '../../ai/dto/coach-reaction.dto';
 import { gradingVerdictSchema, GRADING_FAILURE_CAUSES } from '../grading';
 import { practiceQuestionSchema } from './practice-question.dto';
 
@@ -276,6 +277,32 @@ export const practiceAttemptSchema = z.object({
 
   /** See {@link practiceAnswerSnapshotSchema}. Frozen, never re-resolved. */
   answerSnapshot: practiceAnswerSnapshotSchema,
+
+  // ---------------------------------------------------------------------------
+  // The coach's reaction (issue #320, epic #305 / E14)
+  // ---------------------------------------------------------------------------
+  //
+  // ON THE ATTEMPT ITSELF, NOT ONLY ON THE `POST .../attempts` WRAPPER, and
+  // that placement is the whole point rather than a convenience. This schema
+  // is what `GET /api/practice/sessions/{id}` returns for every recorded
+  // attempt, so putting the field here is what makes the re-read path carry a
+  // reaction at all — and the re-read path is where
+  // `docs/specs/coach-personality.md` §7's determinism guarantee is actually
+  // observable: the same attempt, live and on the summary screen, shows the
+  // same line. A field only on the immediate response would have made that
+  // guarantee untestable and, for a learner, untrue.
+  //
+  // NOT PERSISTED. No column is added to `practice_attempts` for it, and none
+  // will be — see `coach-reaction.dto.ts`'s header and §9. It is derived, on
+  // every read, from the row's own `outcome`/`gradingMethod`/`failureCause`,
+  // the learner's persona setting, and the row's id as the seed.
+  //
+  // `null` when the learner has turned reactions off (`coach.reactions ===
+  // false`). A client renders NOTHING for that — not a placeholder, and not a
+  // reserved empty region.
+
+  /** One line in the learner's chosen voice, or null. See above. */
+  coachReaction: coachReactionSchema.nullable(),
 });
 
 export type PracticeSnapshotAnswer = z.infer<typeof practiceSnapshotAnswerSchema>;
