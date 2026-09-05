@@ -179,6 +179,147 @@ import { closeDbPool, countStorageObjectsUploadedBy } from '../helpers/db';
 // rung 1, both content-independent of which of the ~100 seeded questions a
 // Quick 5 happens to draw.
 // =============================================================================
+//
+// =============================================================================
+// E13 ADDITIONS (issue #314, epic #304 "Conversation mode — hands-free
+// spoken practice") — everything from "TEST 8" onward, below "TEST 7"
+// =============================================================================
+//
+// Five scenarios, per the issue: the one-tap Quick 5 journey (with an
+// INSTRUMENTED tap count, not an eyeballed one), barge-in over the question,
+// a wrong answer spoken back and re-listened to exactly once, "Type instead"
+// reachable at every phase of the loop, and a mic-permission denial that
+// exits the loop both spoken and rendered. `docs/specs/conversation-mode.md`
+// is the design checked against; `apps/web/src/hooks/useConversationSession.ts`
+// and `useVoiceActivity.ts` are the source read directly, exactly as this
+// file's own #114/#289 header states for the six scenarios above it.
+//
+// -----------------------------------------------------------------------------
+// WHAT "ONE TAP" MEANS HERE, PRECISELY
+// -----------------------------------------------------------------------------
+//
+// Choosing Voice does not by itself arm the loop — that is #313's own SHIPPED
+// behaviour, verified by reading `PracticeSessionPage.tsx` rather than
+// assumed from the epic text's first draft. With `voice.conversationMode`
+// already stored as `true` — the learner's persisted preference from a prior
+// session, set here with one `PATCH /api/user-settings` call BEFORE the page
+// ever loads, exactly as a real returning learner's preference already is —
+// the session screen lands in Voice mode by itself and shows `Start
+// hands-free`. THAT is the one tap: everything from the moment a learner
+// reaches a practice session onward, for the rest of that session, happens
+// without another. Reaching the session in the first place (`Start a Quick
+// 5` on `/practice`) is a separate, ordinary action this file does not fold
+// into the count — the claim under test is about ANSWERING a session
+// hands-free, not about starting one, which is also why the sibling Vitest
+// coverage in `PracticeSessionPage.conversation.test.tsx` starts from an
+// already-mounted session page rather than from `/practice`.
+//
+// The tap is INSTRUMENTED, not eyeballed: a `click` listener installed on
+// `document` (capture phase, so nothing downstream can hide a tap from it)
+// counts every real click that reaches the page, and the count is reset the
+// moment the session screen is ready — after `Start a Quick 5`, before
+// `Start hands-free` — so what is asserted is "the rest of this session took
+// exactly one tap", read back from the browser's own count rather than
+// trusted from this file's own script only calling `.click()` once.
+//
+// -----------------------------------------------------------------------------
+// THE ONE PRODUCT FILE THIS ISSUE TOUCHED, AND WHY
+// -----------------------------------------------------------------------------
+//
+// `useVoiceActivity.ts` already exposes `createLevelSource` — an injectable
+// seam built for exactly this (`docs/specs/conversation-mode.md` §16: "What
+// CI *can* verify: the state machine, driven by synthetic levels"), and
+// covered from that angle by `useVoiceActivity.test.ts`. But
+// `PracticeSessionPage.tsx` never threaded that seam through to a caller: it
+// always took the hook's own default (the real `AnalyserNode` tap), so a
+// BROWSER test — this file — had no way to drive the loop past
+// `speakingQuestion` short of a real, audible microphone and a real human
+// voice, which §16 already states this repository's automated suites cannot
+// reproduce.
+//
+// `getTestVoiceActivityLevelSource()` (`PracticeSessionPage.tsx`, added by
+// this issue) closes that one gap: `import.meta.env.PROD` false AND
+// `window.__oathpathTestVoiceLevelSource` set (by
+// `installConversationTestSeam` below, via `page.addInitScript`, before this
+// page's first render) is read and threaded straight into `useVoiceActivity`'s
+// existing option. Every other path — every real deployment, and any test
+// that never sets the global — sees `undefined`, and the hook behaves
+// exactly as it always has. This is the ONE product-code change this issue
+// makes; everything else here is test-only. It is called out again, in full,
+// in this file's own final report.
+//
+// -----------------------------------------------------------------------------
+// THE BROWSER'S OWN VOICE IS STUBBED TOO, AND FOR THE SAME REASON THE
+// MICROPHONE ALREADY IS
+// -----------------------------------------------------------------------------
+//
+// `speakNudge` and `QuestionAudio`'s browser path both call
+// `window.speechSynthesis.speak(...)` — real Chromium's own text-to-speech
+// engine, which a CI container commonly has no voices registered for at all,
+// making a call into it either silently do nothing or behave differently
+// machine to machine. This file does not test whether synthesised speech is
+// audible or intelligible — nothing here could, and §16 says so outright for
+// the acoustic side of this epic. It tests whether the DRIVER calls `speak()`
+// with the right text at the right moment, and waits for that call to
+// resolve before moving on: exactly the claim §16 says a synthetic harness
+// CAN prove. `installConversationTestSeam` below replaces
+// `window.speechSynthesis` with the identical fake
+// `PracticeSessionPage.conversation.test.tsx` already uses (that file's own
+// header): `autoEnd: false` holds an utterance "live" until the test resolves
+// it, which is the only way a browser test can stand inside
+// `speakingQuestion` or `speakingAnswer` long enough to assert anything about
+// that phase.
+//
+// -----------------------------------------------------------------------------
+// WHY `page.waitForTimeout` APPEARS BELOW, AGAINST THIS DIRECTORY'S OWN GRAIN
+// -----------------------------------------------------------------------------
+//
+// Every wait below a fixed number of milliseconds is a wait against a REAL
+// timer inside `useVoiceActivity.ts`'s own state machine — the calibration
+// window, the onset sustain, the hangover, the barge-in arming delay — not a
+// wait for a network response Playwright's auto-retrying `expect(...)` could
+// poll for instead. Each constant here is named against the hook's own
+// exported constant it covers and is always comfortably LONGER than it, so a
+// slow CI tick cannot make a real state transition arrive before this file
+// starts looking for it.
+//
+// -----------------------------------------------------------------------------
+// HONEST LIMITS — WHAT TESTS 8-12 PROVE, AND WHAT THEY CANNOT
+// -----------------------------------------------------------------------------
+//
+// `docs/specs/conversation-mode.md` §16 states this plainly for the whole
+// epic and it applies unchanged to every one of Tests 8-12: "VAD calibration
+// and barge-in detection cannot be exercised against real audio in CI. There
+// is no microphone, no ambient noise, and no human voice in a CI runner."
+// Nothing below changes that. What Tests 8-12 verify is the STATE MACHINE —
+// `useVoiceActivity.ts`'s onset/hangover/barge-in transitions and
+// `useConversationSession.ts`'s driver logic — wired into a REAL browser, a
+// REAL `PracticeSessionPage`, and a REAL API, but fed a SYNTHETIC level
+// through the seam this issue added, and a SYNTHETIC voice through
+// `installConversationTestSeam`'s fake `speechSynthesis`. That proves:
+//
+//   * the driver arms/disarms the detector at the right phase transitions;
+//   * a sustained synthetic level crossing the calibrated bars produces the
+//     right event, at roughly the right time, and the right event produces
+//     the right transition;
+//   * barge-in genuinely cancels playback and starts recording rather than
+//     merely looking like it does from the DOM;
+//   * the retry budget, the one-tap claim, and "Type instead"'s reach are
+//     true against the real page, not merely against the Vitest sibling's
+//     mocked one.
+//
+// It does NOT prove, and cannot: that the ~300 ms ambient-floor calibration
+// (`VOICE_ACTIVITY_CALIBRATION_MS`) actually copes with a windy street; that
+// a real accent's onset is detected as promptly as a synthetic square wave's;
+// that the barge-in threshold is loud/long enough to feel deliberate rather
+// than accidental against a real phone speaker outdoors; or that
+// `window.speechSynthesis` sounds intelligible on a real device — this file
+// replaces that engine entirely rather than listening to it. Those claims
+// belong on the manual checklist §16 itself calls for: starting a session
+// outdoors or with background noise present, deliberately interrupting a
+// question mid-read by voice, and letting the onset window lapse with no
+// answer at all — none of which a CI runner can be asked to do honestly.
+// =============================================================================
 
 test.use({ permissions: ['microphone'] });
 
@@ -233,6 +374,268 @@ async function setVoiceMarker(page: Page, marker: string): Promise<void> {
   await page.evaluate((m) => {
     (window as unknown as { __oathpathVoiceMarker: string }).__oathpathVoiceMarker = m;
   }, marker);
+}
+
+// =============================================================================
+// E13's browser-side seam — installed with `page.addInitScript`, exactly like
+// `installFakeMediaRecorder` above. See this file's own E13 header for what
+// each of the three pieces below is for and why.
+// =============================================================================
+
+interface FakeSpeechUtterance {
+  text: string;
+  rate: number;
+  onstart: (() => void) | null;
+  onend: (() => void) | null;
+  onerror: ((event: { error: string }) => void) | null;
+}
+
+function installConversationTestSeam(): void {
+  const win = window as unknown as {
+    __oathpathVoiceLevel: number;
+    __oathpathTestVoiceLevelSource: (
+      stream: MediaStream,
+    ) => { read: () => number; close: () => void };
+    __oathpathSpeech: {
+      spoken: string[];
+      live: FakeSpeechUtterance[];
+      autoEnd: boolean;
+    };
+    __oathpathTapCount: number;
+  };
+
+  // ---- 1. The synthetic VAD level source -----------------------------------
+  // Read by `PracticeSessionPage.tsx`'s `getTestVoiceActivityLevelSource` and
+  // threaded into `useVoiceActivity`'s own `createLevelSource` option — see
+  // this file's own E13 header.
+  win.__oathpathVoiceLevel = 0;
+  win.__oathpathTestVoiceLevelSource = () => ({
+    read: () => win.__oathpathVoiceLevel,
+    close: () => {},
+  });
+
+  // ---- 2. The browser's own voice, held open on command --------------------
+  win.__oathpathSpeech = { spoken: [], live: [], autoEnd: true };
+
+  class FakeUtterance implements FakeSpeechUtterance {
+    text: string;
+    rate = 1;
+    onstart: (() => void) | null = null;
+    onend: (() => void) | null = null;
+    onerror: ((event: { error: string }) => void) | null = null;
+    constructor(text: string) {
+      this.text = text;
+    }
+  }
+
+  (window as unknown as { SpeechSynthesisUtterance: unknown }).SpeechSynthesisUtterance =
+    FakeUtterance;
+  (window as unknown as { speechSynthesis: unknown }).speechSynthesis = {
+    cancel: () => {
+      const interrupted = win.__oathpathSpeech.live;
+      win.__oathpathSpeech.live = [];
+      for (const utterance of interrupted) {
+        utterance.onerror?.({ error: 'canceled' });
+      }
+    },
+    speak: (utterance: FakeSpeechUtterance) => {
+      win.__oathpathSpeech.spoken.push(utterance.text);
+      utterance.onstart?.();
+      if (win.__oathpathSpeech.autoEnd) utterance.onend?.();
+      else win.__oathpathSpeech.live.push(utterance);
+    },
+  };
+
+  // ---- 3. The tap counter ---------------------------------------------------
+  win.__oathpathTapCount = 0;
+  document.addEventListener(
+    'click',
+    () => {
+      win.__oathpathTapCount += 1;
+    },
+    true,
+  );
+}
+
+/** Raise or lower the synthetic VAD level the fake `AnalyserNode` reports. */
+async function setVoiceLevel(page: Page, level: number): Promise<void> {
+  await page.evaluate((l) => {
+    (window as unknown as { __oathpathVoiceLevel: number }).__oathpathVoiceLevel = l;
+  }, level);
+}
+
+/** Hold (or stop holding) every utterance the fake voice is given next. */
+async function setSpeechAutoEnd(page: Page, autoEnd: boolean): Promise<void> {
+  await page.evaluate((value) => {
+    (
+      window as unknown as { __oathpathSpeech: { autoEnd: boolean } }
+    ).__oathpathSpeech.autoEnd = value;
+  }, autoEnd);
+}
+
+/** Let whatever is HELD finish, the way a real engine eventually does. */
+async function finishHeldSpeech(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const speech = (
+      window as unknown as {
+        __oathpathSpeech: { live: { onend: (() => void) | null }[] };
+      }
+    ).__oathpathSpeech;
+    const live = speech.live;
+    speech.live = [];
+    for (const utterance of live) utterance.onend?.();
+  });
+}
+
+/** Every utterance actually spoken, in order — including still-held ones. */
+async function spokenTexts(page: Page): Promise<string[]> {
+  return page.evaluate(
+    () =>
+      (window as unknown as { __oathpathSpeech: { spoken: string[] } }).__oathpathSpeech
+        .spoken,
+  );
+}
+
+/**
+ * How many utterances are currently HELD (`autoEnd: false`, never yet ended
+ * OR cancelled). Zero after a `cancel()` proves the hold was cleared by the
+ * cancel path — `onerror`, never `onend` — not merely that nothing NEW was
+ * spoken since.
+ */
+async function liveSpeechCount(page: Page): Promise<number> {
+  return page.evaluate(
+    () =>
+      (window as unknown as { __oathpathSpeech: { live: unknown[] } }).__oathpathSpeech
+        .live.length,
+  );
+}
+
+/** The number of real clicks that have reached the page since the last reset. */
+async function tapCount(page: Page): Promise<number> {
+  return page.evaluate(
+    () => (window as unknown as { __oathpathTapCount: number }).__oathpathTapCount,
+  );
+}
+
+async function resetTapCount(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    (window as unknown as { __oathpathTapCount: number }).__oathpathTapCount = 0;
+  });
+}
+
+/**
+ * Reject `getUserMedia` the way a real permission denial does — a
+ * `NotAllowedError` `DOMException` with no "dismiss" in its message, which
+ * `classifyGetUserMediaError` (`useAudioCapture.ts`) reads as
+ * `permission_denied` rather than `permission_dismissed`. Installed instead
+ * of relying on `playwright.config.ts`'s own `--use-fake-ui-for-media-stream`
+ * flag, which exists to AUTO-GRANT the prompt for every other spec in this
+ * suite — overriding `getUserMedia` at the JS layer is what lets exactly one
+ * test see a denial without a second Chromium project.
+ */
+function denyMicrophonePermission(): void {
+  Object.defineProperty(navigator, 'mediaDevices', {
+    configurable: true,
+    value: {
+      getUserMedia: () =>
+        Promise.reject(new DOMException('Permission denied', 'NotAllowedError')),
+    },
+  });
+}
+
+// -----------------------------------------------------------------------------
+// Real-time buffers over `useVoiceActivity.ts`'s own named exported constants
+// — always comfortably longer than the constant they cover. See this file's
+// own "WHY `page.waitForTimeout` APPEARS BELOW" header section.
+// -----------------------------------------------------------------------------
+
+/** > `VOICE_ACTIVITY_CALIBRATION_MS` (300 ms). */
+const CALIBRATION_SETTLE_MS = 600;
+/** > `VOICE_ACTIVITY_ONSET_SUSTAIN_MS` (120 ms). */
+const ONSET_HOLD_MS = 300;
+/** > `VOICE_ACTIVITY_HANGOVER_MS` (1,500 ms). */
+const HANGOVER_WAIT_MS = 1_900;
+/** > `VOICE_ACTIVITY_BARGE_IN_ARMING_MS` (500 ms). */
+const BARGE_IN_ARM_WAIT_MS = 800;
+/** > `VOICE_ACTIVITY_BARGE_IN_SUSTAIN_MS` (350 ms). */
+const BARGE_IN_HOLD_MS = 550;
+
+/**
+ * `CONVERSATION_NUDGE_RETRY` (`useConversationSession.ts`), copied rather
+ * than imported — this suite never imports frontend source, matching every
+ * other literal copy string quoted throughout this file.
+ */
+const CONVERSATION_NUDGE_RETRY = 'Say that again.';
+
+/**
+ * Speak, and drive the synthetic VAD through one full "the learner answered"
+ * turn: calibration settles, the level rises past onset and holds, then falls
+ * and stays down through the hangover. Ends with `endOfTurn` fired inside the
+ * page and the driver moving to `processing`.
+ *
+ * Also what a barge-in's OWN continuation needs, unchanged: `arm('listening')`
+ * always restarts calibration from `phase: 'calibrating'`
+ * (`useVoiceActivity.ts`'s own `arm()`), regardless of `alreadySpeaking` —
+ * that flag only decides whether the RECORDER starts immediately
+ * (`toListening`, `useConversationSession.ts`), not whether the DETECTOR
+ * already considers itself mid-turn. So the turn that follows a barge-in
+ * needs the identical calibrate-then-onset-then-hangover sequence a fresh
+ * question does, which is why `TEST 9` below calls this function directly
+ * after driving the barge-in itself rather than a separate, shorter helper.
+ */
+async function driveOneTurn(page: Page, marker: string): Promise<void> {
+  await setVoiceMarker(page, marker);
+  await page.waitForTimeout(CALIBRATION_SETTLE_MS);
+  await setVoiceLevel(page, 1);
+  await page.waitForTimeout(ONSET_HOLD_MS);
+  await setVoiceLevel(page, 0);
+  await page.waitForTimeout(HANGOVER_WAIT_MS);
+}
+
+/** The learner's own words, mid-question — armed only after the grace delay. */
+async function driveBargeIn(page: Page): Promise<void> {
+  await page.waitForTimeout(BARGE_IN_ARM_WAIT_MS);
+  await setVoiceLevel(page, 1);
+  await page.waitForTimeout(BARGE_IN_HOLD_MS);
+}
+
+/**
+ * Reach the session screen with `voice.conversationMode` already `true` (a
+ * `PATCH` the caller sends before ever loading the page — see
+ * `patchConversationMode`), then tap `Start hands-free` — THE ONE TAP this
+ * file's own E13 header explains. Returns the session id.
+ */
+async function startHandsFree(page: Page): Promise<string> {
+  const sessionId = await startQuickFive(page);
+  await expect(page.getByRole('heading', { level: 2 })).toBeVisible();
+  // Reset AFTER reaching the session screen, BEFORE the one tap this file
+  // measures — "Start a Quick 5" on `/practice` is a separate action; see the
+  // header.
+  await resetTapCount(page);
+  const start = page.getByRole('button', { name: /start hands-free/i });
+  await expect(start).toBeVisible();
+  await start.click();
+  await expect(page.getByText('Asking you the question.', { exact: true })).toBeVisible();
+  return sessionId;
+}
+
+/** `PATCH /api/user-settings` — the `voice.conversationMode` preference alone. */
+async function patchConversationMode(
+  page: Page,
+  accessToken: string,
+  value: boolean | null,
+): Promise<void> {
+  const response = await page.request.patch('/api/user-settings', {
+    headers: { Authorization: `Bearer ${accessToken}` },
+    data: { voice: { conversationMode: value } },
+    failOnStatusCode: false,
+  });
+  expect(
+    response.ok(),
+    `PATCH /api/user-settings (voice.conversationMode) — ${await response
+      .text()
+      .catch(() => '')}`,
+  ).toBe(true);
 }
 
 // -----------------------------------------------------------------------------
@@ -1082,6 +1485,436 @@ test.describe('Voice foundation (issue #114), epic #58 (E9)', () => {
     ).toBe(0);
   });
 
+  // ===========================================================================
+  // TEST 8 (E13 scenario 1) — the one-tap Quick 5 journey, end to end, with an
+  // INSTRUMENTED tap count of exactly one
+  // ===========================================================================
+  //
+  // Depends on Test 2's `transcribe`/`speak` binding, same as Tests 3-7 —
+  // `test.describe.configure({ mode: 'serial' })` is what makes that safe.
+
+  test('conversation mode: one tap answers a whole Quick 5, an instrumented tap count of exactly one', async ({
+    page,
+  }) => {
+    // Five real turns, each paying `CALIBRATION_SETTLE_MS` +
+    // `ONSET_HOLD_MS` + `HANGOVER_WAIT_MS` (~2.8 s) plus a real network round
+    // trip and `CONVERSATION_ADVANCE_PAUSE_MS` (900 ms) — comfortably over
+    // this file's own default budget.
+    test.setTimeout(90_000);
+
+    await page.addInitScript(installConversationTestSeam);
+    await page.addInitScript(installFakeMediaRecorder);
+
+    const email = testEmail('conv-onetap');
+    const { accessToken } = await seedOnboarding(page, { email, onboarding: 'full' });
+    await page.waitForURL('/', { timeout: 10000 });
+    const headers = { Authorization: `Bearer ${accessToken}` };
+    const userId = await fetchUserId(page, headers);
+    createdUserIds.push(userId);
+
+    // THE LEARNER'S PERSISTED PREFERENCE, set before the page ever loads —
+    // see this file's own "WHAT 'ONE TAP' MEANS HERE" header section.
+    await patchConversationMode(page, accessToken, true);
+
+    const sessionId = await startHandsFree(page);
+
+    for (let n = 1; n <= 5; n += 1) {
+      const isLast = n === 5;
+      const { acceptedAnswer } = await currentQuestionAndAnswer(page, headers, sessionId);
+
+      await driveOneTurn(page, `TRANSCRIPT:${acceptedAnswer}`);
+      await expect(page.getByText('Working out how that went.', { exact: true })).toBeVisible();
+      await expect(page.getByText('Telling you the answer.', { exact: true })).toBeVisible({
+        timeout: VERDICT_REGION_TIMEOUT,
+      });
+      // The accepted answer really was READ ALOUD, not merely graded —
+      // `gradeTranscript`'s `say(grade.spokenAnswer, 'answer')` lands a beat
+      // after the phase text itself (a further React commit), so this is
+      // polled rather than asserted the instant the phase text appears.
+      await expect
+        .poll(async () => spokenTexts(page))
+        .toEqual(expect.arrayContaining([acceptedAnswer]));
+
+      if (isLast) {
+        await expect(
+          page.getByText('That was the last question. Conversation mode has stopped.', {
+            exact: true,
+          }),
+        ).toBeVisible({ timeout: VERDICT_REGION_TIMEOUT });
+      } else {
+        await expect(page.getByText(`Question ${n + 1} of 5`, { exact: true })).toBeVisible({
+          timeout: VERDICT_REGION_TIMEOUT,
+        });
+      }
+    }
+
+    // THE INSTRUMENTED CLAIM: everything from `Start hands-free` to the fifth
+    // question's grade took exactly the one tap that started it.
+    expect(await tapCount(page)).toBe(1);
+
+    const detail = await fetchSessionDetail(page, headers, sessionId);
+    expect(detail.progress.answered).toBe(5);
+    expect(detail.attempts).toHaveLength(5);
+    for (const attempt of detail.attempts) {
+      expect(attempt.inputMode).toBe('spoken');
+      expect(attempt.outcome).toBe('correct');
+      expect(attempt.promptMode).toBe('heard');
+    }
+    // NEVER completed via the API. This file's own tap count deliberately
+    // stops at the loop's own exit — before the separate "Finish and see
+    // your summary" tap, which is an ordinary action outside the hands-free
+    // claim under test, exactly as the header states.
+    expect(detail.session.status).toBe('in_progress');
+
+    expect(
+      await countStorageObjectsUploadedBy([userId]),
+      'no storage_objects row for a whole session answered entirely hands-free',
+    ).toBe(0);
+  });
+
+  // ===========================================================================
+  // TEST 9 (E13 scenario 2) — barge-in over the question cancels playback and
+  // starts recording
+  // ===========================================================================
+
+  test('conversation mode: barge-in over the question cancels playback and starts recording', async ({
+    page,
+  }) => {
+    test.setTimeout(60_000);
+
+    await page.addInitScript(installConversationTestSeam);
+    await page.addInitScript(installFakeMediaRecorder);
+
+    const email = testEmail('conv-bargein');
+    const { accessToken } = await seedOnboarding(page, { email, onboarding: 'full' });
+    await page.waitForURL('/', { timeout: 10000 });
+    const headers = { Authorization: `Bearer ${accessToken}` };
+    const userId = await fetchUserId(page, headers);
+    createdUserIds.push(userId);
+
+    await patchConversationMode(page, accessToken, true);
+
+    // HOLD the question open — the whole point of this scenario is to
+    // interrupt it before it would ever finish on its own.
+    await setSpeechAutoEnd(page, false);
+
+    const sessionId = await startHandsFree(page);
+    const { questionId, acceptedAnswer } = await currentQuestionAndAnswer(
+      page,
+      headers,
+      sessionId,
+    );
+
+    // The question is genuinely still being read: `speakingQuestion`'s own
+    // phase text has not moved on to `Listening`, and the fake voice is
+    // holding exactly one utterance live.
+    await expect(page.getByText('Asking you the question.', { exact: true })).toBeVisible();
+    await expect(
+      page.getByText('Listening. Answer when you are ready.', { exact: true }),
+    ).toHaveCount(0);
+    await expect.poll(async () => spokenTexts(page)).toHaveLength(1);
+
+    await setVoiceMarker(page, `TRANSCRIPT:${acceptedAnswer}`);
+    await driveBargeIn(page);
+
+    // PLAYBACK CANCELLED. The held utterance never reached its own `onend` —
+    // `QuestionAudio` deliberately reports nothing for a cancel
+    // (`useConversationSession.ts`'s own header) — so the ONLY way the loop
+    // could have moved past `speakingQuestion` here is the barge-in path
+    // itself: `speech.stop()` (our fake voice's `cancel()`, which empties
+    // `live` via `onerror`, never `onend`) followed by `toListening(true)`.
+    await expect(
+      page.getByText('Listening. Answer when you are ready.', { exact: true }),
+    ).toBeVisible();
+    // The proof this was a CANCEL, not a second utterance quietly finishing
+    // on its own: `spoken` still holds only the one question (no second
+    // entry), AND the held list is now empty — `cancel()`'s own effect,
+    // never `onend`'s.
+    await expect.poll(async () => (await spokenTexts(page)).length).toBe(1);
+    await expect.poll(async () => liveSpeechCount(page)).toBe(0);
+
+    // RECORDING ALREADY STARTED (`alreadySpeaking` skips the onset wait
+    // entirely — `toListening(true)`, `useConversationSession.ts`). What the
+    // VAD does NOT skip is its own recalibration: `arm('listening')` always
+    // restarts at `phase: 'calibrating'` regardless of `alreadySpeaking` (see
+    // `driveOneTurn`'s own doc comment) — so the turn that follows a
+    // barge-in needs the identical calibrate → onset → hangover sequence a
+    // fresh question does, driven here by the same helper Test 8 uses.
+    await driveOneTurn(page, `TRANSCRIPT:${acceptedAnswer}`);
+    await expect(page.getByText('Working out how that went.', { exact: true })).toBeVisible();
+    await expect(page.getByText('Telling you the answer.', { exact: true })).toBeVisible({
+      timeout: VERDICT_REGION_TIMEOUT,
+    });
+
+    const detail = await fetchSessionDetail(page, headers, sessionId);
+    const attempt = detail.attempts.find((a) => a.questionId === questionId);
+    if (!attempt) {
+      throw new Error('barge-in: the recording that followed it was never graded');
+    }
+    expect(attempt.inputMode).toBe('spoken');
+    expect(attempt.transcript).toBe(acceptedAnswer);
+    expect(attempt.outcome).toBe('correct');
+
+    expect(await countStorageObjectsUploadedBy([userId])).toBe(0);
+  });
+
+  // ===========================================================================
+  // TEST 10 (E13 scenario 3) — a wrong answer is spoken back and re-listened
+  // to exactly once; a second miss does not loop
+  // ===========================================================================
+
+  test('conversation mode: a wrong answer is re-listened to exactly once, and a second miss moves on', async ({
+    page,
+  }) => {
+    test.setTimeout(60_000);
+
+    await page.addInitScript(installConversationTestSeam);
+    await page.addInitScript(installFakeMediaRecorder);
+
+    const email = testEmail('conv-retry');
+    const { accessToken } = await seedOnboarding(page, { email, onboarding: 'full' });
+    await page.waitForURL('/', { timeout: 10000 });
+    const headers = { Authorization: `Bearer ${accessToken}` };
+    const userId = await fetchUserId(page, headers);
+    createdUserIds.push(userId);
+
+    await patchConversationMode(page, accessToken, true);
+
+    const sessionId = await startHandsFree(page);
+    const { questionId } = await currentQuestionAndAnswer(page, headers, sessionId);
+
+    // FIRST MISS. `answer-matching.ts`'s exact-only rung 1 (this file's own
+    // header) means this cannot accidentally match any accepted answer, for
+    // any question this Quick 5 happened to draw.
+    await driveOneTurn(page, 'TRANSCRIPT:this is not the right answer at all');
+    await expect(page.getByText('Telling you the answer.', { exact: true })).toBeVisible({
+      timeout: VERDICT_REGION_TIMEOUT,
+    });
+    // THE WRONG ANSWER IS "SPOKEN BACK": the accepted answer is read aloud
+    // even though the attempt missed — `gradeTranscript` reads
+    // `grade.spokenAnswer` regardless of `outcome` — followed by the ONE
+    // retry nudge.
+    await expect
+      .poll(async () => spokenTexts(page))
+      .toEqual(expect.arrayContaining([CONVERSATION_NUDGE_RETRY]));
+
+    // RE-LISTENED TO: the loop returns to `listening` for the SAME question,
+    // not the next one.
+    await expect(
+      page.getByText('Listening. Answer when you are ready.', { exact: true }),
+    ).toBeVisible();
+    const afterFirstMiss = await fetchSessionDetail(page, headers, sessionId);
+    expect(afterFirstMiss.nextQuestion?.id).toBe(questionId);
+
+    // SECOND MISS — a DIFFERENT wrong transcript, so the retry is a genuine
+    // second attempt rather than a resubmission of the first.
+    await driveOneTurn(page, 'TRANSCRIPT:still not the right answer either');
+    await expect(page.getByText('Telling you the answer.', { exact: true })).toBeVisible({
+      timeout: VERDICT_REGION_TIMEOUT,
+    });
+
+    // A SECOND MISS DOES NOT LOOP: the loop moves on to the next question
+    // rather than nudging a second "Say that again." — the retry budget is
+    // ONE per question (`CONVERSATION_RETRY_BUDGET`,
+    // `useConversationSession.ts`), shared across every reason a turn can
+    // miss.
+    await expect(page.getByText(`Question 2 of 5`, { exact: true })).toBeVisible({
+      timeout: VERDICT_REGION_TIMEOUT,
+    });
+    const spoken = await spokenTexts(page);
+    expect(spoken.filter((text) => text === CONVERSATION_NUDGE_RETRY)).toHaveLength(1);
+
+    const finalDetail = await fetchSessionDetail(page, headers, sessionId);
+    const attemptsForQuestion = finalDetail.attempts.filter((a) => a.questionId === questionId);
+    expect(attemptsForQuestion).toHaveLength(2);
+    const original = attemptsForQuestion.find((a) => a.retryOfAttemptId === null);
+    const retry = attemptsForQuestion.find((a) => a.retryOfAttemptId !== null);
+    if (!original || !retry) {
+      throw new Error('expected exactly one original and one retry attempt');
+    }
+    expect(retry.retryOfAttemptId).toBe(original.id);
+    // ONE QUESTION, not two: the pair supersedes to a single answered count,
+    // exactly as Test 4's own assertion already establishes for the
+    // hand-driven retry.
+    expect(finalDetail.progress.answered).toBe(1);
+
+    expect(await countStorageObjectsUploadedBy([userId])).toBe(0);
+  });
+
+  // ===========================================================================
+  // TEST 11 (E13 scenario 4) — "Type instead" is reachable at every phase of
+  // the loop
+  // ===========================================================================
+  //
+  // Five tests, one per named `ConversationPhase`
+  // (`useConversationSession.ts`), generated by a loop rather than typed out
+  // five times — the Vitest sibling
+  // (`PracticeSessionPage.conversation.test.tsx`) does the identical thing
+  // with `it.each`.
+
+  const CONVERSATION_PHASES = [
+    'speakingQuestion',
+    'listening',
+    'processing',
+    'speakingAnswer',
+    'advancing',
+  ] as const;
+
+  /**
+   * Drive the loop to exactly one named phase and leave it there — the same
+   * shape as the Vitest sibling's own `driveTo`, over real timers instead of
+   * fake ones. `autoEnd` is left `false` for the WHOLE function: the question
+   * is held for `speakingQuestion`/`listening` and beyond, and the accepted
+   * answer is held too once grading reaches it, which is exactly what
+   * `speakingAnswer` needs and costs nothing for `advancing` (`finishHeldSpeech`
+   * is called a second time to reach it).
+   */
+  async function driveConversationToPhase(
+    page: Page,
+    phase: (typeof CONVERSATION_PHASES)[number],
+    marker: string,
+  ): Promise<void> {
+    await setSpeechAutoEnd(page, false);
+    await startHandsFree(page);
+    if (phase === 'speakingQuestion') return;
+
+    await finishHeldSpeech(page);
+    await expect(
+      page.getByText('Listening. Answer when you are ready.', { exact: true }),
+    ).toBeVisible();
+    if (phase === 'listening') return;
+
+    await setVoiceMarker(page, marker);
+    await page.waitForTimeout(CALIBRATION_SETTLE_MS);
+    await setVoiceLevel(page, 1);
+    await page.waitForTimeout(ONSET_HOLD_MS);
+    await setVoiceLevel(page, 0);
+    await page.waitForTimeout(HANGOVER_WAIT_MS);
+    await expect(page.getByText('Working out how that went.', { exact: true })).toBeVisible();
+    if (phase === 'processing') return;
+
+    // Grading is a real network round trip this file does not race —
+    // `processing` above is the one phase where "Type instead" arriving
+    // mid-flight is a genuine, acknowledged race (see this test's own
+    // comment at that call site), not one this helper tries to win.
+    await expect(page.getByText('Telling you the answer.', { exact: true })).toBeVisible({
+      timeout: VERDICT_REGION_TIMEOUT,
+    });
+    if (phase === 'speakingAnswer') return;
+
+    await finishHeldSpeech(page);
+    await expect(
+      page.getByText('Moving on to the next question.', { exact: true }),
+    ).toBeVisible();
+    // 'advancing' — return immediately. The caller must act before
+    // `CONVERSATION_ADVANCE_PAUSE_MS` (900 ms) elapses and `advance()` fires.
+  }
+
+  for (const phase of CONVERSATION_PHASES) {
+    test(`conversation mode: "Type instead" from ${phase} leaves the loop, keeps the session`, async ({
+      page,
+    }) => {
+      test.setTimeout(60_000);
+
+      await page.addInitScript(installConversationTestSeam);
+      await page.addInitScript(installFakeMediaRecorder);
+
+      const email = testEmail(`conv-type-${phase}`);
+      const { accessToken } = await seedOnboarding(page, { email, onboarding: 'full' });
+      await page.waitForURL('/', { timeout: 10000 });
+      const headers = { Authorization: `Bearer ${accessToken}` };
+      const userId = await fetchUserId(page, headers);
+      createdUserIds.push(userId);
+
+      await patchConversationMode(page, accessToken, true);
+
+      await driveConversationToPhase(page, phase, 'TRANSCRIPT:a wrong answer, deliberately');
+
+      // A NOTE ON `processing`, HONESTLY: `handleTypeInstead` calls
+      // `conversation.stop('typing')`, which bumps the driver's own turn
+      // token BEFORE any pending `submit()` continuation checks it
+      // (`isCurrent(turn)`, `useConversationSession.ts`) — so a transcribe/
+      // grade call already in flight when this tap lands may still reach the
+      // server and record a real attempt even though the CLIENT never acts
+      // on it. That is the identical race the Vitest sibling's own phase
+      // loop does not resolve either (it asserts CLIENT-rendered invariants,
+      // never a server call count, for this exact reason) — this test keeps
+      // the same scope rather than asserting something structurally racy.
+      await page.getByRole('button', { name: /type instead/i }).click();
+
+      // BACK ON THE TYPED CONTROL — the session, the question on screen and
+      // the counter all come from the server and none of them moved, because
+      // "Type instead" never calls `handleNext`.
+      await expect(page.getByRole('button', { name: /^text$/i })).toHaveAttribute(
+        'aria-pressed',
+        'true',
+      );
+      await expect(page.getByLabel('Your answer')).toBeVisible();
+      await expect(page.getByRole('button', { name: /start hands-free/i })).toHaveCount(0);
+      await expect(page.getByRole('button', { name: /^stop$/i })).toHaveCount(0);
+      // A SILENT EXIT — the learner asked for it; being told what you just
+      // did is not information (`useConversationSession.ts`'s own header).
+      await expect(page.getByText(/conversation mode has stopped/i)).toHaveCount(0);
+
+      expect(await countStorageObjectsUploadedBy([userId])).toBe(0);
+    });
+  }
+
+  // ===========================================================================
+  // TEST 12 (E13 scenario 5) — a mic-permission denial exits the loop with a
+  // spoken AND a rendered reason
+  // ===========================================================================
+
+  test('conversation mode: a mic-permission denial exits the loop with a spoken and a rendered reason', async ({
+    page,
+  }) => {
+    await page.addInitScript(installConversationTestSeam);
+    await page.addInitScript(denyMicrophonePermission);
+
+    const email = testEmail('conv-mic-denied');
+    const { accessToken } = await seedOnboarding(page, { email, onboarding: 'full' });
+    await page.waitForURL('/', { timeout: 10000 });
+    const headers = { Authorization: `Bearer ${accessToken}` };
+    const userId = await fetchUserId(page, headers);
+    createdUserIds.push(userId);
+
+    await patchConversationMode(page, accessToken, true);
+
+    await startQuickFive(page);
+    await expect(page.getByRole('heading', { level: 2 })).toBeVisible();
+    await resetTapCount(page);
+
+    const start = page.getByRole('button', { name: /start hands-free/i });
+    await expect(start).toBeVisible();
+    await start.click();
+
+    // RENDERED — the exact message-plus-remedy sentence `describeCaptureProblem`
+    // gives `permission_denied` (`useAudioCapture.ts`'s own `CAPTURE_PROBLEMS`
+    // table), joined the same way `useConversationSession.ts`'s own `finish()`
+    // joins it for the spoken line below: `${message} ${remedy}`.
+    const NOTICE =
+      'Your browser is blocking the microphone for this site. ' +
+      'Open the site permissions from the icon in your address bar, allow the microphone, then reload this page.';
+    await expect(page.getByText(NOTICE, { exact: true })).toBeVisible({
+      timeout: VERDICT_REGION_TIMEOUT,
+    });
+
+    // SPOKEN — the IDENTICAL sentence, through the driver's own nudge voice
+    // (`say()`, `useConversationSession.ts`): a walking learner who cannot
+    // read the screen hears the exact same reason as one who can.
+    await expect.poll(async () => spokenTexts(page)).toEqual(expect.arrayContaining([NOTICE]));
+
+    // THE LOOP ACTUALLY STOPPED — `Start hands-free` is back, not `Stop`.
+    await expect(page.getByRole('button', { name: /start hands-free/i })).toBeVisible();
+    await expect(page.getByRole('button', { name: /^stop$/i })).toHaveCount(0);
+
+    // CAUGHT AT THE VERY FIRST DEVICE REQUEST — never mid-turn, and never
+    // more than the one tap that started the attempt.
+    expect(await tapCount(page)).toBe(1);
+
+    expect(await countStorageObjectsUploadedBy([userId])).toBe(0);
+  });
+
   test.afterAll(async () => {
     // A whole-file sweep across every learner this spec created, on top of
     // each test's own per-user check — cheap, and it catches a leak that
@@ -1102,11 +1935,26 @@ test.describe('Voice foundation (issue #114), epic #58 (E9)', () => {
 // edited `playwright.config.ts` (the two Chromium flags) and
 // `tests/e2e/package.json` / `package-lock.json` (the `pg` dependency the
 // database helper needs). Issue #289 (epic #280 / E12, this file's own Test 7)
-// adds one test to THIS file and touches nothing else in `tests/e2e/` — no new
-// helper, no config change, no new dependency. Every other file under
-// `tests/e2e/` remains untouched, including the OAuth, mock-interview, memory,
-// habit, civics-learn, journey-shell and practice-session specs — none of
-// them is imported by, or shares any mutable state with, this file beyond the
-// same `system_settings.key = 'ai'` row `ai-evaluation.spec.ts` already
-// documents writing to.
+// added one test to THIS file and touched nothing else in `tests/e2e/` — no new
+// helper, no config change, no new dependency.
+//
+// Issue #314 (epic #304 / E13, Tests 8-12 above) adds five tests and their own
+// helpers to THIS file, touches no other file under `tests/e2e/`, and needs no
+// new dependency, config change, or Chromium launch flag — the fake
+// microphone and its two launch flags are unchanged and already sufficient.
+// It DOES touch exactly one file OUTSIDE `tests/e2e/`:
+// `apps/web/src/pages/PracticeSessionPage.tsx` gained
+// `getTestVoiceActivityLevelSource()`, a `!import.meta.env.PROD`-gated read of
+// `window.__oathpathTestVoiceLevelSource` threaded into `useVoiceActivity`'s
+// own pre-existing `createLevelSource` option — this file's own "THE ONE
+// PRODUCT FILE THIS ISSUE TOUCHED" header section states why, in full, and it
+// is the one deviation from this issue's own "no product code" rule, called
+// out there as the explicitly-permitted exception (a minimal, test-only VAD
+// level-source seam) rather than smuggled in silently.
+//
+// Every other file under `tests/e2e/` remains untouched, including the OAuth,
+// mock-interview, memory, habit, civics-learn, journey-shell and
+// practice-session specs — none of them is imported by, or shares any mutable
+// state with, this file beyond the same `system_settings.key = 'ai'` row
+// `ai-evaluation.spec.ts` already documents writing to.
 // =============================================================================
