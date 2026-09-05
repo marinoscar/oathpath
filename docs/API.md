@@ -1232,11 +1232,12 @@ Returns totals plus breakdowns by model and by the role each call served.
 
 ### AI Speech
 
-Issue #95, epic #58 (E9 "Voice foundation"). Two routes, both `@Auth()` with
-**no permissions and no user-id parameter** — the caller is always resolved
-from `@CurrentUser('id')`, exactly like every other route in this section:
-every authenticated learner speaks with their own voice on their own key, and
-gating either route would leave a Viewer unable to practice at all.
+Issue #95, epic #58 (E9 "Voice foundation"), plus `GET /ai/speech/voices`
+(issue #283, epic #280). Three routes, all `@Auth()` with **no permissions and
+no user-id parameter** — the caller is always resolved from
+`@CurrentUser('id')`, exactly like every other route in this section: every
+authenticated learner speaks with their own voice on their own key, and gating
+any of them would leave a Viewer unable to practice at all.
 
 **Binding `transcribe` or `speak` is entirely optional and never affects
 `systemReady`.** See
@@ -1246,8 +1247,8 @@ each role costs and controls. Both routes run inference on the **caller's**
 own key, so usage lands on that learner's own `GET /ai/usage`, under
 `roleKey: 'transcribe'` / `roleKey: 'speak'` — never on the server credential.
 
-**Both responses are discriminated unions on `status`, and both are always
-HTTP 200** — `ok` (transcribe only), `unavailable` (`{ cause, role }`), or
+**The two POST responses are discriminated unions on `status`, and both are
+always HTTP 200** — `ok` (transcribe only), `unavailable` (`{ cause, role }`), or
 `failed` (`{ errorCode, error }`). A non-2xx here would discard the one fact
 either response exists to carry: *why* no answer or no audio was produced,
 which a caller (`AiNotReady`-style UI) needs to render correctly. `cause` is
@@ -1260,6 +1261,9 @@ switch on `status`** (and, for synthesize's success case, on
 §9.1 for the client-side contract this shape requires, and for issue #277,
 where a flat client-side type that skipped this became a JavaScript error
 on a learner's screen.
+
+**`GET /ai/speech/voices` is deliberately NOT one of those unions** — see its
+own entry below. It runs no inference, so there is no `cause` it could carry.
 
 #### POST /ai/speech/transcribe
 Multipart upload, one audio file in the `audio` field (optional
@@ -1289,6 +1293,58 @@ HTTP 200.
 This is an upgrade over the browser's built-in `speechSynthesis`, which is
 the default everywhere and needs no configuration — an unbound `speak` is
 not a degraded state and nothing renders a warning for it.
+
+#### GET /ai/speech/voices
+Issue #283, epic #280. The voices the configured provider can speak in, so a
+client can render a voice picker. **No query parameters, no request body.**
+
+**A plain JSON body, not a `status` union, and the only route in this group
+that is not one.** Nothing here can be "unavailable" in the
+`AiUnavailableCause` sense: the route makes no inference call, resolves no
+credential, spends nobody's key and writes no `ai_usage_events` row — it reads
+a settings row and a list the provider hard-codes about itself. There is no
+state a `cause` would describe.
+
+**Response:**
+```json
+{
+  "data": {
+    "voices": [
+      {
+        "id": "alloy",
+        "label": "Alloy",
+        "description": "Neutral and even — the easiest to listen to for a long session."
+      }
+    ],
+    "speakBound": true,
+    "defaultVoice": "alloy"
+  }
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `voices[].id` | The provider's own voice id. Send it back verbatim as `voice` on `POST /ai/speech/synthesize`. |
+| `voices[].label` | User-facing name. |
+| `voices[].description` | One short sentence describing how the voice sounds. |
+| `speakBound` | Whether an administrator has bound a model to the `speak` role — the same fact `GET /ai/status`'s `unboundRoles` carries for `'speak'`, never `systemReady`, which is computed over the text roles only. |
+| `defaultVoice` | The id used when a synthesis request names no voice, or `null` when there are no voices. A member of `voices` whenever it is not `null`. |
+
+**`voices: []` and `speakBound: false` are both ordinary, and neither is an
+error.** An empty list means the configured provider has no text-to-speech at
+all; `speakBound: false` means the premium path is not configured on this
+deployment, which is the state of every fresh install. In both cases the
+browser's own `speechSynthesis` still reads every question aloud
+([`docs/specs/voice.md`](specs/voice.md#2-browser-speechsynthesis-is-the-default-text-to-speech)
+§2), so a client should offer browser voices and **render no warning**.
+
+**The list is served here rather than duplicated in the web bundle** on
+purpose: the accepted set belongs to the provider, so a copy would be correct
+the day it was written and silently wrong the day the provider added or renamed
+a voice. This is the same reasoning `GET /ai-settings/models` serves the
+model-role registry for, and the reason
+`POST /ai/speech/synthesize` validates a voice id's *shape* but never its
+membership.
 
 ---
 

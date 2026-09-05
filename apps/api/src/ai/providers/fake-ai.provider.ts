@@ -21,6 +21,7 @@ import type {
   AiTranscriptionRequest,
   AiTranscriptionResult,
   AiUsage,
+  AiVoiceDescriptor,
 } from '../ai.types';
 import type { AiCapabilitySet } from './ai-provider.interface';
 import { classifyModel, parseGeneration } from './model-classifier';
@@ -411,6 +412,57 @@ const FAKE_SPEECH_BYTES: readonly number[] = [
 ];
 
 /**
+ * The voices this fake claims to speak in (#283, epic #280).
+ *
+ * A SMALL FIXTURE RATHER THAN A COPY OF OPENAI'S LIST, and the ids are
+ * deliberately unmistakable. Two reasons, and the first is the load-bearing
+ * one:
+ *
+ *   1. `OPENAI_TTS_VOICES` in `openai.provider.ts` is the ONE place OpenAI's
+ *      voice ids live, and `openai.provider.spec.ts` asserts exactly that by
+ *      scanning the tree. A fake that repeated them would break the assertion
+ *      while looking like a harmless fixture — and, worse, would make the
+ *      assertion's failure look like the test's fault rather than the copy's.
+ *   2. A picker exercised under `AI_PROVIDER_FAKE=true` should visibly be
+ *      showing fixtures. An operator who sees "Alloy" on a fake deployment has
+ *      no way to tell whether anything reached OpenAI; `Fixture (warm)` answers
+ *      that at a glance, exactly as {@link FakeAiProvider.providerName}'s
+ *      "Fake AI" already does on the admin page.
+ *
+ * THREE OF THEM, NOT ONE: a picker with a single option cannot exercise
+ * selecting a non-default voice, which is the only interesting thing a picker
+ * does.
+ */
+const FAKE_TTS_VOICES: readonly AiVoiceDescriptor[] = [
+  {
+    id: 'fake-warm',
+    label: 'Fixture (warm)',
+    description: 'A test fixture. Nothing here reaches a speech provider.',
+  },
+  {
+    id: 'fake-bright',
+    label: 'Fixture (bright)',
+    description: 'A second test fixture, so a picker has something to change to.',
+  },
+  {
+    id: 'fake-low',
+    label: 'Fixture (low)',
+    description: 'A third test fixture. The audio is the same bytes either way.',
+  },
+];
+
+/**
+ * The fixture voice this provider reports as its default.
+ *
+ * `runSynthesis` below ignores `request.voice` entirely — the bytes do not
+ * depend on it — so unlike `OpenAiProvider` there is no synthesis fallback for
+ * this to drift from. It is here because the base class asks every provider to
+ * name one, and because a caller testing "the default is marked in the picker"
+ * needs the fake to have a default at all.
+ */
+const DEFAULT_FAKE_VOICE = 'fake-warm';
+
+/**
  * The instant every fake realtime session's expiry is measured from.
  *
  * A CONSTANT RATHER THAN `Date.now()`, for the same reason
@@ -469,6 +521,12 @@ export class FakeAiProvider extends BaseAiProvider {
    * reaching OpenAI.
    */
   protected readonly providerName = 'Fake AI';
+
+  /** See {@link FAKE_TTS_VOICES}. The base class gates these on `tts`. */
+  protected readonly speechVoices = FAKE_TTS_VOICES;
+
+  /** See {@link DEFAULT_FAKE_VOICE}. */
+  protected readonly defaultSpeechVoice = DEFAULT_FAKE_VOICE;
 
   constructor(
     // Exposed to the base class through this field exactly as `OpenAiProvider`

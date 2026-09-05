@@ -15,6 +15,7 @@ import type {
   AiSynthesisResult,
   AiTranscriptionRequest,
   AiTranscriptionResult,
+  AiVoiceDescriptor,
 } from '../ai.types';
 
 // =============================================================================
@@ -253,6 +254,61 @@ export interface AiProvider {
     apiKey: string,
     request: AiSynthesisRequest,
   ): Promise<AiSynthesisResult>;
+
+  /**
+   * The voices this provider's `tts` capability can speak in, for a picker to
+   * render (issue #283, epic #280).
+   *
+   * SYNCHRONOUS, AND THAT IS THE DESIGN DECISION ON THIS METHOD. Every other
+   * member of this interface returns a promise because every other member
+   * makes a network call; this one returns what the provider hard-codes about
+   * itself. Typing it `Promise<AiVoiceDescriptor[]>` would cost nothing today
+   * and invite the one implementation nobody should write — a fetch — which is
+   * how a voice picker acquires a spinner, a failure state, and an empty
+   * `<select>` on a slow morning. A picker that CANNOT fail to populate is
+   * strictly better than one that merely usually does not, and OpenAI publishes
+   * no "list voices" endpoint to fetch from in the first place.
+   *
+   * NEVER THROWS, and unlike {@link transcribe} and {@link synthesize} it needs
+   * no `try`/`catch` wrapper in `BaseAiProvider` to be sure of it: there is no
+   * key to read, no client to construct and no I/O to fail. The never-throw
+   * rule this interface's header states is satisfied here by construction
+   * rather than by a guard.
+   *
+   * TAKES NO `userId` AND NO `apiKey`, the only method on this interface that
+   * takes neither. A static list costs nothing to read, reveals nothing about
+   * any credential, and spends nobody's money — so there is no caller to bill,
+   * no usage row to write, and nothing here that could reach for the server key
+   * by mistake.
+   *
+   * @returns the provider's voices, or `[]` when it does not
+   *          `supports('tts')`. AN EMPTY ARRAY, NEVER A THROW AND NEVER A
+   *          FAILURE RESULT: a deployment on a chat-only provider has no
+   *          premium voices to offer, the browser's own `speechSynthesis`
+   *          still reads every question aloud (`docs/specs/voice.md` §2), and
+   *          an empty picker is the correct rendering of that, not an error to
+   *          report.
+   */
+  listVoices(): AiVoiceDescriptor[];
+
+  /**
+   * The voice {@link synthesize} uses when a request names none.
+   *
+   * SEPARATE FROM {@link listVoices} RATHER THAN "the first entry", because
+   * "the default is whichever one is listed first" is a convention a future
+   * edit breaks by alphabetising a list — silently, with no test that could
+   * see it. A learner's picker has to mark one option as the one they already
+   * hear; this is the method that says which, read from the same constant
+   * {@link synthesize} falls back to so the two cannot drift.
+   *
+   * Synchronous and never throws, for the reasons {@link listVoices} gives.
+   *
+   * @returns a member of {@link listVoices}'s result, or `null` when this
+   *          provider has no voices at all — which is the same state
+   *          `listVoices(): []` reports, said once more in the shape a caller
+   *          needs.
+   */
+  defaultVoice(): string | null;
 
   /**
    * Mint one EPHEMERAL realtime session credential on the CALLER's key, and

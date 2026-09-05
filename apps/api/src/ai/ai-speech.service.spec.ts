@@ -9,6 +9,7 @@ import {
   MAX_TRANSCRIBE_SECONDS,
 } from './ai-speech.service';
 import type { TranscribeUpload } from './ai-speech.service';
+import type { AiSettingsService } from './ai-settings.service';
 import type { AiUsage } from './ai.types';
 
 // =============================================================================
@@ -55,10 +56,38 @@ function dispatchDouble(overrides: Partial<AiDispatchService> = {}) {
   } as unknown as AiDispatchService;
 }
 
-function build(overrides: Partial<AiDispatchService> = {}) {
-  const dispatch = dispatchDouble(overrides);
+/**
+ * An `AiSettingsService` double.
+ *
+ * ONLY `describeReadiness` IS STUBBED, because it is the only method
+ * `AiSpeechService` calls — it asks the settings layer one question ("is
+ * `speak` bound?") and reads the answer out of `unboundRoles`. A double with
+ * more surface than that would let a call to some other method pass here and
+ * fail in production.
+ */
+function settingsDouble(unboundRoles: string[] = []) {
+  return {
+    describeReadiness: jest.fn().mockResolvedValue({
+      systemReady: true,
+      enabled: true,
+      providerConfigured: true,
+      unboundRoles,
+    }),
+  } as unknown as AiSettingsService;
+}
 
-  return { service: new AiSpeechService(dispatch), dispatch };
+function build(
+  overrides: Partial<AiDispatchService> = {},
+  unboundRoles: string[] = [],
+) {
+  const dispatch = dispatchDouble(overrides);
+  const settings = settingsDouble(unboundRoles);
+
+  return {
+    service: new AiSpeechService(dispatch, settings),
+    dispatch,
+    settings,
+  };
 }
 
 function upload(over: Partial<TranscribeUpload> = {}): TranscribeUpload {

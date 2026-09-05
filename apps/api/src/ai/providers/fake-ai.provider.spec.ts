@@ -827,3 +827,69 @@ describe('FakeAiProvider.createRealtimeSession', () => {
     );
   });
 });
+
+// =============================================================================
+// FakeAiProvider.listVoices (#283, epic #280)
+// =============================================================================
+//
+// The picker has to be exercisable under `AI_PROVIDER_FAKE=true` — with no
+// OpenAI account, no key and no network — which means the fake needs a voice
+// list of its own. The properties asserted are the two that matter to a caller:
+// the ids are ones `aiSynthesizeRequestSchema` would accept, and they are
+// visibly fixtures rather than a second copy of OpenAI's list.
+// =============================================================================
+
+/** The charset `aiSynthesizeRequestSchema`'s `voice` field accepts. */
+const VOICE_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
+
+describe('FakeAiProvider.listVoices', () => {
+  it('returns a non-empty list', () => {
+    expect(provider().listVoices().length).toBeGreaterThan(0);
+  });
+
+  it('offers more than one, so a picker can change its selection', () => {
+    expect(provider().listVoices().length).toBeGreaterThan(1);
+  });
+
+  it('gives every voice a non-empty id, label and description', () => {
+    for (const voice of provider().listVoices()) {
+      expect(voice.id.trim()).not.toBe('');
+      expect(voice.label.trim()).not.toBe('');
+      expect(voice.description.trim()).not.toBe('');
+    }
+  });
+
+  it('gives every voice an id the synthesize DTO would accept', () => {
+    // The same coupling `openai.provider.spec.ts` asserts, and it matters just
+    // as much here: a fixture id the DTO refuses turns every fake-provider
+    // deployment's picker into a 400.
+    for (const voice of provider().listVoices()) {
+      expect(voice.id).toMatch(VOICE_ID_PATTERN);
+      expect(voice.id.length).toBeLessThanOrEqual(64);
+    }
+  });
+
+  it('reports a default that is one of the voices it offers', () => {
+    const p = provider();
+    const defaultVoice = p.defaultVoice();
+
+    expect(defaultVoice).not.toBeNull();
+    expect(p.listVoices().map((voice) => voice.id)).toContain(defaultVoice);
+  });
+
+  it('does not reuse OpenAI`s voice ids', () => {
+    // Two reasons, both in `FAKE_TTS_VOICES`' own comment: `openai.provider.ts`
+    // is the one file OpenAI's list lives in (a copy here would break that
+    // assertion from the least likely direction), and an operator looking at a
+    // fake deployment's picker should be able to see it is a fake.
+    const ids = provider().listVoices().map((voice) => voice.id);
+
+    for (const openAiVoice of ['alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer']) {
+      expect(ids).not.toContain(openAiVoice);
+    }
+  });
+
+  it('is deterministic, like every other method on this class', () => {
+    expect(provider().listVoices()).toEqual(provider().listVoices());
+  });
+});
