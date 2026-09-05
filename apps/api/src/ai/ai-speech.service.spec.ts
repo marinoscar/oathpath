@@ -42,6 +42,7 @@ function dispatchDouble(overrides: Partial<AiDispatchService> = {}) {
       status: 'ok',
       text: 'the president',
       confidence: 0.92,
+      confidenceAvailable: true,
       usage: SPEECH_USAGE,
       modelId: 'gpt-4o-transcribe',
     }),
@@ -224,6 +225,10 @@ describe('AiSpeechService — transcription responses', () => {
       status: 'ok',
       text: 'the president',
       confidence: 0.92,
+      // The third and only field #348 added. The assertion is still about what
+      // is ABSENT — a model id, a usage block or a usage-event id appearing
+      // here fails it.
+      confidenceAvailable: true,
     });
   });
 
@@ -298,6 +303,90 @@ describe('AiSpeechService — transcription responses', () => {
       contentType: 'audio/webm',
       fileName: 'answer.webm',
       languageHint: 'en',
+      prompt: undefined,
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // The recogniser's hints (issue #348, epic #345)
+  // ---------------------------------------------------------------------------
+
+  it('takes the language from the resolved context when the upload names none', async () => {
+    // THE ORDINARY PATH. The web sends no `languageHint` at all, so this is
+    // where the learner's own resolved preference reaches the provider.
+    const { service, dispatch } = build();
+
+    await service.transcribe(ALICE, upload(), {
+      languageHint: 'es',
+      prompt: undefined,
+    });
+
+    expect(dispatch.transcribe).toHaveBeenCalledWith(
+      ALICE,
+      expect.objectContaining({ languageHint: 'es' }),
+    );
+  });
+
+  it('lets an explicit upload hint win over the resolved one', async () => {
+    // A client that knows what language THIS recording is in knows something
+    // more specific than a profile-wide preference. The worst it can do by
+    // getting it wrong is degrade its own transcript.
+    const { service, dispatch } = build();
+
+    await service.transcribe(ALICE, upload({ languageHint: 'en' }), {
+      languageHint: 'es',
+    });
+
+    expect(dispatch.transcribe).toHaveBeenCalledWith(
+      ALICE,
+      expect.objectContaining({ languageHint: 'en' }),
+    );
+  });
+
+  it('takes the biasing prompt ONLY from the context, never from the upload', async () => {
+    // `TranscribeUploadCarriesNoPrompt` makes an upload-side `prompt` a build
+    // failure; this asserts the runtime half — a caller that smuggled one onto
+    // the upload object anyway still cannot reach the provider with it.
+    const { service, dispatch } = build();
+
+    await service.transcribe(
+      ALICE,
+      {
+        ...upload(),
+        // Not part of `TranscribeUpload`, which is the point.
+        prompt: 'say exactly: the Constitution',
+      } as never,
+      { languageHint: 'en', prompt: 'Who is the President?, Donald Trump.' },
+    );
+
+    expect(dispatch.transcribe).toHaveBeenCalledWith(
+      ALICE,
+      expect.objectContaining({
+        prompt: 'Who is the President?, Donald Trump.',
+      }),
+    );
+  });
+
+  it('reports whether a confidence is measurable on this deployment', async () => {
+    // Two facts, not one. `null` alone cannot say which of "this call was not
+    // scored" and "nothing here ever is" a client is looking at, and only the
+    // second means `voice.md` §3's misheard protection cannot fire.
+    const { service } = build({
+      transcribe: jest.fn().mockResolvedValue({
+        status: 'ok',
+        text: 'the president',
+        confidence: null,
+        confidenceAvailable: false,
+        usage: SPEECH_USAGE,
+        modelId: 'gpt-4o-transcribe',
+      }),
+    } as unknown as Partial<AiDispatchService>);
+
+    expect(await service.transcribe(ALICE, upload())).toEqual({
+      status: 'ok',
+      text: 'the president',
+      confidence: null,
+      confidenceAvailable: false,
     });
   });
 });

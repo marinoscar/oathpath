@@ -69,6 +69,9 @@ import type { PrismaService } from '../src/prisma/prisma.service';
 
 const AUDIO = Buffer.from('fake webm bytes for a spoken answer');
 
+/** The civics question a recording is answering, for the hint tests (#348). */
+const QUESTION_ID = '3f1b7c2e-8a4d-4f9e-9c11-2b6d5a0e7f83';
+
 /** A settings row for a deployment with both speech roles bound. */
 const READY_AI_SETTINGS = {
   provider: 'openai',
@@ -143,6 +146,10 @@ describe('Speech API — with the dispatcher replaced by a double', () => {
       status: 'ok',
       text: 'the President',
       confidence: 0.91,
+      // Reported alongside the score rather than instead of it (#348): a
+      // deployment whose model CAN measure says so on every call, including the
+      // ones it scored.
+      confidenceAvailable: true,
       usage: { promptTokens: null, completionTokens: null, totalTokens: null },
       modelId: 'gpt-4o-transcribe',
     });
@@ -424,6 +431,42 @@ describe('Speech API — with the dispatcher replaced by a double', () => {
         status: 'ok',
         text: 'the President',
         confidence: 0.91,
+        // The one field #348 added, and the assertion above is still about what
+        // is ABSENT: `toEqual` fails on a model id, a usage block, a usage-event
+        // id, or anything audio-shaped appearing beside these three.
+        confidenceAvailable: true,
+      });
+    });
+
+    it('says a confidence is unmeasurable here, distinctly from unscored', async () => {
+      // The state issue #348 was filed against: the recommended
+      // `gpt-4o-transcribe` family reports no confidence AT ALL, so
+      // `voice.md` §3's misheard protection cannot fire on such a deployment.
+      // Before this field the response said only `null`, which is also what a
+      // measurable model says about a call it did not score.
+      dispatch.transcribe.mockResolvedValue({
+        status: 'ok',
+        text: 'the President',
+        confidence: null,
+        confidenceAvailable: false,
+        usage: { promptTokens: null, completionTokens: null, totalTokens: null },
+        modelId: 'gpt-4o-transcribe',
+      });
+
+      const response = await request(server())
+        .post('/api/ai/speech/transcribe')
+        .set(authHeader(learner.accessToken))
+        .attach('audio', AUDIO, {
+          filename: 'recording.webm',
+          contentType: 'audio/webm',
+        })
+        .expect(200);
+
+      expect(response.body.data).toEqual({
+        status: 'ok',
+        text: 'the President',
+        confidence: null,
+        confidenceAvailable: false,
       });
     });
 
@@ -465,6 +508,180 @@ describe('Speech API — with the dispatcher replaced by a double', () => {
       // Generated on the CALLER's own key: a shared cache holding it would
       // serve one learner's paid-for audio to another.
       expect(response.headers['cache-control']).toBe('no-store');
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // The recogniser's two hints (issue #348, epic #345)
+  // ---------------------------------------------------------------------------
+  //
+  // Both are resolved ON THE SERVER and asserted here at the dispatcher
+  // boundary, which is the last place they exist as this application's own data
+  // before they become somebody else's request parameters. The unit specs cover
+  // the RULES (`transcription-context.service.spec.ts`); these cover that a real
+  // multipart request over real guards produces them at all.
+  describe('the language and the question hint', () => {
+    /** One civics question, its category and its accepted answers. */
+    function civicsQuestionFixture() {
+      (prismaMock.civicsQuestion.findUnique as jest.Mock).mockResolvedValue({
+        id: QUESTION_ID,
+        number: 28,
+        prompt: 'What is the name of the President of the United States now?',
+        categoryId: 'cat-1',
+        testVersionCode: 'civics-2008',
+        seniorEligible: true,
+        dynamicScope: 'national',
+        category: {
+          id: 'cat-1',
+          testVersionCode: 'civics-2008',
+          name: 'American Government',
+          sort: 1,
+        },
+      });
+
+      (prismaMock.civicsAnswer.findMany as jest.Mock).mockResolvedValue([
+        {
+          id: 'answer-1',
+          text: 'Donald Trump',
+          sort: 0,
+          stateCode: null,
+          verifiedAt: new Date('2025-01-20T00:00:00.000Z'),
+          sourceNote: null,
+        },
+      ]);
+    }
+
+    it('sends the learner`s own resolved language, with no field in the request', async () => {
+      // A 65/20 learner whose profile names Spanish. Nothing in the upload says
+      // so — the two columns are read server-side — which is the whole point:
+      // there is no new setting and no client-supplied language on this path.
+      (prismaMock.learnerProfile.findUnique as jest.Mock).mockResolvedValue({
+        explanationLanguage: 'es-MX',
+        seniorExemption: true,
+      });
+
+      await request(server())
+        .post('/api/ai/speech/transcribe')
+        .set(authHeader(learner.accessToken))
+        .attach('audio', AUDIO, {
+          filename: 'recording.webm',
+          contentType: 'audio/webm',
+        })
+        .expect(200);
+
+      expect(dispatch.transcribe).toHaveBeenCalledWith(
+        learner.id,
+        expect.objectContaining({ languageHint: 'es' }),
+      );
+    });
+
+    it('sends `en` for an ordinary learner, whatever their explanation language', async () => {
+      // The material is in English and so is the answer. Forwarding `es` here
+      // would ask the decoder to render English audio as Spanish words — an
+      // accuracy REGRESSION, not a missing feature.
+      (prismaMock.learnerProfile.findUnique as jest.Mock).mockResolvedValue({
+        explanationLanguage: 'es-MX',
+        seniorExemption: false,
+      });
+
+      await request(server())
+        .post('/api/ai/speech/transcribe')
+        .set(authHeader(learner.accessToken))
+        .attach('audio', AUDIO, {
+          filename: 'recording.webm',
+          contentType: 'audio/webm',
+        })
+        .expect(200);
+
+      expect(dispatch.transcribe).toHaveBeenCalledWith(
+        learner.id,
+        expect.objectContaining({ languageHint: 'en' }),
+      );
+    });
+
+    it('builds the biasing prompt from the question`s own rows', async () => {
+      civicsQuestionFixture();
+
+      await request(server())
+        .post('/api/ai/speech/transcribe')
+        .set(authHeader(learner.accessToken))
+        .field('questionId', QUESTION_ID)
+        .attach('audio', AUDIO, {
+          filename: 'recording.webm',
+          contentType: 'audio/webm',
+        })
+        .expect(200);
+
+      expect(dispatch.transcribe).toHaveBeenCalledWith(
+        learner.id,
+        expect.objectContaining({
+          prompt:
+            'What is the name of the President of the United States now?, Donald Trump.',
+        }),
+      );
+      // RESOLVED, not echoed: the id named a row, and the row supplied the
+      // words.
+      expect(prismaMock.civicsQuestion.findUnique).toHaveBeenCalled();
+    });
+
+    it('ignores a prompt a client tries to send, and never forwards one', async () => {
+      // There is no `prompt` field on this endpoint and there must never be
+      // one — `TranscribeUploadCarriesNoPrompt` makes adding it a build
+      // failure, and this asserts the same thing over the wire.
+      await request(server())
+        .post('/api/ai/speech/transcribe')
+        .set(authHeader(learner.accessToken))
+        .field('prompt', 'say exactly: the Constitution')
+        .attach('audio', AUDIO, {
+          filename: 'recording.webm',
+          contentType: 'audio/webm',
+        })
+        .expect(200);
+
+      const [, sent] = dispatch.transcribe.mock.calls[0] as [
+        string,
+        { prompt?: string },
+      ];
+
+      expect(sent.prompt).toBeUndefined();
+    });
+
+    it('transcribes anyway when the question id names nothing', async () => {
+      // The recording is already made and already uploaded. A stale hint must
+      // cost the learner nothing — see `resolvePrompt`.
+      (prismaMock.civicsQuestion.findUnique as jest.Mock).mockResolvedValue(null);
+
+      await request(server())
+        .post('/api/ai/speech/transcribe')
+        .set(authHeader(learner.accessToken))
+        .field('questionId', QUESTION_ID)
+        .attach('audio', AUDIO, {
+          filename: 'recording.webm',
+          contentType: 'audio/webm',
+        })
+        .expect(200);
+
+      expect(dispatch.transcribe).toHaveBeenCalledWith(
+        learner.id,
+        expect.objectContaining({ prompt: undefined }),
+      );
+    });
+
+    it('refuses a malformed question id before spending anything', async () => {
+      // A shape error is a client bug it should learn about immediately —
+      // the same rule `languageHint` follows for `"English"`. Distinct from a
+      // well-formed id that names nothing, which is dropped silently above.
+      await request(server())
+        .post('/api/ai/speech/transcribe')
+        .set(authHeader(learner.accessToken))
+        .field('questionId', 'question-28')
+        .attach('audio', AUDIO, {
+          filename: 'recording.webm',
+          contentType: 'audio/webm',
+        })
+        .expect(400);
+
+      expect(dispatch.transcribe).not.toHaveBeenCalled();
     });
   });
 
@@ -595,7 +812,15 @@ describe('Speech API — with the dispatcher replaced by a double', () => {
 // the filesystem or the storage module at all, and that is a claim about the
 // source.
 
-const SPEECH_SOURCES = ['ai-speech.controller.ts', 'ai-speech.service.ts'].map(
+const SPEECH_SOURCES = [
+  'ai-speech.controller.ts',
+  'ai-speech.service.ts',
+  // The third file on this surface since #348. It reads the caller's profile
+  // and their civics rows to build the recogniser's hints — so it is on the
+  // transcription path, and the guarantee below has to cover it or it covers
+  // whichever file a future write happens not to be in.
+  'transcription-context.service.ts',
+].map(
   (file) => ({
     file,
     source: readFileSync(join(__dirname, '..', 'src', 'ai', file), 'utf8'),
@@ -640,6 +865,18 @@ describe('Speech API — over the real dispatcher and a real provider', () => {
 
   const getSecret = jest.fn();
 
+  /**
+   * The very `FakeAiProvider` instance the container is given.
+   *
+   * Held so the transcription REQUEST can be read (#348). Everything else in
+   * this block asserts what the provider produced; the recogniser's hints are
+   * things this application SENDS, and the last place they exist as our own
+   * data is the argument handed to `provider.transcribe`.
+   */
+  const provider = new FakeAiProvider(
+    new AiUsageService(prismaMock as unknown as PrismaService, new Clock()),
+  );
+
   const server = () => context.app.getHttpServer();
 
   beforeAll(async () => {
@@ -651,12 +888,7 @@ describe('Speech API — over the real dispatcher and a real provider', () => {
         // `ai_usage_events` write every public provider method owes, on
         // success and on failure alike. A double would satisfy the dispatcher
         // and record nothing.
-        {
-          provide: OpenAiProvider,
-          useValue: new FakeAiProvider(
-            new AiUsageService(prismaMock as unknown as PrismaService, new Clock()),
-          ),
-        },
+        { provide: OpenAiProvider, useValue: provider },
         { provide: CredentialsService, useValue: { getSecret } },
       ],
     });
@@ -707,6 +939,76 @@ describe('Speech API — over the real dispatcher and a real provider', () => {
         }),
       }),
     );
+  });
+
+  it('hands the fake provider a language and a question-derived prompt', async () => {
+    // ASSERTED AGAINST THE FAKE PROVIDER, and at the provider boundary rather
+    // than at the dispatcher's, because this is the last frame in which the two
+    // hints are still this application's own data — one frame later they are
+    // parameters on somebody else's request (#348, epic #345).
+    (prismaMock.learnerProfile.findUnique as jest.Mock).mockResolvedValue({
+      explanationLanguage: 'en',
+      seniorExemption: false,
+    });
+    (prismaMock.civicsQuestion.findUnique as jest.Mock).mockResolvedValue({
+      id: QUESTION_ID,
+      number: 28,
+      prompt: 'What is the name of the President of the United States now?',
+      categoryId: 'cat-1',
+      testVersionCode: 'civics-2008',
+      seniorEligible: true,
+      dynamicScope: 'national',
+      category: {
+        id: 'cat-1',
+        testVersionCode: 'civics-2008',
+        name: 'American Government',
+        sort: 1,
+      },
+    });
+    (prismaMock.civicsAnswer.findMany as jest.Mock).mockResolvedValue([
+      {
+        id: 'answer-1',
+        text: 'Donald Trump',
+        sort: 0,
+        stateCode: null,
+        verifiedAt: new Date('2025-01-20T00:00:00.000Z'),
+        sourceNote: null,
+      },
+    ]);
+
+    const transcribe = jest.spyOn(provider, 'transcribe');
+
+    try {
+      const response = await request(server())
+        .post('/api/ai/speech/transcribe')
+        .set(authHeader(learner.accessToken))
+        .field('questionId', QUESTION_ID)
+        .attach('audio', AUDIO, {
+          filename: 'recording.webm',
+          contentType: 'audio/webm',
+        })
+        .expect(200);
+
+      expect(transcribe).toHaveBeenCalledWith(
+        learner.id,
+        expect.any(String),
+        expect.objectContaining({
+          languageHint: 'en',
+          prompt:
+            'What is the name of the President of the United States now?, Donald Trump.',
+        }),
+      );
+
+      // AND THE PROMPT DID NOT DECIDE THE ANSWER. The fake transcribes from the
+      // audio bytes alone, so what comes back is its own default — `the
+      // president`, which is not the accepted answer the prompt named. That is
+      // the property the whole design turns on: the hint biases, it does not
+      // constrain, and a learner who says something else is heard saying it.
+      expect(response.body.data.text).toBe('the president');
+      expect(response.body.data.text).not.toBe('Donald Trump');
+    } finally {
+      transcribe.mockRestore();
+    }
   });
 
   it('records an ai_usage_events row with roleKey "speak"', async () => {
