@@ -231,6 +231,7 @@ import { usePracticeSession } from '../hooks/usePracticeSession';
 import { useAudioCapture } from '../hooks/useAudioCapture';
 import { useIsMounted } from '../hooks/useIsMounted';
 import { useVoiceActivity } from '../hooks/useVoiceActivity';
+import type { VoiceActivityLevelSource } from '../hooks/useVoiceActivity';
 import { useVoiceAvailability } from '../hooks/useVoiceAvailability';
 import {
   DEFAULT_VOICE_CONVERSATION_MODE,
@@ -429,6 +430,46 @@ function speakNudge(text: string): Promise<ConversationSpeechOutcome> {
   });
 }
 
+/**
+ * =============================================================================
+ * TEST-ONLY SEAM — issue #314, epic #304 / E13's own test coverage
+ * =============================================================================
+ *
+ * `useVoiceActivity`'s own `createLevelSource` option exists precisely so a
+ * caller can replace the real `AnalyserNode` tap with a synthetic one
+ * (`docs/specs/conversation-mode.md` §16: "What CI *can* verify: the state
+ * machine, driven by synthetic levels"). Nothing in this file reached that
+ * seam before this issue — this page always took the hook's own default,
+ * which is why a browser end-to-end test had no way to drive the loop past
+ * `speakingQuestion` without a real, audible microphone.
+ *
+ * `window.__oathpathTestVoiceLevelSource`, when a Playwright spec sets it with
+ * `page.addInitScript` BEFORE the page's first render, is read here and
+ * threaded through unchanged. Every other path — every real user, every
+ * deployment, and any test that never sets the global — sees `undefined` and
+ * this component behaves exactly as it did before this issue: `useVoiceActivity`
+ * falls back to its own real `createAnalyserLevelSource`.
+ *
+ * `import.meta.env.PROD` is the identical gate `App.tsx`'s `TestLoginPage`
+ * already uses for a development-only route: a production build strips this
+ * branch out entirely (the `if` is dead-code-eliminated), so there is no
+ * runtime check to bypass and no code path a production deployment can be
+ * tricked into taking.
+ */
+function getTestVoiceActivityLevelSource():
+  | ((stream: MediaStream) => VoiceActivityLevelSource | null)
+  | undefined {
+  if (import.meta.env.PROD) return undefined;
+  if (typeof window === 'undefined') return undefined;
+  return (
+    window as unknown as {
+      __oathpathTestVoiceLevelSource?: (
+        stream: MediaStream,
+      ) => VoiceActivityLevelSource | null;
+    }
+  ).__oathpathTestVoiceLevelSource;
+}
+
 /** `/practice/sessions/:id/summary` for one id, spelled once. */
 export function practiceSummaryPath(sessionId: string): string {
   return `/practice/sessions/${sessionId}/summary`;
@@ -498,6 +539,9 @@ export default function PracticeSessionPage() {
     // exactly right for a page sitting in Text mode.
     stream: conversationCapture.stream,
     onEvent: (event) => conversationRef.current?.onVoiceActivityEvent(event),
+    // TEST-ONLY, and `undefined` everywhere it is not explicitly set by a
+    // Playwright spec — see `getTestVoiceActivityLevelSource`'s own header.
+    createLevelSource: getTestVoiceActivityLevelSource(),
   });
   // THE SINGLE READER of the voice roles' binding state. Not `useAiStatus()`
   // and not `unboundRoles` directly — `transcribeBound` is false while the
