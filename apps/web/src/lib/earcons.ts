@@ -2,8 +2,10 @@
  * Earcons — the short tones that tell a learner who is not looking at the
  * screen what the app is doing.
  *
- * Issue #310, epic #304 / E13 ("Conversation mode"). Three cues, no assets, no
- * network, and a single switch that turns the whole module off.
+ * Issue #310, epic #304 / E13 ("Conversation mode"), extended by issue #357,
+ * epic #345. Eight cues, no assets, no network, and a single switch that turns
+ * the whole module off — since #357 that switch is a learner-facing control
+ * (`voice.soundCues`), not only an internal flag.
  *
  * =============================================================================
  * SILENCE IS INDISTINGUISHABLE FROM A CRASH WHEN NOBODY IS WATCHING THE SCREEN
@@ -29,6 +31,15 @@
  * pulse is the load-bearing one. The other two mark edges; the pulse is what
  * says "still here, still working" during the span where saying nothing would
  * be read as being broken.
+ *
+ * ISSUE #357 ADDED THE FIVE EDGES THOSE THREE LEFT SILENT — the tap that
+ * starts a session (in front of the permission prompt), the top of a question,
+ * the pause before the next one, and the two ways a session can end. The three
+ * original cues were placed by hand at the three call sites somebody noticed;
+ * the full set is now DERIVED FROM THE PHASE, in
+ * `lib/conversationCues.ts`, so a transition cannot be added without a cue
+ * decision being made for it. Nothing in this file knows about that table:
+ * this module still only knows how to make a sound.
  *
  * =============================================================================
  * SYNTHESISED, NOT SHIPPED AS FILES — AND NOT AS A COMPROMISE
@@ -70,6 +81,13 @@
  * one place, rather than an `if (soundOn)` at every call site — a call site
  * that forgets the check is a learner who turned sounds off and still hears
  * them, and that bug is invisible to everybody whose sounds are on.
+ *
+ * The flag is checked BEFORE the context is reached, so a learner who has
+ * turned cues off does not merely hear nothing: no `AudioContext` is built and
+ * no `OscillatorNode` is ever constructed on their behalf. `useVoicePrefs` is
+ * the single place that calls it, from the stored `voice.soundCues`
+ * preference; the settings switch that writes that preference is in
+ * `components/settings/VoiceSettings.tsx` (issue #357).
  *
  * Every cue is also a no-op when there is no `AudioContext` to play it through
  * — jsdom, an older Safari, a context the browser refuses to start before a
@@ -162,6 +180,102 @@ export const CAPTURED_EARCON: EarconDescriptor = {
   tones: [
     { frequency: 880, durationMs: 90, gain: 0.12 },
     { frequency: 587.33, durationMs: 130, gain: 0.12, atMs: 90 },
+  ],
+};
+
+/**
+ * "I heard the tap" — two short taps on one pitch, A4.
+ *
+ * Issue #357, epic #345. THE ONE CUE THAT PLAYS BEFORE ANYTHING IS OPEN. It
+ * fires the instant Start is pressed, in front of `acquireStream()` — which on
+ * a first use is a permission dialogue the learner has to read, and on a slow
+ * device is a second or two of a microphone being opened. Hands-free, that
+ * span was previously indistinguishable from a tap that never registered, and
+ * the learner's remedy for a tap that never registered is to tap again.
+ *
+ * FLAT, NOT A SWEEP, on purpose: the two sweeping cues below already mean
+ * "the microphone opened" and "your turn was captured", and a third sweep in
+ * the same register would be a third thing to learn. A double tap on one pitch
+ * is heard as punctuation rather than as a direction.
+ */
+export const SESSION_START_EARCON: EarconDescriptor = {
+  name: 'session-start',
+  wave: 'sine',
+  tones: [
+    { frequency: 440, durationMs: 60, gain: 0.1 },
+    { frequency: 440, durationMs: 60, gain: 0.1, atMs: 100 },
+  ],
+};
+
+/**
+ * "Here comes a question" — one short, light tone, F#5.
+ *
+ * Issue #357. It marks the top of a turn: the question is about to be read,
+ * which after `advancing`'s pause is the only signal that the loop moved on
+ * rather than stopped. Deliberately ONE tone and quieter than the edge cues,
+ * because a voice follows it immediately — a long cue in front of a sentence
+ * is a cue talking over the thing it announced.
+ */
+export const QUESTION_EARCON: EarconDescriptor = {
+  name: 'question',
+  wave: 'sine',
+  tones: [{ frequency: 739.99, durationMs: 70, gain: 0.07 }],
+};
+
+/**
+ * "Moving on" — one short, light tone, D4.
+ *
+ * Issue #357. The pair of {@link QUESTION_EARCON}, an octave and a half below
+ * it: same length, same gain, opposite end of the register. `advancing` is a
+ * deliberate ~900 ms pause (`CONVERSATION_ADVANCE_PAUSE_MS`) in which nothing
+ * speaks, and low-then-high across that gap reads as "that one is done, here
+ * is the next" without either cue having to be learned separately.
+ */
+export const ADVANCING_EARCON: EarconDescriptor = {
+  name: 'advancing',
+  wave: 'sine',
+  tones: [{ frequency: 293.66, durationMs: 70, gain: 0.07 }],
+};
+
+/**
+ * "That's the end of the session" — a resolved three-note fall, A5-F#5-D5.
+ *
+ * Issue #357. A CADENCE: three notes that land on the tonic, which is what
+ * makes it sound finished rather than interrupted. It is the counterpart of
+ * {@link SESSION_FAILED_EARCON} below, and the two must be told apart by
+ * somebody who is not looking at the screen and who may have missed the spoken
+ * sentence entirely — so they differ in register (upper against lower), in
+ * length (three notes against two) and in shape (resolved against unresolved),
+ * rather than in one of those alone.
+ */
+export const SESSION_END_EARCON: EarconDescriptor = {
+  name: 'session-end',
+  wave: 'sine',
+  tones: [
+    { frequency: 880, durationMs: 110, gain: 0.11 },
+    { frequency: 739.99, durationMs: 110, gain: 0.11, atMs: 110 },
+    { frequency: 587.33, durationMs: 190, gain: 0.11, atMs: 220 },
+  ],
+};
+
+/**
+ * "Something stopped this" — an unresolved low fall, D4 then A3.
+ *
+ * Issue #357. NOT AN ALARM, and that is a product rule rather than a taste:
+ * `VISION.md` forbids creating pressure or fear, and an involuntary exit is
+ * usually not the learner's doing — an unbound `transcribe` role, a microphone
+ * the browser took away, an attempt that could not be recorded. So it is low,
+ * slow and quiet: the sound of something winding down, not of an error. What
+ * it must NOT be is mistakable for {@link SESSION_END_EARCON}, because the
+ * remedies differ — one means "you finished", the other means "look at the
+ * screen when you can".
+ */
+export const SESSION_FAILED_EARCON: EarconDescriptor = {
+  name: 'session-failed',
+  wave: 'sine',
+  tones: [
+    { frequency: 293.66, durationMs: 130, gain: 0.11 },
+    { frequency: 220, durationMs: 220, gain: 0.11, atMs: 130 },
   ],
 };
 
@@ -413,6 +527,33 @@ export function playListeningEarcon(): void {
 /** The answer has been captured. Falling two-tone. */
 export function playCapturedEarcon(): void {
   playEarcon(CAPTURED_EARCON);
+}
+
+/**
+ * Start was tapped. Played BEFORE the device is opened — see the descriptor.
+ */
+export function playSessionStartEarcon(): void {
+  playEarcon(SESSION_START_EARCON);
+}
+
+/** A question is about to be read aloud. One light tone. */
+export function playQuestionEarcon(): void {
+  playEarcon(QUESTION_EARCON);
+}
+
+/** The loop is moving to the next question. One low tone. */
+export function playAdvancingEarcon(): void {
+  playEarcon(ADVANCING_EARCON);
+}
+
+/** The session finished normally. A resolved three-note cadence. */
+export function playSessionEndEarcon(): void {
+  playEarcon(SESSION_END_EARCON);
+}
+
+/** The session was ended by something that went wrong. A low, dull fall. */
+export function playSessionFailedEarcon(): void {
+  playEarcon(SESSION_FAILED_EARCON);
 }
 
 /**
