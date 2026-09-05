@@ -357,8 +357,8 @@ export const DEFAULT_VOICE_READ_ANSWERS_ALOUD = false;
  * the mode with a hardware prerequisite (a working mic, somewhere the learner
  * can speak aloud) that the typed mode does not have, so defaulting it on
  * would strand anybody who has neither — and, exactly as with every other
- * field here, a stored `true` is never written to say so. Absent means
- * "typed", resolved at read time.
+ * field here, this default is never materialised into a learner's document
+ * to say so. Absent means "typed", resolved at read time.
  */
 export const DEFAULT_VOICE_CONVERSATION_MODE = false;
 
