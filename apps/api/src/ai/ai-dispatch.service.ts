@@ -19,6 +19,7 @@ import type {
   AiRealtimeTool,
   AiStreamEvent,
   AiUsage,
+  AiVoiceDescriptor,
 } from './ai.types';
 import type { AiProvider } from './providers/ai-provider.interface';
 import { OpenAiProvider } from './providers/openai.provider';
@@ -1055,6 +1056,70 @@ export class AiDispatchService {
     } catch (err) {
       return this.dispatchFailure(userId, REALTIME_ROLE, err, redact);
     }
+  }
+
+  /**
+   * The configured provider's speech voices, and the one it uses by default
+   * (#283, epic #280).
+   *
+   * -------------------------------------------------------------------------
+   * THE ONE PUBLIC METHOD HERE THAT TAKES NO `userId`
+   * -------------------------------------------------------------------------
+   *
+   * Every other method on this class is handed a caller because a caller's key
+   * is spent and a caller's `ai_usage_events` row is written. Nothing is spent
+   * here: this reads a settings row and an in-process array. There is no
+   * credential to resolve — so no `no_user_key` branch, no `getSecret` call,
+   * and no per-caller check to get wrong — and no usage to record, because no
+   * inference ran.
+   *
+   * -------------------------------------------------------------------------
+   * `[]` RATHER THAN AN `unavailable` RESULT, WHICH IS WHY THERE IS NO UNION
+   * -------------------------------------------------------------------------
+   *
+   * A disabled master switch, an unconfigured provider, a provider with no
+   * `tts` capability and a corrupt settings row all come back as an empty
+   * list. None of them is a failure a caller should render: a deployment with
+   * no premium voices to choose from still reads every question aloud through
+   * the browser's own `speechSynthesis` (`docs/specs/voice.md` §2), and an
+   * empty picker is the correct rendering of that. `AiUnavailableCause`'s four
+   * values exist so a caller can explain why an inference call did not happen;
+   * no inference was ever going to happen here, so there is nothing for them to
+   * explain.
+   *
+   * `enabled` IS NOT CONSULTED, deliberately. The master switch governs
+   * spending, and reading a static array spends nothing — an admin who has
+   * switched AI off has not deleted the provider's voice catalog, and a picker
+   * that emptied itself for that reason would be reporting the wrong fact.
+   * What such a deployment cannot do is synthesise, which
+   * `POST /api/ai/speech/synthesize` already answers with `ai_disabled`.
+   *
+   * NEVER THROWS. `aiSettings.get()` does, on a stored-but-invalid row; a
+   * configuration nobody can read has no readable provider either, which is
+   * `[]`.
+   */
+  async listVoices(): Promise<{
+    voices: AiVoiceDescriptor[];
+    defaultVoice: string | null;
+  }> {
+    let provider: AiProvider | null;
+
+    try {
+      const settings = await this.aiSettings.get();
+
+      provider =
+        settings.provider === null ? null : this.providers[settings.provider];
+    } catch {
+      provider = null;
+    }
+
+    if (provider === null) return { voices: [], defaultVoice: null };
+
+    // NO `supports('tts')` CHECK HERE. `BaseAiProvider.listVoices` makes it,
+    // once, for every provider — asking again would be a second answer to the
+    // same question, in a file that would have to be edited whenever the first
+    // one changed.
+    return { voices: provider.listVoices(), defaultVoice: provider.defaultVoice() };
   }
 
   // ---------------------------------------------------------------------------
