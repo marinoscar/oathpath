@@ -337,18 +337,37 @@ function renderSession(options: Options = {}) {
 
   let statusReads = 0;
 
+  // The stored document, mutated by PATCH exactly as the server mutates it —
+  // FIELD-WISE within `voice`, never wholesale. Since #313 this page WRITES a
+  // voice preference (the session-wide `Text | Voice` control stores
+  // `voice.conversationMode`), so a mock that replaced the namespace with the
+  // one key that was sent would silently reset `autoSubmitSpoken` and grade
+  // every opt-out suite below on the opposite setting.
+  let stored: Record<string, unknown> = {
+    theme: 'system',
+    profile: { useProviderImage: true, customImageUrl: null },
+    ...(options.voice ? { voice: options.voice } : {}),
+    updatedAt: '2026-03-01T00:00:00.000Z',
+    version: 1,
+  };
+
   server.use(
-    http.get(`${API_BASE}/user-settings`, () =>
-      HttpResponse.json({
-        data: {
-          theme: 'system',
-          profile: { useProviderImage: true, customImageUrl: null },
-          ...(options.voice ? { voice: options.voice } : {}),
-          updatedAt: '2026-03-01T00:00:00.000Z',
-          version: 1,
-        },
-      }),
-    ),
+    http.get(`${API_BASE}/user-settings`, () => HttpResponse.json({ data: stored })),
+    http.patch(`${API_BASE}/user-settings`, async ({ request }) => {
+      const body = (await request.json()) as { voice?: Record<string, unknown> };
+      const merged = { ...((stored.voice as Record<string, unknown>) ?? {}) };
+      for (const [key, value] of Object.entries(body.voice ?? {})) {
+        // `null` is the DELETE, exactly as `mergeVoice` treats it server-side.
+        if (value === null) delete merged[key];
+        else merged[key] = value;
+      }
+      stored = {
+        ...stored,
+        voice: merged,
+        version: (stored.version as number) + 1,
+      };
+      return HttpResponse.json({ data: stored });
+    }),
     http.get(`${API_BASE}/ai/status`, () => {
       statusReads += 1;
       if (options.unbindTranscribeOnRefresh && statusReads > 1) {
@@ -478,10 +497,19 @@ function renderSession(options: Options = {}) {
   );
 }
 
-/** Wait for the question, then switch to the microphone. */
+/**
+ * Wait for the question, then switch to the microphone.
+ *
+ * THE CONTROL IS NOW `Voice`, ABOVE THE QUESTION, AND SESSION-WIDE (#313,
+ * epic #304 / E13): `docs/specs/conversation-mode.md` §7 formally amends
+ * `voice.md` §5's per-question picker. Only the label and its position moved —
+ * choosing Voice still renders `PushToTalkButton` and still runs every flow
+ * asserted below, because the hands-free loop is armed by its own Start and by
+ * nothing else.
+ */
 async function startSpeaking(user: ReturnType<typeof userEvent.setup>) {
   await screen.findByRole('heading', { level: 2, name: QUESTION_1.prompt });
-  const speak = await screen.findByRole('button', { name: /speak/i });
+  const speak = await screen.findByRole('button', { name: /^voice$/i });
   await user.click(speak);
   return speak;
 }
@@ -1373,14 +1401,14 @@ describe('switching between speaking and typing mid-session', () => {
     expect(screen.getByText('Question 2 of 5')).toBeInTheDocument();
 
     // Voice…
-    await user.click(screen.getByRole('button', { name: /speak/i }));
+    await user.click(screen.getByRole('button', { name: /^voice$/i }));
     expect(
       await screen.findByRole('button', { name: /hold to record/i }),
     ).toBeInTheDocument();
     expect(screen.getByText('Question 2 of 5')).toBeInTheDocument();
 
     // …text…
-    await user.click(screen.getByRole('button', { name: /^type$/i }));
+    await user.click(screen.getByRole('button', { name: /^text$/i }));
     expect(screen.queryByRole('button', { name: /hold to record/i })).toBeNull();
     expect(screen.getByText('Question 2 of 5')).toBeInTheDocument();
     expect(
@@ -1388,7 +1416,7 @@ describe('switching between speaking and typing mid-session', () => {
     ).toBeInTheDocument();
 
     // …and back. Nothing restarted, nothing re-fetched, nothing re-asked.
-    await user.click(screen.getByRole('button', { name: /speak/i }));
+    await user.click(screen.getByRole('button', { name: /^voice$/i }));
     expect(
       await screen.findByRole('button', { name: /hold to record/i }),
     ).toBeInTheDocument();

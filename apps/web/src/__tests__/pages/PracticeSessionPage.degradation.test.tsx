@@ -223,13 +223,17 @@ describe('the voice degradation matrix — all eight (transcribe x speak x key) 
 
     await screen.findByRole('heading', { level: 2, name: QUESTION_1.prompt });
 
-    const speakButton = screen.queryByRole('button', { name: /^speak$/i });
+    // `Voice` since #313 (epic #304 / E13) — the session-wide picker replaced
+    // the per-question `Type | Speak` toggle. The claim under test is unchanged
+    // and is the one `conversation-mode.md` §10's degradation row states: with
+    // `transcribe` unbound the option is ABSENT, never a disabled button.
+    const speakButton = screen.queryByRole('button', { name: /^voice$/i });
 
     if (cell.transcribeBound) {
       // PRESENT, not merely enabled — the claim is that the control exists at
-      // all, exactly as `PracticeSessionPage.tsx`'s own comment states: "Offering
-      // 'Speak' on a deployment with no `transcribe` model bound would be a dead
-      // affordance beside a notice explaining that it is dead."
+      // all, exactly as `PracticeSessionPage.tsx`'s own comment states: a Voice
+      // option on a deployment with no `transcribe` model bound would be a dead
+      // affordance beside a notice explaining that it is dead.
       expect(speakButton).not.toBeNull();
       expect(speakButton).toBeEnabled();
     } else {
