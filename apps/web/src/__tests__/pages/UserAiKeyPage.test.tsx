@@ -58,6 +58,11 @@ const usage: AiUsage = {
     { key: 'tutor', calls: 40, totalTokens: 9000 },
     { key: 'grader', calls: 80, totalTokens: 3000 },
   ],
+  timeline: [
+    { date: '2026-08-01', calls: 60, totalTokens: 6000 },
+    { date: '2026-08-02', calls: 0, totalTokens: 0 },
+    { date: '2026-08-03', calls: 60, totalTokens: 6000 },
+  ],
 };
 
 const EMPTY_USAGE: AiUsage = {
@@ -70,6 +75,21 @@ const EMPTY_USAGE: AiUsage = {
   callsWithUnknownUsage: 0,
   byModel: [],
   byRole: [],
+  timeline: [{ date: '2026-08-03', calls: 0, totalTokens: 0 }],
+};
+
+/** A brand-new account: exactly one day of recorded history. */
+const SINGLE_DAY_USAGE: AiUsage = {
+  since: '2026-08-03T00:00:00.000Z',
+  calls: 3,
+  successfulCalls: 3,
+  promptTokens: 300,
+  completionTokens: 100,
+  totalTokens: 400,
+  callsWithUnknownUsage: 0,
+  byModel: [{ key: 'gpt-5.4', calls: 3, totalTokens: 400 }],
+  byRole: [{ key: 'tutor', calls: 3, totalTokens: 400 }],
+  timeline: [{ date: '2026-08-03', calls: 3, totalTokens: 400 }],
 };
 
 function mockAll(u: AiUsage = usage) {
@@ -154,6 +174,66 @@ describe('UserAiKeyPage — the key', () => {
   });
 });
 
+describe('UserAiKeyPage — OpenAiSpendCard, the actual answer to "how much"', () => {
+  it('links to the authoritative record, opening in a new tab', async () => {
+    renderPage();
+
+    const link = await screen.findByRole('link', { name: /Open OpenAI usage/i });
+    expect(link).toHaveAttribute('href', 'https://platform.openai.com/usage');
+    expect(link).toHaveAttribute('target', '_blank');
+    expect(link.getAttribute('rel')).toContain('noopener');
+    expect(link.getAttribute('rel')).toContain('noreferrer');
+  });
+
+  it('renders even in the empty state — a zero-call account still has an OpenAI account worth checking', async () => {
+    mockAll(EMPTY_USAGE);
+    renderPage();
+
+    expect(await screen.findByText(/Nothing yet/i)).toBeInTheDocument();
+    expect(
+      screen.getByRole('link', { name: /Open OpenAI usage/i }),
+    ).toHaveAttribute('href', 'https://platform.openai.com/usage');
+  });
+});
+
+describe('UserAiKeyPage — the token trend chart', () => {
+  it('renders the chart when there is more than one day of history', async () => {
+    renderPage();
+
+    const heading = await screen.findByText('Tokens per day');
+    expect(heading).toBeInTheDocument();
+
+    // Accessible labelling: the chart's wrapper points at the heading and the
+    // caption underneath via aria-labelledby/aria-describedby, and both ids
+    // resolve to real elements in the document.
+    const labelledById = heading.getAttribute('id');
+    expect(labelledById).toBeTruthy();
+    const describedByEl = document.getElementById('ai-usage-trend-desc');
+    expect(describedByEl).not.toBeNull();
+
+    const wrapper = document.querySelector(
+      `[aria-labelledby="${labelledById}"]`,
+    );
+    expect(wrapper).not.toBeNull();
+    expect(wrapper).toHaveAttribute('aria-describedby', 'ai-usage-trend-desc');
+  });
+
+  it('renders the single-day sentence, not a chart, when there is exactly one day of history', async () => {
+    mockAll(SINGLE_DAY_USAGE);
+    renderPage();
+
+    expect(
+      await screen.findByText(/tokens across 3 requests\./i),
+    ).toBeInTheDocument();
+    // The section heading is shared by both renderings; what must NOT appear
+    // is the chart itself — its accessible wrapper only exists in the
+    // multi-day branch.
+    expect(
+      document.querySelector('[aria-labelledby="ai-usage-trend-heading"]'),
+    ).not.toBeInTheDocument();
+  });
+});
+
 describe('UserAiKeyPage — usage is not a bill', () => {
   it('states the caveat ABOVE the numbers', async () => {
     // A note under a total is read after the total has already been believed.
@@ -168,12 +248,17 @@ describe('UserAiKeyPage — usage is not a bill', () => {
     ).toBeTruthy();
   });
 
-  it('links to the authoritative record', async () => {
+  it('states the one remaining caveat concisely, not the old pre-emptive paragraph', async () => {
+    // Issue #291: the old alert argued at length against a figure this page
+    // never showed. Now that `OpenAiSpendCard` answers "how much have I
+    // spent", the alert says only what these counts are NOT.
     renderPage();
 
-    const link = await screen.findByRole('link', { name: /OpenAI usage page/i });
-    expect(link).toHaveAttribute('href', 'https://platform.openai.com/usage');
-    expect(link.getAttribute('rel')).toContain('noopener');
+    expect(
+      await screen.findByText(
+        /These are request and token counts OathPath made with your key — not a bill, and not an estimate of one\./i,
+      ),
+    ).toBeInTheDocument();
   });
 
   it('shows NO currency figure anywhere', async () => {

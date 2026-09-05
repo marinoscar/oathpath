@@ -12,6 +12,7 @@ import { AiUsageController } from './ai-usage.controller';
 import { OpenAiProvider } from './providers/openai.provider';
 import { AI_USAGE_MAKES_NO_BILLING_CLAIM } from './dto/ai-usage.dto';
 import { PrismaService } from '../prisma/prisma.service';
+import { Clock } from '../common/clock/clock';
 import type { CredentialsService } from '../credentials/credentials.service';
 import { PatService } from '../pat/pat.service';
 import {
@@ -325,7 +326,13 @@ describe('AiUsageService.record', () => {
   beforeEach(async () => {
     prisma = createMockPrismaService();
     const module: TestingModule = await Test.createTestingModule({
-      providers: [AiUsageService, { provide: PrismaService, useValue: prisma }],
+      providers: [
+        AiUsageService,
+        { provide: PrismaService, useValue: prisma },
+        // `record()` itself never touches the clock — only `describeForUser`
+        // does — but the constructor still requires one to resolve.
+        { provide: Clock, useValue: { now: jest.fn(), calendarDateIn: jest.fn() } },
+      ],
     }).compile();
     service = module.get(AiUsageService);
     jest.spyOn(service['logger'], 'error').mockImplementation(() => undefined);
@@ -419,14 +426,41 @@ describe('AiUsageService.record', () => {
 describe('AiUsageService.describeForUser', () => {
   let service: AiUsageService;
   let prisma: MockPrismaService;
+  let clock: { now: jest.Mock; calendarDateIn: jest.Mock };
+
+  // A fixed instant, well clear of any real "today" this suite might run on,
+  // so `timeline`'s upper bound is provably the CLOCK's answer and not
+  // whatever `Date.now()` happened to return when the test ran.
+  const CLOCK_NOW = new Date('2026-08-15T12:00:00.000Z');
 
   beforeEach(async () => {
     prisma = createMockPrismaService();
     prisma.aiUsageEvent.findMany.mockResolvedValue([] as never);
+    clock = {
+      now: jest.fn().mockReturnValue(CLOCK_NOW),
+      calendarDateIn: jest.fn(),
+    };
     const module: TestingModule = await Test.createTestingModule({
-      providers: [AiUsageService, { provide: PrismaService, useValue: prisma }],
+      providers: [
+        AiUsageService,
+        { provide: PrismaService, useValue: prisma },
+        { provide: Clock, useValue: clock },
+      ],
     }).compile();
     service = module.get(AiUsageService);
+  });
+
+  it('passes clock.now() through as the timeline\'s upper bound (#291)', async () => {
+    // `summarise`'s `now` parameter used to not exist; `describeForUser` must
+    // supply it from the injected `Clock`, never from a bare `Date.now()` —
+    // see CLAUDE.md's "Using the Clock" rule. A day-zero-filled timeline whose
+    // last entry is anything other than the clock's own day means this call
+    // site reached for the wall clock instead.
+    const summary = await service.describeForUser(ALICE);
+
+    expect(clock.now).toHaveBeenCalled();
+    const lastEntry = summary.timeline[summary.timeline.length - 1];
+    expect(lastEntry.date).toBe('2026-08-15');
   });
 
   it('queries only the calling user\'s rows', async () => {
@@ -457,6 +491,7 @@ describe('AiUsageService.describeForUser', () => {
     expect(Object.keys(query.select).sort()).toEqual(
       [
         'completionTokens',
+        'createdAt',
         'model',
         'promptTokens',
         'roleKey',
@@ -487,6 +522,7 @@ describe('clampWindow', () => {
 
 describe('summarise', () => {
   const since = new Date('2026-08-01T00:00:00Z');
+  const now = new Date('2026-08-03T12:00:00Z');
 
   it('EXCLUDES unknown counts from the totals rather than counting them as zero', () => {
     const summary = summarise(
@@ -498,6 +534,7 @@ describe('summarise', () => {
           completionTokens: 5,
           totalTokens: 15,
           success: true,
+          createdAt: new Date('2026-08-01T08:00:00Z'),
         },
         {
           model: 'gpt-5.4',
@@ -506,9 +543,11 @@ describe('summarise', () => {
           completionTokens: null,
           totalTokens: null,
           success: false,
+          createdAt: new Date('2026-08-01T09:00:00Z'),
         },
       ],
       since,
+      now,
     );
 
     expect(summary.totalTokens).toBe(15);
@@ -528,6 +567,7 @@ describe('summarise', () => {
           completionTokens: 1,
           totalTokens: 100,
           success: true,
+          createdAt: new Date('2026-08-01T08:00:00Z'),
         },
         {
           model: 'gpt-5.4-mini',
@@ -536,9 +576,11 @@ describe('summarise', () => {
           completionTokens: 1,
           totalTokens: 200,
           success: true,
+          createdAt: new Date('2026-08-02T08:00:00Z'),
         },
       ],
       since,
+      now,
     );
 
     // Heaviest first, so the expensive thing is at the top.
@@ -550,7 +592,7 @@ describe('summarise', () => {
   });
 
   it('gives an empty window a sensible zero state, not a broken one', () => {
-    const summary = summarise([], since);
+    const summary = summarise([], since, now);
 
     expect(summary).toMatchObject({
       calls: 0,
@@ -558,6 +600,186 @@ describe('summarise', () => {
       byModel: [],
       byRole: [],
     });
+  });
+});
+
+describe('summarise — timeline (issue #291)', () => {
+  it('zero-fills one entry per UTC calendar day from since through now, inclusive, for an empty window', () => {
+    const since = new Date('2026-08-01T00:00:00Z');
+    const now = new Date('2026-08-03T00:00:00Z');
+
+    const summary = summarise([], since, now);
+
+    expect(summary.timeline).toEqual([
+      { date: '2026-08-01', calls: 0, totalTokens: 0 },
+      { date: '2026-08-02', calls: 0, totalTokens: 0 },
+      { date: '2026-08-03', calls: 0, totalTokens: 0 },
+    ]);
+  });
+
+  it('keeps zero-activity days as explicit entries between days that DO have activity, not omitted', () => {
+    const since = new Date('2026-08-01T00:00:00Z');
+    const now = new Date('2026-08-05T00:00:00Z');
+
+    const summary = summarise(
+      [
+        {
+          model: 'gpt-5.4',
+          roleKey: 'tutor',
+          promptTokens: 1,
+          completionTokens: 1,
+          totalTokens: 10,
+          success: true,
+          createdAt: new Date('2026-08-01T08:00:00Z'),
+        },
+        {
+          model: 'gpt-5.4',
+          roleKey: 'tutor',
+          promptTokens: 1,
+          completionTokens: 1,
+          totalTokens: 20,
+          success: true,
+          createdAt: new Date('2026-08-04T08:00:00Z'),
+        },
+      ],
+      since,
+      now,
+    );
+
+    // Five days in the window; only two of them have rows. The gap between
+    // the two active days, AND the day after the second one, must still
+    // appear — as explicit zero entries, not be skipped.
+    expect(summary.timeline).toHaveLength(5);
+    const byDate = new Map(summary.timeline.map((point) => [point.date, point]));
+    expect(byDate.get('2026-08-01')).toEqual({
+      date: '2026-08-01',
+      calls: 1,
+      totalTokens: 10,
+    });
+    // THE gap — a day with zero calls present in the array, not omitted.
+    expect(byDate.get('2026-08-02')).toEqual({
+      date: '2026-08-02',
+      calls: 0,
+      totalTokens: 0,
+    });
+    expect(byDate.get('2026-08-03')).toEqual({
+      date: '2026-08-03',
+      calls: 0,
+      totalTokens: 0,
+    });
+    expect(byDate.get('2026-08-04')).toEqual({
+      date: '2026-08-04',
+      calls: 1,
+      totalTokens: 20,
+    });
+    expect(byDate.get('2026-08-05')).toEqual({
+      date: '2026-08-05',
+      calls: 0,
+      totalTokens: 0,
+    });
+  });
+
+  it('is in ascending date order', () => {
+    const since = new Date('2026-08-01T00:00:00Z');
+    const now = new Date('2026-08-06T00:00:00Z');
+
+    // Rows deliberately out of order, to prove the output order comes from
+    // the days themselves rather than from row insertion order.
+    const summary = summarise(
+      [
+        {
+          model: 'gpt-5.4',
+          roleKey: 'tutor',
+          promptTokens: 1,
+          completionTokens: 1,
+          totalTokens: 5,
+          success: true,
+          createdAt: new Date('2026-08-05T08:00:00Z'),
+        },
+        {
+          model: 'gpt-5.4',
+          roleKey: 'tutor',
+          promptTokens: 1,
+          completionTokens: 1,
+          totalTokens: 5,
+          success: true,
+          createdAt: new Date('2026-08-02T08:00:00Z'),
+        },
+      ],
+      since,
+      now,
+    );
+
+    const dates = summary.timeline.map((point) => point.date);
+    expect(dates).toEqual([...dates].sort());
+    expect(dates).toEqual([
+      '2026-08-01',
+      '2026-08-02',
+      '2026-08-03',
+      '2026-08-04',
+      '2026-08-05',
+      '2026-08-06',
+    ]);
+  });
+
+  it('excludes a null totalTokens from the day\'s total while still counting the call', () => {
+    const since = new Date('2026-08-01T00:00:00Z');
+    const now = new Date('2026-08-01T00:00:00Z');
+
+    const summary = summarise(
+      [
+        {
+          model: 'gpt-5.4',
+          roleKey: 'tutor',
+          promptTokens: 10,
+          completionTokens: 5,
+          totalTokens: 50,
+          success: true,
+          createdAt: new Date('2026-08-01T01:00:00Z'),
+        },
+        {
+          model: 'gpt-5.4',
+          roleKey: 'tutor',
+          promptTokens: null,
+          completionTokens: null,
+          totalTokens: null,
+          success: false,
+          createdAt: new Date('2026-08-01T02:00:00Z'),
+        },
+      ],
+      since,
+      now,
+    );
+
+    expect(summary.timeline).toEqual([
+      // Both calls counted; the null-usage one contributes 0 tokens, not a
+      // dropped call and not a claimed count.
+      { date: '2026-08-01', calls: 2, totalTokens: 50 },
+    ]);
+  });
+
+  it('FENCEPOST — since and now on the same UTC calendar day produce exactly one entry', () => {
+    const since = new Date('2026-08-01T01:00:00.000Z');
+    const now = new Date('2026-08-01T23:00:00.000Z');
+
+    const summary = summarise([], since, now);
+
+    expect(summary.timeline).toEqual([
+      { date: '2026-08-01', calls: 0, totalTokens: 0 },
+    ]);
+  });
+
+  it('FENCEPOST — since and now straddling a UTC calendar-day boundary produce exactly two entries', () => {
+    // Under two hours apart, but on different UTC calendar dates.
+    const since = new Date('2026-08-01T23:00:00.000Z');
+    const now = new Date('2026-08-02T01:00:00.000Z');
+
+    const summary = summarise([], since, now);
+
+    expect(summary.timeline).toEqual([
+      { date: '2026-08-01', calls: 0, totalTokens: 0 },
+      { date: '2026-08-02', calls: 0, totalTokens: 0 },
+    ]);
   });
 });
 
