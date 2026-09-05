@@ -819,6 +819,11 @@ describe('the hands-free loop', () => {
     await finishSpeaking();
 
     await screen.findByRole('heading', { level: 2, name: QUESTION_2.prompt });
+    // …and it is ASKED, not merely rendered. The same race `startLoop` guards
+    // on the way in: the phase and the question both change a render BEFORE
+    // the loop's player mounts, so waiting on either alone leaves the mount
+    // that speaks question 2 still pending when the case ends.
+    await waitFor(() => expect(speech.spoken).toContain(QUESTION_2.prompt));
   });
 
   it('stops, spoken and on screen, when there is no next question', async () => {
