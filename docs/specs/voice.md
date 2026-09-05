@@ -321,6 +321,54 @@ low confidence is what makes the UI show the raw transcript for editing
 rather than silently accepting it. See the worked example below for exactly
 how the two interact.
 
+> **Amended by E15 (epic #345), recording a gap rather than fixing it.**
+> `asrConfidence` is **unconditionally `null`** for the `gpt-4o-transcribe`
+> family — the recommended transcription model — not merely low or
+> sometimes missing. Verified directly against
+> `apps/api/src/ai/providers/openai.provider.ts`: `wantsVerboseTranscription`
+> (line 1437: `return !/transcribe/i.test(modelId)`) returns `false` for any
+> model id matching `/transcribe/i`, which routes `runTranscription` down
+> the plain `json`-response branch, and **both** of that branch's returns
+> (lines 809 and 833) hardcode `transcriptionResult(readTranscriptText(...),
+> null)`. `deriveConfidence` — the real, `avg_logprob`-derived signal this
+> section describes — is reachable only on the `verbose_json` branch, which
+> `gpt-4o-transcribe` cannot accept at all (a 400 if forced).
+>
+> **The consequence for the mechanism this section specifies:** on any
+> deployment bound to `gpt-4o-transcribe` (or its `-mini` sibling), every
+> condition in this section and §3.1 that reads `asrConfidence` is dead
+> code that never fires. `isLowConfidence` correctly returns `false` for
+> `null` — unknown is not low, and that half of the design holds — but the
+> practical effect is that **no attempt is ever flagged `failureCause:
+> 'misheard'` on such a deployment**, `mastery-skip.ts`'s scheduling
+> refusal never triggers for a confidence reason, and the confirm/retry
+> copy that reads "we may have misheard you" never renders. `VISION.md`
+> line 228's promise — "never unfairly penalized for an accent or
+> speech-recognition errors" — is described in this document as delivered
+> by a mechanism that, on the recommended model, cannot fire.
+>
+> **This document does not implement a fix here.** The fix is
+> [issue #348](https://github.com/marinoscar/oathpath/issues/348), filed
+> against this exact gap: sending a `prompt`/`languageHint` to bias
+> recognition, and choosing between restoring a real signal on models that
+> can produce one versus explicitly documenting, per deployment, that the
+> `misheard` guarantee is unenforceable on models that cannot. Until that
+> issue lands, treat every claim in this section and §3.1 about
+> `failureCause: 'misheard'` firing as **conditional on the bound
+> transcription model being one that can produce `verbose_json`**
+> (`whisper-1`, by this file's own `wantsVerboseTranscription` check) —
+> `Decisions locked` #4 (§11) carries the identical amendment note.
+>
+> **The realtime transport (E15, `docs/specs/realtime-practice.md`) does
+> not inherit this gap, because it never had the signal to lose.** Its own
+> `grade_answer` tool call carries no `confidence` argument at all, by
+> deliberate design rather than by omission — a model's self-reported
+> certainty is a different, uncalibrated quantity from the
+> recogniser-measured value this section's threshold is tuned against, and
+> accepting one would not be restoring this section's guarantee, only
+> replacing one untrustworthy `null` with an equally untrustworthy number.
+> See `docs/specs/realtime-practice.md` §9 for the argument in full.
+
 ### 3.1 Worked example
 
 > **Amended by E12 (epic #280).** The confirmation screen below renders only
@@ -1063,7 +1111,7 @@ load-bearing rather than a preference:
 | 1 | **Browser TTS is the default; `speak` is an optional upgrade.** | "Hear the question" must work on a fresh install with zero configuration and zero cost — an admin who has not touched AI settings at all must not be the reason a learner cannot hear a question read aloud. §2. |
 | 2 | **Wiring a voice role must not break existing installations.** | `systemReady` was computed over every `wiredModelRoles()` member; wiring `transcribe`/`speak` alone, without narrowing `systemReady` to the text roles in the same commit, would make every deployed installation report not-ready the instant this epic merges — for a capability nobody asked for yet, discovered by an admin who changed nothing. §1. |
 | 3 | **The transcript is confirmed by the learner before grading.** ***Amended by E12 (epic #280)*** — confirm-before-grade is now the opt-out (`autoSubmitSpoken: false`); the default flow grades immediately and moves the anti-penalty guarantee to `recomputeMasteryForQuestion`. See `docs/specs/voice-hands-free.md` §1, §2, and this document's own §3 amendment note. | This is the anti-penalty mechanism `VISION.md` line 228 requires. Grading raw ASR output treats a speech-recognition failure as a civics-knowledge failure — the exact conflation this epic exists to prevent. §3. |
-| 4 | **A low-confidence miss is flagged `failureCause: misheard` and withheld from mastery scheduling — `outcome` stays whatever grading honestly found.** | Without the scheduling withholding, an accent or a noisy microphone becomes a scheduling penalty (a reset streak, a lapse, a pulled-in `dueAt`) indistinguishable from not knowing the material — the recognizer's own uncertainty about the TEXT says nothing about the learner's recall, so `question_mastery` must never see it. §3, §3.1. |
+| 4 | **A low-confidence miss is flagged `failureCause: misheard` and withheld from mastery scheduling — `outcome` stays whatever grading honestly found.** ***Amended by E15 (epic #345)*** — recorded, not fixed: `asrConfidence` is unconditionally `null` on the `gpt-4o-transcribe` family, so this mechanism cannot fire at all on that binding; the fix is issue #348. See this document's own §3 amendment note. | Without the scheduling withholding, an accent or a noisy microphone becomes a scheduling penalty (a reset streak, a lapse, a pulled-in `dueAt`) indistinguishable from not knowing the material — the recognizer's own uncertainty about the TEXT says nothing about the learner's recall, so `question_mastery` must never see it. §3, §3.1. |
 | 5 | **Audio is not stored.** | An unnecessary recording of someone's voice, made while they practice for a naturalization interview, is a liability this product has no use for and every reason to avoid — retaining it would create a sensitive data store with no corresponding feature need. §4. |
 | 6 | **Voice is always optional.** ***Amended by E13 (epic #304)*** — optionality is unchanged, but the picker is no longer per-question only: a session-wide `Text \| Voice` control (Conversation mode, `voice.conversationMode`, defaulting `false`) is also offered, with no session-level flag added to `practice_sessions` and the per-question "Type instead" override still reachable throughout. See `docs/specs/conversation-mode.md` §7 and this document's own §5 amendment note. | `VISION.md`'s "type instead when voice is inconvenient" and "switch between voice and text without losing progress" are stated as user-facing requirements, not aspirations; a learner who cannot or does not want to use voice must have the identical practice experience by text. §5. |
 
