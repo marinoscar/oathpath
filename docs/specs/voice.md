@@ -586,13 +586,42 @@ recording this section rules out.
 
 ## 5. Voice is always optional
 
+> **Amended by E13 (epic #304).** The bullet below originally read
+> "Answering aloud is an alternative to typing, never the only way to
+> answer a practice question. The picker between the two is per-question,
+> not a session-wide mode lock." `docs/specs/conversation-mode.md` ships a
+> session-wide `Text | Voice` control (Conversation mode) alongside the
+> original per-question picker — replaced, not silently contradicted, below.
+> Nothing else in this section changes: every other bullet, and this
+> section's own reasoning, holds identically for both pickers. See
+> `docs/specs/conversation-mode.md` §7 and this document's own `Decisions
+> locked` #6 amendment note (§11).
+
 Every voice surface has a text path, unconditionally:
 
 - Reading a question aloud is an addition to the existing read-the-question
   UI, never a replacement for it — the question text is always rendered.
-- Answering aloud is an alternative to typing, never the only way to answer
-  a practice question. The picker between the two is per-question, not a
-  session-wide mode lock.
+- **Answering aloud is an alternative to typing, never the only way to
+  answer a practice question.** The picker between the two was
+  per-question only until E13 (epic #304); `docs/specs/conversation-mode.md`
+  adds a session-wide `Text | Voice` control as a second, coarser way to
+  make the identical choice, without loosening any of what this bullet has
+  always guaranteed:
+  - `Decisions locked` #6, "Voice is always optional" (§11), locks
+    **optionality**, not the granularity of the picker — a session-wide
+    control is still a choice the learner makes at the top of a session,
+    still reversible mid-session, and still never the only way to answer
+    a question.
+  - **No session-level flag is added to `practice_sessions`.** The mode is
+    client UI state plus the per-*user* `voice.conversationMode`
+    preference (`docs/specs/conversation-mode.md` §6), never a column on
+    the session row — `PracticeAttempt.inputMode`, the per-row column the
+    next bullet describes, stays the only place how a given attempt was
+    actually answered is recorded.
+  - **The text path ("Type instead") stays reachable on every question, at
+    every phase of a conversation-mode session** — choosing Voice at the
+    top of a session sets what the learner starts on, not a lock that
+    removes the per-question override underneath it.
 - **Switching between voice and text mid-session must not lose the
   session, the answered questions, or the progress counter.** A practice
   session (`practice_sessions`, `docs/specs/practice-sessions.md`) is
@@ -1036,7 +1065,7 @@ load-bearing rather than a preference:
 | 3 | **The transcript is confirmed by the learner before grading.** ***Amended by E12 (epic #280)*** — confirm-before-grade is now the opt-out (`autoSubmitSpoken: false`); the default flow grades immediately and moves the anti-penalty guarantee to `recomputeMasteryForQuestion`. See `docs/specs/voice-hands-free.md` §1, §2, and this document's own §3 amendment note. | This is the anti-penalty mechanism `VISION.md` line 228 requires. Grading raw ASR output treats a speech-recognition failure as a civics-knowledge failure — the exact conflation this epic exists to prevent. §3. |
 | 4 | **A low-confidence miss is flagged `failureCause: misheard` and withheld from mastery scheduling — `outcome` stays whatever grading honestly found.** | Without the scheduling withholding, an accent or a noisy microphone becomes a scheduling penalty (a reset streak, a lapse, a pulled-in `dueAt`) indistinguishable from not knowing the material — the recognizer's own uncertainty about the TEXT says nothing about the learner's recall, so `question_mastery` must never see it. §3, §3.1. |
 | 5 | **Audio is not stored.** | An unnecessary recording of someone's voice, made while they practice for a naturalization interview, is a liability this product has no use for and every reason to avoid — retaining it would create a sensitive data store with no corresponding feature need. §4. |
-| 6 | **Voice is always optional.** | `VISION.md`'s "type instead when voice is inconvenient" and "switch between voice and text without losing progress" are stated as user-facing requirements, not aspirations; a learner who cannot or does not want to use voice must have the identical practice experience by text. §5. |
+| 6 | **Voice is always optional.** ***Amended by E13 (epic #304)*** — optionality is unchanged, but the picker is no longer per-question only: a session-wide `Text \| Voice` control (Conversation mode, `voice.conversationMode`, defaulting `false`) is also offered, with no session-level flag added to `practice_sessions` and the per-question "Type instead" override still reachable throughout. See `docs/specs/conversation-mode.md` §7 and this document's own §5 amendment note. | `VISION.md`'s "type instead when voice is inconvenient" and "switch between voice and text without losing progress" are stated as user-facing requirements, not aspirations; a learner who cannot or does not want to use voice must have the identical practice experience by text. §5. |
 
 ## 12. Rejected alternatives
 
