@@ -12,6 +12,9 @@ import { AiStatusProvider } from "./contexts/AiStatusContext";
 import { LearnerProfileProvider } from "./contexts/LearnerProfileContext";
 import { Layout } from "./components/common/Layout";
 import { ErrorBoundary } from "./components/common/ErrorBoundary";
+// Issue #359, epic #345 — the update banner and the install offer. Both are
+// Snackbars, neither is route-dependent; see `PwaAffordances`.
+import { PwaAffordances } from "./components/pwa/PwaAffordances";
 
 // Pages (lazy loaded)
 import { Suspense, lazy } from "react";
@@ -128,6 +131,10 @@ function AppRoutes() {
   return (
     <ThemeProvider theme={theme}>
       <CssBaseline />
+      {/* OUTSIDE `<Routes>` and outside `ErrorBoundary`'s subtree concerns:
+          "a new version is available" must survive every navigation, and the
+          install offer arrives when the browser decides it does. */}
+      <PwaAffordances />
       <ErrorBoundary>
         <Suspense fallback={<LoadingSpinner fullScreen />}>
           <Routes>
