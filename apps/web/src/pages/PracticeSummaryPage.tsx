@@ -61,6 +61,26 @@
  * about the first.
  *
  * =============================================================================
+ * THE COACH'S CLOSING WORD (#352, epic #345) IS RENDERED, NOT COMPOSED
+ * =============================================================================
+ *
+ * `session.coachReaction` is one line in the learner's chosen coach voice
+ * about how the whole session went. The server has computed it since #320 and
+ * nothing rendered it for two epics, because the web's `PracticeSession` type
+ * did not carry the field — so the end of a session, the most natural moment
+ * for a coach to say anything, was silent.
+ *
+ * This page renders what it is sent and picks nothing. `null` means silence —
+ * an abandoned session with no summary to react to, or a learner who has set
+ * `coach.reactions` to `false` — and silence renders as NOTHING, not as an
+ * empty region reserving space for a line that is never coming. There is no
+ * suppression branch here: the preference became `null` once, server-side.
+ *
+ * In Voice mode the session screen has already SPOKEN the same string on its
+ * way here, from the same response's `spokenTurn`. One selection, said and
+ * shown.
+ *
+ * =============================================================================
  * WIDTH, HEADINGS AND WHAT THIS PAGE IS NOT
  * =============================================================================
  *
@@ -223,6 +243,19 @@ export default function PracticeSummaryPage() {
    * abandoned session, which has no tally either), or a session that produced
    * nothing measurable.
    */
+  /**
+   * The coach's line about the whole session, trimmed — or `''`.
+   *
+   * `''` in exactly the cases the server sends `null`: an abandoned session
+   * with no stored summary to react to, and a learner who has turned
+   * `coach.reactions` off. Both render nothing at all, and NEITHER is a branch
+   * this page owns: suppression happened once, server-side, in
+   * `toCoachReaction`. Trimmed for the same reason `AiFeedbackCard` trims its
+   * own reaction — an all-whitespace string must render nothing rather than an
+   * empty paragraph with margins around it.
+   */
+  const sessionReaction = (session.coachReaction?.text ?? '').trim();
+
   const celebration =
     engagement && session.summary
       ? selectCelebrationCopy({
@@ -255,6 +288,38 @@ export default function PracticeSummaryPage() {
         )}
 
         {celebration && <SessionCelebration copy={celebration} />}
+
+        {sessionReaction && (
+          // THE COACH'S CLOSING WORD (#352, epic #345).
+          //
+          // DIRECTLY UNDER THE TALLY, for the reason `AiFeedbackCard.tsx` puts
+          // an attempt's reaction directly under its verdict: the tally is the
+          // verdict of the session, and the coach's line sits BESIDE that
+          // judgement rather than wearing it. Above the tally it would read as
+          // the result; below it, it reads as the coach's remark about the
+          // result, which is what it is.
+          //
+          // NO icon, NO chip, NO coloured surface, and no heading — the same
+          // three deliberate omissions that card makes. Anything framing it
+          // would make a joke look like a system message and give the
+          // personality a visual weight the numbers deliberately keep.
+          //
+          // `role="status"` so assistive technology announces it: it is the
+          // one piece of this page that is the coach speaking rather than the
+          // record reporting, and a line nobody hears is a line only sighted
+          // learners get. In Voice mode the session screen has already SPOKEN
+          // this same string on its way here (`PracticeSessionPage`'s
+          // `handleFinish`), from the server's own `spokenTurn` — one
+          // selection, rendered and said.
+          <Typography
+            variant="body1"
+            component="p"
+            role="status"
+            sx={{ mt: 3, mb: 1 }}
+          >
+            {sessionReaction}
+          </Typography>
+        )}
 
         {session.summary ? (
           <SummaryTally summary={session.summary} headingId="summary-tally-heading" />

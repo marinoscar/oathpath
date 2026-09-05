@@ -458,6 +458,56 @@ function speakNudge(text: string): Promise<ConversationSpeechOutcome> {
 }
 
 /**
+ * How long one closing line may hold the summary screen up.
+ *
+ * `speakNudge` resolves on `onend` or `onerror`, and a browser that fires
+ * NEITHER — the one real hazard of `speechSynthesis` — would otherwise leave a
+ * learner staring at "Finishing…" forever. Eight seconds is far longer than any
+ * line in the bank takes to say and far shorter than a learner will wait before
+ * deciding the app has hung.
+ */
+const CLOSING_TURN_LINE_TIMEOUT_MS = 8000;
+
+/**
+ * Say the session's closing turn, in order, and resolve when it is done
+ * (issue #352, epic #345).
+ *
+ * ============================================================================
+ * WHY THIS IS AWAITED BEFORE NAVIGATING, RATHER THAN FIRED AND FORGOTTEN
+ * ============================================================================
+ *
+ * `useConversationSession`'s unmount cleanup calls `speech.stop()`, which
+ * cancels whatever the page is saying. Leaving for the summary screen while the
+ * coach is still speaking therefore does not overlap the two — it CUTS THE
+ * COACH OFF mid-sentence, which is worse than the silence this issue exists to
+ * end. So the closing line is spoken first and the navigation waits for it,
+ * bounded by the timeout above.
+ *
+ * ============================================================================
+ * WHY THE BROWSER'S OWN VOICE, NOT `QuestionAudio`'s PREMIUM PATH
+ * ============================================================================
+ *
+ * The premium path is for CONTENT — a civics question or its accepted answer —
+ * and it is what the deployment-wide audio cache
+ * (`GET /api/ai/speech/audio`) is keyed for: `civics_question` and
+ * `civics_answer`, and nothing else. A coach's line is neither, so a premium
+ * synthesis of it would spend the learner's own key on every session ending,
+ * uncached, forever. The browser's voice costs nothing, needs no key and needs
+ * no `speak` binding — which also means the closing line still happens on a
+ * deployment with no AI voice configured at all.
+ */
+async function speakClosingTurn(lines: readonly string[]): Promise<void> {
+  for (const line of lines) {
+    await Promise.race([
+      speakNudge(line),
+      new Promise<void>((resolve) => {
+        setTimeout(resolve, CLOSING_TURN_LINE_TIMEOUT_MS);
+      }),
+    ]);
+  }
+}
+
+/**
  * =============================================================================
  * TEST-ONLY SEAM — issue #314, epic #304 / E13's own test coverage
  * =============================================================================
@@ -1711,7 +1761,27 @@ export default function PracticeSessionPage() {
     setPending('complete');
     setActionError(null);
     try {
-      await completePracticeSession(id);
+      const completed = await completePracticeSession(id);
+
+      // THE CLOSING TURN (#352, epic #345), IN VOICE MODE ONLY.
+      //
+      // The server composed it — `spokenTurn` on the session, from the same
+      // `coachReaction` the summary screen is about to render, so the line
+      // heard here and the line read there are the same string by
+      // construction. This page picks nothing and rewrites nothing.
+      //
+      // `[]` is the ordinary answer for a learner who has turned
+      // `coach.reactions` off, and speaking an empty array is silence. THERE
+      // IS NO SUPPRESSION BRANCH HERE and there must not be one: the
+      // preference became `null` once, server-side, in `toCoachReaction`.
+      //
+      // The loop is stopped with `'learner'` first — the silent reason — so
+      // the driver does not narrate an exit over the top of the coach.
+      if (answerMode === 'voice' && completed.spokenTurn.length > 0) {
+        conversationRef.current?.stop('learner');
+        await speakClosingTurn(completed.spokenTurn);
+      }
+
       if (isMounted()) navigate(practiceSummaryPath(id), { replace: true });
     } catch (err) {
       if (isMounted()) {

@@ -118,6 +118,26 @@ export const practiceSessionSchema = z.object({
    * seeded by the attempt id.
    */
   coachReaction: coachReactionSchema.nullable(),
+
+  /**
+   * What the coach SAYS when this session ends, in order (issue #352, epic
+   * #345).
+   *
+   * The spoken sibling of {@link coachReaction}, composed server-side by
+   * `composeSessionClosingTurn` for the reason `spoken-turn.ts`'s header
+   * gives for the per-attempt turn: the order and selection of what is said
+   * are decided once, here, where every transport reads them — the ordinary
+   * request/response loop today and E15's realtime one next.
+   *
+   * EMPTY IS ORDINARY, and is the answer whenever {@link coachReaction} is
+   * `null`: an unfinished session, or a learner who has turned reactions off.
+   * A client speaks `[]` as silence and never substitutes a line of its own.
+   *
+   * Deliberately carries no tally. The band is already in the line the coach
+   * says; the digits belong on the summary screen, where they can be read at
+   * the learner's own pace — see `spoken-turn.ts`'s no-interpolation rule.
+   */
+  spokenTurn: z.array(z.string()),
 });
 
 /**
