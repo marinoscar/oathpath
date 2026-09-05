@@ -36,6 +36,15 @@ Source of truth for every claim below:
 - [`docs/specs/english-test.md`](../specs/english-test.md) §3, §4 — the
   design record for how E10 reuses the accent rule and the dictation
   default; not restated here.
+- `apps/api/src/ai/providers/openai.provider.ts` (`OPENAI_TTS_VOICES`,
+  `listVoices()`) and `GET /api/ai/speech/voices` — the voice catalog E12
+  (epic #280, issue #283) adds; §1.1 below.
+- `apps/api/src/ai/speech-audio.service.ts` and the `speech_audio_assets`
+  table — the shared civics-clip cache E12 (epic #280, issue #284) adds;
+  §3 below.
+- [`docs/specs/voice-hands-free.md`](../specs/voice-hands-free.md) — the
+  full E12 design record; this runbook states only what changes for you as
+  an administrator, not restated here.
 
 ---
 
@@ -62,6 +71,24 @@ Put plainly: **you do not need to touch either setting for spoken practice
 to work.** `transcribe` is the one decision that actually changes what the
 product can do (adds voice input); `speak` only changes which voice reads
 the question aloud (the browser's, or your bound model's).
+
+### 1.1 You bind the model; each learner picks the voice (epic #280)
+
+Binding `speak` decides something beyond "is there a premium voice at all" —
+it also decides **which voices show up in a learner's own picker**, at
+`/settings/voice`. That screen reads `GET /api/ai/speech/voices`, which
+returns whatever your configured provider's `speak` capability can
+produce (OpenAI's own fixed list today) together with `speakBound`. You do
+not choose a voice for your learners: you bind the model, and every learner
+who prefers the premium path chooses their own voice and reading speed from
+what that model offers, stored as their own preference and applied the next
+time a question is read aloud.
+
+An unbound `speak` means that picker has nothing to offer — the same "not a
+degraded state" fact §1 already states, restated for the picker
+specifically: a learner still sees a voice-and-speed screen, it simply has
+no premium option checked, and every question is still read by the
+browser at whatever speed the learner has set.
 
 ## 2. Binding either role never blocks the rest of the app
 
@@ -107,6 +134,24 @@ What that means for the two roles specifically:
   `speechSynthesis` and never triggers a `speak` call at all. Binding
   `speak` therefore adds cost only in proportion to how many of your
   learners opt into it, not to your total learner count.
+
+**Civics question and answer audio specifically is a different shape of
+cost, since epic #280 (issue #284): it is synthesized once per voice across
+your whole deployment, not once per learner or per attempt.** The first
+learner who asks to hear a given civics question — in a given voice, from
+the model currently bound to `speak` — pays for that one synthesis call, on
+their own key, exactly as §3 already states above. Every learner after
+that, on this deployment, hears the identical cached clip with **no AI call
+and no cost to anyone**. So the number that actually scales your cost here
+is not your learner count and not your total attempts — it is roughly **the
+number of distinct voices your learners actually choose** (each one, at
+most once per question, ever needs to be synthesized again). This applies
+only to OathPath's own civics content read through `GET /ai/speech/audio`;
+`POST /api/ai/speech/synthesize`'s general-purpose "read this text aloud"
+route is not cached and runs on the calling learner's key every time, as it
+always has. Rebinding `speak` to a different model resets this for free —
+the next request for a question your new model hasn't spoken yet is simply
+a fresh first-payer, on that learner's own key.
 
 Neither role has a rate limit or a spend cap in this application (carried
 over from `docs/specs/ai-settings.md` §18 and `docs/specs/ai-evaluation.md`
@@ -167,6 +212,11 @@ own.
 - [ ] Neither decision affects `systemReady` or blocks any learner from using
       the rest of the app (§2)
 - [ ] Both roles bill the learner's own OpenAI key, never yours (§3)
+- [ ] Binding `speak` also populates each learner's own voice picker at
+      `/settings/voice` (§1.1) — you choose the model, they choose the voice
+- [ ] Civics question/answer audio is cached deployment-wide per voice, so
+      its cost scales with distinct voices in use, not with learner count or
+      attempts (§3)
 - [ ] English reading and writing practice (`/practice/reading`,
       `/practice/writing`) automatically inherit whatever you decided above
       — nothing to configure separately for them (§5)
