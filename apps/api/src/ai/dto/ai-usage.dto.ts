@@ -39,6 +39,26 @@ export const aiUsageBreakdownSchema = z.object({
   totalTokens: z.number().int(),
 });
 
+/** One day of the usage trend. */
+export const aiUsageTimelinePointSchema = z.object({
+  /**
+   * UTC calendar date, `YYYY-MM-DD`. `z.iso.date()` rather than
+   * `z.iso.datetime()` (used for `since` below) because this is a day, not
+   * an instant — matching `realWorldInstantSchema`'s use of the same zod
+   * method for the same reason (`update-civics-dynamic-answer.dto.ts`).
+   */
+  date: z.iso.date(),
+
+  calls: z.number().int(),
+
+  /**
+   * Same null-exclusion rule as the summary total and the by-model/by-role
+   * breakdowns: a call with unknown usage still counts toward `calls` but
+   * contributes nothing here.
+   */
+  totalTokens: z.number().int(),
+});
+
 export const aiUsageResponseSchema = z.object({
   /** Inclusive start of the window this summarises. */
   since: z.iso.datetime(),
@@ -67,6 +87,13 @@ export const aiUsageResponseSchema = z.object({
 
   /** The same, by the job the call served. */
   byRole: z.array(aiUsageBreakdownSchema),
+
+  /**
+   * One entry per UTC calendar day from `since` through today, ascending,
+   * including zero-activity days — see `AiUsageTimelinePoint` on the
+   * service. This is the trend chart's data source.
+   */
+  timeline: z.array(aiUsageTimelinePointSchema),
 });
 
 export type AiUsageResponse = z.infer<typeof aiUsageResponseSchema>;

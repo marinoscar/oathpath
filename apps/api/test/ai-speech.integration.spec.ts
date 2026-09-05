@@ -19,6 +19,7 @@ import {
 } from './helpers/auth-mock.helper';
 import { AiDispatchService } from '../src/ai/ai-dispatch.service';
 import { AiUsageService } from '../src/ai/ai-usage.service';
+import { Clock } from '../src/common/clock/clock';
 import { CredentialsService } from '../src/credentials/credentials.service';
 import { FakeAiProvider } from '../src/ai/providers/fake-ai.provider';
 import { OpenAiProvider } from '../src/ai/providers/openai.provider';
@@ -653,7 +654,7 @@ describe('Speech API — over the real dispatcher and a real provider', () => {
         {
           provide: OpenAiProvider,
           useValue: new FakeAiProvider(
-            new AiUsageService(prismaMock as unknown as PrismaService),
+            new AiUsageService(prismaMock as unknown as PrismaService, new Clock()),
           ),
         },
         { provide: CredentialsService, useValue: { getSecret } },
@@ -837,7 +838,7 @@ describe('GET /api/ai/speech/voices — over a real provider', () => {
         {
           provide: OpenAiProvider,
           useValue: new FakeAiProvider(
-            new AiUsageService(prismaMock as unknown as PrismaService),
+            new AiUsageService(prismaMock as unknown as PrismaService, new Clock()),
           ),
         },
         { provide: CredentialsService, useValue: { getSecret } },
@@ -1003,7 +1004,7 @@ describe('GET /api/ai/speech/voices — on a provider with no tts capability', (
         {
           provide: OpenAiProvider,
           useValue: new NoTtsFakeProvider(
-            new AiUsageService(prismaMock as unknown as PrismaService),
+            new AiUsageService(prismaMock as unknown as PrismaService, new Clock()),
           ),
         },
       ],
@@ -1321,7 +1322,7 @@ describe('Civics audio cache — GET /api/ai/speech/audio', () => {
         {
           provide: OpenAiProvider,
           useValue: new FakeAiProvider(
-            new AiUsageService(prismaMock as unknown as PrismaService),
+            new AiUsageService(prismaMock as unknown as PrismaService, new Clock()),
           ),
         },
         { provide: CredentialsService, useValue: { getSecret } },

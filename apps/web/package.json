@@ -24,6 +24,7 @@
     "@emotion/styled": "^11.14.1",
     "@mui/icons-material": "^9.1.0",
     "@mui/material": "^9.1.0",
+    "@mui/x-charts": "^9.13.0",
     "@mui/x-data-grid": "^9.10.1",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",

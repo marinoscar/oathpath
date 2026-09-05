@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import type { Prisma } from '@prisma/client';
 
+import { Clock } from '../common/clock/clock';
 import { PrismaService } from '../prisma/prisma.service';
 import type { AiUsage } from './ai.types';
 
@@ -88,6 +89,16 @@ export interface AiUsageSummary {
 
   byModel: AiUsageBreakdown[];
   byRole: AiUsageBreakdown[];
+
+  /**
+   * One entry per UTC calendar day from `since` through today, ascending.
+   *
+   * ZERO-FILLED, NOT SPARSE — a day with no calls still gets an entry with
+   * `calls: 0, totalTokens: 0` rather than being omitted. The chart this
+   * feeds needs to render a real gap in activity as a gap, not as a
+   * shorter axis that quietly skips the days nothing happened.
+   */
+  timeline: AiUsageTimelinePoint[];
 }
 
 /** One row of a breakdown. */
@@ -97,11 +108,36 @@ export interface AiUsageBreakdown {
   totalTokens: number;
 }
 
+/** One day of the usage trend. */
+export interface AiUsageTimelinePoint {
+  /** UTC calendar date, `YYYY-MM-DD`. */
+  date: string;
+
+  calls: number;
+
+  /**
+   * Summed known token counts for this day.
+   *
+   * Same null-exclusion rule as the summary total: a call with unknown usage
+   * still increments `calls` but contributes nothing here. There is no
+   * per-day `callsWithUnknownUsage` — that caveat is already tracked once,
+   * at the top level, and a second copy per day would not add information.
+   */
+  totalTokens: number;
+}
+
 @Injectable()
 export class AiUsageService {
   private readonly logger = new Logger(AiUsageService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    // Only for "today", the upper bound of `timeline`. Per CLAUDE.md's
+    // clock rule: never a bare `new Date()`, so an `X-Test-Clock`-pinned
+    // instant governs where the timeline ends exactly as it governs every
+    // other "now" in this codebase.
+    private readonly clock: Clock,
+  ) {}
 
   /**
    * Record one call. NEVER THROWS, NEVER REJECTS.
@@ -201,11 +237,12 @@ export class AiUsageService {
         completionTokens: true,
         totalTokens: true,
         success: true,
+        createdAt: true,
       },
       orderBy: { createdAt: 'desc' },
     });
 
-    return summarise(rows, since);
+    return summarise(rows, since, this.clock.now());
   }
 }
 
@@ -221,6 +258,7 @@ export interface UsageRowForSummary {
   completionTokens: number | null;
   totalTokens: number | null;
   success: boolean;
+  createdAt: Date;
 }
 
 /** Keep a requested window inside sane bounds. See `describeForUser`. */
@@ -230,15 +268,22 @@ export function clampWindow(days: number): number {
 }
 
 /**
- * Total the rows and build the two breakdowns.
+ * Total the rows and build the two breakdowns plus the daily timeline.
  *
  * NULLS ARE SKIPPED, NOT ZEROED, and `callsWithUnknownUsage` counts them. A
  * total that silently absorbed unknowns as zero would be a number this data
  * does not support, and there would be nothing on screen to say so.
+ *
+ * A PURE FUNCTION, DELIBERATELY — `since` and `now` (the timeline's lower and
+ * upper bound) both arrive as parameters rather than being read from a clock
+ * in here, so this stays testable with plain fixtures and no DI. The one
+ * caller that needs a real "now" (`describeForUser`) is the one that injects
+ * `Clock` and passes it in.
  */
 export function summarise(
   rows: UsageRowForSummary[],
   since: Date,
+  now: Date,
 ): AiUsageSummary {
   let promptTokens = 0;
   let completionTokens = 0;
@@ -272,6 +317,7 @@ export function summarise(
     callsWithUnknownUsage,
     byModel: toBreakdown(byModel),
     byRole: toBreakdown(byRole),
+    timeline: buildTimeline(rows, since, now),
   };
 }
 
@@ -293,4 +339,64 @@ function toBreakdown(
   return [...from.entries()]
     .map(([key, value]) => ({ key, ...value }))
     .sort((a, b) => b.totalTokens - a.totalTokens || a.key.localeCompare(b.key));
+}
+
+/** A `Date` reduced to its UTC calendar day, `YYYY-MM-DD`. */
+function toUtcDateKey(date: Date): string {
+  return date.toISOString().slice(0, 10);
+}
+
+/**
+ * One `AiUsageTimelinePoint` per UTC day from `since` through `now`,
+ * inclusive, ascending, WITH ZERO-ACTIVITY DAYS PRESENT.
+ *
+ * Built in two passes rather than one: first every day in the range is
+ * seeded at zero, so the shape of the output does not depend on which days
+ * happen to have rows; then the rows are folded in on top. A single pass
+ * that only created an entry when a row arrived would produce a sparse map
+ * the frontend would have to fill in itself — exactly the gap this function
+ * exists to close.
+ *
+ * `since`/`now` are UTC calendar days, not the caller's local timezone.
+ * Unlike the interview countdown or the streak engine, a token-usage trend
+ * has no "whose day is this" question to answer — every row's `createdAt` is
+ * an instant, not a learner-local event — so bucketing by UTC calendar date
+ * is a simpler, equally correct choice, and it is why this reaches for
+ * `Date`/`toISOString` rather than `Clock.calendarDateIn`.
+ */
+function buildTimeline(
+  rows: UsageRowForSummary[],
+  since: Date,
+  now: Date,
+): AiUsageTimelinePoint[] {
+  const byDay = new Map<string, { calls: number; totalTokens: number }>();
+
+  // Seed every day in the window, oldest to newest, so a day with no rows
+  // still ends up in the map and therefore in the output.
+  const sinceKey = toUtcDateKey(since);
+  const nowKey = toUtcDateKey(now);
+  for (
+    let cursor = Date.parse(`${sinceKey}T00:00:00.000Z`);
+    cursor <= Date.parse(`${nowKey}T00:00:00.000Z`);
+    cursor += 24 * 60 * 60 * 1000
+  ) {
+    byDay.set(toUtcDateKey(new Date(cursor)), { calls: 0, totalTokens: 0 });
+  }
+
+  for (const row of rows) {
+    const key = toUtcDateKey(row.createdAt);
+    // Defensive: every row is already `createdAt >= since` by the caller's
+    // own query, and `now` is read after that query runs, so `key` should
+    // always be in the seeded range. `?? { calls: 0, totalTokens: 0 }` means
+    // an unseeded day still gets counted rather than silently dropped if
+    // that ever stops being true.
+    const entry = byDay.get(key) ?? { calls: 0, totalTokens: 0 };
+    entry.calls += 1;
+    entry.totalTokens += row.totalTokens ?? 0;
+    byDay.set(key, entry);
+  }
+
+  return [...byDay.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([date, value]) => ({ date, ...value }));
 }

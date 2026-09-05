@@ -962,12 +962,31 @@ export interface AiUsageBreakdown {
 }
 
 /**
+ * One day's worth of usage, UTC-bucketed. One entry per calendar day in the
+ * requested window — INCLUDING zero-activity days — so a chart drawn from
+ * `AiUsage.timeline` never has to guess whether a gap means "no calls" or
+ * "no data point"; it always means the former.
+ */
+export interface AiUsageTimelinePoint {
+  /** `YYYY-MM-DD`, UTC. Not the caller's local calendar day. */
+  date: string;
+  calls: number;
+  totalTokens: number;
+}
+
+/**
  * `GET /api/ai/usage` — RECORDED USAGE, NOT A BILL.
  *
  * Token counts are not dollars, this application carries no price table, and
  * `callsWithUnknownUsage` counts calls whose consumption was never reported. A
  * page rendering this must say so and link to the user's OpenAI dashboard;
  * presenting an approximate figure as a bill is the failure to avoid.
+ *
+ * `timeline` is the day-by-day series behind the trend chart on
+ * `/settings/ai` (issue #291) — it is exact recorded data, one row per day,
+ * not a projection or an estimate of anything. It carries the identical
+ * "not a bill" caveat as every other field here: a chart of token counts is
+ * still a chart of token counts, never of spend.
  */
 export interface AiUsage {
   since: string;
@@ -980,6 +999,7 @@ export interface AiUsage {
   callsWithUnknownUsage: number;
   byModel: AiUsageBreakdown[];
   byRole: AiUsageBreakdown[];
+  timeline: AiUsageTimelinePoint[];
 }
 
 // =============================================================================
