@@ -835,7 +835,7 @@ describe('GET /api/ai/speech/voices — over a real provider', () => {
         {
           provide: OpenAiProvider,
           useValue: new FakeAiProvider(
-            new AiUsageService(prismaMock as unknown as PrismaService),
+            new AiUsageService(prismaMock as unknown as PrismaService, new Clock()),
           ),
         },
         { provide: CredentialsService, useValue: { getSecret } },
@@ -1001,7 +1001,7 @@ describe('GET /api/ai/speech/voices — on a provider with no tts capability', (
         {
           provide: OpenAiProvider,
           useValue: new NoTtsFakeProvider(
-            new AiUsageService(prismaMock as unknown as PrismaService),
+            new AiUsageService(prismaMock as unknown as PrismaService, new Clock()),
           ),
         },
       ],
