@@ -8,6 +8,8 @@ import {
   notificationsPatchSchema,
   studySchema,
   studyPatchSchema,
+  voiceSchema,
+  voicePatchSchema,
 } from './user-settings-namespaces.schema';
 
 // =============================================================================
@@ -35,6 +37,10 @@ export const userSettingsSchema = z.object({
   // built-in defaults (`DEFAULT_STUDY_REMINDER_HOUR` / `_ENABLED`) resolved at
   // reminder time, and every existing account is absent.
   study: studySchema.optional(),
+  // `voice` (issue #282, epic #280) is optional for the same reason: absent
+  // means the built-in defaults (`DEFAULT_VOICE_*`) resolved at read time,
+  // and every existing account is absent.
+  voice: voiceSchema.optional(),
 });
 
 export type UserSettingsDto = z.infer<typeof userSettingsSchema>;
@@ -58,6 +64,9 @@ export const userSettingsPatchSchema = z.object({
   // `study: null` clears the namespace; `study: { reminderHour: null }`
   // deletes one field and restores its built-in default.
   study: studyPatchSchema.nullable().optional(),
+  // `voice: null` clears the namespace; `voice: { speechRate: null }` deletes
+  // one field and restores its built-in default.
+  voice: voicePatchSchema.nullable().optional(),
 });
 
 // =============================================================================

@@ -3,6 +3,7 @@ import type {
   NavigationValue,
   NotificationsValue,
   StudyValue,
+  VoiceValue,
 } from '../schemas/user-settings-namespaces.schema';
 
 // =============================================================================
@@ -55,6 +56,19 @@ export interface UserSettingsValue {
    * changes.
    */
   study?: StudyValue;
+  /**
+   * Spoken-audio playback preferences (issue #282, epic #280): whether a
+   * spoken answer auto-submits, whether the premium synthesized voice is
+   * preferred, which provider voice and speech rate to use, and whether
+   * questions/answers play automatically.
+   *
+   * SPARSE, like its neighbours. Absent namespace and absent field both mean
+   * "use the built-in default" (the `DEFAULT_VOICE_*` constants), resolved at
+   * read time — never materialised into a row, so a learner who never
+   * touched a voice preference keeps moving with the defaults if they
+   * change.
+   */
+  voice?: VoiceValue;
 }
 
 /**
@@ -72,7 +86,7 @@ export interface SystemSettingsValue {
 /**
  * Default user settings
  */
-// NOTE: `dataTables`, `navigation`, `notifications` and `study` are
+// NOTE: `dataTables`, `navigation`, `notifications`, `study` and `voice` are
 // intentionally NOT listed here.
 // Seeding them would turn "absent" into "explicitly empty", which is exactly
 // the failure mode the namespaces are designed to avoid (a frozen column set

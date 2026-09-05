@@ -3,7 +3,8 @@ import { NOTIFICATION_CHANNELS } from '../../notifications/notification-events';
 import type { NotificationPreferences } from '../../notifications/notification-preferences';
 
 // =============================================================================
-// User Settings Namespaces: `dataTables`, `navigation`, `notifications`, `study`
+// User Settings Namespaces: `dataTables`, `navigation`, `notifications`,
+// `study`, `voice`
 // =============================================================================
 //
 // WHY THIS FILE EXISTS
@@ -253,6 +254,169 @@ export type NavigationValue = z.infer<typeof navigationSchema>;
 export type NavigationPatchValue = z.infer<typeof navigationPatchSchema>;
 export type StudyValue = z.infer<typeof studySchema>;
 export type StudyPatchValue = z.infer<typeof studyPatchSchema>;
+
+// =============================================================================
+// User Settings Namespace: `voice` (issue #282, epic #280 "Spoken Civics Audio")
+// =============================================================================
+//
+// Six independent scalar preferences, all about how a learner experiences
+// SPOKEN questions and answers — whether a spoken answer grades itself the
+// instant they release the mic, whether they hear the premium synthesized
+// voice or the browser's own free one, which provider voice they hear if the
+// premium path is available, how fast it speaks, and whether either side of
+// a civics card plays itself automatically. None of the six governs whether
+// audio is CACHED (`speech_audio_assets`, issue #282's other half) — this
+// namespace is entirely about local playback behaviour a learner controls
+// for themselves.
+//
+// SAME SHAPE AS `study`, SAME MERGE STRATEGY. Six independently-optional
+// scalar fields with no nested map to deep-merge — `mergeNavigation` and
+// `mergeStudy` already establish the field-wise pattern this namespace
+// reuses (see `user-settings.service.ts`), never `mergeDataTables`'
+// replace-wholesale.
+//
+// THE BUILT-IN DEFAULTS ARE CONSTANTS BELOW, NOT `.default()` CALLS — the
+// identical rule this file's header states for every namespace above.
+// Materialising `autoSubmitSpoken: true` (say) into storage the first time a
+// learner touched an unrelated preference would freeze them at today's
+// default even after a future change decided the default should move; see
+// the header's `dataTables.visibleColumns` paragraph for the failure mode in
+// full, and `study`'s own block for the same argument made once already.
+// =============================================================================
+
+/**
+ * Whether a spoken answer grades itself the instant the learner releases the
+ * microphone, with no separate confirm step.
+ *
+ * `true`. A confirm-before-grade step is the SAFER, more deliberate flow (and
+ * still exists — this preference is what makes it recoverable, not what
+ * removes it): a learner who wants to review their own transcript before it
+ * is scored can turn this off. Defaulting to the faster flow matches the
+ * product's general bias toward low-friction practice reps.
+ */
+export const DEFAULT_VOICE_AUTO_SUBMIT_SPOKEN = true;
+
+/**
+ * Whether the premium, synthesized voice is preferred over the browser's own
+ * free `speechSynthesis`, when a premium voice is actually available.
+ *
+ * `true`. This preference does not ITSELF make premium audio available —
+ * `speak` (the AI model role) may simply be unbound, in which case playback
+ * falls back to the browser voice regardless of this setting, exactly as
+ * `docs/specs/voice.md` §1's degradation rule already states for every
+ * voice-adjacent feature: an unbound optional role never blocks the
+ * underlying capability, it only removes the upgrade.
+ */
+export const DEFAULT_VOICE_PREFER_PREMIUM = true;
+
+/**
+ * How fast synthesized speech plays, as a multiplier of the provider's normal
+ * rate.
+ *
+ * `0.95` — matches the rate already hard-coded at
+ * `apps/web/src/components/voice/QuestionAudio.tsx:256`. That value exists
+ * because a civics question read at conversational speed is hard to follow
+ * for a learner studying in a second language; making it a namespace default
+ * (rather than leaving it hard-coded) is what lets a learner who wants it
+ * slower or faster say so, without changing what everyone else hears by
+ * default.
+ */
+export const DEFAULT_VOICE_SPEECH_RATE = 0.95;
+
+/** Minimum accepted `speechRate` — half normal speed. */
+export const VOICE_SPEECH_RATE_MIN = 0.5;
+
+/** Maximum accepted `speechRate` — double normal speed. */
+export const VOICE_SPEECH_RATE_MAX = 2.0;
+
+/**
+ * Whether a civics question is read aloud automatically when it renders.
+ *
+ * `false`. Auto-play is opt-in: a learner who has not asked for audio should
+ * not have it start speaking at them the moment a card appears.
+ */
+export const DEFAULT_VOICE_READ_QUESTIONS_ALOUD = false;
+
+/**
+ * Whether a civics answer is read aloud automatically when it renders.
+ *
+ * `false`, for the identical reason `readQuestionsAloud` is — see above.
+ */
+export const DEFAULT_VOICE_READ_ANSWERS_ALOUD = false;
+
+/**
+ * Shape bound for a provider voice id, e.g. `alloy`.
+ *
+ * SHAPE VALIDATED, MEMBERSHIP NOT — the same rule
+ * `apps/api/src/ai/dto/ai-speech.dto.ts` (~line 209) already states for this
+ * exact value on the synthesis request itself: the accepted set of voice ids
+ * belongs to the provider, so hard-coding OpenAI's current list here would be
+ * a second place that list lives — wrong on the day a second provider ships,
+ * stale on the day OpenAI adds a voice. An identifier-shaped string is the
+ * part this layer can genuinely own; anything else is a client bug.
+ */
+export const VOICE_PREFERRED_VOICE_PATTERN = /^[A-Za-z0-9_-]+$/;
+
+/**
+ * Full `voice` namespace.
+ *
+ * Every field optional, NONE with a `.default()` — see the block above.
+ * `preferredVoice` UNSET (never an empty string) lets the provider choose;
+ * `speechRate` is bounded to a range a learner could plausibly want to
+ * listen at, not the provider's own theoretical bounds.
+ */
+export const voiceSchema = z
+  .object({
+    autoSubmitSpoken: z.boolean().optional(),
+    preferPremiumVoice: z.boolean().optional(),
+    preferredVoice: z
+      .string()
+      .trim()
+      .min(1)
+      .max(64)
+      .regex(VOICE_PREFERRED_VOICE_PATTERN)
+      .optional(),
+    speechRate: z
+      .number()
+      .min(VOICE_SPEECH_RATE_MIN)
+      .max(VOICE_SPEECH_RATE_MAX)
+      .optional(),
+    readQuestionsAloud: z.boolean().optional(),
+    readAnswersAloud: z.boolean().optional(),
+  })
+  .strict();
+
+/**
+ * PATCH form of the `voice` namespace: each field may additionally be `null`,
+ * meaning "delete this field and fall back to the built-in default" — the
+ * same restore-the-default semantics `studyPatchSchema` and
+ * `navigationPatchSchema` already give their own fields.
+ */
+export const voicePatchSchema = z
+  .object({
+    autoSubmitSpoken: z.boolean().nullable().optional(),
+    preferPremiumVoice: z.boolean().nullable().optional(),
+    preferredVoice: z
+      .string()
+      .trim()
+      .min(1)
+      .max(64)
+      .regex(VOICE_PREFERRED_VOICE_PATTERN)
+      .nullable()
+      .optional(),
+    speechRate: z
+      .number()
+      .min(VOICE_SPEECH_RATE_MIN)
+      .max(VOICE_SPEECH_RATE_MAX)
+      .nullable()
+      .optional(),
+    readQuestionsAloud: z.boolean().nullable().optional(),
+    readAnswersAloud: z.boolean().nullable().optional(),
+  })
+  .strict();
+
+export type VoiceValue = z.infer<typeof voiceSchema>;
+export type VoicePatchValue = z.infer<typeof voicePatchSchema>;
 
 // =============================================================================
 // User Settings Namespace: `notifications` (issue #126, epic #109)
