@@ -29,6 +29,7 @@ import type {
   AiTranscriptionRequest,
   AiTranscriptionResult,
   AiUsage,
+  AiVoiceDescriptor,
 } from '../ai.types';
 import type { AiCapabilitySet } from './ai-provider.interface';
 import { classifyModel, parseGeneration } from './model-classifier';
@@ -135,8 +136,107 @@ const OPENAI_CAPABILITIES: AiCapabilitySet = new Set<AiCapabilityFamily>([
  * `alloy` is OpenAI's neutral default. The choice lives here rather than at
  * each call site so the application does not read questions in one voice and
  * explanations in another — see `AiSynthesisRequest.voice`.
+ *
+ * EXPORTED SINCE #283, and it is the same constant on both sides of the voice
+ * picker: `runSynthesis` below falls back to it, and `defaultSpeechVoice`
+ * publishes it through `GET /api/ai/speech/voices` as the option a learner is
+ * already hearing. Two constants — one for the synthesiser, one for the picker
+ * — would agree today and disagree the first time either moved, and the
+ * symptom would be a settings screen confidently naming a voice the
+ * application does not use.
  */
-const DEFAULT_SPEECH_VOICE = 'alloy';
+export const DEFAULT_SPEECH_VOICE = 'alloy';
+
+/**
+ * OpenAI's own text-to-speech voices, and THE ONE PLACE IN THIS REPOSITORY
+ * THIS LIST LIVES (#283, epic #280).
+ *
+ * -----------------------------------------------------------------------------
+ * WHY IT IS HERE AND NOWHERE ELSE
+ * -----------------------------------------------------------------------------
+ *
+ * `aiSynthesizeRequestSchema`'s `voice` field validates SHAPE AND NOT
+ * MEMBERSHIP, and its own comment says why: "the accepted set belongs to the
+ * provider and hard-coding OpenAI's list here would be a second place that list
+ * lives — wrong on the day a second provider ships, and stale on the day OpenAI
+ * adds a voice." That argument does not stop at the DTO. It rules out a copy in
+ * `apps/web/src/config` for the same reason `ai-model-roles.ts` refuses one for
+ * the role registry: a duplicate plus a test asserting the two agree is
+ * DETECTION rather than prevention — the copies can still disagree in a working
+ * tree, in a branch, and in any build where the test is not run.
+ *
+ * So the web reads this over `GET /api/ai/speech/voices`, and a provider that
+ * is not OpenAI publishes its own list from its own file without touching
+ * either the DTO or the picker. `openai.provider.spec.ts` asserts these ids
+ * appear in exactly one non-test source file.
+ *
+ * -----------------------------------------------------------------------------
+ * THE IDS ARE A WIRE CONTRACT, THE LABELS AND DESCRIPTIONS ARE PRODUCT COPY
+ * -----------------------------------------------------------------------------
+ *
+ * Each `id` is sent verbatim to `client.audio.speech.create` and must satisfy
+ * the charset `aiSynthesizeRequestSchema` accepts, or the picker would offer a
+ * value the synthesis endpoint answers with a 400 — a failure the learner
+ * cannot explain, caused by choosing from a list this application handed them.
+ * The descriptions are written for somebody deciding which voice to study with,
+ * not for an operator reading a catalog.
+ *
+ * Alphabetical, which happens to put the default first; nothing reads the
+ * order, because {@link DEFAULT_SPEECH_VOICE} names the default explicitly
+ * rather than leaving it to position.
+ */
+const OPENAI_TTS_VOICES: readonly AiVoiceDescriptor[] = [
+  {
+    id: 'alloy',
+    label: 'Alloy',
+    description: 'Neutral and even — the easiest to listen to for a long session.',
+  },
+  {
+    id: 'ash',
+    label: 'Ash',
+    description: 'Low and unhurried, with a steady, matter-of-fact delivery.',
+  },
+  {
+    id: 'ballad',
+    label: 'Ballad',
+    description: 'Gentle and expressive, with a softer, storytelling rhythm.',
+  },
+  {
+    id: 'coral',
+    label: 'Coral',
+    description: 'Bright and friendly, with a warm lift at the end of a sentence.',
+  },
+  {
+    id: 'echo',
+    label: 'Echo',
+    description: 'Calm and level, with little inflection — plain and easy to follow.',
+  },
+  {
+    id: 'fable',
+    label: 'Fable',
+    description: 'Warm and animated, in the register of someone reading aloud.',
+  },
+  {
+    id: 'nova',
+    label: 'Nova',
+    description: 'Clear and energetic, crisply articulated at a slightly brisker pace.',
+  },
+  {
+    id: 'onyx',
+    label: 'Onyx',
+    description: 'Deep and resonant — the most authoritative of the voices.',
+  },
+  {
+    id: 'sage',
+    label: 'Sage',
+    description: 'Measured and reassuring, at a patient, teacherly pace.',
+  },
+  {
+    id: 'shimmer',
+    label: 'Shimmer',
+    description: 'Light and airy, soft-edged and gentle on the ear.',
+  },
+];
 
 /** The container used when a caller names none. Widely playable, small. */
 const DEFAULT_SPEECH_FORMAT = 'mp3';
@@ -223,6 +323,16 @@ export class OpenAiProvider extends BaseAiProvider {
   readonly kind: AiProviderKind = 'openai';
   readonly capabilities = OPENAI_CAPABILITIES;
   protected readonly providerName = 'OpenAI';
+
+  /** See {@link OPENAI_TTS_VOICES} — the base class gates these on `tts`. */
+  protected readonly speechVoices = OPENAI_TTS_VOICES;
+
+  /**
+   * The same constant `runSynthesis` falls back to, so the picker's "default"
+   * and the synthesiser's default are one value. See
+   * {@link DEFAULT_SPEECH_VOICE}.
+   */
+  protected readonly defaultSpeechVoice = DEFAULT_SPEECH_VOICE;
 
   /**
    * The last fetched catalog. In-process and per-instance, which is the right

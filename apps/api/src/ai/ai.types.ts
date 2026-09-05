@@ -681,6 +681,51 @@ export interface AiSynthesisResult {
   error: string | null;
 }
 
+/**
+ * One voice a provider's `tts` capability can speak in (issue #283, epic #280).
+ *
+ * STATIC, PROVIDER-AUTHORED DATA — NOT A CATALOG ENTRY. Every other shape in
+ * this file describes a call: a request going out, a result coming back, usage
+ * to be recorded. This one describes nothing that happened. It is what a
+ * provider hard-codes about itself so a learner's voice picker has something to
+ * render, and it is the reason {@link AiProvider.listVoices} is synchronous:
+ * OpenAI publishes no "list voices" endpoint at all, so there is nothing to
+ * fetch even if fetching were wanted.
+ *
+ * THREE STRING FIELDS AND NOTHING ELSE. No model id (which voices a model can
+ * speak in is administrator-facing configuration, and this list is read by
+ * every learner), no price, no sample URL, no capability flag. Each of those is
+ * a field a future change would have to keep compatible on a response that
+ * exists to fill one `<select>`.
+ */
+export interface AiVoiceDescriptor {
+  /**
+   * The provider's own voice id, sent verbatim as
+   * {@link AiSynthesisRequest.voice}.
+   *
+   * MUST SATISFY THE CHARSET `aiSynthesizeRequestSchema` ACCEPTS
+   * (`/^[A-Za-z0-9_-]+$/`, at most 64 characters). That coupling is real and
+   * not decorative: an id offered by the picker but refused by the synthesis
+   * DTO is a 400 the learner has no way to explain, produced by choosing from
+   * a list this application handed them. Both providers' lists are tested
+   * against that expression for exactly that reason.
+   */
+  id: string;
+
+  /** User-facing name, e.g. `'Alloy'`. */
+  label: string;
+
+  /**
+   * One short user-facing sentence describing how it sounds.
+   *
+   * WRITTEN FOR A LEARNER CHOOSING A VOICE, not for an operator reading a
+   * catalog: "warm and even" is the useful sentence, "gpt-4o-mini-tts standard
+   * voice" is not. A picker that lists ten ids with no description makes the
+   * learner audition all ten.
+   */
+  description: string;
+}
+
 // -----------------------------------------------------------------------------
 // Realtime sessions (issue #156, epic #60 — E11 "Realtime voice interview")
 // -----------------------------------------------------------------------------
