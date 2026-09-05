@@ -807,7 +807,14 @@ test.describe('Realtime mock interview (issue #161), epic #60 (E11)', () => {
     // (`ReadinessMovement.tsx`), so with both null this alert is simply
     // absent rather than showing stale or contradictory copy.
     await page.goto(`/practice/interviews/${interviewId}/debrief`);
-    await expect(page.getByRole('heading', { level: 1, name: 'Interview debrief' })).toBeVisible();
+    // A generous timeout: the debrief page's own load fetches the completed
+    // interview and computes readiness copy client-side, and a freshly
+    // completed voice interview's debrief carries more sections (the E11
+    // realtime debrief, #160) than a plain text one — slower than the
+    // library default's 5s on a loaded runner, not hung.
+    await expect(
+      page.getByRole('heading', { level: 1, name: 'Interview debrief' }),
+    ).toBeVisible({ timeout: 15000 });
     await expect(page.getByRole('status').filter({ hasText: 'typed' })).toHaveCount(0);
   });
 });
