@@ -6,6 +6,8 @@ import { AI_PROVIDER_KINDS } from '../ai-settings.schema';
 import { capabilityForRole } from '../ai-model-roles';
 import type { AiUsageService } from '../ai-usage.service';
 import type { AiCompletionRequest, AiStreamEvent } from '../ai.types';
+import { AI_COACH_PERSONAS } from '../coach/personas';
+import { buildGradingPrompt } from '../../practice/grading';
 
 // =============================================================================
 // FakeAiProvider — tests (issue #105, epic #53)
@@ -408,6 +410,80 @@ describe('FakeAiProvider — grading', () => {
       expect.objectContaining({ userId: ALICE, roleKey: 'grader', success: true }),
     );
   });
+});
+
+// =============================================================================
+// A coach persona changes the wording. It does not change the grade.
+// (issue #319, epic #305 / E14)
+// =============================================================================
+//
+// THE CLOSEST THING TO AN END-TO-END PROOF THAT #319 CAN CURRENTLY OFFER, and
+// it is worth saying precisely what it does and does not establish.
+//
+// It DOES establish, over all four personas at once: that the real
+// `buildGradingPrompt` output — system message, appended persona fragment,
+// scope notice and invariant floor included — is still parseable by the real
+// grader that every downstream grading test depends on, and that the judgement
+// it returns is byte-identical to the one an unpersona'd prompt produces. That
+// is not a tautology: the floor is a BULLET LIST, `parseAcceptedAnswers` reads
+// bullets, and the two turns are joined into one string before either is
+// parsed. An appended block that landed after the answers heading, or that
+// carried a `learner_response` marker, would silently make every attempt grade
+// `incorrect` / `unknown` — the exact uniform failure that parser's own header
+// warns about — and this test is what refuses it.
+//
+// It does NOT establish anything about a real model: `FakeAiProvider` is a
+// fixture, and no test in this repository can prove a model honours the scope
+// notice. What backs the property structurally is elsewhere and unchanged —
+// `gradingVerdictSchema`'s three fields, the 240-character cap, and
+// `groundVerdict`.
+//
+// It also does NOT go through HTTP. A request-level version — four learners,
+// four stored `coach.persona` values, `AI_PROVIDER_FAKE` on, one graded attempt
+// each — would need integration infrastructure that does not exist yet: no
+// suite under `test/` sets `AI_PROVIDER_FAKE` at all today, so AI is
+// unconfigured there and every graded attempt is `gradingMethod: 'exact'` on
+// rung 3. Building that belongs with #323 rather than here.
+// =============================================================================
+
+describe('FakeAiProvider — a persona’d grading prompt grades identically', () => {
+  /** The real §7 prompt, for one persona, through the real public path. */
+  async function gradeWithPersona(persona?: (typeof AI_COACH_PERSONAS)[number]) {
+    const result = await provider().completeStructured<Grade>(ALICE, KEY, {
+      roleKey: 'grader',
+      modelId: 'gpt-5.4-mini',
+      messages: buildGradingPrompt({
+        questionPrompt: 'Name one branch or part of the government.',
+        acceptedAnswers: BRANCHES.map((text) => ({ text })),
+        responseText: 'the one that makes the laws, congress i think',
+        persona,
+      }),
+      schemaName: 'practice_grade',
+      schema: GRADE_SCHEMA,
+    } as never);
+
+    if (result.data === null) {
+      throw new Error(`expected a graded result, got ${result.errorCode}`);
+    }
+
+    return result.data;
+  }
+
+  it.each(AI_COACH_PERSONAS.map((persona) => [persona.key, persona] as const))(
+    'reaches the same verdict and the same failureCause for %s as for no persona at all',
+    async (_key, persona) => {
+      const baseline = await gradeWithPersona();
+      const withPersona = await gradeWithPersona(persona);
+
+      expect(withPersona.verdict).toBe(baseline.verdict);
+      expect(withPersona.failureCause).toBe(baseline.failureCause);
+
+      // And it is a real judgement rather than the "unreadable prompt" answer,
+      // which would also be identical across all four and would prove nothing.
+      expect(baseline.verdict).toBe('correct');
+      expect(baseline.failureCause).toBe('expression');
+    },
+  );
 });
 
 describe('FakeAiProvider — structured replies for other roles', () => {
