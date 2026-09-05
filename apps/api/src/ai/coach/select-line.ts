@@ -29,6 +29,25 @@
 // be — the inputs to a deterministic function are already frozen.
 //
 // -----------------------------------------------------------------------------
+// DETERMINISM IS IN THE SEED, NOT ACROSS BANK EDITS (issue #352)
+// -----------------------------------------------------------------------------
+//
+// The index is `hash(seed) % lines.length`, so the CELL'S LENGTH is part of the
+// selection. Adding a line to a cell — which #352 did to all forty of them —
+// re-maps every seed in it, and a learner re-reading a session from before the
+// edit can find a different line beside an attempt than the one they saw live.
+//
+// THIS IS EXPECTED, AND IT IS NOT THE DETERMINISM GUARANTEE BREAKING.
+// `docs/specs/coach-personality.md` §7's promise is stability for a FIXED bank
+// and a FIXED persona: the same attempt, read twice, in one build, says the
+// same thing. §9 already accepts the same shape of change on the other axis —
+// switching persona re-voices past attempts — and for the same reason: the
+// reaction is computed at read time precisely so that improving the bank
+// improves what every learner reads, including on attempts already recorded.
+// Freezing the selection into a column would make old attempts immune to every
+// future edit, which is the trade §9 refuses. Do not "fix" this by persisting.
+//
+// -----------------------------------------------------------------------------
 // WHY A HAND-WRITTEN HASH RATHER THAN `crypto`
 // -----------------------------------------------------------------------------
 //
@@ -80,8 +99,10 @@ function hashSeed(seed: string): number {
  * The line this coach says about this event, for this attempt.
  *
  * Pure, total, and deterministic in `seed`: the same three arguments return
- * the same string forever, and different seeds spread across the cell's
- * available lines.
+ * the same string forever — for a fixed bank — and different seeds spread
+ * across the cell's available lines. Editing the cell changes which line a
+ * given seed lands on; see the header's own section on why that is expected
+ * rather than a defect.
  *
  * @param persona the learner's resolved persona
  * @param event   what just happened
