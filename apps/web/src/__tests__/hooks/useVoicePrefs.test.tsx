@@ -25,6 +25,7 @@ import { http, HttpResponse } from 'msw';
 
 import { server } from '../mocks/server';
 import {
+  DEFAULT_VOICE_CONVERSATION_MODE,
   DEFAULT_VOICE_SPEECH_RATE,
   resolveVoicePreferences,
   useVoicePrefs,
@@ -75,8 +76,12 @@ describe('useVoicePrefs (#288)', () => {
       speechRate: DEFAULT_VOICE_SPEECH_RATE,
       readQuestionsAloud: false,
       readAnswersAloud: false,
+      conversationMode: false,
     });
     expect(DEFAULT_VOICE_SPEECH_RATE).toBe(0.95);
+    // Hands-free Voice mode is opt-in (#307, epic #304), exactly as autoplay
+    // is — and, like every default here, resolved rather than written back.
+    expect(DEFAULT_VOICE_CONVERSATION_MODE).toBe(false);
     expect(patchCount).toBe(0);
   });
 
@@ -90,6 +95,19 @@ describe('useVoicePrefs (#288)', () => {
     // The fields the document does not name keep their built-in defaults, and
     // are still not written back.
     expect(result.current.voice.autoSubmitSpoken).toBe(true);
+    expect(patchCount).toBe(0);
+  });
+
+  it('honours a stored conversationMode without writing anything back', async () => {
+    mockSettings({ conversationMode: true });
+
+    const { result } = renderHook(() => useVoicePrefs());
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    expect(result.current.voice.conversationMode).toBe(true);
+    // The other six keep their built-in defaults, and nothing is stored to
+    // say so — the same sparse contract the whole namespace ships with.
+    expect(result.current.voice.readQuestionsAloud).toBe(false);
     expect(patchCount).toBe(0);
   });
 
@@ -132,10 +150,31 @@ describe('resolveVoicePreferences — values this build will not honour', () => 
     ).toBe('some_future-voice9');
   });
 
+  it('falls back on a wrong-typed conversationMode, and honours a real boolean', () => {
+    // Out of a user-writable JSONB column: a string, a number or a null is
+    // reachable, and none of them is a learner asking for hands-free mode.
+    for (const bad of ['true', 1, 0, null, {}, []]) {
+      expect(
+        resolveVoicePreferences({ conversationMode: bad as never })
+          .conversationMode,
+      ).toBe(DEFAULT_VOICE_CONVERSATION_MODE);
+    }
+
+    expect(
+      resolveVoicePreferences({ conversationMode: true }).conversationMode,
+    ).toBe(true);
+    // A stored `false` is a real opt-out, not an absence — it happens to
+    // equal the default today, which is exactly why it must not be written.
+    expect(
+      resolveVoicePreferences({ conversationMode: false }).conversationMode,
+    ).toBe(false);
+  });
+
   it('resolves an entirely absent namespace without throwing', () => {
     expect(resolveVoicePreferences(undefined).speechRate).toBe(
       DEFAULT_VOICE_SPEECH_RATE,
     );
     expect(resolveVoicePreferences(undefined).preferredVoice).toBeUndefined();
+    expect(resolveVoicePreferences(undefined).conversationMode).toBe(false);
   });
 });

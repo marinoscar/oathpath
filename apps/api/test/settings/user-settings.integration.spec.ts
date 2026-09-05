@@ -1077,6 +1077,7 @@ describe('User Settings Integration', () => {
             speechRate: 1.2,
             readQuestionsAloud: true,
             readAnswersAloud: true,
+            conversationMode: true,
           },
         })
         .expect(200);
@@ -1093,6 +1094,7 @@ describe('User Settings Integration', () => {
         speechRate: 1.2,
         readQuestionsAloud: true,
         readAnswersAloud: true,
+        conversationMode: true,
       });
     });
 
@@ -1225,6 +1227,143 @@ describe('User Settings Integration', () => {
 
       expect(response.body.data.theme).toBe('dark');
       expect(response.body.data).not.toHaveProperty('voice');
+    });
+
+    // =========================================================================
+    // conversationMode (issue #307, epic #304 "Conversation mode")
+    // =========================================================================
+    //
+    // The seventh field, added to the EXISTING namespace rather than as a new
+    // one. Its acceptance criteria are the same four the namespace as a whole
+    // already has to satisfy, asserted for this field specifically because
+    // "the field reached storage" and "the write returned 200" are different
+    // claims: `userSettingsSchema.parse()` silently strips what it does not
+    // know, and a `mergeVoice` missing its block would drop the field with a
+    // 200 and an unchanged GET. Every assertion below is therefore made
+    // against a real subsequent GET.
+    describe('conversationMode (issue #307, epic #304)', () => {
+      it('round-trips a true through PATCH and a subsequent GET', async () => {
+        const user = await createMockTestUser(context);
+        setupMockUserSettings(user.id, DEFAULT_USER_SETTINGS);
+
+        await request(context.app.getHttpServer())
+          .patch('/api/user-settings')
+          .set(authHeader(user.accessToken))
+          .send({ voice: { conversationMode: true } })
+          .expect(200);
+
+        const response = await request(context.app.getHttpServer())
+          .get('/api/user-settings')
+          .set(authHeader(user.accessToken))
+          .expect(200);
+
+        expect(response.body.data.voice).toEqual({ conversationMode: true });
+      });
+
+      it('patching it to null deletes it, restoring the built-in default', async () => {
+        const user = await createMockTestUser(context);
+        setupMockUserSettings(user.id, DEFAULT_USER_SETTINGS);
+
+        await request(context.app.getHttpServer())
+          .patch('/api/user-settings')
+          .set(authHeader(user.accessToken))
+          .send({ voice: { conversationMode: true, preferredVoice: 'nova' } })
+          .expect(200);
+
+        await request(context.app.getHttpServer())
+          .patch('/api/user-settings')
+          .set(authHeader(user.accessToken))
+          .send({ voice: { conversationMode: null } })
+          .expect(200);
+
+        const response = await request(context.app.getHttpServer())
+          .get('/api/user-settings')
+          .set(authHeader(user.accessToken))
+          .expect(200);
+
+        // GONE, not stored as `false` — a stored `false` reads identically
+        // today and would pin this learner to it if the default ever moves.
+        expect(response.body.data.voice).toEqual({ preferredVoice: 'nova' });
+        expect(response.body.data.voice).not.toHaveProperty('conversationMode');
+      });
+
+      it('setting an unrelated voice field does not materialise it', async () => {
+        const user = await createMockTestUser(context);
+        setupMockUserSettings(user.id, DEFAULT_USER_SETTINGS);
+
+        await request(context.app.getHttpServer())
+          .patch('/api/user-settings')
+          .set(authHeader(user.accessToken))
+          .send({ voice: { speechRate: 1.2 } })
+          .expect(200);
+
+        const response = await request(context.app.getHttpServer())
+          .get('/api/user-settings')
+          .set(authHeader(user.accessToken))
+          .expect(200);
+
+        expect(response.body.data.voice).toEqual({ speechRate: 1.2 });
+        expect(response.body.data.voice).not.toHaveProperty('conversationMode');
+      });
+
+      it('an account that never touched it persists nothing at all', async () => {
+        const user = await createMockTestUser(context);
+        setupMockUserSettings(user.id, DEFAULT_USER_SETTINGS);
+
+        await request(context.app.getHttpServer())
+          .patch('/api/user-settings')
+          .set(authHeader(user.accessToken))
+          .send({ theme: 'dark' })
+          .expect(200);
+
+        const response = await request(context.app.getHttpServer())
+          .get('/api/user-settings')
+          .set(authHeader(user.accessToken))
+          .expect(200);
+
+        expect(response.body.data).not.toHaveProperty('voice');
+      });
+
+      it('survives a PATCH of a different voice field, and vice versa', async () => {
+        // The field-wise half of `mergeVoice`, for this field specifically:
+        // a learner who turns conversation mode on and later changes their
+        // speech rate must still be in conversation mode.
+        const user = await createMockTestUser(context);
+        setupMockUserSettings(user.id, DEFAULT_USER_SETTINGS);
+
+        await request(context.app.getHttpServer())
+          .patch('/api/user-settings')
+          .set(authHeader(user.accessToken))
+          .send({ voice: { conversationMode: true } })
+          .expect(200);
+
+        await request(context.app.getHttpServer())
+          .patch('/api/user-settings')
+          .set(authHeader(user.accessToken))
+          .send({ voice: { speechRate: 1.3 } })
+          .expect(200);
+
+        const response = await request(context.app.getHttpServer())
+          .get('/api/user-settings')
+          .set(authHeader(user.accessToken))
+          .expect(200);
+
+        expect(response.body.data.voice).toEqual({
+          conversationMode: true,
+          speechRate: 1.3,
+        });
+      });
+
+      it('rejects a non-boolean conversationMode with a 400', async () => {
+        const user = await createMockTestUser(context);
+        setupMockUserSettings(user.id, DEFAULT_USER_SETTINGS);
+
+        await request(context.app.getHttpServer())
+          .patch('/api/user-settings')
+          .set(authHeader(user.accessToken))
+          .send({ voice: { conversationMode: 'yes' } })
+          .expect(400);
+      });
     });
 
     describe('validation', () => {
