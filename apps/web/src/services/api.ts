@@ -307,6 +307,7 @@ import type {
   CivicsAudioScope,
   SpeechFailed,
   SpeechVoicesResponse,
+  CoachPersonasResponse,
   TranscribeResponse,
   NotificationEventDef,
   AppNotification,
@@ -1109,6 +1110,27 @@ export async function listSpeechVoices(
   opts: { signal?: AbortSignal } = {},
 ): Promise<SpeechVoicesResponse> {
   return api.get<SpeechVoicesResponse>('/ai/speech/voices', {
+    signal: opts.signal,
+  });
+}
+
+/**
+ * The coach personas a learner can choose between (#320, epic #305).
+ *
+ * A PLAIN JSON BODY, not a `status` union — like `listSpeechVoices` above and
+ * for the same reason: the route makes no inference call, resolves no
+ * credential and spends nobody's key. It reads a server-side constant. There
+ * is no AI state a `cause` would describe, so there is nothing here to switch
+ * on.
+ *
+ * The response carries four fields per persona and never the prompt fragment
+ * or the reaction bank — see `apps/api/src/ai/coach/coach.controller.ts` for
+ * why each exclusion is load-bearing rather than tidy.
+ */
+export async function listCoachPersonas(
+  opts: { signal?: AbortSignal } = {},
+): Promise<CoachPersonasResponse> {
+  return api.get<CoachPersonasResponse>('/ai/coach/personas', {
     signal: opts.signal,
   });
 }

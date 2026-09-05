@@ -23,6 +23,7 @@ import PersonIcon from '@mui/icons-material/Person';
 import FlagIcon from '@mui/icons-material/Flag';
 import PaletteIcon from '@mui/icons-material/Palette';
 import RecordVoiceOverIcon from '@mui/icons-material/RecordVoiceOver';
+import PsychologyIcon from '@mui/icons-material/Psychology';
 import NotificationsIcon from '@mui/icons-material/Notifications';
 import VpnKeyIcon from '@mui/icons-material/VpnKey';
 import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome';
@@ -118,6 +119,35 @@ export const USER_SETTINGS_SECTIONS: SettingsSectionDef[] = [
           'How questions are read to you, and what happens when you answer out loud.',
         Icon: RecordVoiceOverIcon,
         path: '/settings/voice',
+      },
+      {
+        // Issue #322, epic #305 (E14 "The Coach's personality"). Where a
+        // learner chooses how the product talks to them about their answers.
+        //
+        // A REGISTRY CARD PLUS A ROUTE, never a tab on Voice (CLAUDE.md's
+        // Settings UI Pattern, rules 1 and 2). The two are different axes and
+        // a destination gate is about REACHABILITY where a tab gate is about
+        // CONTENT: `voice` governs how spoken practice sounds, `coach`
+        // governs how an answer is framed — in text as much as in speech —
+        // and a learner who never presses play still has a coach. Folding it
+        // into Voice would hide the whole coach configuration behind a
+        // heading whose other controls do nothing for them.
+        //
+        // NEXT TO Voice because a learner looking for "how this thing talks
+        // to me" will look where "how this thing sounds" is.
+        //
+        // NO `permission`, like every card in this file.
+        // `PATCH /api/user-settings` grants `user_settings:write` to all three
+        // roles and `GET /api/ai/coach/personas` is `@Auth()` with no
+        // permissions — there is no "may choose a coach" privilege in this
+        // product's authorization model, and inventing one would leave a
+        // Viewer, the default role, unable to change how the app speaks to
+        // them.
+        title: 'Coach',
+        description:
+          'How your coach talks to you about your answers, and whether it says anything beyond the verdict.',
+        Icon: PsychologyIcon,
+        path: '/settings/coach',
       },
       {
         // Issue #126, epic #109. NO `permission`, like every card here: the
