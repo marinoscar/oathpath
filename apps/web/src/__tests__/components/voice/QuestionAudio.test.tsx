@@ -287,6 +287,43 @@ describe('the premium voice is opt-in, on top', () => {
     expect(screen.queryByText(/not available yet/i)).toBeNull();
     expect(screen.queryByText(/administrator/i)).toBeNull();
   });
+
+  it('falls back to the browser voice, silently, on a 200 JSON `failed` body', async () => {
+    // THE THIRD MEMBER, asserted on directly rather than assumed to share the
+    // `unavailable` test's fate above. Both are branched over the SAME
+    // `if (result.status === 'ok')` in `QuestionAudio`'s `play()` — so this is
+    // one line of code either way — but issue #277 is precisely the case
+    // where a client handled one non-`ok` member and silently crashed or
+    // mis-rendered on the other, and a suite that only ever sent `unavailable`
+    // would never have caught it.
+    installSpeechSynthesis();
+    mockStatus({ unboundRoles: [] });
+    server.use(
+      http.post('*/api/ai/speech/synthesize', () =>
+        HttpResponse.json({
+          data: {
+            status: 'failed',
+            errorCode: 'provider_error',
+            error: 'The provider refused the request.',
+          },
+        }),
+      ),
+    );
+
+    renderIt({ text: QUESTION, premiumVoice: true });
+    await waitFor(() => expect(statusCalls).toBe(1));
+
+    fireEvent.click(screen.getByRole('button', { name: /read the question aloud/i }));
+
+    await waitFor(() => expect(spoken).toHaveLength(1));
+    expect(spoken[0].text).toBe(QUESTION);
+    // Same silence as `unavailable` — a provider failure is not the learner's
+    // problem, and the browser voice already read the question.
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.queryByText(/not available yet/i)).toBeNull();
+    expect(screen.queryByText(/administrator/i)).toBeNull();
+    expect(screen.queryByText(/provider refused/i)).toBeNull();
+  });
 });
 
 describe('a browser that cannot speak at all', () => {
