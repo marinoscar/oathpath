@@ -231,7 +231,7 @@ export function CoachSettings({
         previewRef.current = false;
         setPreview({
           kind: 'message',
-          text: "We couldn't play that sample just now. Everything else on this page still works.",
+          text: 'We couldn\u2019t play that sample just now. Everything else on this page still works.',
         });
         return;
       } finally {
@@ -260,7 +260,7 @@ export function CoachSettings({
       if (result.status === 'failed') {
         setPreview({
           kind: 'message',
-          text: `We couldn't play the ${option.label} sample just now. Reading it above works either way.`,
+          text: `We couldn\u2019t play the ${option.label} sample just now. Reading it above works either way.`,
         });
         return;
       }
@@ -279,7 +279,7 @@ export function CoachSettings({
           ? { kind: 'playing', label: option.label }
           : {
               kind: 'message',
-              text: `We couldn't play the ${option.label} sample just now. Reading it above works either way.`,
+              text: `We couldn\u2019t play the ${option.label} sample just now. Reading it above works either way.`,
             },
       );
     },
@@ -439,8 +439,13 @@ export function CoachSettings({
                 }}
                 // `slotProps.input`, never a bare prop on `<Switch>`: MUI
                 // forwards unknown props to the ROOT span, leaving the element
-                // that actually carries `role="switch"` unlabelled. Same rule,
-                // same reason, as `VoiceSettings.tsx`'s own switches.
+                // that actually carries the checkbox role unlabelled — which
+                // is exactly what a name query found when this was written the
+                // other way. Same rule, same reason, as `VoiceSettings.tsx`'s
+                // own switches.
+                slotProps={{
+                  input: { 'aria-label': 'Show a line from your coach' },
+                }}
               />
             }
             label="Show a line from your coach"
