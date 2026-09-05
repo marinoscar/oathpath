@@ -89,6 +89,7 @@ a v2.
 | E12 | Hands-free voice practice | Auto-submit replaces confirm-before-grade as the default (with a zero-cost correction via `recomputeMasteryForQuestion`), a shared content-addressed cache for civics question/answer audio, and a learner-chosen premium voice | E9, E5 | done<sup>‡‡</sup> | [#280](https://github.com/marinoscar/oathpath/issues/280) |
 | E13 | Conversation mode | A session-wide, one-tap `Text \| Voice` control: a persistent microphone stream, a calibrated voice-activity detector with barge-in, a `speakingQuestion → listening → processing → speakingAnswer → advancing` state machine, synthesised earcons, a foreground-only wake lock, and the `voice.conversationMode` preference — no API change | E9, E12 | done<sup>§§</sup> | [#304](https://github.com/marinoscar/oathpath/issues/304) |
 | E14 | The Coach's personality | A learner-chosen coach delivery style (`supportive`/`academic`/`playful`/`unfiltered`, defaulting to today's voice) delivered through two mechanisms — a curated, no-AI-call reaction-line bank covering the deterministically-graded majority of attempts, and a persona prompt fragment appended to calls that already run (the grader's feedback sentence, the civics explanation stream) — both bounded by one invariant floor enforced twice, in the prompt and by a lint over the shipped reaction bank; the mock-interview officer, the debrief, and notifications are permanently excluded | E4, E12 (for the audio cache) | in progress | [#305](https://github.com/marinoscar/oathpath/issues/305) |
+| E15 | Realtime practice sessions | A second, realtime-backed hands-free mode for ordinary practice sessions (not only mock interviews): the five-tool contract (`next_question`/`grade_answer`/`repeat_question`/`skip_question`/`end_session`) driving the identical `PracticeService.recordAttempt` ladder over a live, tool-mediated conversation, the spoken-turn composer that fixes the request/response loop's identical-audio-on-right-or-wrong defect on both transports at once, a persona-as-curated-line coach voice bounded by `COACH_INVARIANT_FLOOR`, and the degradation ladder between realtime, request/response, and text | E9, E11, E13, E14 | in progress | [#345](https://github.com/marinoscar/oathpath/issues/345) |
 
 **E12 is the first epic filed after the MVP boundary.** E1–E11 closed
 Milestone A and Milestone B — the whole MVP, per [§2](#2-what-the-mvp-is) —
@@ -1106,3 +1107,77 @@ arrives on their lock screen. The readiness narrative
 principle — deferred to a later epic, which would wire the identical
 fragment-plus-floor pattern this document already uses everywhere else, not
 a different one.
+
+**2026-09-05 — Practice sessions get a second, realtime speech transport
+because the request/response one has an architectural latency floor a
+tuning pass cannot lower (E15, #345).** E13's hands-free loop
+(`docs/specs/conversation-mode.md`) is record → upload → transcribe →
+grade → synthesize → play, one multi-second round-trip per question — not
+a bug in that loop's implementation, but the shape of any transport built
+on discrete request/response calls to speech endpoints. `VISION.md`'s own
+words for what this should feel like — "speaking with a patient human
+coach, not operating a voice command interface" — are the same words
+`realtime-interview.md` §1 already quotes for why mock interviews got a
+realtime transport in E11; this decision is that same forcing function
+applied to ordinary practice, not a preference for a newer technology. The
+change was **forced, not chosen for convenience**, on the identical basis
+the E9→E12 and E12→E13 entries above already establish for this section:
+a real product requirement (interruptible, full-duplex, low-latency
+conversation) that the existing transport structurally cannot satisfy,
+regardless of how much tuning its VAD thresholds or its auto-submit
+default receive.
+
+**What this forced, concretely, and what it did not.** E15 reuses E11's
+entire transport mechanism verbatim — the same `AiDispatchService
+.createRealtimeSession`, the same ephemeral-secret lifecycle, the same
+never-throw provider contract — pointed at the practice engine instead of
+the interview engine, via a new five-tool contract
+(`next_question`/`grade_answer`/`repeat_question`/`skip_question`/
+`end_session`) that gives a realtime model strictly less room to author a
+verdict than even the interview's own three-tool contract does: `grade_answer`
+here carries no `confidence` argument at all, a deliberate narrowing
+`docs/specs/realtime-practice.md` §3/§9 explains in full. It did **not**
+force a second grading ladder, a new `PracticeInputMode` enum value, or a
+session-level transport column on `practice_sessions` — each of those was
+considered and rejected on its own terms (`docs/specs/realtime-practice.md`
+§14), for the identical class of reason `docs/specs/conversation-mode.md`
+§14 already rejected a session-level `mode` column: a per-attempt fact
+already exists and already answers the question correctly.
+
+**One real, load-bearing defect surfaced along the way and is fixed for
+both transports at once, not only the new one.** `useConversationSession`'s
+existing E13 loop speaks the raw accepted-answer text on a miss with no
+verdict, no reason, and no coach voice — a right answer and a wrong one
+sound identical once the retry budget is spent. The fix
+(`composeSpokenTurn`, `docs/specs/realtime-practice.md` §6) is a pure,
+API-side function exposed additively on the existing
+`POST /api/practice/sessions/{id}/attempts` response, so the fix lands on
+the request/response loop that shipped two epics ago in the same change
+that lands it on the realtime loop this epic adds — a defect discovered
+while building a new surface, closed on the old one without a separate
+epic.
+
+**Two documents are formally amended rather than silently outgrown, on the
+idiom this section's own E12 and E13 entries already set.**
+`docs/specs/conversation-mode.md` §15's realtime-transport row is replaced
+(not deleted) to point at `docs/specs/realtime-practice.md` now that the
+"later epic" it once gestured at has a design record of its own, and its
+§4 gains a note stating explicitly that its five-state machine
+(`speakingQuestion → listening → processing → speakingAnswer → advancing`)
+governs the request/response transport only — the realtime transport has
+no `processing` phase, because a realtime `grade_answer` tool call
+resolves inside the live connection the model is already speaking over,
+with no separate transcribe-then-grade round-trip for an earcon to cover.
+`docs/specs/voice.md` §3 gains a recorded, not fixed, gap: `asrConfidence`
+is unconditionally `null` on the `gpt-4o-transcribe` family (verified
+against `apps/api/src/ai/providers/openai.provider.ts`), so the
+`misheard` protection that section describes cannot fire at all on the
+recommended transcription model — the fix is sibling issue #348, tracked
+separately rather than folded into this epic. See
+[`docs/specs/realtime-practice.md`](docs/specs/realtime-practice.md) for
+the full design, including the four mechanisms that keep an invented
+verdict structurally impossible, the single-`recordAttempt` rule (and the
+real, verified `InterviewsService.gradeCivicsAnswer` duplication it exists
+to prevent from repeating), and the honest statement that echo suppression
+regresses from structural to probabilistic the moment full duplex is the
+requirement.
