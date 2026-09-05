@@ -27,6 +27,7 @@ import {
   failureCauseCopy,
 } from '../../../components/practice/failureCause';
 import type {
+  CoachPersona,
   PracticeAttempt,
   PracticeFailureCause,
   PracticeGradingMethod,
@@ -66,6 +67,10 @@ function makeAttempt(overrides: Partial<PracticeAttempt> = {}): PracticeAttempt 
     transcript: null,
     asrConfidence: null,
     retryOfAttemptId: null,
+    // Reactions off by default in the fixture, so every pre-existing test
+    // below keeps asserting exactly the card it was written against. The
+    // coach's own cases opt in explicitly.
+    coachReaction: null,
     answeredAt: '2026-03-01T12:00:00.000Z',
     answerSnapshot: {
       resolvedAt: '2026-03-01T12:00:00.000Z',
@@ -336,5 +341,165 @@ describe('the summary review shows the judgement the learner saw live', () => {
     expect(screen.getByText('Not a match')).toBeInTheDocument();
     expect(screen.queryByText('Graded by the assistant.')).not.toBeInTheDocument();
     expectNoRawEnumValues();
+  });
+});
+
+// -----------------------------------------------------------------------------
+// The coach's reaction (issue #321, epic #305)
+// -----------------------------------------------------------------------------
+//
+// Three claims, and the first two are the ones that would decay quietly:
+//
+//  1. The reaction renders on a DETERMINISTICALLY graded attempt. That is the
+//     common case, it has no `aiFeedback` at all, and before this epic it left
+//     the card saying nothing but the verdict — so if this regressed, the
+//     feature would be silently absent exactly where it was needed, and every
+//     other test here would still pass.
+//
+//  2. The verdict never wears the personality. If a persona ever changed the
+//     chip, the product would be dressing up an assessment to match a tone
+//     preference — and it would be invisible, because the wording changed too.
+//
+//  3. The live screen and the summary review show the same line. That is the
+//     whole reason `AiFeedbackCard` is one component, and the reaction is the
+//     first thing it renders that is chosen from more than one candidate.
+// -----------------------------------------------------------------------------
+
+const REACTION = 'Not quite right — but you can get it next time.';
+
+function withReaction(
+  persona: CoachPersona = 'supportive',
+  text: string = REACTION,
+  overrides: Partial<PracticeAttempt> = {},
+): PracticeAttempt {
+  return makeAttempt({ coachReaction: { text, persona }, ...overrides });
+}
+
+describe('AiFeedbackCard — the coach reaction', () => {
+  it('renders on an exact-graded attempt, which has no AI feedback at all', () => {
+    // THE HEADLINE ASSERTION. `gradingMethod: 'exact'` is the case every other
+    // coaching field on this card is deliberately null for.
+    const attempt = withReaction();
+
+    expect(attempt.gradingMethod).toBe('exact');
+    expect(attempt.aiFeedback).toBeNull();
+
+    render(<AiFeedbackCard attempt={attempt} />);
+
+    expect(screen.getByText(REACTION)).toBeInTheDocument();
+  });
+
+  it('renders on a self-marked attempt too', () => {
+    render(
+      <AiFeedbackCard
+        attempt={withReaction('playful', 'Counted! Take the point.', {
+          outcome: 'correct',
+          gradingMethod: 'self',
+        })}
+      />,
+    );
+
+    expect(screen.getByText('Counted! Take the point.')).toBeInTheDocument();
+  });
+
+  it('renders nothing when the learner has reactions off', () => {
+    // `null`, not an empty string: the card must not reserve space for a line
+    // that is never coming.
+    const { container } = render(
+      <AiFeedbackCard attempt={makeAttempt({ coachReaction: null })} />,
+    );
+
+    expect(screen.queryByText(REACTION)).not.toBeInTheDocument();
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    expect(container.textContent).not.toContain(REACTION);
+  });
+
+  it('renders nothing for a whitespace-only line', () => {
+    render(<AiFeedbackCard attempt={withReaction('supportive', '   ')} />);
+
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+  });
+
+  it('leaves the verdict chip byte-identical across every persona', () => {
+    // Asserted over all four, on the same attempt otherwise. `VISION.md`
+    // Principle #11: a beautiful wrong answer is still wrong.
+    const personas: CoachPersona[] = [
+      'supportive',
+      'academic',
+      'playful',
+      'unfiltered',
+    ];
+
+    const rendered = personas.map((persona) => {
+      const { unmount } = render(
+        <AiFeedbackCard attempt={withReaction(persona, `line for ${persona}`)} />,
+      );
+      const chip = screen.getByText('Not a match');
+      const result = {
+        label: chip.textContent,
+        className: chip.className,
+        detail: screen.getByText('That doesn’t match an accepted answer.')
+          .textContent,
+      };
+      unmount();
+      return result;
+    });
+
+    for (const one of rendered) {
+      expect(one).toEqual(rendered[0]);
+    }
+  });
+
+  it('is announced, and adds no heading to the outline', () => {
+    render(<AiFeedbackCard attempt={withReaction()} />);
+
+    // Announced when it arrives with the grade — a learner using a screen
+    // reader has focus elsewhere at that moment.
+    expect(screen.getByRole('status')).toHaveTextContent(REACTION);
+
+    // The card's heading order belongs to the cause block. A coach's aside
+    // must not insert itself into the document outline.
+    expect(screen.queryByRole('heading')).not.toBeInTheDocument();
+  });
+
+  it('shows the same line live and on the summary review', () => {
+    const attempt = withReaction('unfiltered', 'That answer was a mess.');
+
+    const live = render(<AiFeedbackCard attempt={attempt} />);
+    const liveText = screen.getByRole('status').textContent;
+    live.unmount();
+
+    render(
+      <ul>
+        <AttemptReview attempt={attempt} />
+      </ul>,
+    );
+
+    expect(screen.getByRole('status').textContent).toBe(liveText);
+  });
+
+  it('renders on a review row that would otherwise have nothing to say', () => {
+    // The early-return case: an exact-graded row on the summary has no
+    // provenance, no cause and no coaching, so the card returns null — unless
+    // there is a reaction, which there now is.
+    render(
+      <ul>
+        <AttemptReview attempt={withReaction()} />
+      </ul>,
+    );
+
+    expect(screen.getByText(REACTION)).toBeInTheDocument();
+  });
+
+  it('never renders the line as markup', () => {
+    render(
+      <AiFeedbackCard
+        attempt={withReaction('playful', '<em>not</em> markup & fine')}
+      />,
+    );
+
+    const status = screen.getByRole('status');
+    expect(status.textContent).toBe('<em>not</em> markup & fine');
+    expect(status.querySelector('em')).toBeNull();
   });
 });
