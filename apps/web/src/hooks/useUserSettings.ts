@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { api, ApiError } from '../services/api';
 import { UserSettings, UserSettingsUpdate } from '../types';
-import { useThemeContext } from '../contexts/ThemeContext';
+import { useOptionalThemeContext } from '../contexts/ThemeContext';
 import { useIsMounted } from './useIsMounted';
 
 interface UseUserSettingsOptions {
@@ -15,9 +15,26 @@ interface UseUserSettingsOptions {
    * AppBar's light/dark toggle, any refetch — or simply navigating to a route
    * that remounts the chrome — calls setMode() with the persisted value and
    * stamps the toggle right back. Do not "simplify" this option away.
+   *
+   * `false` ALSO DROPS THE `ThemeContextProvider` REQUIREMENT (#288). A caller
+   * that has opted out of theme syncing never calls `setMode`, so demanding a
+   * provider it will not use would keep `voice` preferences from being read on
+   * the practice and writing screens — surfaces whose reason to exist has
+   * nothing to do with theme chrome. `syncTheme: true` still throws without
+   * one, unchanged: there, a silently inert `setMode` would be a theme control
+   * that does nothing.
    */
   syncTheme?: boolean;
 }
+
+/**
+ * `setMode` for a `syncTheme: false` caller with no provider above it.
+ *
+ * MODULE-LEVEL so its identity is stable — it lands in the dependency array of
+ * `fetchSettings`/`updateSettings`, and a fresh function per render would
+ * re-create both callbacks (and so re-fire the fetch effect) on every render.
+ */
+const NO_THEME_SYNC = () => undefined;
 
 interface UseUserSettingsReturn {
   settings: UserSettings | null;
@@ -36,7 +53,13 @@ export function useUserSettings(options: UseUserSettingsOptions = {}): UseUserSe
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
-  const { setMode } = useThemeContext();
+  const themeContext = useOptionalThemeContext();
+  // The throw is preserved for the callers that genuinely need the theme, and
+  // is a plain render-time check rather than a conditional hook call.
+  if (syncTheme && !themeContext) {
+    throw new Error('useThemeContext must be used within a ThemeContextProvider');
+  }
+  const setMode = themeContext?.setMode ?? NO_THEME_SYNC;
   // Every `setState` past an `await` is guarded: a request that settles after
   // the component is gone must not schedule an update on it. `setMode` is
   // included — it writes ThemeContext state and is just as unsafe once the

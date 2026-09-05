@@ -82,3 +82,23 @@ export function useThemeContext(): ThemeContextValue {
   }
   return context;
 }
+
+/**
+ * The theme context IF there is one, `null` otherwise — the non-throwing
+ * accessor, on the exact model of `useOptionalAiStatus`.
+ *
+ * FOR POINT-OF-USE CALLERS THAT DO NOT WANT THE THEME AT ALL. `useUserSettings`
+ * is one settings document read by several unrelated surfaces, and only the
+ * ones that edit the theme (`syncTheme: true`, the default) need this provider
+ * above them. A practice screen reading its own `voice` preferences out of the
+ * same document (#288) does not, and making the whole session page depend on
+ * theme chrome would be a coupling with no behaviour behind it.
+ *
+ * `useThemeContext` above still THROWS, unchanged, and remains the accessor for
+ * every caller that genuinely needs the theme: an unusable `setMode` that fails
+ * silently is worse than a loud error for those. This one is the deliberate
+ * opt-out, not a softer default — do not swap the call sites over wholesale.
+ */
+export function useOptionalThemeContext(): ThemeContextValue | null {
+  return useContext(ThemeContext) ?? null;
+}
