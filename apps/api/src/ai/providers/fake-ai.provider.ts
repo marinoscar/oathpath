@@ -774,6 +774,26 @@ export class FakeAiProvider extends BaseAiProvider {
    * see `usageFor`, whose reason for reporting them does not apply to a
    * surface the provider itself leaves blank.
    */
+  /**
+   * `true` — the fake always scores what it heard (issue #348, epic #345).
+   *
+   * DERIVED FROM WHAT THIS CLASS ACTUALLY DOES, not from the model id it was
+   * handed. {@link runTranscription} below returns a real number on every call,
+   * for every model id, so reporting anything else here would make the fake
+   * disagree with itself and let a test pass against a claim production never
+   * makes.
+   *
+   * It is deliberately NOT `wantsVerboseTranscription(modelId)`: a voice test
+   * naming `gpt-4o-transcribe` (the recommended model, and the one most tests
+   * name) would then be told no confidence was available while the very same
+   * call handed it `0.97`.
+   */
+  override reportsTranscriptionConfidence(modelId: string): boolean {
+    void modelId;
+
+    return true;
+  }
+
   protected async runTranscription(
     apiKey: string,
     request: AiTranscriptionRequest,

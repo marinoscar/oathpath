@@ -1245,6 +1245,35 @@ export interface SpeechTranscriptionOk {
    * reason ("null means unknown, never zero").
    */
   confidence: number | null;
+
+  /**
+   * Can the model bound on THIS DEPLOYMENT report a confidence at all?
+   * (issue #348, epic #345.)
+   *
+   * -------------------------------------------------------------------------
+   * A SECOND FACT, BECAUSE `null` WAS ANSWERING TWO QUESTIONS AT ONCE
+   * -------------------------------------------------------------------------
+   *
+   * {@link confidence} being `null` means "unknown", and it always has. What it
+   * could not say is WHY it is unknown:
+   *
+   *   * `confidenceAvailable: true` — the bound model measures recordings, and
+   *     this one simply was not scored. Rare, ordinary, nothing to say about it.
+   *   * `confidenceAvailable: false` — the bound model measures NOTHING, on any
+   *     call, ever. The `gpt-4o-transcribe` family — the recommended one — is
+   *     exactly this, so on most deployments `docs/specs/voice.md` §3's
+   *     misheard protection does not fire rarely, it never fires.
+   *
+   * `false` IS NOT AN ERROR AND MUST NOT BE RENDERED AS ONE. Nothing is
+   * broken, nothing is unconfigured, and there is no administrator action that
+   * would help. What replaces the score is the mechanism that never needed one
+   * — the learner reads the words that will be (or were) graded and can correct
+   * them, which every spoken screen offers unconditionally. This field only
+   * lets the copy beside those words be honest: `spokenDoubt`
+   * (`components/voice/confidence.ts`) is where the three states are turned
+   * into the three things worth saying.
+   */
+  confidenceAvailable: boolean;
 }
 
 /**

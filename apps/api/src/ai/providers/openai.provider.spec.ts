@@ -1380,6 +1380,43 @@ describe('wantsVerboseTranscription', () => {
   });
 });
 
+describe('OpenAiProvider.reportsTranscriptionConfidence', () => {
+  // The deployment fact issue #348 exists to publish. It is deliberately the
+  // SAME rule as `wantsVerboseTranscription`, not a second one that could drift
+  // from it: on this provider "can produce verbose_json" and "can report a
+  // confidence" are the same question, because the only signal is
+  // `segments[].avg_logprob` and only the verbose shape carries segments.
+  const p = () => new OpenAiProvider(credentialsReturning(null), usageStub());
+
+  it('is true for whisper, which really does measure', () => {
+    expect(p().reportsTranscriptionConfidence('whisper-1')).toBe(true);
+  });
+
+  it('is FALSE for the recommended gpt-4o-transcribe family', () => {
+    // The honest answer, and the one this issue was filed about: bound here,
+    // `voice.md` §3's misheard protection cannot fire at all — not rarely,
+    // never — and a screen needs to be told so rather than inferring it from a
+    // `null` that also means "unscored".
+    expect(p().reportsTranscriptionConfidence('gpt-4o-transcribe')).toBe(false);
+    expect(p().reportsTranscriptionConfidence('gpt-4o-mini-transcribe')).toBe(
+      false,
+    );
+  });
+
+  it('agrees with wantsVerboseTranscription on every id, by construction', () => {
+    for (const id of [
+      'whisper-1',
+      'gpt-4o-transcribe',
+      'gpt-4o-mini-transcribe',
+      'some-new-speech-model',
+    ]) {
+      expect(p().reportsTranscriptionConfidence(id)).toBe(
+        wantsVerboseTranscription(id),
+      );
+    }
+  });
+});
+
 describe('isUnsupportedResponseFormatError', () => {
   it('recognises the real rejection verbatim', () => {
     expect(
@@ -1473,6 +1510,75 @@ describe('OpenAiProvider.transcribe', () => {
     expect(result.text).toBe('the president');
     // NOT a guessed number. There is no signal in a plain `json` reply.
     expect(result.confidence).toBeNull();
+  });
+
+  it('sends the language and the biasing prompt when they are supplied', async () => {
+    // The two accuracy levers issue #348 wired. `language` narrows the decoder;
+    // `prompt` is PRIOR CONTEXT that makes in-domain spellings cheaper. Neither
+    // forbids anything, which is the property the test below asserts about the
+    // OUTPUT rather than about the request.
+    transcriptionsCreateMock.mockResolvedValue({ text: 'the president' });
+
+    const p = new OpenAiProvider(credentialsReturning(null), usageStub());
+
+    await p.transcribe(CALLER, USER_KEY, {
+      ...transcribeRequest('gpt-4o-transcribe'),
+      languageHint: 'en',
+      prompt:
+        'What is the name of the President of the United States now?, Donald Trump.',
+    });
+
+    const body = transcriptionsCreateMock.mock.calls[0][0] as Record<
+      string,
+      unknown
+    >;
+
+    expect(body.language).toBe('en');
+    expect(body.prompt).toBe(
+      'What is the name of the President of the United States now?, Donald Trump.',
+    );
+  });
+
+  it('omits both parameters entirely when there is nothing to hint with', async () => {
+    // ABSENT, not empty. An empty `prompt` is a string the decoder still has to
+    // account for, and an empty `language` is a value OpenAI rejects — neither
+    // is the same request as one that asked for no hint at all.
+    transcriptionsCreateMock.mockResolvedValue({ text: 'the president' });
+
+    const p = new OpenAiProvider(credentialsReturning(null), usageStub());
+
+    await p.transcribe(CALLER, USER_KEY, transcribeRequest('gpt-4o-transcribe'));
+
+    const body = transcriptionsCreateMock.mock.calls[0][0] as Record<
+      string,
+      unknown
+    >;
+
+    expect(body).not.toHaveProperty('language');
+    expect(body).not.toHaveProperty('prompt');
+  });
+
+  it('BIASES rather than constrains: a transcript outside the prompt survives', async () => {
+    // The line issue #348 draws, asserted rather than asserted-about. The
+    // recogniser answers with words that appear NOWHERE in the prompt — a wrong
+    // answer, which is exactly what a learner who is wrong must be heard
+    // saying — and this provider returns them untouched. Nothing here compares
+    // the transcript to the prompt, filters it, or retries.
+    transcriptionsCreateMock.mockResolvedValue({
+      text: 'the king of England',
+    });
+
+    const p = new OpenAiProvider(credentialsReturning(null), usageStub());
+
+    const result = await p.transcribe(CALLER, USER_KEY, {
+      ...transcribeRequest('gpt-4o-transcribe'),
+      prompt:
+        'What is the name of the President of the United States now?, Donald Trump.',
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.text).toBe('the king of England');
+    expect(transcriptionsCreateMock).toHaveBeenCalledTimes(1);
   });
 
   it('falls back to json once when a model rejects verbose_json unexpectedly', async () => {

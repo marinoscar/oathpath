@@ -13,6 +13,7 @@ import type {
   AiSynthesizeRequestInput,
   AiTranscribeResponse,
 } from './dto/ai-speech.dto';
+import type { TranscriptionContext } from './transcription-context.service';
 
 // =============================================================================
 // AiSpeechService (issue #95, epic #58 — E9 "Voice foundation")
@@ -169,8 +170,37 @@ export interface TranscribeUpload {
   /** The part's file name. A wire detail the provider SDK reads; never stored. */
   fileName: string;
 
-  /** An optional ISO-639-1 hint from the form. */
+  /**
+   * An optional ISO-639-1 hint from the form.
+   *
+   * A CLIENT MAY STILL SEND ONE, AND IT WINS OVER THE PROFILE-DERIVED DEFAULT
+   * (issue #348, epic #345). A client that knows what language a specific
+   * recording is in — a reading-practice screen dictating a known English
+   * sentence, say — knows something more specific than a profile-wide
+   * preference does, and this is a self-inflicted accuracy setting: the worst a
+   * caller can do by sending a wrong one is degrade its own transcript.
+   *
+   * The ORDINARY path sends none, and then
+   * {@link TranscriptionContext.languageHint} supplies it.
+   */
   languageHint?: string;
+
+  /**
+   * The civics question this recording answers, when the client knows it.
+   *
+   * AN ID THE SERVER RESOLVES, NEVER TEXT. It is the input to
+   * `TranscriptionContextService`, which reads the question and its accepted
+   * answers out of the database — for this caller and their own state — and
+   * builds the recogniser's biasing prompt from those rows. A client that could
+   * send the biasing text itself could put arbitrary strings into a provider
+   * request field, and could steer a recogniser toward words nobody accepted;
+   * see {@link TranscribeUploadCarriesNoPrompt} below, which makes that a build
+   * failure rather than a review comment.
+   *
+   * Optional, and a stale one is dropped rather than refused — transcription is
+   * a general-purpose route and plenty of recordings answer no question at all.
+   */
+  questionId?: string;
 
   /**
    * A duration the CLIENT claims, in seconds, when it sends one.
@@ -184,6 +214,35 @@ export interface TranscribeUpload {
    */
   declaredDurationSeconds?: number;
 }
+
+// -----------------------------------------------------------------------------
+// Compile-time proof that the CLIENT half of a transcription cannot carry a
+// recogniser prompt (issue #348, epic #345)
+// -----------------------------------------------------------------------------
+//
+// `TranscribeUpload` is everything a caller sent: bytes, a content type, a file
+// name, an optional language, an optional claimed duration, and an optional
+// civics question ID. The biasing `prompt` is built on the server, from rows,
+// by `TranscriptionContextService` — and the way that guarantee would most
+// plausibly be undone is not a malicious request. It is a convenience field
+// added in good faith ("the client already knows the question text, let it send
+// the hint and save a query"), after which arbitrary caller-chosen text reaches
+// a provider request field and the recogniser can be steered by whoever is
+// holding the microphone.
+//
+// So the field names are forbidden in the TYPE. The service's own `transcribe`
+// reads `prompt` from the context parameter and from nowhere else; this makes
+// "and from nowhere else" a build failure rather than a code review.
+
+type ForbiddenUploadFieldNames = 'prompt' | 'promptText' | 'bias' | 'vocabulary';
+
+export type TranscribeUploadCarriesNoPrompt =
+  Extract<keyof TranscribeUpload, ForbiddenUploadFieldNames> extends never
+    ? true
+    : never;
+
+export const TRANSCRIBE_UPLOAD_CARRIES_NO_PROMPT: TranscribeUploadCarriesNoPrompt =
+  true;
 
 /** What `synthesize` produces when there is audio to send. */
 export interface SynthesizedSpeech {
@@ -220,6 +279,7 @@ export class AiSpeechService {
   async transcribe(
     userId: string,
     upload: TranscribeUpload,
+    context: Partial<TranscriptionContext> = {},
   ): Promise<AiTranscribeResponse> {
     this.assertAcceptable(upload);
 
@@ -227,7 +287,14 @@ export class AiSpeechService {
       audio: upload.audio,
       contentType: normalizeContentType(upload.contentType),
       fileName: upload.fileName,
-      languageHint: upload.languageHint,
+      // THE CLIENT'S HINT WINS, THE PROFILE'S IS THE DEFAULT — see
+      // `TranscribeUpload.languageHint`. On the ordinary path the client sends
+      // none and this is the learner's own resolved preference.
+      languageHint: upload.languageHint ?? context.languageHint,
+      // FROM THE CONTEXT AND ONLY FROM THE CONTEXT. There is no `upload.prompt`
+      // to fall back to, by construction — see
+      // {@link TranscribeUploadCarriesNoPrompt}.
+      prompt: context.prompt,
     });
 
     return describeTranscription(result);
@@ -396,10 +463,21 @@ function describeTranscription(
 ): AiTranscribeResponse {
   switch (result.status) {
     case 'ok':
-      // EXACTLY TWO FIELDS BESIDES THE DISCRIMINANT. No model id, no usage, no
-      // usage-event id — `voice.md` §9's "and nothing else", and every field
+      // EXACTLY THREE FIELDS BESIDES THE DISCRIMINANT. No model id, no usage,
+      // no usage-event id — `voice.md` §9's "and nothing else", and every field
       // not returned is one this endpoint never has to keep compatible.
-      return { status: 'ok', text: result.text, confidence: result.confidence };
+      //
+      // `confidenceAvailable` is the third, added by issue #348 with §9 amended
+      // to match. It is not a convenience field: without it `confidence: null`
+      // says both "this call produced no score" and "no call here ever will",
+      // and only the second tells a screen that §3's misheard protection cannot
+      // fire on this deployment.
+      return {
+        status: 'ok',
+        text: result.text,
+        confidence: result.confidence,
+        confidenceAvailable: result.confidenceAvailable,
+      };
     case 'unavailable':
       return { status: 'unavailable', cause: result.cause, role: 'transcribe' };
     case 'failed':

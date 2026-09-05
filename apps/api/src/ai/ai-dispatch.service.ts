@@ -259,8 +259,26 @@ export interface AiTranscribeRunRequest {
    */
   fileName: string;
 
-  /** An optional ISO-639-1 hint, e.g. `'en'`. A hint, never a constraint. */
+  /**
+   * An optional ISO-639-1 hint, e.g. `'en'`. A hint, never a constraint.
+   *
+   * RESOLVED FROM THE CALLER'S OWN LEARNER PROFILE by
+   * `TranscriptionContextService` (issue #348, epic #345), not typed in as a
+   * literal at a call site and not a new user setting.
+   */
   languageHint?: string;
+
+  /**
+   * The biasing context string, built server-side from the caller's own civics
+   * rows (issue #348, epic #345).
+   *
+   * A BIAS, NEVER A CONSTRAINT, and NEVER CLIENT TEXT — the full argument for
+   * both is on `AiTranscriptionRequest.prompt`, which this field is passed
+   * straight into. It is on the RUN request rather than being resolved inside
+   * this service for the same reason `messages` is: the dispatcher owns the
+   * model, the provider and the key, and the feature owns the content.
+   */
+  prompt?: string;
 }
 
 /** What a caller supplies to {@link AiDispatchService.synthesize}. */
@@ -310,6 +328,28 @@ export interface AiTranscribeRunOk {
    * answer was MISHEARD rather than wrong.
    */
   confidence: number | null;
+
+  /**
+   * Can the model this deployment has bound to `transcribe` report a
+   * confidence AT ALL? (issue #348, epic #345.)
+   *
+   * A PROPERTY OF THE DEPLOYMENT, NOT OF THIS RECORDING, which is exactly why
+   * it is a second field rather than a third state of {@link confidence}.
+   * `confidence: null` alone cannot distinguish "this call produced no score"
+   * from "no call here ever will", and the difference is the whole of
+   * `docs/specs/voice.md` §3's misheard protection: it is built on a measured
+   * confidence, so on a `false` deployment it cannot fire — not rarely, never.
+   *
+   * `false` DOES NOT MEAN DEGRADED. Every consumer's fallback is the mechanism
+   * that needs no score — the learner reads the transcript and can correct it,
+   * which is unconditional on every spoken screen in this application. This
+   * field exists so that fact is stated rather than inferred from a silent
+   * `null`.
+   *
+   * Read from `AiProvider.reportsTranscriptionConfidence` with the resolved
+   * model id, never guessed from `confidence === null` on the way past.
+   */
+  confidenceAvailable: boolean;
 
   usage: AiUsage;
   modelId: string;
@@ -821,6 +861,10 @@ export class AiDispatchService {
         contentType: request.contentType,
         fileName: request.fileName,
         languageHint: request.languageHint,
+        // Straight through. This service resolves the model, the provider and
+        // the key and NEVER the content — see the header's one-door rule, and
+        // `AiTranscriptionRequest.prompt` for who does build this string.
+        prompt: request.prompt,
       });
 
       // `typeof text === 'string'` AND NOT `text.length > 0`, deliberately
@@ -835,6 +879,14 @@ export class AiDispatchService {
           // PASSED THROUGH, NEVER COALESCED. `?? 0` here would be the exact
           // false claim `AiTranscriptionResult.confidence` exists to forbid.
           confidence: result.confidence,
+          // ASKED OF THE PROVIDER, NEVER INFERRED FROM `confidence === null`
+          // one line above it (issue #348). Inferring it would collapse the two
+          // situations this field exists to separate: a model that can measure
+          // and did not, and a model that never can. See
+          // {@link AiTranscribeRunOk.confidenceAvailable}.
+          confidenceAvailable: resolved.provider.reportsTranscriptionConfidence(
+            resolved.modelId,
+          ),
           usage: result.usage,
           modelId: resolved.modelId,
         };

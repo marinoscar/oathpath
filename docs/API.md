@@ -1272,10 +1272,44 @@ own entry below. It runs no inference, so there is no `cause` it could carry.
 
 #### POST /ai/speech/transcribe
 Multipart upload, one audio file in the `audio` field (optional
-`languageHint`, ISO-639-1, and `durationSeconds` fields). Turns the
-recording into text **on your own key** and returns
-`{ status: 'ok', text, confidence }` — confidence is `null` when the
-recogniser did not report one, and that means *unknown*, never zero.
+`languageHint` (ISO-639-1), `durationSeconds` and `questionId` (UUID)
+fields, all sent **before** the file part). Turns the recording into text
+**on your own key** and returns
+`{ status: 'ok', text, confidence, confidenceAvailable }` — confidence is
+`null` when the recogniser did not report one, and that means *unknown*,
+never zero.
+
+**`confidenceAvailable` says whether a confidence is measurable on this
+deployment at all** (issue #348, epic #345). `confidence: null` alone answers
+two different questions with the same value — "this call was not scored" and
+"nothing here ever is" — and only the second matters:
+`docs/specs/voice.md` §3's misheard protection is built on a measured score,
+so where `confidenceAvailable` is `false` (the recommended
+`gpt-4o-transcribe` family reports no confidence at all) it does not fire
+rarely, it never fires. **This is not an error state and must not be
+rendered as one.** What replaces it is the mechanism that never needed a
+score: show the learner the words that will be — or were — graded, and let
+them correct them. Say so plainly rather than staying silent, which implies
+something checked. See [`docs/specs/voice.md`](specs/voice.md#3-confirm-before-grade)
+§3 for the per-deployment table.
+
+**`languageHint` is resolved for you when you send none.** The server reads
+your own learner profile: `en` for an ordinary learner (the material and the
+interview are in English), and your own explanation language if you have
+claimed the 65/20 accommodation, under which USCIS lets the civics test be
+taken in the language of your choice. Send one only if you know what
+language a specific recording is in; it wins when present.
+
+**Send `questionId` when you know which civics question is being answered.**
+The server resolves it — to that question and its accepted answers, in your
+own state — and uses those words to **bias** the recogniser toward the proper
+nouns a civics answer is full of. It is only a bias: a transcript that is not
+an accepted answer still comes back exactly as it was heard, which is what
+keeps a wrong answer gradeable as a wrong answer. A malformed id is a 400; a
+well-formed id that names nothing is ignored, so a stale hint never costs you
+a recording you have already made. **There is deliberately no field for the
+biasing text itself**, and there will not be one — a caller that could name
+its own prompt could steer its own recogniser.
 
 **Nothing is graded here, and nothing is stored.** No practice attempt is
 written, and the recording is never persisted anywhere — not in object

@@ -143,6 +143,10 @@ function providerDouble(overrides: Partial<AiProvider> = {}): AiProvider {
       errorCode: null,
       error: null,
     } satisfies AiTranscriptionResult),
+    // `true`, matching the double's `transcribe` above, which always reports a
+    // number. A double that claimed `false` while handing back `0.92` would let
+    // an assertion pass against a state no provider can be in (issue #348).
+    reportsTranscriptionConfidence: jest.fn().mockReturnValue(true),
     synthesize: jest.fn().mockResolvedValue({
       success: true,
       audio: Buffer.from([0x49, 0x44, 0x33]),
@@ -700,9 +704,63 @@ describe('AiDispatchService.transcribe', () => {
       status: 'ok',
       text: 'the president',
       confidence: 0.92,
+      confidenceAvailable: true,
       usage: SPEECH_USAGE,
       modelId: 'gpt-4o-transcribe',
     });
+  });
+
+  it('carries the language and the biasing prompt through to the provider', async () => {
+    // The two accuracy levers (#348). Both are RESOLVED BY THE CALLER — the
+    // language from the learner's own profile, the prompt from their own civics
+    // rows — and this service's job is to hand them over unaltered alongside the
+    // model, provider and key it alone resolves.
+    const { service, provider } = build(speechSettings(), USER_KEY);
+
+    await service.transcribe(ALICE, {
+      ...TRANSCRIBE_REQUEST,
+      languageHint: 'en',
+      prompt: 'Who is the President of the United States?, Donald Trump.',
+    });
+
+    expect(provider.transcribe).toHaveBeenCalledWith(
+      ALICE,
+      USER_KEY,
+      expect.objectContaining({
+        languageHint: 'en',
+        prompt: 'Who is the President of the United States?, Donald Trump.',
+      }),
+    );
+  });
+
+  it('asks the provider whether a confidence is measurable, rather than reading the null', async () => {
+    // The distinction the field exists for: this call produced no score, AND
+    // the bound model can never produce one. A `confidenceAvailable` inferred
+    // from `confidence === null` could not tell the two apart and would report
+    // the first as the second on every unscored recording.
+    const provider = providerDouble({
+      transcribe: jest.fn().mockResolvedValue({
+        success: true,
+        text: 'the president',
+        confidence: null,
+        usage: SPEECH_USAGE,
+        errorCode: null,
+        error: null,
+      } satisfies AiTranscriptionResult),
+      reportsTranscriptionConfidence: jest.fn().mockReturnValue(false),
+    });
+    const { service } = build(speechSettings(), USER_KEY, provider);
+
+    expect(await service.transcribe(ALICE, TRANSCRIBE_REQUEST)).toMatchObject({
+      status: 'ok',
+      confidence: null,
+      confidenceAvailable: false,
+    });
+
+    // Asked about the BOUND model, never about a literal.
+    expect(provider.reportsTranscriptionConfidence).toHaveBeenCalledWith(
+      'gpt-4o-transcribe',
+    );
   });
 
   it('runs on the caller`s own key and names the transcribe role to the provider', async () => {
@@ -745,6 +803,9 @@ describe('AiDispatchService.transcribe', () => {
     const result = await service.transcribe(ALICE, TRANSCRIBE_REQUEST);
 
     expect(result).toMatchObject({ status: 'ok', confidence: null });
+    // …and a model that CAN measure still says so, even on a call it did not
+    // score. Unknown-for-this-call is not unmeasurable-on-this-deployment.
+    expect(result).toMatchObject({ confidenceAvailable: true });
   });
 
   it('treats an empty transcript as a success, unlike an empty completion', async () => {

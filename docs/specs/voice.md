@@ -347,17 +347,81 @@ how the two interact.
 > speech-recognition errors" — is described in this document as delivered
 > by a mechanism that, on the recommended model, cannot fire.
 >
-> **This document does not implement a fix here.** The fix is
-> [issue #348](https://github.com/marinoscar/oathpath/issues/348), filed
-> against this exact gap: sending a `prompt`/`languageHint` to bias
-> recognition, and choosing between restoring a real signal on models that
-> can produce one versus explicitly documenting, per deployment, that the
-> `misheard` guarantee is unenforceable on models that cannot. Until that
-> issue lands, treat every claim in this section and §3.1 about
-> `failureCause: 'misheard'` firing as **conditional on the bound
-> transcription model being one that can produce `verbose_json`**
-> (`whisper-1`, by this file's own `wantsVerboseTranscription` check) —
-> `Decisions locked` #4 (§11) carries the identical amendment note.
+> **RESOLVED BY [issue #348](https://github.com/marinoscar/oathpath/issues/348),
+> and the paragraph below is now the rule rather than a pending fix.** The
+> gap recorded above is real and was not closed by making the signal
+> reappear: it was closed by publishing the fact, per deployment, and by
+> making the mechanism that needs no score carry the guarantee everywhere.
+> Read the paragraphs that follow as part of this section, not as a note
+> about it.
+>
+> **Which deployments can enforce the `misheard` guarantee, and which
+> cannot.** The dividing line is the model an administrator has bound to
+> `transcribe`, and it is now published rather than inferred:
+>
+> | Bound `transcribe` model | `confidence` | `confidenceAvailable` | `failureCause: 'misheard'` |
+> |---|---|---|---|
+> | `whisper-1` (anything accepting `verbose_json`) | a number, from `deriveConfidence` | `true` | **Can fire.** Every mechanism in this section and §3.1 works exactly as written. |
+> | `gpt-4o-transcribe`, `gpt-4o-mini-transcribe` — **the recommended family** | always `null` | `false` | **Cannot fire, ever.** Not rarely: never. `mastery-skip.ts`'s scheduling refusal never triggers for a confidence reason, the `answer.misheard` coach event is unreachable, `ConversationGrade.misheard` is always `false`, and `POST /api/english/attempts` never answers `misheard`. |
+>
+> **`deriveConfidence` was kept, not removed.** A `whisper-1` deployment
+> really does measure recordings, and deleting the derivation would take a
+> working protection away from those installations to tidy up an unused code
+> path on the others. What changed is that the *availability* of that
+> protection is now a stated fact instead of a silent `null`:
+> `AiProvider.reportsTranscriptionConfidence(modelId)` answers it from the
+> bound model id, `AiTranscribeRunOk.confidenceAvailable` carries it up, and
+> `POST /api/ai/speech/transcribe`'s `ok` member publishes it — see §9, whose
+> "and nothing else" now names three fields rather than two.
+>
+> **What a learner gets on a deployment that cannot measure.** The
+> protection is not absent there; it is a *different* protection, and it is
+> the one E12 already made unconditional — **the learner sees the words that
+> will be, or were, graded, and can replace them.** On the default
+> (`autoSubmitSpoken: true`) path that is the post-verdict correction panel,
+> whose retry writes a new attempt carrying `retryOfAttemptId`; the
+> superseded row is excluded from the session summary and, since #285, from
+> spaced repetition too (`recomputeMasteryForQuestion`), so a mishearing and
+> its correction cost nothing. On the opt-out path it is §3.1's confirmation
+> step, before grading. **Neither has ever been gated on confidence** —
+> `PracticeSessionPage`'s `canAnswerAgain` is `inputMode === 'spoken'`, not
+> `failureCause === 'misheard'` — which is precisely why the guarantee
+> survives a model that measures nothing. What confidence changes, and all it
+> has ever changed on these screens, is the WORDING; `spokenDoubt`
+> (`apps/web/src/components/voice/confidence.ts`) now returns three values
+> rather than two, and the third — `unmeasured` — is what makes the copy
+> honest: *"we cannot tell how clearly that came through, so please read
+> it"*, rather than a silence that implies something checked.
+>
+> **`unmeasured` is not `low`, and merging them would be a regression.**
+> Treating an unmeasurable transcript as doubted would greet every learner on
+> the recommended model with "that may not be what you said" about a
+> transcript nothing was ever uncertain about — the same failure the
+> "unknown is not low" rule (`isLowConfidence` returning `false` for `null`)
+> exists to prevent, arriving by a different route. `false` is also **not an
+> error state** and nothing renders it as one: no administrator action
+> improves it beyond rebinding to `whisper-1`, which is a trade against that
+> family's accuracy rather than a fix.
+>
+> **One affordance remains on screen that cannot fire on the recommended
+> model, and the fact is recorded rather than the branch deleted:**
+> `ReadingPracticePage`'s `result.status === 'misheard'` panel. It is correct
+> and reachable wherever `whisper-1` is bound; a comment at that branch says
+> so, and points here.
+>
+> **Two accuracy levers were pulled in the same issue, and neither is a
+> constraint.** `POST /api/ai/speech/transcribe` now sends a `language`,
+> resolved server-side from the caller's own `learner_profiles` row (see §9),
+> and — when the client names a `questionId` — a `prompt` built from that
+> question's own prompt and accepted answers, resolved for that caller's own
+> state through `CivicsService.getQuestion`. The prompt is **prior context,
+> never a whitelist**: the recogniser must still be able to return words that
+> appear nowhere in it, or a learner who answers wrongly cannot be heard
+> answering wrongly and the grading ladder is handed its own answer back. No
+> code anywhere compares a transcript to the prompt that biased it, and
+> `apps/api/src/ai/providers/fake-ai.provider.spec.ts` and
+> `openai.provider.spec.ts` each assert a transcript outside the prompt
+> comes back unchanged.
 >
 > **The realtime transport (E15, `docs/specs/realtime-practice.md`) does
 > not inherit this gap, because it never had the signal to lose.** Its own
@@ -956,15 +1020,55 @@ POST /api/ai/speech/synthesize   @Auth(), no permissions
 plugin, the same mechanism `POST /api/storage/objects`'s `simpleUpload`
 already uses via `req.file()`). Request: one audio file field. **Response:
 a discriminated union on `status`, always HTTP 200.** On success,
-`{ status: 'ok', text: string, confidence: number | null }` and **nothing
-else** — no usage event id, no model id, no raw provider metadata. The
-success shape is narrow on purpose: the caller (the web client's
-confirm-transcript screen) needs exactly those two fields to do its job, and
-every additional field returned is one more thing a future change to this
-endpoint has to keep compatible or treat as a breaking change. Otherwise,
-`{ status: 'unavailable', cause, role }` or `{ status: 'failed', errorCode,
-error }` — see the note under `synthesize`, directly below, for why these
-are 200s rather than a 404 or a 503.
+`{ status: 'ok', text: string, confidence: number | null,
+confidenceAvailable: boolean }` and **nothing else** — no usage event id, no
+model id, no raw provider metadata. The success shape is narrow on purpose:
+the caller (the web client's confirm-transcript screen) needs exactly those
+fields to do its job, and every additional field returned is one more thing a
+future change to this endpoint has to keep compatible or treat as a breaking
+change. Otherwise, `{ status: 'unavailable', cause, role }` or
+`{ status: 'failed', errorCode, error }` — see the note under `synthesize`,
+directly below, for why these are 200s rather than a 404 or a 503.
+
+> **Amended by E15 (epic #345, issue #348).** The success member named two
+> fields when this section was written; `confidenceAvailable` is the third
+> and, at the time of writing, the last. It is not a convenience field: it is
+> the deployment fact §3's amendment turns on, and without it `confidence:
+> null` answers two different questions at once ("this call was not scored"
+> and "nothing here ever is") with the same value. It names no model, no
+> provider and no key, so it stays inside this section's own narrowness rule.
+
+**Two request fields the server resolves, and one it deliberately does not
+accept** (E15, epic #345, issue #348):
+
+* **`languageHint`** (optional, ISO-639-1) may still be sent by a client that
+  knows what language a particular recording is in, and wins when it is. On
+  the ordinary path **nothing is sent and the server resolves one** from the
+  caller's own `learner_profiles` row — `en` for an ordinary learner, because
+  the material and the interview are in English, and the learner's own
+  `explanation_language` for a learner claiming the 65/20 accommodation, who
+  by USCIS's own rule may take the civics test in the language of their
+  choice. That is the whole rule, it is two columns rather than a constant,
+  and it adds **no new user setting**: forwarding `explanation_language`
+  unconditionally would be an accuracy regression, because it "Governs AI
+  explanations only; questions stay in English."
+* **`questionId`** (optional, UUID) names the civics question the recording
+  answers. The server resolves it through `CivicsService.getQuestion` — the
+  same method `GET /api/civics/questions/{id}` serves that caller, applying
+  that caller's own state — and builds the recogniser's biasing prompt from
+  those rows: the question's own prompt, then each accepted answer, joined
+  as a comma-separated glossary and closed with a full stop. Never a
+  sentence, never an instruction. A malformed id is a 400 (a client bug worth
+  learning about immediately, exactly like `languageHint: "English"`); a
+  well-formed id that names nothing is **ignored**, because by then the
+  learner's recording has already been made and uploaded and a stale hint
+  must not cost them an answer.
+* **There is no field for the biasing text itself, and there must never be
+  one.** A client that could name its own prompt could put arbitrary strings
+  into a provider request field and steer its own recogniser toward the words
+  it wanted to be heard saying. `TranscribeUploadCarriesNoPrompt`
+  (`apps/api/src/ai/ai-speech.service.ts`) makes adding one a build failure
+  rather than a review comment.
 
 **The byte cap and the duration cap are both enforced BEFORE dispatching to
 `AiDispatchService.transcribe`**, so an oversized file is a 400, not a
@@ -1111,7 +1215,7 @@ load-bearing rather than a preference:
 | 1 | **Browser TTS is the default; `speak` is an optional upgrade.** | "Hear the question" must work on a fresh install with zero configuration and zero cost — an admin who has not touched AI settings at all must not be the reason a learner cannot hear a question read aloud. §2. |
 | 2 | **Wiring a voice role must not break existing installations.** | `systemReady` was computed over every `wiredModelRoles()` member; wiring `transcribe`/`speak` alone, without narrowing `systemReady` to the text roles in the same commit, would make every deployed installation report not-ready the instant this epic merges — for a capability nobody asked for yet, discovered by an admin who changed nothing. §1. |
 | 3 | **The transcript is confirmed by the learner before grading.** ***Amended by E12 (epic #280)*** — confirm-before-grade is now the opt-out (`autoSubmitSpoken: false`); the default flow grades immediately and moves the anti-penalty guarantee to `recomputeMasteryForQuestion`. See `docs/specs/voice-hands-free.md` §1, §2, and this document's own §3 amendment note. | This is the anti-penalty mechanism `VISION.md` line 228 requires. Grading raw ASR output treats a speech-recognition failure as a civics-knowledge failure — the exact conflation this epic exists to prevent. §3. |
-| 4 | **A low-confidence miss is flagged `failureCause: misheard` and withheld from mastery scheduling — `outcome` stays whatever grading honestly found.** ***Amended by E15 (epic #345)*** — recorded, not fixed: `asrConfidence` is unconditionally `null` on the `gpt-4o-transcribe` family, so this mechanism cannot fire at all on that binding; the fix is issue #348. See this document's own §3 amendment note. | Without the scheduling withholding, an accent or a noisy microphone becomes a scheduling penalty (a reset streak, a lapse, a pulled-in `dueAt`) indistinguishable from not knowing the material — the recognizer's own uncertainty about the TEXT says nothing about the learner's recall, so `question_mastery` must never see it. §3, §3.1. |
+| 4 | **A low-confidence miss is flagged `failureCause: misheard` and withheld from mastery scheduling — `outcome` stays whatever grading honestly found.** ***Amended by E15 (epic #345), then RESOLVED by issue #348*** — the decision is that this mechanism holds **only on a deployment whose bound `transcribe` model can measure** (`whisper-1`), is published as such (`confidenceAvailable`), and is replaced on every other deployment by the correction affordance, which was never gated on confidence. The rule itself is unchanged: `isMisheardAttempt` and `mastery-skip.ts`'s refusal were deliberately not touched. See this document's own §3 amendment note for the table and the reasoning. | Without the scheduling withholding, an accent or a noisy microphone becomes a scheduling penalty (a reset streak, a lapse, a pulled-in `dueAt`) indistinguishable from not knowing the material — the recognizer's own uncertainty about the TEXT says nothing about the learner's recall, so `question_mastery` must never see it. §3, §3.1. |
 | 5 | **Audio is not stored.** | An unnecessary recording of someone's voice, made while they practice for a naturalization interview, is a liability this product has no use for and every reason to avoid — retaining it would create a sensitive data store with no corresponding feature need. §4. |
 | 6 | **Voice is always optional.** ***Amended by E13 (epic #304)*** — optionality is unchanged, but the picker is no longer per-question only: a session-wide `Text \| Voice` control (Conversation mode, `voice.conversationMode`, defaulting `false`) is also offered, with no session-level flag added to `practice_sessions` and the per-question "Type instead" override still reachable throughout. See `docs/specs/conversation-mode.md` §7 and this document's own §5 amendment note. | `VISION.md`'s "type instead when voice is inconvenient" and "switch between voice and text without losing progress" are stated as user-facing requirements, not aspirations; a learner who cannot or does not want to use voice must have the identical practice experience by text. §5. |
 
