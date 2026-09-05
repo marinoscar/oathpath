@@ -1625,43 +1625,43 @@ export default function PracticeSessionPage() {
                     said. */}
                 {question && (
                   <>
-                <Typography variant="body2" color="text.secondary">
-                  Hands-free practice reads each question aloud, listens for
-                  your answer, and moves on by itself. You can stop, or go back
-                  to typing, at any moment.
-                </Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    Hands-free practice reads each question aloud, listens for
+                    your answer, and moves on by itself. You can stop, or go back
+                    to typing, at any moment.
+                  </Typography>
 
-                <Stack
-                  direction={{ xs: 'column', sm: 'row' }}
-                  spacing={1}
-                  sx={{ mt: 2, alignItems: { xs: 'stretch', sm: 'center' } }}
-                >
-                  {conversation.isRunning ? (
-                    <Button
-                      variant="outlined"
-                      startIcon={<StopIcon />}
-                      onClick={() => conversation.stop()}
-                    >
-                      Stop
+                  <Stack
+                    direction={{ xs: 'column', sm: 'row' }}
+                    spacing={1}
+                    sx={{ mt: 2, alignItems: { xs: 'stretch', sm: 'center' } }}
+                  >
+                    {conversation.isRunning ? (
+                      <Button
+                        variant="outlined"
+                        startIcon={<StopIcon />}
+                        onClick={() => conversation.stop()}
+                      >
+                        Stop
+                      </Button>
+                    ) : (
+                      <Button
+                        variant="contained"
+                        startIcon={<MicIcon />}
+                        onClick={handleStartConversation}
+                        disabled={pending !== null}
+                      >
+                        Start hands-free
+                      </Button>
+                    )}
+                    {/* REACHABLE AT EVERY PHASE — rendered from this branch
+                        rather than from any state of the loop, so there is no
+                        moment in `speakingQuestion → listening → processing →
+                        speakingAnswer → advancing` where it is missing. */}
+                    <Button variant="text" onClick={handleTypeInstead}>
+                      Type instead
                     </Button>
-                  ) : (
-                    <Button
-                      variant="contained"
-                      startIcon={<MicIcon />}
-                      onClick={handleStartConversation}
-                      disabled={pending !== null}
-                    >
-                      Start hands-free
-                    </Button>
-                  )}
-                  {/* REACHABLE AT EVERY PHASE — rendered from this branch
-                      rather than from any state of the loop, so there is no
-                      moment in `speakingQuestion → listening → processing →
-                      speakingAnswer → advancing` where it is missing. */}
-                  <Button variant="text" onClick={handleTypeInstead}>
-                    Type instead
-                  </Button>
-                </Stack>
+                  </Stack>
                   </>
                 )}
 
