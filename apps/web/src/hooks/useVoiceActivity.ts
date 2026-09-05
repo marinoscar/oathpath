@@ -23,8 +23,26 @@
  * place that can leave that light on, and the two would have no way to agree
  * about who was allowed to close it. So this hook takes a stream and gives it
  * back untouched: it attaches an `AnalyserNode` (which observes without
- * consuming) and, on teardown, disconnects its own nodes and closes its own
- * `AudioContext` — never a track.
+ * consuming) and, on teardown, disconnects its own nodes — never a track, and
+ * (since issue #347) never a context either.
+ *
+ * =============================================================================
+ * THERE IS EXACTLY ONE `AudioContext` ON THE PAGE, AND THIS FILE DOES NOT OWN IT
+ * =============================================================================
+ *
+ * The analyser hangs off {@link getSharedAudioContext} — `lib/earcons.ts`'s
+ * context, resumed on every access there — and NOT off a `new AudioContext()`
+ * of this file's own. `earcons.ts` states the rule at the export itself: two
+ * contexts means two audio devices open, two suspend/resume lifecycles to keep
+ * in step, and on some platforms the second `new AudioContext()` simply fails.
+ * A suspended context hands `getFloatTimeDomainData` a buffer of zeros, which
+ * this detector reads as a perfectly silent room — the learner speaks and
+ * nothing happens, with nothing on screen to say why.
+ *
+ * The corollary is a rule about teardown: THIS FILE NEVER CLOSES THE CONTEXT.
+ * It borrowed it, the earcons still need it, and closing it would silence every
+ * cue on the page. `close()` on the level source disconnects the two nodes this
+ * file created and stops there.
  *
  * A consequence worth stating: if the caller stops the stream mid-turn, the
  * analyser reads silence, the hangover clock runs out, and the turn ends with
@@ -53,10 +71,37 @@
  * property a test can assert rather than a claim a comment can make.
  *
  * =============================================================================
+ * AND THE BAR IS *ONLY* THE ROOM'S — NO ABSOLUTE TERM — issue #347, epic #345
+ * =============================================================================
+ *
+ * Until #347 the onset bar was `floor * 1.8 + 0.045`, and that `+ 0.045` was an
+ * ABSOLUTE RMS term the calibration could not move. In a quiet room
+ * (floor ~ 0.002) it put the bar at ~0.0486 RMS — about -26 dBFS — no matter
+ * how far away the microphone was. A phone held at 20 cm clears -26 dBFS
+ * easily. A laptop's far-field array at 50-80 cm delivers ordinary speech at
+ * roughly -35 to -45 dBFS and never clears it, so on a laptop: `loudSince`
+ * reset on every sub-threshold sample, onset fired only on the loudest
+ * syllable, the eight-second window expired into `onsetTimeout`, a mid-sentence
+ * dip ended the turn, and barge-in at ~0.128 (~-18 dBFS) was unreachable.
+ * ONE CONSTANT PRODUCED ALL OF IT, and it was the one constant that made this
+ * a platform difference rather than a general weakness.
+ *
+ * So every bar here is now a MULTIPLE of the measured floor and nothing else.
+ * The only absolute number left is {@link VOICE_ACTIVITY_ONSET_MINIMUM}, which
+ * is not headroom: it exists so that a floor of exactly zero (a muted track, a
+ * suspended context handing back a buffer of zeros, a synthetic silence in a
+ * test) cannot produce a bar of exactly zero — where every sample, silence
+ * included, is "speech". It sits ~17 dB BELOW the quietest far-field speech
+ * this change is for, so it is never the thing a learner has to clear.
+ *
+ * =============================================================================
  * BARGE-IN COSTS MORE THAN ONSET, ON PURPOSE
  * =============================================================================
  *
- * Interrupting the coach uses a SECOND, STRICTLY HIGHER threshold, requires
+ * Interrupting the coach uses a SECOND, STRICTLY HIGHER threshold — also
+ * purely relative, for the reason the section above gives; barge-in had its own
+ * absolute headroom term until #347 and it made interrupting unreachable on
+ * exactly the devices onset was already failing on. It requires
  * speech to be sustained roughly three times as long
  * ({@link VOICE_ACTIVITY_BARGE_IN_SUSTAIN_MS} against
  * {@link VOICE_ACTIVITY_ONSET_SUSTAIN_MS}), and is not armed at all for the
@@ -74,6 +119,31 @@
  * mid-explanation. Interrupting should take intent. Missing an interruption
  * costs a learner one repeated sentence; a barge-in that fires on traffic
  * makes the coach unusable outdoors, which is the entire feature.
+ *
+ * =============================================================================
+ * A THROTTLED POLL IS REPORTED, NOT PAPERED OVER — issue #347
+ * =============================================================================
+ *
+ * {@link VOICE_ACTIVITY_POLL_INTERVAL_MS} asks for 25 ms. Chrome clamps
+ * `setInterval` in a hidden or occluded tab to roughly ONE SECOND, and a
+ * learner practising at a desk with another window in front of the browser is
+ * the ordinary case, not an exotic one. At 1 Hz the calibration median is taken
+ * from a single sample and onset needs two loud readings a second apart —
+ * the machine still works, in the sense that every transition still fires, but
+ * it is no longer the detector its constants describe.
+ *
+ * So each tick measures the gap since the last one and, when a gap reaches
+ * {@link VOICE_ACTIVITY_THROTTLE_RATIO} times the interval that was asked for,
+ * the arm is marked throttled: {@link VoiceActivityState.poll} says so while it
+ * is armed, and {@link UseVoiceActivityReturn.getPollHealth} says so afterwards,
+ * carrying the worst gap actually observed. NOTHING IS FAKED — no interpolated
+ * samples, no scaled sustain windows, no pretending a 1 Hz poll is a 40 Hz one.
+ *
+ * It is deliberately NOT a sixth {@link VoiceActivityEvent}. Every member of
+ * that union is a TURN OUTCOME that disarms the hook as it fires, and a driver
+ * switches over it exhaustively; a throttled clock is neither an outcome nor a
+ * reason to end a turn, and making it one would force every driver to handle
+ * "the tab is behind another window" as though the learner had stopped talking.
  *
  * =============================================================================
  * WHAT THIS FILE DOES NOT CLAIM
@@ -94,6 +164,8 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 
+import { getSharedAudioContext } from '../lib/earcons';
+
 // ---------------------------------------------------------------------------
 // Tunables. EVERY ONE OF THEM IS EXPORTED AND NAMED.
 //
@@ -112,25 +184,64 @@ import { useCallback, useEffect, useRef, useState } from 'react';
  * than anything that costs battery.
  *
  * A `setInterval`, deliberately, and NOT `requestAnimationFrame`: rAF is
- * throttled to roughly 1 Hz in a background tab and suspended outright in a
+ * throttled to roughly 1 Hz in a background tab and suspended OUTRIGHT in a
  * hidden one. A learner practising hands-free is very likely to have the
  * screen off or the tab behind something, and a detector that stops sampling
  * exactly then would hear the whole answer as one uninterrupted silence.
+ *
+ * `setInterval` is throttled too, though — to about 1 Hz rather than to zero —
+ * which is why this is an interval a tick MEASURES ITSELF AGAINST rather than
+ * an interval anything downstream is entitled to assume. See
+ * {@link VOICE_ACTIVITY_THROTTLE_RATIO}.
  */
 export const VOICE_ACTIVITY_POLL_INTERVAL_MS = 25;
+
+/**
+ * A gap of this many poll intervals means the timer is being throttled.
+ *
+ * 4x (100 ms at the default interval) is well past ordinary jitter — a busy
+ * main thread, a long render, a garbage collection — and well under the ~1 Hz
+ * (40x) a hidden tab is clamped to, so it separates "the machine was briefly
+ * busy" from "this clock is no longer the clock we asked for" without needing
+ * to name either number twice.
+ */
+export const VOICE_ACTIVITY_THROTTLE_RATIO = 4;
 
 /** How long the ambient floor is sampled on each arm, before anything can fire. */
 export const VOICE_ACTIVITY_CALIBRATION_MS = 300;
 
-/** The onset bar is this multiple of the measured floor, plus the headroom below. */
+/**
+ * The onset bar is this multiple of the measured floor. THE WHOLE BAR — since
+ * issue #347 there is nothing added to it (see {@link VOICE_ACTIVITY_ONSET_MINIMUM}
+ * for the one exception, which is a clamp rather than a term).
+ *
+ * 1.8x is about +5.1 dB over the room, which is where a speaking voice sits
+ * relative to the ambient floor of the room it is spoken in, near or far.
+ * Because it is a RATIO, the same number works at 20 cm on a phone and at 80 cm
+ * on a laptop: both measure their own floor first, and speech is the same
+ * distance above it in both. The de-glitching that stops a single loud sample
+ * being a voice is {@link VOICE_ACTIVITY_ONSET_SUSTAIN_MS}, not this.
+ */
 export const VOICE_ACTIVITY_ONSET_FLOOR_MULTIPLIER = 1.8;
 
 /**
- * Added to the scaled floor so that a SILENT room (floor ≈ 0) still has a bar
- * above zero. Without it, a multiplier alone would put the bar at 0 in a quiet
- * room and every faint hiss would read as speech.
+ * THE ONLY ABSOLUTE LEVEL LEFT IN THIS FILE, AND IT IS NOT HEADROOM.
+ *
+ * `0.0008` RMS is about -62 dBFS. It exists for exactly one degenerate case: a
+ * measured floor of (or very near) ZERO — a muted track, a suspended context
+ * returning a buffer of zeros, a synthetic silence — where a pure multiplier
+ * would put the onset bar at 0 and EVERY sample, silence included, would be
+ * over it. Onset would fire instantly and permanently on nothing at all.
+ *
+ * It is deliberately ~17 dB below the -45 dBFS (0.0056 RMS) bottom of the
+ * far-field speech range issue #347 is about, and ~26 dB below -35 dBFS: a
+ * laptop's array microphone at 50-80 cm never has to clear THIS number, it has
+ * to clear `floor * {@link VOICE_ACTIVITY_ONSET_FLOOR_MULTIPLIER}`. Raising it
+ * towards speech levels would re-introduce the absolute term #347 removed, one
+ * decibel at a time — so it is a guard against arithmetic, not against noise,
+ * and it should never be tuned as though it were the latter.
  */
-export const VOICE_ACTIVITY_ONSET_HEADROOM = 0.045;
+export const VOICE_ACTIVITY_ONSET_MINIMUM = 0.0008;
 
 /**
  * The onset bar never goes above this, however loud the room is.
@@ -204,11 +315,19 @@ export const VOICE_ACTIVITY_MAX_DURATION_MS = 120_000;
  */
 export const VOICE_ACTIVITY_BARGE_IN_ARMING_MS = 500;
 
-/** The barge-in bar is this multiple of the (already capped) onset bar. */
+/**
+ * The barge-in bar is this multiple of the (already capped) onset bar, and
+ * nothing else is added to it.
+ *
+ * `> 1` is what makes "barge-in is always stricter than onset" arithmetic
+ * rather than intent, at every floor: onset is itself never zero (see
+ * {@link VOICE_ACTIVITY_ONSET_MINIMUM}), so `onset * 1.6 > onset` holds
+ * everywhere, and the two ceilings are ordered so the capped case holds too.
+ * The absolute headroom this used to carry (`+ 0.05`) put the bar at ~0.128 in
+ * a quiet room — about -18 dBFS — which no far-field microphone reaches, so
+ * interrupting the coach on a laptop was not merely hard, it was impossible.
+ */
 export const VOICE_ACTIVITY_BARGE_IN_MULTIPLIER = 1.6;
-
-/** Added to the scaled onset bar, so barge-in is above it even at a floor of 0. */
-export const VOICE_ACTIVITY_BARGE_IN_HEADROOM = 0.05;
 
 /**
  * The barge-in bar never goes above this. Strictly above
@@ -366,12 +485,48 @@ export interface UseVoiceActivityOptions {
   bargeInSustainMs?: number;
 }
 
+/**
+ * How the poll loop is ACTUALLY running, as opposed to how it was asked to.
+ *
+ * See "A THROTTLED POLL IS REPORTED" in the file header. A consumer renders
+ * `throttled` (or logs it, or falls back to a button); it must never be used to
+ * silently rescale a window, because a coarse clock is a fact about the
+ * environment and not a parameter of the detector.
+ */
+export interface VoiceActivityPollHealth {
+  /**
+   * True once any gap between two polls reached
+   * {@link VOICE_ACTIVITY_THROTTLE_RATIO} times {@link intendedIntervalMs}.
+   *
+   * Latching, not instantaneous: it stays true for the rest of the arm. A turn
+   * that was sampled at 1 Hz for part of its life was measured with a coarse
+   * clock throughout, and a flag that flickered back to `false` the moment the
+   * tab came forward would describe the last 25 ms rather than the turn.
+   */
+  throttled: boolean;
+  /**
+   * The longest gap between two consecutive polls this arm, in ms.
+   *
+   * LIVE ON {@link UseVoiceActivityReturn.getPollHealth}, and a SNAPSHOT on
+   * {@link VoiceActivityState.poll} — the state copy is written when the
+   * throttle flag latches and at each phase change, because re-rendering every
+   * consumer forty times a second to update a diagnostic number would cost more
+   * than the number is worth. Read the state copy for "is this arm throttled";
+   * read the getter for the current worst gap.
+   */
+  worstIntervalMs: number;
+  /** What was asked for — the option, or {@link VOICE_ACTIVITY_POLL_INTERVAL_MS}. */
+  intendedIntervalMs: number;
+}
+
 export interface VoiceActivityState {
   status: VoiceActivityStatus;
   /** What we were armed for, or `null` when idle/unavailable. */
   mode: VoiceActivityMode | null;
   /** The bars this arm calibrated, or `null` before calibration finishes. */
   thresholds: VoiceActivityThresholds | null;
+  /** Whether the clock underneath all of the above is the one we asked for. */
+  poll: VoiceActivityPollHealth;
 }
 
 export interface UseVoiceActivityReturn {
@@ -391,6 +546,15 @@ export interface UseVoiceActivityReturn {
   /** Stop detection and release the audio graph. Safe at any time, emits
    *  nothing — a caller-initiated stop is not an event. */
   disarm: () => void;
+  /**
+   * The poll loop's health, live and surviving teardown.
+   *
+   * `state.poll` goes back to nominal when a terminal event disarms the hook,
+   * because `state` describes the CURRENT arm and there isn't one. This getter
+   * keeps the last arm's answer, so a driver handling an `onsetTimeout` can ask
+   * why it did not hear anything and get a truthful answer.
+   */
+  getPollHealth: () => VoiceActivityPollHealth;
   /**
    * The most recent level reading, 0..1.
    *
@@ -416,22 +580,30 @@ export interface UseVoiceActivityReturn {
  *      argument of the file header, and a regression in it (an inverted ratio,
  *      a clamp in the wrong direction) would show up in the field as "voice
  *      practice does not work outside", never as a stack trace.
- *   2. `bargeIn > onset`, ALWAYS. Provable, not merely intended: the raw
- *      barge-in value is `onset * m + h` with `m > 1` and `h > 0`, which
- *      exceeds `onset` for every non-negative `onset`; and its ceiling
- *      (0.95) is strictly above the onset ceiling (0.75), so the capped case
- *      is above the capped case too.
+ *   2. `release < onset < bargeIn`, ALWAYS. Provable, not merely intended.
+ *      `onset` is clamped into `[MINIMUM, CEILING]` and `MINIMUM > 0`, so
+ *      `onset > 0` everywhere; `release = onset * 0.7 < onset`; and
+ *      `bargeIn = onset * 1.6 > onset` for every positive onset. Where both
+ *      are capped, the barge-in ceiling (0.95) is strictly above the onset
+ *      ceiling (0.75), so the capped case is ordered too. NO TERM IS ADDED TO
+ *      ANY OF THE THREE — see the "ONLY THE ROOM'S" section of the header.
  */
 export function calibrateThresholds(noiseFloor: number): VoiceActivityThresholds {
   const floor = Number.isFinite(noiseFloor) ? Math.max(0, noiseFloor) : 0;
 
+  // Purely relative, then clamped. The `Math.max` is the degenerate-floor
+  // guard described on the constant; it is NOT headroom, and for every floor
+  // at or above ~0.00045 it does nothing at all.
   const onset = Math.min(
-    floor * VOICE_ACTIVITY_ONSET_FLOOR_MULTIPLIER + VOICE_ACTIVITY_ONSET_HEADROOM,
+    Math.max(
+      floor * VOICE_ACTIVITY_ONSET_FLOOR_MULTIPLIER,
+      VOICE_ACTIVITY_ONSET_MINIMUM,
+    ),
     VOICE_ACTIVITY_ONSET_THRESHOLD_CEILING,
   );
 
   const bargeIn = Math.min(
-    onset * VOICE_ACTIVITY_BARGE_IN_MULTIPLIER + VOICE_ACTIVITY_BARGE_IN_HEADROOM,
+    onset * VOICE_ACTIVITY_BARGE_IN_MULTIPLIER,
     VOICE_ACTIVITY_BARGE_IN_THRESHOLD_CEILING,
   );
 
@@ -463,11 +635,21 @@ function median(values: number[]): number {
 /**
  * The real level source: an `AnalyserNode` tapping the stream, read as RMS.
  *
+ * ON THE SHARED CONTEXT, NEVER A NEW ONE — issue #347. `getSharedAudioContext`
+ * is `lib/earcons.ts`'s single context, and that module's own export comment is
+ * the rule this obeys: two contexts means two audio devices open, two
+ * suspend/resume lifecycles to keep in step, and on some platforms the second
+ * `new AudioContext()` simply fails. It also resumes a suspended context on
+ * every access, which matters more here than it does for a cue: a suspended
+ * context fills `getFloatTimeDomainData`'s buffer with zeros, and a detector
+ * reading zeros concludes the learner never spoke.
+ *
  * Returns `null` — never throws — wherever the Web Audio API is missing or
  * refuses the stream. jsdom is the case every test run hits (there is no
- * `AudioContext` there at all), but a locked-down browser and a stream whose
- * tracks have already ended land in the same place, and all three mean the
- * same thing to a caller: this hook cannot listen, fall back to a button.
+ * `AudioContext` there at all, so the shared getter itself returns `null`), but
+ * a locked-down browser and a stream whose tracks have already ended land in
+ * the same place, and all three mean the same thing to a caller: this hook
+ * cannot listen, fall back to a button.
  *
  * The analyser is deliberately NOT connected to `context.destination`.
  * Connecting it would route the microphone to the speakers, which on a phone
@@ -477,19 +659,12 @@ function median(values: number[]): number {
 export function createAnalyserLevelSource(
   stream: MediaStream,
 ): VoiceActivityLevelSource | null {
-  if (typeof window === 'undefined') return null;
+  const context = getSharedAudioContext();
+  if (!context) return null;
 
-  const AudioContextCtor =
-    window.AudioContext ??
-    (window as unknown as { webkitAudioContext?: typeof AudioContext })
-      .webkitAudioContext;
-  if (!AudioContextCtor) return null;
-
-  let context: AudioContext;
   let analyser: AnalyserNode;
   let source: MediaStreamAudioSourceNode;
   try {
-    context = new AudioContextCtor();
     source = context.createMediaStreamSource(stream);
     analyser = context.createAnalyser();
     analyser.fftSize = VOICE_ACTIVITY_FFT_SIZE;
@@ -516,10 +691,11 @@ export function createAnalyserLevelSource(
       } catch {
         // Already disconnected. Nothing to do and nobody to tell.
       }
-      // Fire-and-forget: the context is being discarded either way, and an
-      // unhandled rejection from a close on an already-closing context would
-      // surface as an error in a learner's console for no reason.
-      void context.close().catch(() => undefined);
+      // AND THAT IS ALL. The context is `earcons.ts`'s, shared with every cue
+      // on the page and with the next arm of this same hook; closing it here
+      // would silence the earcons and leave the next `arm()` building an
+      // analyser on a dead context. Whoever created it closes it —
+      // `closeSharedAudioContext()` — and that is never this file.
     },
   };
 }
@@ -539,12 +715,21 @@ interface VoiceActivityMachine {
   loudSince: number | null;
   speechStartedAt: number;
   lastLoudAt: number;
+  /** When the previous poll ran; seeded with `armedAt` — see `arm`. */
+  lastTickAt: number | null;
+  /** The worst gap seen this arm, and whether it crossed the throttle line. */
+  poll: VoiceActivityPollHealth;
+}
+
+function nominalPollHealth(intendedIntervalMs: number): VoiceActivityPollHealth {
+  return { throttled: false, worstIntervalMs: 0, intendedIntervalMs };
 }
 
 const IDLE_STATE: VoiceActivityState = {
   status: 'idle',
   mode: null,
   thresholds: null,
+  poll: nominalPollHealth(VOICE_ACTIVITY_POLL_INTERVAL_MS),
 };
 
 export function useVoiceActivity(
@@ -563,6 +748,17 @@ export function useVoiceActivity(
   const sourceRef = useRef<VoiceActivityLevelSource | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const levelRef = useRef(0);
+  /**
+   * The last arm's poll health, deliberately NOT cleared by `teardown`.
+   *
+   * A driver asks this question exactly when the turn has just ended badly —
+   * "nobody spoke" — which is after the terminal event has already disarmed
+   * the hook. Resetting it on teardown would make the answer unavailable at the
+   * only moment anybody wants it. `arm()` clears it; nothing else does.
+   */
+  const pollHealthRef = useRef<VoiceActivityPollHealth>(
+    nominalPollHealth(VOICE_ACTIVITY_POLL_INTERVAL_MS),
+  );
 
   /** Stop the loop and release the audio graph. NEVER touches React state. */
   const teardown = useCallback(() => {
@@ -593,6 +789,33 @@ export function useVoiceActivity(
 
     const opts = optionsRef.current;
     const now = (opts.now ?? Date.now)();
+
+    // ---- Is this still the clock we asked for? ----------------------------
+    // Measured before anything is decided FROM it, and reported rather than
+    // compensated for. See the file header.
+    const previousTickAt = machine.lastTickAt;
+    machine.lastTickAt = now;
+    if (previousTickAt !== null) {
+      const sincePreviousTick = now - previousTickAt;
+      if (sincePreviousTick > machine.poll.worstIntervalMs) {
+        machine.poll = { ...machine.poll, worstIntervalMs: sincePreviousTick };
+      }
+      const throttledNow =
+        sincePreviousTick >=
+        machine.poll.intendedIntervalMs * VOICE_ACTIVITY_THROTTLE_RATIO;
+      if (throttledNow && !machine.poll.throttled) {
+        machine.poll = { ...machine.poll, throttled: true };
+        pollHealthRef.current = machine.poll;
+        // Published once, on the transition, rather than on every late tick: a
+        // latched flag has nothing to say a second time, and a `setState` per
+        // poll would re-render every consumer forty times a second.
+        setState((current) =>
+          current.poll.throttled ? current : { ...current, poll: machine.poll },
+        );
+      } else {
+        pollHealthRef.current = machine.poll;
+      }
+    }
 
     let level: number;
     try {
@@ -633,6 +856,7 @@ export function useVoiceActivity(
         status: machine.phase === 'listening' ? 'listening' : 'watching',
         mode: machine.mode,
         thresholds,
+        poll: machine.poll,
       });
       return;
     }
@@ -688,7 +912,12 @@ export function useVoiceActivity(
           machine.speechStartedAt = machine.loudSince;
           machine.lastLoudAt = now;
           machine.phase = 'speaking';
-          setState({ status: 'speaking', mode: machine.mode, thresholds });
+          setState({
+            status: 'speaking',
+            mode: machine.mode,
+            thresholds,
+            poll: machine.poll,
+          });
           emit({ type: 'onset', at: now });
         }
         return;
@@ -725,7 +954,7 @@ export function useVoiceActivity(
       const opts = optionsRef.current;
       const stream = opts.stream;
       if (!stream) {
-        setState({ status: 'unavailable', mode: null, thresholds: null });
+        setState({ ...IDLE_STATE, status: 'unavailable' });
         return;
       }
 
@@ -733,9 +962,13 @@ export function useVoiceActivity(
       const source = create(stream);
       if (!source) {
         // jsdom, an old browser, or a stream we cannot tap. Inert, not fatal.
-        setState({ status: 'unavailable', mode: null, thresholds: null });
+        setState({ ...IDLE_STATE, status: 'unavailable' });
         return;
       }
+
+      const intendedIntervalMs =
+        opts.pollIntervalMs ?? VOICE_ACTIVITY_POLL_INTERVAL_MS;
+      const poll = nominalPollHealth(intendedIntervalMs);
 
       sourceRef.current = source;
       machineRef.current = {
@@ -747,14 +980,20 @@ export function useVoiceActivity(
         loudSince: null,
         speechStartedAt: 0,
         lastLoudAt: 0,
+        // Seeded with `armedAt`, not `null`: the FIRST poll of an arm is as
+        // able to be late as any other, and an arm whose first tick lands a
+        // second after it was scheduled is throttled from the start. Leaving
+        // it null would make the very case this detects — a tab that was
+        // already in the background when the turn began — the one case it
+        // cannot see.
+        lastTickAt: (opts.now ?? Date.now)(),
+        poll,
       };
       levelRef.current = 0;
-      setState({ status: 'calibrating', mode, thresholds: null });
+      pollHealthRef.current = poll;
+      setState({ status: 'calibrating', mode, thresholds: null, poll });
 
-      timerRef.current = setInterval(
-        tick,
-        opts.pollIntervalMs ?? VOICE_ACTIVITY_POLL_INTERVAL_MS,
-      );
+      timerRef.current = setInterval(tick, intendedIntervalMs);
     },
     [teardown, tick],
   );
@@ -766,6 +1005,7 @@ export function useVoiceActivity(
   useEffect(() => teardown, [teardown]);
 
   const getLevel = useCallback(() => levelRef.current, []);
+  const getPollHealth = useCallback(() => pollHealthRef.current, []);
 
   return {
     state,
@@ -773,6 +1013,7 @@ export function useVoiceActivity(
     arm,
     disarm,
     getLevel,
+    getPollHealth,
   };
 }
 

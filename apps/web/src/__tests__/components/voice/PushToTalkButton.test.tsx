@@ -1,22 +1,32 @@
 /**
- * `PushToTalkButton` — six failures, six screens, and never a dead end.
+ * `PushToTalkButton` — seven failures, seven screens, and never a dead end.
  *
  * Issue #99, epic #58 / E9. What is being defended here is not the button; it
  * is the sentence beside it. A learner who holds the microphone and gets
- * nothing has one of six ordinary, fixable problems, and the difference between
+ * nothing has one of seven ordinary, fixable problems, and the difference between
  * this product working for them and being abandoned is whether the screen names
  * which one and what to do about it.
  *
  * So: every code renders its own message AND its own remedy, no state is a
  * silent disabled control, typing is reachable from all of them, and the hold
  * gesture works from a keyboard as well as a pointer.
+ *
+ * Issue #347, epic #345 added the seventh code (`recording_too_short`) and a
+ * second pointer gesture: a mouse CLICK, which used to produce a zero-byte blob
+ * reported as "your microphone is busy with another application", now arms the
+ * same toggle the keyboard has always used. `holding the button` below
+ * therefore distinguishes a HELD press from a CLICKED one by the clock, which
+ * is why that block pins `Date.now` rather than trusting how fast a test runs.
  */
 
 import { ThemeProvider } from '@mui/material/styles';
 import { fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { PushToTalkButton } from '../../../components/voice/PushToTalkButton';
+import {
+  PushToTalkButton,
+  PUSH_TO_TALK_CLICK_MS,
+} from '../../../components/voice/PushToTalkButton';
 import {
   describeCaptureProblem,
   type AudioCaptureProblemCode,
@@ -65,11 +75,13 @@ const ALL_CODES: AudioCaptureProblemCode[] = [
   'device_in_use',
   'insecure_origin',
   'unsupported',
+  // Issue #347's seventh: an empty recording is not a busy device.
+  'recording_too_short',
 ];
 
 afterEach(() => resetViewportWidth());
 
-describe('each of the six says what happened and what to do', () => {
+describe('each of the seven says what happened and what to do', () => {
   it.each(ALL_CODES)('%s', (code) => {
     const problem = describeCaptureProblem(code);
     renderIt(captureIn(failedWith(code)));
@@ -138,7 +150,32 @@ describe('each of the six says what happened and what to do', () => {
 });
 
 describe('holding the button', () => {
-  it('starts on pointer down and stops on pointer up', () => {
+  /**
+   * Pin the clock the gesture is measured against.
+   *
+   * `fireEvent.pointerDown` and `fireEvent.pointerUp` happen within a
+   * millisecond of each other in a test, which — correctly — is a CLICK. A
+   * hold has to be expressed as elapsed time, so it is expressed as elapsed
+   * time rather than as whatever the machine happened to do.
+   */
+  function pinClock(): { advance: (ms: number) => void } {
+    let clock = 1_000_000;
+    vi.spyOn(Date, 'now').mockImplementation(() => clock);
+    return {
+      advance: (ms: number) => {
+        clock += ms;
+      },
+    };
+  }
+
+  afterEach(() => vi.restoreAllMocks());
+
+  it('starts on pointer down and stops on pointer up — WHEN IT WAS HELD', () => {
+    // Updated deliberately for issue #347: this case used to release
+    // instantly, which after #347 is the CLICK gesture (below), not the hold
+    // this test is about. The assertion is unchanged; the gesture is now
+    // actually performed.
+    const clock = pinClock();
     const start = vi.fn();
     const stop = vi.fn();
     renderIt(captureIn({ status: 'idle' }, { start, stop }));
@@ -147,7 +184,58 @@ describe('holding the button', () => {
     fireEvent.pointerDown(button);
     expect(start).toHaveBeenCalledTimes(1);
 
+    clock.advance(PUSH_TO_TALK_CLICK_MS + 50);
     fireEvent.pointerUp(button);
+    expect(stop).toHaveBeenCalledTimes(1);
+  });
+
+  it('a short MOUSE CLICK keeps recording instead of capturing nothing', () => {
+    // The #347 case. A mouse press and release is over in ~80 ms, which is not
+    // a request for an empty recording — before this, it produced a zero-byte
+    // blob reported as "your microphone is busy with another application".
+    const clock = pinClock();
+    const start = vi.fn();
+    const stop = vi.fn();
+    const { rerender } = renderIt(captureIn({ status: 'idle' }, { start, stop }));
+
+    const button = screen.getByRole('button', { name: /hold to record/i });
+    fireEvent.pointerDown(button);
+    clock.advance(80);
+    fireEvent.pointerUp(button);
+
+    expect(start).toHaveBeenCalledTimes(1);
+    // NOT stopped. The recording is still running and the control is a toggle.
+    expect(stop).not.toHaveBeenCalled();
+
+    rerender(
+      <ThemeProvider theme={lightTheme}>
+        <PushToTalkButton
+          capture={captureIn({ status: 'recording', startedAt: 0 }, { start, stop })}
+        />
+      </ThemeProvider>,
+    );
+    // And the button says so, so a learner is not left wondering.
+    const recording = screen.getByRole('button', { name: /press to stop/i });
+
+    // The second press ends it, exactly as the keyboard toggle does.
+    fireEvent.pointerDown(recording);
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect(start).toHaveBeenCalledTimes(1);
+  });
+
+  it('treats a pointer CANCEL as the end of the recording, however short', () => {
+    // A cancel is the system taking the pointer away — a scroll, a gesture —
+    // not somebody choosing to leave a microphone open.
+    const clock = pinClock();
+    const start = vi.fn();
+    const stop = vi.fn();
+    renderIt(captureIn({ status: 'idle' }, { start, stop }));
+
+    const button = screen.getByRole('button', { name: /hold to record/i });
+    fireEvent.pointerDown(button);
+    clock.advance(40);
+    fireEvent.pointerCancel(button);
+
     expect(stop).toHaveBeenCalledTimes(1);
   });
 
