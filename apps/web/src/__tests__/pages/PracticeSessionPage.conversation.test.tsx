@@ -852,6 +852,30 @@ describe('"Type instead" is reachable at every phase, and costs nothing', () => 
     user: ReturnType<typeof userEvent.setup>,
     phase: string,
   ) {
+    // `idle` — Voice chosen, loop never armed. THE PHASE THE CONTROL IS
+    // EASIEST TO LOSE FROM, because there is no loop for it to be "part of":
+    // it is rendered from the Voice branch, not from any state of the driver,
+    // which is exactly what makes it reachable at all seven.
+    if (phase === 'idle') {
+      await chooseVoice(user);
+      await screen.findByRole('button', { name: /start hands-free/i });
+      return;
+    }
+
+    // `preparing` (#349) — the span between the tap and the first word, with
+    // the browser's permission dialogue open over it. `holdAcquire` stands in
+    // for a learner who has not answered that dialogue yet, which is precisely
+    // when somebody might give up and reach for the keyboard.
+    if (phase === 'preparing') {
+      await chooseVoice(user);
+      speech.autoEnd = false;
+      speech.spoken = [];
+      captureControl.holdAcquire = true;
+      await user.click(screen.getByRole('button', { name: /start hands-free/i }));
+      await screen.findByText('Opening your microphone.');
+      return;
+    }
+
     await startLoop(user);
     if (phase === 'speakingQuestion') return;
 
@@ -872,7 +896,19 @@ describe('"Type instead" is reachable at every phase, and costs nothing', () => 
     await screen.findByText('Moving on to the next question.');
   }
 
+  /**
+   * ALL SEVEN, not the five #313 shipped.
+   *
+   * `ConversationPhase` gained `preparing` with #349 and `idle` was always
+   * there; #350 makes the list exhaustive because the loop can now be armed
+   * WITHOUT a tap on this screen, so "reachable from every phase" stopped being
+   * a claim about a control the learner had just used and became the only way
+   * back for somebody who never pressed Start at all. If an eighth phase is
+   * ever added, this array is where it has to appear.
+   */
   const PHASES = [
+    'idle',
+    'preparing',
     'speakingQuestion',
     'listening',
     'processing',
