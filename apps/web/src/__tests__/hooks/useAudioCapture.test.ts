@@ -15,12 +15,28 @@
  *      have stopped.
  *   3. THE RECORDING IS NEVER PERSISTED — `docs/specs/voice.md` §4. No
  *      `localStorage`, no `IndexedDB`, no object URL, no download.
+ *
+ * Issue #347, epic #345 adds two more:
+ *
+ *   4. AN EMPTY RECORDING IS NAMED, NOT GUESSED AT. A zero-byte blob was
+ *      reported as `device_in_use` — "your microphone is busy with another
+ *      application" — to learners whose microphone was working perfectly and
+ *      who had simply clicked a button built for holding. A wrong remedy is
+ *      worse than a vague one: it sends somebody to fix a thing that is not
+ *      broken and leaves the thing that is.
+ *   5. THE PRE-ROLL IS IN THE BLOB, AND IT IS BOUNDED. A detector cannot report
+ *      an onset until after it has happened, so a recorder started at the onset
+ *      loses the syllable that caused it. The window that fixes that holds a
+ *      learner's voice before they have decided to answer, so §4 governs it:
+ *      small, named, discarded when the turn does not become an answer.
  */
 
 import { act, renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  AUDIO_CAPTURE_PRE_ROLL_MS,
+  AUDIO_CAPTURE_TIMESLICE_MS,
   describeCaptureProblem,
   isCaptureProblemRetryable,
   useAudioCapture,
@@ -56,8 +72,19 @@ class FakeMediaRecorder {
   onstop: (() => void) | null = null;
   onerror: (() => void) | null = null;
 
-  /** Set by a test to record silence — the "tapped, did not hold" case. */
+  /** Set by a test to record silence — the "clicked, did not hold" case. */
   emitData = true;
+
+  /**
+   * The timeslice `start()` was given, or `null`.
+   *
+   * A real recorder emits a `dataavailable` every timeslice; without one it
+   * emits everything at `stop()`. Recorded rather than ignored because the
+   * pre-roll window is impossible without it — there is nothing to roll — so
+   * "was a timeslice passed" is part of the contract, not an implementation
+   * detail (issue #347).
+   */
+  timeslice: number | null = null;
 
   constructor(
     public stream: MediaStream,
@@ -67,8 +94,16 @@ class FakeMediaRecorder {
     FakeMediaRecorder.instances.push(this);
   }
 
-  start() {
+  start(timeslice?: number) {
     this.state = 'recording';
+    this.timeslice = timeslice ?? null;
+  }
+
+  /** One timeslice's worth of audio arriving, as the browser would deliver it. */
+  emitChunk(label: string) {
+    this.ondataavailable?.({
+      data: new Blob([label], { type: this.mimeType }),
+    });
   }
 
   stop() {
@@ -108,6 +143,8 @@ const ALL_CODES: AudioCaptureProblemCode[] = [
   'device_in_use',
   'insecure_origin',
   'unsupported',
+  // Issue #347's seventh. An empty recording is a fact we know exactly.
+  'recording_too_short',
 ];
 
 beforeEach(() => {
@@ -123,7 +160,7 @@ afterEach(() => {
 
 // ---------------------------------------------------------------------------
 
-describe('the six problems are six problems', () => {
+describe('the seven problems are seven problems', () => {
   it('gives every one of them its own message AND its own remedy', () => {
     const messages = ALL_CODES.map((code) => describeCaptureProblem(code).message);
     const remedies = ALL_CODES.map((code) => describeCaptureProblem(code).remedy);
@@ -148,6 +185,8 @@ describe('the six problems are six problems', () => {
     expect(isCaptureProblemRetryable('permission_dismissed')).toBe(true);
     expect(isCaptureProblemRetryable('no_device')).toBe(true);
     expect(isCaptureProblemRetryable('device_in_use')).toBe(true);
+    // Its whole remedy IS pressing again, differently.
+    expect(isCaptureProblemRetryable('recording_too_short')).toBe(true);
     // Neither of these changes because somebody pressed the button again.
     expect(isCaptureProblemRetryable('insecure_origin')).toBe(false);
     expect(isCaptureProblemRetryable('unsupported')).toBe(false);
@@ -275,6 +314,48 @@ describe('a recording, from hold to release', () => {
     // Silently returning to idle would look exactly like a button that does
     // nothing at all.
     expect(result.current.state.status).toBe('failed');
+  });
+
+  it('NEVER blames the device for a recording that captured nothing', async () => {
+    // Issue #347. This reported `device_in_use` — "your microphone is busy
+    // with another application" — for a mouse click on a hold-to-record
+    // button, sending a learner to close an app that was not holding anything.
+    installMicrophone(vi.fn().mockResolvedValue(makeStream()));
+
+    const { result } = renderHook(() => useAudioCapture());
+    await act(async () => {
+      result.current.start();
+    });
+    FakeMediaRecorder.instances[0].emitData = false;
+
+    await act(async () => {
+      result.current.stop();
+    });
+
+    expect(result.current.state).toEqual({
+      status: 'failed',
+      problem: describeCaptureProblem('recording_too_short'),
+    });
+    if (result.current.state.status !== 'failed') throw new Error('unreachable');
+    expect(result.current.state.problem.code).not.toBe('device_in_use');
+    // And the remedy is about the gesture, not about another application.
+    expect(result.current.state.problem.remedy).toMatch(/hold the button/i);
+    expect(result.current.state.problem.remedy).not.toMatch(/close the other app/i);
+  });
+
+  it('starts the recorder with a timeslice, in per-answer mode too', async () => {
+    // Not a pre-roll (there is none here) — the chunked flush itself, which is
+    // what makes one possible at all. See `AUDIO_CAPTURE_TIMESLICE_MS`.
+    installMicrophone(vi.fn().mockResolvedValue(makeStream()));
+
+    const { result } = renderHook(() => useAudioCapture());
+    await act(async () => {
+      result.current.start();
+    });
+
+    expect(FakeMediaRecorder.instances[0].timeslice).toBe(
+      AUDIO_CAPTURE_TIMESLICE_MS,
+    );
   });
 
   it('stops the tracks when the component unmounts mid-recording', async () => {
@@ -903,4 +984,235 @@ describe('unmount releases the stream in both modes', () => {
 
   // Per-answer mode's unmount is covered above, mid-recording, by
   // "stops the tracks when the component unmounts mid-recording".
+});
+
+// ---------------------------------------------------------------------------
+// THE PRE-ROLL — issue #347, epic #345.
+//
+// A voice-activity detector reports an onset 145-190 ms after the learner
+// actually started talking (a ~43 ms RMS window, a 25 ms poll, a 120 ms sustain
+// requirement) plus the encoder's own start-up, so a recorder started at the
+// onset EVENT has already missed the syllable that produced it. The detector
+// has always back-dated its own timestamp for exactly this reason; only the
+// audio was missing.
+//
+// The two claims below are the ones worth holding: the audio from BEFORE the
+// onset is in the uploaded blob, and it is BOUNDED — `voice.md` §4 governs a
+// buffer holding a learner's voice before they have decided to answer.
+// ---------------------------------------------------------------------------
+
+describe('the pre-roll', () => {
+  /** Open a persistent stream and start the pre-roll window on it. */
+  async function armPreRoll() {
+    const stream = makeLiveStream();
+    installMicrophone(vi.fn().mockResolvedValue(stream));
+
+    const { result, unmount } = renderHook(() =>
+      useAudioCapture({ persistent: true }),
+    );
+    await act(async () => {
+      await result.current.acquireStream();
+      await settle();
+    });
+
+    act(() => result.current.startPreRoll());
+    return { result, stream, unmount, recorder: FakeMediaRecorder.instances[0] };
+  }
+
+  it('puts audio from BEFORE the onset into the uploaded blob', async () => {
+    const { result, recorder } = await armPreRoll();
+
+    // The learner starts talking. These two chunks are the first syllable —
+    // the detector cannot possibly have reported an onset yet.
+    recorder.emitChunk('HEADER:');
+    recorder.emitChunk('first-syllable:');
+
+    // NOW the detector reports the onset and the driver calls `start()`.
+    act(() => result.current.start());
+    recorder.emitChunk('the-rest-of-the-answer');
+
+    await act(async () => {
+      result.current.stop();
+    });
+
+    expect(result.current.state.status).toBe('recorded');
+    const blob = result.current.recording!;
+    const bytes = await blob.text();
+
+    // The whole point: the syllable that happened before the onset is here.
+    expect(bytes).toContain('first-syllable:');
+    expect(bytes).toContain('the-rest-of-the-answer');
+    // And in order, header first — a container header dropped or moved is a
+    // blob a transcription provider cannot decode at all.
+    expect(bytes.indexOf('HEADER:')).toBe(0);
+    expect(bytes.indexOf('first-syllable:')).toBeLessThan(
+      bytes.indexOf('the-rest-of-the-answer'),
+    );
+  });
+
+  it('promotes the running recorder rather than starting a second one', async () => {
+    // Building a fresh recorder at the onset would throw away exactly the
+    // audio the pre-roll exists to keep, while also encoding twice.
+    const { result, recorder } = await armPreRoll();
+    expect(FakeMediaRecorder.instances).toHaveLength(1);
+
+    act(() => result.current.start());
+
+    expect(FakeMediaRecorder.instances).toHaveLength(1);
+    expect(recorder.state).toBe('recording');
+    expect(recorder.timeslice).toBe(AUDIO_CAPTURE_TIMESLICE_MS);
+  });
+
+  it('BOUNDS the window — it never accumulates a whole waiting turn', async () => {
+    // `voice.md` §4: this holds a learner's voice before they have decided to
+    // answer, so it is a short, named ceiling and not "everything since we
+    // started listening".
+    const { result, recorder } = await armPreRoll();
+
+    recorder.emitChunk('HEADER:');
+    // Far more than the window: a learner who took several seconds to start.
+    const slices = Math.ceil(AUDIO_CAPTURE_PRE_ROLL_MS / AUDIO_CAPTURE_TIMESLICE_MS);
+    for (let i = 0; i < slices * 6; i += 1) recorder.emitChunk(`old-${i}:`);
+    for (let i = 0; i < slices; i += 1) recorder.emitChunk(`kept-${i}:`);
+
+    act(() => result.current.start());
+    await act(async () => {
+      result.current.stop();
+    });
+
+    const bytes = await result.current.recording!.text();
+    // The header survives, the recent window survives, the rest is gone.
+    expect(bytes.indexOf('HEADER:')).toBe(0);
+    expect(bytes).toContain(`kept-${slices - 1}:`);
+    expect(bytes).not.toContain('old-0:');
+    expect(bytes).not.toContain(`old-${slices * 6 - 1}:`);
+  });
+
+  it('is not a recording — the screen never says "Recording" for it', async () => {
+    // A learner who has not started speaking must not be told they are being
+    // recorded, and a driver must not treat a pre-roll as an answer in flight.
+    const { result, recorder } = await armPreRoll();
+    recorder.emitChunk('HEADER:');
+
+    expect(result.current.state.status).toBe('idle');
+    expect(result.current.isRecording).toBe(false);
+    expect(result.current.recording).toBeNull();
+  });
+
+  it('DISCARDS a window that never became an answer', async () => {
+    // The onset-timeout path: nobody spoke, so there is nothing to hand over,
+    // and half a second of somebody's room is not a recording anybody asked
+    // for (`voice.md` §4).
+    const { result, stream, recorder } = await armPreRoll();
+    recorder.emitChunk('HEADER:');
+    recorder.emitChunk('a-room-nobody-answered-in');
+
+    await act(async () => {
+      result.current.stop();
+    });
+
+    expect(result.current.state.status).toBe('idle');
+    expect(result.current.recording).toBeNull();
+    // …and the session's microphone is untouched: the turn ended, not the
+    // conversation.
+    stream.tracks.forEach((track) => expect(track.stop).not.toHaveBeenCalled());
+    expect(result.current.stream).toBe(stream);
+
+    // The next turn opens a fresh window rather than resuming that one.
+    act(() => result.current.startPreRoll());
+    expect(FakeMediaRecorder.instances).toHaveLength(2);
+  });
+
+  it('is idempotent, and never opens a second recorder on the same stream', async () => {
+    const { result } = await armPreRoll();
+
+    act(() => result.current.startPreRoll());
+    act(() => result.current.startPreRoll());
+
+    expect(FakeMediaRecorder.instances).toHaveLength(1);
+  });
+
+  it('does nothing at all with no stream open', async () => {
+    installMicrophone(vi.fn());
+
+    const { result } = renderHook(() => useAudioCapture({ persistent: true }));
+    act(() => result.current.startPreRoll());
+
+    expect(FakeMediaRecorder.instances).toHaveLength(0);
+    expect(result.current.state).toEqual({ status: 'idle' });
+  });
+
+  it('does nothing in per-answer mode, where there is nothing to pre-roll', async () => {
+    // There, the recorder and the learner's decision to speak are the same
+    // event: they press the button and then talk.
+    installMicrophone(vi.fn().mockResolvedValue(makeStream()));
+
+    const { result } = renderHook(() => useAudioCapture());
+    act(() => {
+      (result.current as { startPreRoll?: () => void }).startPreRoll?.();
+    });
+
+    expect(FakeMediaRecorder.instances).toHaveLength(0);
+  });
+
+  it('spends the server\'s 120 s budget on the BLOB, not on the onset', async () => {
+    // The cap exists because `POST /api/ai/speech/transcribe` rejects anything
+    // over 120 seconds BEFORE it dispatches. The blob is the retained window
+    // plus everything after the onset, so timing the courtesy stop from the
+    // onset alone would hand the server a recording over its own limit — and
+    // the learner would be told, after speaking for two minutes, that none of
+    // it counted.
+    vi.useFakeTimers();
+    try {
+      const stream = makeLiveStream();
+      installMicrophone(vi.fn().mockResolvedValue(stream));
+
+      const { result } = renderHook(() =>
+        useAudioCapture({ persistent: true, maxDurationMs: 10_000 }),
+      );
+      await act(async () => {
+        await result.current.acquireStream();
+        await settle();
+      });
+
+      act(() => result.current.startPreRoll());
+      FakeMediaRecorder.instances[0].emitChunk('HEADER:');
+      act(() => result.current.start());
+      expect(result.current.state.status).toBe('recording');
+
+      // Still going a hair before the budget…
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(10_000 - AUDIO_CAPTURE_PRE_ROLL_MS - 1);
+      });
+      expect(result.current.state.status).toBe('recording');
+
+      // …and stopped by the time the BLOB would have reached the cap.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2);
+      });
+      expect(result.current.state.status).toBe('recorded');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('drops the window with the session on releaseStream()', async () => {
+    const { result, stream } = await armPreRoll();
+    FakeMediaRecorder.instances[0].emitChunk('HEADER:');
+
+    act(() => result.current.releaseStream());
+
+    expect(result.current.state).toEqual({ status: 'idle' });
+    expect(result.current.recording).toBeNull();
+    stream.tracks.forEach((track) => expect(track.stop).toHaveBeenCalled());
+  });
+
+  it('drops the window when the component unmounts', async () => {
+    const { stream, unmount } = await armPreRoll();
+    FakeMediaRecorder.instances[0].emitChunk('HEADER:');
+
+    unmount();
+
+    stream.tracks.forEach((track) => expect(track.stop).toHaveBeenCalled());
+  });
 });

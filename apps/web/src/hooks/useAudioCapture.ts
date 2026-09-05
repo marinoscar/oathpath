@@ -9,14 +9,15 @@
  * that.
  *
  * =============================================================================
- * SIX FAILURES, SIX NAMES, SIX REMEDIES. NEVER "MICROPHONE UNAVAILABLE".
+ * SEVEN FAILURES, SEVEN NAMES, SEVEN REMEDIES. NEVER "MICROPHONE UNAVAILABLE".
  * =============================================================================
  *
  * Microphone capture is the part of this epic most likely to fail in the field,
  * and it fails in more ways than one. A denied permission, a dismissed prompt,
  * no input device at all, a device another application is already holding, an
- * insecure origin, and a browser with no `MediaRecorder` are SIX DISTINCT
- * PROBLEMS WITH SIX DISTINCT REMEDIES:
+ * insecure origin, a browser with no `MediaRecorder`, and a recording that
+ * ended before any audio arrived are SEVEN DISTINCT PROBLEMS WITH SEVEN
+ * DISTINCT REMEDIES:
  *
  *   permission_denied     change a browser setting and reload
  *   permission_dismissed  press and hold again, then choose Allow
@@ -24,6 +25,15 @@
  *   device_in_use         quit the other application
  *   insecure_origin       open the https address
  *   unsupported           use another browser — or just type
+ *   recording_too_short   hold the button while you speak (or press to toggle)
+ *
+ * THE SEVENTH IS ISSUE #347's, AND IT REPLACES A LIE. A zero-byte blob — a
+ * mouse CLICK where a hold was expected, or a muted device — used to be
+ * reported as `device_in_use`, sending a learner off to close an application
+ * that was never holding anything, over a microphone that was working. The
+ * comment that did it admitted it was a guess ("the cause it most often is"),
+ * and for a mouse the guess is simply wrong. An empty recording is a fact we
+ * know exactly: nothing was captured. It gets its own name and its own remedy.
  *
  * Collapsing them into one "microphone unavailable" sentence tells a learner
  * whose headset is simply unplugged to go and change a permission that was
@@ -35,8 +45,8 @@
  * And every one of them leaves typing reachable. `docs/specs/voice.md` §5:
  * voice is always optional, so no capture failure is ever a dead end.
  *
- * All six reach the learner in persistent mode too, including the one that only
- * exists there: a device taken away DURING a hands-free session, which arrives
+ * All seven reach the learner in persistent mode too, including the one that
+ * only exists there: a device taken away DURING a hands-free session, which arrives
  * either as the recorder's own `onerror` or as a track ending by itself.
  *
  * =============================================================================
@@ -57,8 +67,12 @@
  * PERSISTENT MODE KEEPS THE LIGHT ON, AND MEANS IT — issue #308, epic #304 / E13
  * =============================================================================
  *
- * `persistent: true` is opt-in, and nothing in this app passes it today. It
- * inverts the paragraph above deliberately, for one reason: BARGE-IN. A
+ * `persistent: true` is opt-in, and `PracticeSessionPage.tsx` passes it — for
+ * the hands-free conversation loop, alongside a SECOND, per-answer instance of
+ * this hook for the hand-driven push-to-talk flow on the same screen. (It said
+ * "nothing in this app passes it today" until issue #347; #313 wired it, and
+ * the sentence had been false ever since.) It inverts the paragraph above
+ * deliberately, for one reason: BARGE-IN. A
  * hands-free conversation has to let a learner answer over the top of the
  * question being read to them, and a stream that only exists between "press"
  * and "release" cannot hear somebody who started talking before either
@@ -87,6 +101,50 @@
  * it is doing so. Two lifetimes, two names: `release()` ends an ANSWER,
  * `releaseStream()` ends the SESSION. In per-answer mode there is no difference
  * between them, because there the answer IS the session.
+ *
+ * =============================================================================
+ * THE PRE-ROLL: THE FIRST SYLLABLE IS RECORDED TOO — issue #347, epic #345
+ * =============================================================================
+ *
+ * A voice-activity detector cannot report an onset until after it has happened.
+ * `useVoiceActivity` reads a ~43 ms RMS window, polls it every 25 ms, and
+ * requires 120 ms of sustained speech before it will call it speech — so a
+ * recorder started at the onset EVENT begins at least 145-190 ms (plus encoder
+ * start-up) after the learner actually started talking, and every hands-free
+ * turn was losing its own first syllable. The detector already knew: it
+ * back-dates `speechStartedAt` to the first crossing for exactly this reason.
+ * That fixed the timestamp and could not fix the audio, because until #347
+ * there was no audio from before the onset to fix.
+ *
+ * So {@link UsePersistentAudioCaptureReturn.startPreRoll} starts the recorder
+ * EARLY — when the microphone opens for the learner's turn — with a timeslice
+ * ({@link AUDIO_CAPTURE_TIMESLICE_MS}), and keeps a bounded rolling window of
+ * what it produces. `start()` at the onset then does not build a recorder at
+ * all: it PROMOTES the one already running, and whatever is still in the buffer
+ * (the container's header chunk, plus at most
+ * {@link AUDIO_CAPTURE_PRE_ROLL_MS} of trailing audio) is part of the blob that
+ * gets uploaded.
+ *
+ * TWO RULES BOUND IT, AND BOTH ARE LOAD-BEARING:
+ *
+ *   1. `docs/specs/voice.md` §4 — audio is never stored. The pre-roll is
+ *      memory only, exactly like the recording it becomes: no `IndexedDB`, no
+ *      `localStorage`, no object URL, no download. It is explicitly BOUNDED
+ *      ({@link AUDIO_CAPTURE_PRE_ROLL_MS}, half a second) rather than "whatever
+ *      accumulated since we started listening", so an unattended microphone
+ *      holds half a second of a learner's voice and never a minute of it, and
+ *      a pre-roll that never becomes an answer is DISCARDED — `stop()` on a
+ *      recorder that never reached onset drops its bytes rather than handing
+ *      them over as a recording nobody asked for.
+ *   2. The pre-roll is NOT running while the app is talking. It is started when
+ *      the microphone opens FOR THE LEARNER, never during playback, so the
+ *      structural guarantee `useConversationSession`'s header states — the
+ *      recorder is never running while the app speaks, so it cannot transcribe
+ *      the app's own voice — is unchanged.
+ *
+ * Per-answer mode has no pre-roll and needs none: there, the learner presses a
+ * button and then speaks, so there is no audio before the recorder that anybody
+ * is missing.
  *
  * =============================================================================
  * THE APP MUST NOT HEAR ITSELF — echo cancellation, in both modes
@@ -133,9 +191,14 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useIsMounted } from './useIsMounted';
 
 /**
- * Why capture could not happen. A CLOSED SET OF SIX, and the closure is
- * load-bearing: a consumer switches over it exhaustively so a seventh cause can
+ * Why capture could not happen. A CLOSED SET OF SEVEN, and the closure is
+ * load-bearing: a consumer switches over it exhaustively so an eighth cause can
  * never be added without every screen that renders one being revisited.
+ *
+ * It was six until issue #347 added `recording_too_short`, and that addition is
+ * the reason the set is closed rather than open — the empty-recording case had
+ * been folded into `device_in_use` for want of a name, which is precisely the
+ * "collapse into the nearest label" this union exists to prevent.
  */
 export type AudioCaptureProblemCode =
   /** The browser is blocking the microphone for this site. */
@@ -149,7 +212,16 @@ export type AudioCaptureProblemCode =
   /** The page is not on a secure origin, where capture is forbidden outright. */
   | 'insecure_origin'
   /** This browser cannot record audio at all. */
-  | 'unsupported';
+  | 'unsupported'
+  /**
+   * The recording ended before any audio arrived. NOT a device problem.
+   *
+   * A click where a hold was expected, a release inside the encoder's own
+   * start-up, or a microphone that is muted at the operating system. The device
+   * opened, the recorder ran, and it produced zero bytes — so the remedy is
+   * about the gesture (or the mute switch), never about closing another app.
+   */
+  | 'recording_too_short';
 
 export interface AudioCaptureProblem {
   code: AudioCaptureProblemCode;
@@ -199,6 +271,11 @@ const CAPTURE_PROBLEMS: Record<
     remedy:
       'A recent Chrome, Edge, Firefox or Safari can — or answer by typing, which works everywhere.',
   },
+  recording_too_short: {
+    message: 'That recording ended before any sound was captured.',
+    remedy:
+      'Hold the button down while you speak and let go when you finish — or press it once to start and once more to stop. If your microphone is muted, unmute it first.',
+  },
 };
 
 /** Build the full problem for a code. Exported so a consumer can render one. */
@@ -214,8 +291,10 @@ export function describeCaptureProblem(
  * `insecure_origin` and `unsupported` are facts about where the page is loaded
  * from and what the browser is, and neither changes because somebody pressed
  * again. Offering a retry there is an invitation to press a button that is
- * guaranteed to fail, which reads as the product being broken; the other four
- * are genuinely worth one more press once the remedy has been followed.
+ * guaranteed to fail, which reads as the product being broken; the other five
+ * are genuinely worth one more press once the remedy has been followed —
+ * `recording_too_short` most of all, since its whole remedy IS pressing again,
+ * differently.
  */
 export function isCaptureProblemRetryable(
   code: AudioCaptureProblemCode,
@@ -349,6 +428,25 @@ export interface UsePersistentAudioCaptureReturn extends UseAudioCaptureReturn {
    */
   acquireStream: () => Promise<MediaStream | null>;
   /**
+   * Start recording BEFORE the learner has started speaking, keeping only a
+   * bounded rolling window of it. PERSISTENT MODE ONLY.
+   *
+   * Call it when the microphone opens FOR THE LEARNER — the moment a
+   * conversation driver enters its listening phase — and never while the app is
+   * speaking. `start()` at the detected onset then promotes this recorder
+   * instead of building one, so the blob carries the syllable the detector
+   * could not report in time. See the file header's PRE-ROLL section.
+   *
+   * Idempotent and safe from anywhere: a no-op when a recording is already
+   * running, when a pre-roll is already running, or when no stream is open. It
+   * never changes `state` — a pre-roll is not a recording, and a screen that
+   * said "Recording" here would be claiming the learner's answer had begun.
+   *
+   * A pre-roll that never becomes an answer is DISCARDED, not handed over:
+   * `stop()` on a recorder still in pre-roll drops its bytes.
+   */
+  startPreRoll: () => void;
+  /**
    * STOP THE TRACKS. The one call that closes the microphone.
    *
    * This is the teardown the E13 acceptance criterion names: the stream's
@@ -365,6 +463,44 @@ export interface UsePersistentAudioCaptureReturn extends UseAudioCaptureReturn {
 
 /** 120 seconds. See {@link UseAudioCaptureOptions.maxDurationMs}. */
 const DEFAULT_MAX_DURATION_MS = 120_000;
+
+/**
+ * How often `MediaRecorder` hands over a chunk, in BOTH modes.
+ *
+ * Without a timeslice a recorder emits everything in one `dataavailable` at
+ * `stop()`, which makes a rolling pre-roll window impossible: there is nothing
+ * to roll. 100 ms is the granularity of {@link AUDIO_CAPTURE_PRE_ROLL_MS}, and
+ * it is fine enough that the window is a window rather than a step function,
+ * coarse enough not to make an event per animation frame.
+ */
+export const AUDIO_CAPTURE_TIMESLICE_MS = 100;
+
+/**
+ * How much audio from BEFORE the onset is kept. See the file header's PRE-ROLL
+ * section, and `docs/specs/voice.md` §4 for the rule it is bounded by.
+ *
+ * 500 ms comfortably covers what a detector structurally cannot report in time
+ * — a ~43 ms RMS window, a 25 ms poll, a 120 ms sustain requirement, plus the
+ * encoder's own start-up — with room for a syllable in front of it.
+ *
+ * IT IS A CEILING ON HOW MUCH OF A LEARNER'S VOICE IS HELD BEFORE THEY HAVE
+ * DECIDED TO ANSWER, and that is why it is small and named rather than "keep
+ * everything since we armed". §4 makes the recording itself memory-only and
+ * momentary; the pre-roll is part of that recording and lives under the same
+ * rule, discarded with it on `release()` and dropped outright by a `stop()`
+ * that never reached an onset.
+ */
+export const AUDIO_CAPTURE_PRE_ROLL_MS = 500;
+
+/**
+ * The container header plus this many trailing chunks are what survive
+ * trimming. The header is chunk zero and is never dropped — without it the
+ * retained chunks are undecodable bytes rather than audio.
+ */
+const MAX_PRE_ROLL_CHUNKS = Math.max(
+  1,
+  Math.ceil(AUDIO_CAPTURE_PRE_ROLL_MS / AUDIO_CAPTURE_TIMESLICE_MS),
+);
 
 /**
  * Preferred container/codec, best first.
@@ -436,6 +572,15 @@ export function useAudioCapture(
   const streamRef = useRef<MediaStream | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<BlobPart[]>([]);
+  /**
+   * True while a recorder is running but the answer has NOT started.
+   *
+   * The one bit that separates a pre-roll from a recording: it decides whether
+   * incoming chunks are trimmed to the rolling window, whether `start()` builds
+   * a recorder or promotes this one, and whether `stop()` hands the bytes over
+   * or drops them. See the file header's PRE-ROLL section.
+   */
+  const preRollingRef = useRef(false);
   const startedAtRef = useRef(0);
   const maxDurationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -522,6 +667,7 @@ export function useAudioCapture(
     clearMaxDurationTimer();
     const recorder = recorderRef.current;
     recorderRef.current = null;
+    preRollingRef.current = false;
     if (recorder && recorder.state !== 'inactive') {
       // Detached first: this teardown is not the flush path, and letting the
       // handlers fire here would push a blob into a state nobody is going to
@@ -586,6 +732,16 @@ export function useAudioCapture(
     holdRef.current += 1;
     clearMaxDurationTimer();
 
+    // A recorder that never reached an onset has captured half a second of a
+    // room nobody answered in. Dropping it is both the honest outcome (there is
+    // no answer to hand over) and the privacy one — see the file header's
+    // PRE-ROLL section and `docs/specs/voice.md` §4.
+    if (recorderRef.current && preRollingRef.current) {
+      teardownRecorder();
+      endAnswerStream();
+      return;
+    }
+
     const recorder = recorderRef.current;
     if (!recorder) {
       // Released before the permission resolved, or before a recorder existed.
@@ -614,7 +770,7 @@ export function useAudioCapture(
     // exactly the "the recognizer mangled it" experience §3 exists to keep out
     // of a grade.
     recorder.stop();
-  }, [clearMaxDurationTimer, endAnswerStream, isMounted]);
+  }, [clearMaxDurationTimer, endAnswerStream, isMounted, teardownRecorder]);
 
   /**
    * Notice a device that goes away mid-session. PERSISTENT MODE ONLY.
@@ -725,9 +881,14 @@ export function useAudioCapture(
     return result.status === 'ok' ? result.stream : null;
   }, [acquirePersistentStream, persistent]);
 
-  /** Put a recorder on a stream we already hold, and start it. */
-  const beginRecording = useCallback(
-    (stream: MediaStream) => {
+  /**
+   * Put a recorder on a stream we already hold, and start it — for a PRE-ROLL
+   * or for a real recording, which differ only in `preRollingRef`.
+   *
+   * Returns false when it could not (the failure is already in `state`).
+   */
+  const openRecorder = useCallback(
+    (stream: MediaStream, preRolling: boolean): boolean => {
       let recorder: MediaRecorder;
       try {
         const mimeType = pickMimeType(window.MediaRecorder);
@@ -740,15 +901,32 @@ export function useAudioCapture(
         // asked for. Rare, and still a browser that cannot record — the
         // learner's remedy is the same one.
         fail('unsupported');
-        return;
+        return false;
       }
 
       recorderRef.current = recorder;
+      preRollingRef.current = preRolling;
       chunksRef.current = [];
       startedAtRef.current = Date.now();
 
       recorder.ondataavailable = (event: BlobEvent) => {
-        if (event.data && event.data.size > 0) chunksRef.current.push(event.data);
+        if (!event.data || event.data.size === 0) return;
+        chunksRef.current.push(event.data);
+        if (!preRollingRef.current) return;
+
+        // THE ROLLING WINDOW. Chunk zero is the container header and is never
+        // dropped — without it the rest is undecodable bytes rather than audio
+        // — so what is trimmed is the middle: everything between the header and
+        // the last {@link AUDIO_CAPTURE_PRE_ROLL_MS} of sound. The `> + 1`
+        // guard is what keeps the header out of the trailing slice, so it is
+        // never carried twice.
+        const chunks = chunksRef.current;
+        if (chunks.length > MAX_PRE_ROLL_CHUNKS + 1) {
+          chunksRef.current = [
+            chunks[0],
+            ...chunks.slice(chunks.length - MAX_PRE_ROLL_CHUNKS),
+          ];
+        }
       };
 
       recorder.onstop = () => {
@@ -776,13 +954,18 @@ export function useAudioCapture(
         const blob = new Blob(chunks, { type });
 
         if (blob.size === 0) {
-          // Nothing was captured — a tap rather than a hold, or a muted
-          // device. Silently returning to idle would look like the button
-          // does nothing at all, so this is reported with the remedy for the
-          // cause it most often is.
+          // Nothing was captured — a click rather than a hold, a release
+          // inside the encoder's start-up, or a muted device. Silently
+          // returning to idle would look like the button does nothing at all.
+          //
+          // NAMED FOR WHAT IT IS, NOT GUESSED AT (issue #347). This reported
+          // `device_in_use` until #347 — "your microphone is busy with another
+          // application" — which sent a learner whose microphone was working
+          // perfectly off to close an application that was not holding it. We
+          // know exactly what happened here: the recording produced no bytes.
           setState({
             status: 'failed',
-            problem: describeCaptureProblem('device_in_use'),
+            problem: describeCaptureProblem('recording_too_short'),
           });
           return;
         }
@@ -804,22 +987,77 @@ export function useAudioCapture(
       };
 
       try {
-        recorder.start();
+        // A TIMESLICE, ALWAYS — see `AUDIO_CAPTURE_TIMESLICE_MS`. Without one
+        // there is nothing to roll a pre-roll window over, and the whole
+        // recording arrives in a single event at `stop()`.
+        recorder.start(AUDIO_CAPTURE_TIMESLICE_MS);
       } catch {
         fail('unsupported');
-        return;
+        return false;
       }
 
-      // Courtesy stop at the server's own cap. See `maxDurationMs`.
-      maxDurationTimerRef.current = setTimeout(() => {
-        maxDurationTimerRef.current = null;
-        stop();
-      }, maxDurationMs);
-
-      setState({ status: 'recording', startedAt: startedAtRef.current });
+      return true;
     },
-    [clearMaxDurationTimer, endAnswerStream, fail, isMounted, maxDurationMs, stop],
+    [clearMaxDurationTimer, endAnswerStream, fail, isMounted],
   );
+
+  /**
+   * The answer starts NOW: arm the courtesy cap and publish `recording`.
+   *
+   * Split out because it happens either when a recorder is built (per-answer,
+   * and the first hands-free turn without a pre-roll) or when an existing
+   * pre-roll recorder is promoted, and both have to do exactly this much.
+   */
+  const markRecordingStarted = useCallback(() => {
+    const promotedFromPreRoll = preRollingRef.current;
+    preRollingRef.current = false;
+    // `startedAt` is the ONSET, not the first byte: the pre-roll in front of it
+    // is audio the learner produced before we could know they had started, and
+    // dating the recording from it would report a turn that began before the
+    // learner spoke.
+    startedAtRef.current = Date.now();
+
+    // Courtesy stop at the server's own cap. See `maxDurationMs`.
+    //
+    // MINUS THE PRE-ROLL, when there was one: the cap is about the BLOB (the
+    // server rejects a transcription over 120 seconds before it dispatches
+    // anything), and the blob is the retained window plus everything after the
+    // onset. Timing the cap from the onset alone would hand the server a
+    // recording up to half a second over its own limit and get the whole
+    // answer rejected — after the learner had already spoken it.
+    clearMaxDurationTimer();
+    const budgetMs = Math.max(
+      0,
+      maxDurationMs - (promotedFromPreRoll ? AUDIO_CAPTURE_PRE_ROLL_MS : 0),
+    );
+    maxDurationTimerRef.current = setTimeout(() => {
+      maxDurationTimerRef.current = null;
+      stop();
+    }, budgetMs);
+
+    setState({ status: 'recording', startedAt: startedAtRef.current });
+  }, [clearMaxDurationTimer, maxDurationMs, stop]);
+
+  const beginRecording = useCallback(
+    (stream: MediaStream) => {
+      if (!openRecorder(stream, false)) return;
+      markRecordingStarted();
+    },
+    [markRecordingStarted, openRecorder],
+  );
+
+  /** See {@link UsePersistentAudioCaptureReturn.startPreRoll}. */
+  const startPreRoll = useCallback(() => {
+    // Per-answer mode has nothing to pre-roll: there the recorder and the
+    // learner's decision to speak are the same event.
+    if (!persistent) return;
+    // A recording (or another pre-roll) is already running; a second recorder
+    // on the same stream would double the encoding and split the audio in two.
+    if (recorderRef.current) return;
+    const stream = streamRef.current;
+    if (!stream) return;
+    openRecorder(stream, true);
+  }, [openRecorder, persistent]);
 
   const start = useCallback(() => {
     // ---- "already recording" is a no-op, in both modes ---------------------
@@ -835,7 +1073,16 @@ export function useAudioCapture(
     // make `start()` a permanent no-op from the second question onwards, in
     // silence. It is kept, unweakened, for per-answer mode, where a held stream
     // still means a hold in progress whose recorder has not been built yet.
-    if (recorderRef.current) return;
+    if (recorderRef.current) {
+      // A PRE-ROLL IS PROMOTED, NOT REFUSED. The recorder is already running
+      // and already holding the syllable the detector could not report in
+      // time; this call is the onset, so the answer starts here and the buffer
+      // it has kept becomes the front of the blob. Building a second recorder
+      // instead would throw exactly the audio away that the pre-roll exists to
+      // keep. See the file header's PRE-ROLL section.
+      if (preRollingRef.current) markRecordingStarted();
+      return;
+    }
     if (!persistent && streamRef.current) return;
 
     const hold = holdRef.current + 1;
@@ -892,6 +1139,7 @@ export function useAudioCapture(
     endAnswerStream,
     fail,
     isMounted,
+    markRecordingStarted,
     persistent,
     requestStream,
   ]);
@@ -905,6 +1153,7 @@ export function useAudioCapture(
     release,
     stream: liveStream,
     acquireStream,
+    startPreRoll,
     releaseStream,
   };
 }

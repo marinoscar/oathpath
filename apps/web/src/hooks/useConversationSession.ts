@@ -58,6 +58,16 @@
  * in `speakingQuestion` or `speakingAnswer`. `startRecording` refuses outright
  * in those two phases rather than trusting the call sites.
  *
+ * ISSUE #347 ADDED A PRE-ROLL, AND IT DOES NOT WEAKEN THAT. `toListening` asks
+ * the capture hook for `startPreRoll()`, which runs the recorder over the
+ * bounded window BEFORE the onset so the learner's first syllable — which a
+ * detector structurally cannot report in time — is in the uploaded blob. It is
+ * started on entry to `listening`, which is after `speech.stop()` and is a
+ * phase in which the app is by definition not talking, and every exit from
+ * `listening` discards or promotes it. So the recorder still never runs while
+ * the app speaks; it now starts a fraction of a second earlier within the
+ * window where it was always allowed to run.
+ *
  * THIS, NOT ECHO CANCELLATION, IS WHAT KEEPS THE APP FROM TRANSCRIBING ITSELF
  * (`docs/specs/conversation-mode.md` §2). `useAudioCapture` asks the device for
  * `echoCancellation` in both its modes and that helps, but it reduces bleed —
@@ -618,6 +628,12 @@ export function useConversationSession(
       opts.speech.stop();
       setPhase('listening');
       playListeningEarcon();
+      // BEFORE the detector is armed, and after `speech.stop()`: the pre-roll
+      // window has to already be filling when the learner starts, or there is
+      // nothing in front of the onset to keep (issue #347). Discarded by the
+      // `onsetTimeout` path below if nobody speaks; promoted by `start()` if
+      // they do.
+      opts.capture.startPreRoll();
       opts.voiceActivity.arm('listening');
       if (alreadySpeaking) startRecording();
     },
@@ -919,6 +935,11 @@ export function useConversationSession(
           // A named timeout, NOT an empty recording: nothing was recorded, so
           // there is nothing to transcribe and certainly nothing to grade.
           if (phaseRef.current !== 'listening') return;
+          // …and the pre-roll goes with it. `stop()` on a recorder that never
+          // reached an onset DROPS its bytes rather than handing them over, so
+          // the half-second of room this turn accumulated does not survive
+          // into the nudge that follows (issue #347, `voice.md` §4).
+          optionsRef.current.capture.stop();
           void retryOrMoveOn(CONVERSATION_NUDGE_SILENCE, turn);
           return;
       }

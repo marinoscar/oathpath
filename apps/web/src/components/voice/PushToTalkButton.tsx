@@ -1,5 +1,5 @@
 /**
- * Hold to speak, release to submit — and the six ways that can fail.
+ * Hold to speak, release to submit — and the seven ways that can fail.
  *
  * Issue #99, epic #58 / E9. The visible half of `useAudioCapture`: it renders
  * the button, the recording indicator, and — the reason this is a component
@@ -13,7 +13,7 @@
  * A greyed-out microphone tells a learner nothing except that the product is
  * broken, and there is nothing they can do about it from there. So every
  * failure renders the sentence naming what happened AND the sentence naming
- * what to do, and for the four that a second press can fix, the press is still
+ * what to do, and for the five that a second press can fix, the press is still
  * offered. For the two it cannot (`insecure_origin`, `unsupported`) the control
  * is replaced rather than disabled — a button guaranteed to fail is worse than
  * no button.
@@ -38,6 +38,31 @@
  * ignored so a held key does not fire twenty starts, and `preventDefault()`
  * stops the browser synthesising the click that would immediately undo the
  * toggle.
+ *
+ * =============================================================================
+ * A MOUSE CLICK TOGGLES TOO — issue #347, epic #345
+ * =============================================================================
+ *
+ * A finger holds a button. A MOUSE CLICKS IT: press and release inside a tenth
+ * of a second, which is not a gesture anybody meant as "record nothing". Until
+ * #347 that produced a zero-byte blob and a message telling the learner their
+ * microphone was busy with another application — advice about a problem they
+ * did not have, for a gesture the control had simply not accounted for.
+ *
+ * So a pointer release inside {@link PUSH_TO_TALK_CLICK_MS} does NOT stop the
+ * recording: it leaves it running and arms the same toggle the keyboard has
+ * always used, with the button's label switching to "press to stop". A release
+ * after that threshold is a deliberate hold and ends the recording exactly as
+ * it always has. Nothing is guessed after the fact — the two gestures are told
+ * apart by how long the pointer was down, before any audio exists to diagnose.
+ *
+ * The threshold cannot be perfect and does not need to be: the failure mode of
+ * reading a hold as a click is a recording that keeps going until the learner
+ * presses again (they are told, in the label, and one press fixes it), and the
+ * failure mode of reading a click as a hold is the empty recording this
+ * replaces. `useAudioCapture`'s `recording_too_short` is still there for the
+ * empty blob that gets through anyway — a muted device, say — and it now says
+ * something true.
  */
 
 import MicIcon from '@mui/icons-material/Mic';
@@ -50,11 +75,24 @@ import {
   Stack,
   Typography,
 } from '@mui/material';
+import { useCallback, useRef, useState } from 'react';
 
 import {
   isCaptureProblemRetryable,
   type UseAudioCaptureReturn,
 } from '../../hooks/useAudioCapture';
+
+/**
+ * A pointer press shorter than this is a CLICK, not a hold.
+ *
+ * 250 ms is comfortably longer than a deliberate mouse click (~50-120 ms) and
+ * comfortably shorter than the briefest press somebody makes when they mean to
+ * hold something down while they say a word. Exported, and named, for the
+ * reason every tunable in `useVoiceActivity` is: a number typed inline into a
+ * comparison is one nobody can find, override in a test, or adjust after the
+ * first real report.
+ */
+export const PUSH_TO_TALK_CLICK_MS = 250;
 
 export interface PushToTalkButtonProps {
   /**
@@ -90,14 +128,31 @@ export function PushToTalkButton({
 }: PushToTalkButtonProps) {
   const { state, isRecording, start, stop } = capture;
 
+  /** When the pointer went down, or 0 when this press is not a recording one. */
+  const pressedAtRef = useRef(0);
+  /**
+   * True once a short click has left the recording running.
+   *
+   * Local to the control on purpose: it describes a GESTURE this button is in
+   * the middle of, not a capture state, and `useAudioCapture` has no business
+   * knowing which input device started a recording.
+   */
+  const [clickToggled, setClickToggled] = useState(false);
+
+  const endGesture = useCallback(() => {
+    pressedAtRef.current = 0;
+    setClickToggled(false);
+    stop();
+  }, [stop]);
+
   if (state.status === 'failed') {
     const { code, message, remedy } = state.problem;
 
     return (
       // `Alert` renders `role="alert"`, so the message is announced the moment
       // it appears rather than waiting for a screen-reader user to go looking
-      // for why nothing happened. `warning`, not `error`: none of the six is a
-      // fault, and every one of them has a next step.
+      // for why nothing happened. `warning`, not `error`: none of the seven is
+      // a fault, and every one of them has a next step.
       <Alert severity="warning" sx={{ mt: 1 }}>
         <AlertTitle>{message}</AlertTitle>
 
@@ -153,17 +208,41 @@ export function PushToTalkButton({
           // control is a microphone nobody asked to leave on.
           onPointerDown={(event) => {
             if (disabled || isBusy) return;
+            // A press while a click-armed recording is running is the second
+            // half of that toggle: it stops, and starts nothing.
+            if (clickToggled) {
+              endGesture();
+              return;
+            }
             // Keeps the pointer's events coming to this element even if the
             // finger slides off it, so `onPointerUp` is not lost mid-hold.
             event.currentTarget.setPointerCapture?.(event.pointerId);
+            pressedAtRef.current = Date.now();
             start();
           }}
-          onPointerUp={stop}
-          onPointerCancel={stop}
+          onPointerUp={() => {
+            const pressedAt = pressedAtRef.current;
+            // The release that ENDED a click-armed recording. Its `pointerdown`
+            // already did the work.
+            if (pressedAt === 0) return;
+            pressedAtRef.current = 0;
+            if (Date.now() - pressedAt < PUSH_TO_TALK_CLICK_MS) {
+              // A click. Keep recording and switch to the toggle — see the
+              // file header.
+              setClickToggled(true);
+              return;
+            }
+            stop();
+          }}
+          // A CANCEL IS NOT A CLICK, however short it was. The pointer was taken
+          // away from us (a system gesture, a scroll taking over); nobody chose
+          // to leave a microphone running, so this always ends the recording.
+          onPointerCancel={endGesture}
           onPointerLeave={() => {
             // Only relevant when capture is unavailable (older Safari); with
-            // capture the pointer never "leaves" mid-hold.
-            if (isRecording) stop();
+            // capture the pointer never "leaves" mid-hold. A click-armed
+            // recording is deliberate and survives the pointer wandering off.
+            if (isRecording && !clickToggled) endGesture();
           }}
           // Keyboard: toggle. See the file header.
           onKeyDown={(event) => {
@@ -172,7 +251,7 @@ export function PushToTalkButton({
             if (event.repeat) return;
             event.preventDefault();
             if (disabled || isBusy) return;
-            if (isRecording) stop();
+            if (isRecording) endGesture();
             else start();
           }}
           sx={{ minWidth: { sm: 220 } }}

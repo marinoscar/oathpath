@@ -86,6 +86,7 @@ const captureControl = vi.hoisted(() => {
     starts: 0,
     releases: 0,
     streamReleases: 0,
+    preRolls: 0,
     set(next: { status: string; blob?: Blob }) {
       this.state = next;
       listeners.forEach((listener) => listener());
@@ -95,6 +96,7 @@ const captureControl = vi.hoisted(() => {
       this.starts = 0;
       this.releases = 0;
       this.streamReleases = 0;
+      this.preRolls = 0;
     },
   };
 });
@@ -126,6 +128,10 @@ vi.mock('../../hooks/useAudioCapture', async (importOriginal) => {
       const releaseStream = useCallback(() => {
         captureControl.streamReleases += 1;
       }, []);
+      /** Issue #347's pre-roll window. Counted so the page's wiring is visible. */
+      const startPreRoll = useCallback(() => {
+        captureControl.preRolls += 1;
+      }, []);
       const acquireStream = useCallback(
         async () => captureControl.stream,
         [],
@@ -143,6 +149,7 @@ vi.mock('../../hooks/useAudioCapture', async (importOriginal) => {
         release,
         stream: captureControl.stream,
         acquireStream,
+        startPreRoll,
         releaseStream,
       };
     },
