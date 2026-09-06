@@ -361,13 +361,30 @@ function installMediaEnvironment({
   });
 }
 
-/** Let whatever is speaking finish, the way a real engine eventually does. */
+/**
+ * Let whatever is speaking finish, the way a real engine eventually does.
+ *
+ * DRAINS UNTIL QUIET, not once (#375). A turn used to be a single utterance —
+ * the accepted answer — so ending the live one ended the turn. It is now the
+ * composed `spokenTurn`, spoken one utterance per line with the driver
+ * awaiting each before queueing the next, so ending line 1 merely makes line 2
+ * live. Draining once would leave the loop mid-turn and every phase this
+ * helper is used to reach would time out.
+ *
+ * The bound is a safety net against a driver that queues forever, not an
+ * expected count: a real engine does eventually go quiet, and a helper that
+ * span here would hang the suite instead of failing it.
+ */
 async function finishSpeaking() {
-  await act(async () => {
-    const live = speech.live;
-    speech.live = [];
-    for (const utterance of live) utterance.onend?.();
-  });
+  for (let pass = 0; pass < 20; pass += 1) {
+    if (speech.live.length === 0) return;
+    await act(async () => {
+      const live = speech.live;
+      speech.live = [];
+      for (const utterance of live) utterance.onend?.();
+    });
+  }
+  throw new Error('finishSpeaking: still speaking after 20 passes');
 }
 
 // -----------------------------------------------------------------------------
