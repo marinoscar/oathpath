@@ -31,7 +31,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { fireEvent, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 
@@ -39,7 +39,10 @@ import { render } from '../utils/test-utils';
 import { server } from '../mocks/server';
 import { AiStatusProvider } from '../../contexts/AiStatusContext';
 import VoiceSettingsPage from '../../pages/VoiceSettingsPage';
-import { VOICE_PREVIEW_SENTENCE } from '../../components/settings/VoiceSettings';
+import {
+  PLAYBACK_BLOCKED_MESSAGE,
+  VOICE_PREVIEW_SENTENCE,
+} from '../../components/settings/VoiceSettings';
 import type { AiStatus, UserSettings } from '../../types';
 
 const API_BASE = '*/api';
@@ -185,22 +188,81 @@ async function findAutoSubmit(): Promise<HTMLInputElement> {
   )) as HTMLInputElement;
 }
 
-/** A fake `Audio` whose playback is observable — jsdom implements none. */
-function installAudio() {
+/**
+ * A fake `Audio` whose construction and playback are observable — jsdom
+ * implements neither.
+ *
+ * SPLIT INTO `primed` AND `played` (#383). The autoplay unlock plays a silent
+ * data URI inside the click and the real sample a round trip later, and the
+ * entire point of the fix is that the first happens BEFORE the synthesis
+ * promise resolves — so a fake that lumps both into one list cannot see the
+ * bug it exists to catch. `constructed` is the other half of that: one element
+ * for the life of the component, reused, because an element only carries the
+ * user activation of the press that unlocked it.
+ */
+interface FakeAudioHandle {
+  /** Every `play()` of the silent unlock source, in order. */
+  primed: string[];
+  /** Every `play()` of a real sample, in order. */
+  played: string[];
+  /** Every element ever constructed. Should stay at one. */
+  constructed: unknown[];
+  /** The most recent element, for firing `ended`/`error` at it. */
+  last: () => {
+    onended: (() => void) | null;
+    onerror: (() => void) | null;
+  } | null;
+}
+
+function installAudio(
+  options: { play?: (src: string) => Promise<void> } = {},
+): FakeAudioHandle {
+  const primed: string[] = [];
   const played: string[] = [];
+  const constructed: FakeAudio[] = [];
+
   class FakeAudio {
+    src = '';
     onended: (() => void) | null = null;
     onerror: (() => void) | null = null;
-    constructor(public src: string) {}
+    constructor(src?: string) {
+      if (src) this.src = src;
+      constructed.push(this);
+    }
     play() {
-      played.push(this.src);
-      return Promise.resolve();
+      // The unlock source is a `data:` URI, a sample is a blob URL. That is
+      // the only thing that tells the two apart from out here, and it is the
+      // same thing the component itself checks before pausing.
+      (this.src.startsWith('data:') ? primed : played).push(this.src);
+      return options.play
+        ? options.play(this.src)
+        : Promise.resolve();
     }
     pause() {}
-    removeAttribute() {}
+    removeAttribute() {
+      this.src = '';
+    }
   }
+
   (window as unknown as { Audio: unknown }).Audio = FakeAudio;
-  return played;
+  return {
+    primed,
+    played,
+    constructed,
+    last: () => constructed[constructed.length - 1] ?? null,
+  };
+}
+
+/**
+ * The row a voice's radio, its Preview button and its own status share.
+ *
+ * #383: the status used to render once, after the whole radio group, several
+ * screens below the button that was pressed on a phone. Asserting "there is a
+ * status somewhere on the page" cannot tell that apart from the fix, so the
+ * tests below scope to the row instead.
+ */
+function voiceRow(voiceId: string): HTMLElement {
+  return screen.getByTestId(`voice-row-${voiceId}`);
 }
 
 describe('VoiceSettingsPage (#288)', () => {
@@ -449,7 +511,7 @@ describe('VoiceSettingsPage (#288)', () => {
   });
 
   it('synthesizes on an explicit press, sending that voice id, and plays the result', async () => {
-    const played = installAudio();
+    const audio = installAudio();
     const user = userEvent.setup();
     renderPage();
 
@@ -468,7 +530,7 @@ describe('VoiceSettingsPage (#288)', () => {
     );
 
     // Audio was produced, not merely requested.
-    await waitFor(() => expect(played).toHaveLength(1));
+    await waitFor(() => expect(audio.played).toHaveLength(1));
     expect(await screen.findByRole('status')).toHaveTextContent(
       'Playing a sample in the Nova voice.',
     );
@@ -544,6 +606,147 @@ describe('VoiceSettingsPage (#288)', () => {
     });
   });
 
+  // ===========================================================================
+  // The autoplay unlock (#383)
+  // ===========================================================================
+
+  it('primes the audio element INSIDE the click, before the synthesis resolves (#383)', async () => {
+    const audio = installAudio();
+
+    // A synthesis call that does not answer until this test says so. The whole
+    // question here is what has already happened while it is still in flight.
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    server.use(
+      http.post(`${API_BASE}/ai/speech/synthesize`, async ({ request }) => {
+        synthesizeBodies.push((await request.json()) as Record<string, unknown>);
+        await gate;
+        return HttpResponse.arrayBuffer(new ArrayBuffer(8), {
+          headers: { 'Content-Type': 'audio/mpeg' },
+        });
+      }),
+    );
+
+    renderPage();
+    await screen.findByRole('radiogroup', { name: 'Voice' });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Preview the Nova voice' }));
+
+    // THE ASSERTION THIS TEST EXISTS FOR, and it is deliberately made with NO
+    // `await` between it and the click: the element must have been built and
+    // played inside the activation window the press opened. Move `new Audio()`
+    // or `play()` back into the continuation after `synthesizeSpeech` — which
+    // is precisely #383 — and both of these are empty here, while every other
+    // test in this file still passes.
+    expect(audio.constructed).toHaveLength(1);
+    expect(audio.primed).toHaveLength(1);
+    expect(audio.primed[0].startsWith('data:audio/')).toBe(true);
+
+    // And priming is silent in the other sense too: no sample has played yet.
+    expect(audio.played).toEqual([]);
+
+    release();
+    await waitFor(() => expect(audio.played).toHaveLength(1));
+    expect(audio.played[0].startsWith('data:')).toBe(false);
+
+    // Priming spent nothing: still exactly ONE synthesis call for one press.
+    expect(synthesizeBodies).toHaveLength(1);
+  });
+
+  it('reuses the ONE unlocked element across presses rather than building a new one', async () => {
+    const audio = installAudio();
+    const user = userEvent.setup();
+    renderPage();
+
+    await screen.findByRole('radiogroup', { name: 'Voice' });
+    await user.click(screen.getByRole('button', { name: 'Preview the Alloy voice' }));
+    await waitFor(() => expect(audio.played).toHaveLength(1));
+
+    await user.click(screen.getByRole('button', { name: 'Preview the Nova voice' }));
+    await waitFor(() => expect(audio.played).toHaveLength(2));
+
+    // ONE element, both times. A fresh element per preview is a fresh lock per
+    // preview, and the second one was never touched by a gesture.
+    expect(audio.constructed).toHaveLength(1);
+  });
+
+  it('says so when the browser BLOCKS playback, instead of returning quietly to idle (#383)', async () => {
+    // A `play()` that rejects for the sample and resolves for the silent
+    // unlock — which is exactly what a muted phone or an autoplay policy does.
+    const audio = installAudio({
+      play: (src) =>
+        src.startsWith('data:')
+          ? Promise.resolve()
+          : Promise.reject(new Error('NotAllowedError')),
+    });
+    const user = userEvent.setup();
+    renderPage();
+
+    await screen.findByRole('radiogroup', { name: 'Voice' });
+    await user.click(screen.getByRole('button', { name: 'Preview the Nova voice' }));
+
+    await waitFor(() => expect(audio.played).toHaveLength(1));
+
+    // THE ASSERTION THIS TEST EXISTS FOR. Before #383 this state ran the same
+    // handler a finished sample runs, so "your phone would not play this" and
+    // "you have just heard it" were the same empty region — and the one
+    // outcome the learner could actually act on was the one nothing said.
+    const status = await screen.findByRole('status');
+    await waitFor(() => expect(status).toHaveTextContent(PLAYBACK_BLOCKED_MESSAGE));
+
+    // Named, and named honestly: a remedy, no alert, and the standing promise
+    // that the browser voice is still reading everything.
+    expect(PLAYBACK_BLOCKED_MESSAGE).toMatch(/press Preview again/i);
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(document.querySelector('.MuiAlert-root')).toBeNull();
+
+    // And the page is still standing — every control still responds.
+    await user.click(await findAutoSubmit());
+    await waitFor(() => expect(patchBodies).toHaveLength(1));
+  });
+
+  it('states an element error too, rather than looking like a sample that ended', async () => {
+    const audio = installAudio();
+    const user = userEvent.setup();
+    renderPage();
+
+    await screen.findByRole('radiogroup', { name: 'Voice' });
+    await user.click(screen.getByRole('button', { name: 'Preview the Alloy voice' }));
+    await waitFor(() => expect(audio.played).toHaveLength(1));
+
+    // The element fails on the bytes it was handed.
+    act(() => {
+      audio.last()?.onerror?.();
+    });
+
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      /couldn't play the Alloy sample/i,
+    );
+  });
+
+  it('goes back to idle — and says nothing — when a sample simply ends', async () => {
+    const audio = installAudio();
+    const user = userEvent.setup();
+    renderPage();
+
+    await screen.findByRole('radiogroup', { name: 'Voice' });
+    await user.click(screen.getByRole('button', { name: 'Preview the Nova voice' }));
+    await waitFor(() => expect(audio.played).toHaveLength(1));
+
+    const ended = audio.last()?.onended;
+    act(() => {
+      ended?.();
+    });
+
+    // The other half of the distinction above: an ordinary ending stays
+    // wordless. A message here would make every finished sample look failed.
+    await waitFor(() =>
+      expect(screen.getByRole('status').textContent?.trim()).toBe(''),
+    );
+  });
+
   it('handles a `failed` synthesis without crashing — the #277 lesson', async () => {
     installAudio();
     const user = userEvent.setup();
@@ -562,6 +765,98 @@ describe('VoiceSettingsPage (#288)', () => {
 
     await user.click(await findAutoSubmit());
     await waitFor(() => expect(patchBodies).toHaveLength(1));
+  });
+
+  // ===========================================================================
+  // The status belongs to one voice, and so does the busy treatment (#383)
+  // ===========================================================================
+
+  it("renders the status in the pressed voice's own row, not only below the list", async () => {
+    const audio = installAudio();
+    const user = userEvent.setup();
+    renderPage();
+
+    await screen.findByRole('radiogroup', { name: 'Voice' });
+    await user.click(screen.getByRole('button', { name: 'Preview the Nova voice' }));
+    await waitFor(() => expect(audio.played).toHaveLength(1));
+
+    // Where the learner is actually looking: under the button they pressed.
+    await waitFor(() =>
+      expect(voiceRow('nova')).toHaveTextContent(
+        'Playing a sample in the Nova voice.',
+      ),
+    );
+    // …and NOT in somebody else's row.
+    expect(voiceRow('alloy')).not.toHaveTextContent(/Playing a sample/);
+  });
+
+  it('keeps exactly ONE always-mounted live region, whatever the preview is doing', async () => {
+    const audio = installAudio();
+    const user = userEvent.setup();
+    renderPage();
+
+    await screen.findByRole('radiogroup', { name: 'Voice' });
+
+    // Mounted and empty BEFORE anything happens. A live region inserted at the
+    // same moment as its text is frequently never announced at all, so this
+    // absence-of-text-but-presence-of-region is the load-bearing part.
+    expect(screen.getAllByRole('status')).toHaveLength(1);
+    expect(screen.getByRole('status').textContent?.trim()).toBe('');
+
+    await user.click(screen.getByRole('button', { name: 'Preview the Nova voice' }));
+    await waitFor(() => expect(audio.played).toHaveLength(1));
+
+    // Still exactly one — eleven rows must not mean eleven regions.
+    expect(screen.getAllByRole('status')).toHaveLength(1);
+    expect(screen.getByRole('status')).toHaveTextContent(
+      'Playing a sample in the Nova voice.',
+    );
+  });
+
+  it("disables ONLY the pressed voice's Preview button while its request is in flight", async () => {
+    installAudio();
+
+    // A synthesis that stays in flight, so the `preparing` state can be
+    // inspected rather than raced against.
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    server.use(
+      http.post(`${API_BASE}/ai/speech/synthesize`, async () => {
+        await gate;
+        return HttpResponse.arrayBuffer(new ArrayBuffer(8), {
+          headers: { 'Content-Type': 'audio/mpeg' },
+        });
+      }),
+    );
+
+    renderPage();
+    await screen.findByRole('radiogroup', { name: 'Voice' });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Preview the Nova voice' }));
+
+    const nova = screen.getByRole('button', { name: 'Preview the Nova voice' });
+    await waitFor(() => expect(nova).toBeDisabled());
+
+    // THE ASSERTION THIS TEST EXISTS FOR. Greying out all eleven buttons is
+    // feedback that points at no voice at all; pressing a different one is a
+    // legitimate "no, that one", and `previewRef` — not this attribute — is
+    // what stops a second charge on the learner's key.
+    expect(
+      screen.getByRole('button', { name: 'Preview the Alloy voice' }),
+    ).toBeEnabled();
+    expect(
+      screen.getByRole('button', { name: 'Preview the Standard voice' }),
+    ).toBeEnabled();
+
+    // And the pressed one says it is busy, visibly, so the learner can see
+    // WHICH voice is being prepared.
+    expect(within(voiceRow('nova')).getByRole('progressbar')).toBeInTheDocument();
+    expect(voiceRow('nova')).toHaveTextContent('Preparing the sample…');
+
+    release();
+    await waitFor(() => expect(nova).toBeEnabled());
   });
 
   // ===========================================================================
@@ -636,10 +931,16 @@ describe('VoiceSettingsPage (#288)', () => {
     await waitFor(() =>
       expect(status).toHaveTextContent(/no key saved on your account yet/i),
     );
-    expect(within(status).getByRole('link', { name: 'Add a key' })).toHaveAttribute(
+
+    // THE REMEDY IS IN THE ROW (#383), beside the button that was pressed, and
+    // it is reachable — the live region carries the sentence for assistive
+    // technology, the row carries the link a learner has to be able to click.
+    const row = voiceRow('alloy');
+    expect(within(row).getByRole('link', { name: 'Add a key' })).toHaveAttribute(
       'href',
       '/settings/ai',
     );
+    expect(row).toHaveTextContent(/no key saved on your account yet/i);
   });
 
   it('says nothing remediable for an `unavailable` cause the learner cannot fix', async () => {
