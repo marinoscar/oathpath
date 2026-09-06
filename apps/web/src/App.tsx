@@ -91,6 +91,10 @@ const CoachSettingsPage = lazy(() => import("./pages/CoachSettingsPage"));
 // Issue #77, epic #50 — the ongoing home for the six orientation answers,
 // rendering the SAME `JourneyProfileForm` `/setup/journey` above renders.
 const UserJourneyPage = lazy(() => import("./pages/UserJourneyPage"));
+// Issue #384 — what this browser on this device will currently permit: the
+// microphone, notifications, and whether anything can be heard at all. Lazy
+// like its siblings; nothing on the critical path to practising imports it.
+const UserDevicePage = lazy(() => import("./pages/UserDevicePage"));
 const UserTokensPage = lazy(() => import("./pages/UserTokensPage"));
 // Issue #42, epic #25 — the user's own OpenAI key and what it has been used for.
 const UserAiKeyPage = lazy(() => import("./pages/UserAiKeyPage"));
@@ -493,6 +497,20 @@ function AppRoutes() {
                         <Route
                           path="/settings/journey"
                           element={<UserJourneyPage />}
+                        />
+                        {/* Ungated like its siblings (#384), and by the strongest
+                        version of their argument: this page makes NO
+                        authenticated API call at all — every fact on it is read
+                        live from the browser — so there is no controller behind
+                        it and no permission string a gate here could honestly
+                        mirror. The `Device & permissions` card declares none
+                        for the same reason.
+
+                        INSIDE `RequireOrientation` with the rest of the shell,
+                        like every other `/settings/*` route in this block. */}
+                        <Route
+                          path="/settings/device"
+                          element={<UserDevicePage />}
                         />
                         <Route
                           path="/settings/tokens"

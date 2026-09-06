@@ -25,6 +25,7 @@ import PaletteIcon from '@mui/icons-material/Palette';
 import RecordVoiceOverIcon from '@mui/icons-material/RecordVoiceOver';
 import PsychologyIcon from '@mui/icons-material/Psychology';
 import NotificationsIcon from '@mui/icons-material/Notifications';
+import PhonelinkSetupIcon from '@mui/icons-material/PhonelinkSetup';
 import VpnKeyIcon from '@mui/icons-material/VpnKey';
 import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome';
 import WarningAmberIcon from '@mui/icons-material/WarningAmber';
@@ -166,6 +167,38 @@ export const USER_SETTINGS_SECTIONS: SettingsSectionDef[] = [
           'Choose which events notify you, and whether they arrive by email or in your browser.',
         Icon: NotificationsIcon,
         path: '/settings/notifications',
+      },
+      {
+        // Issue #384. What this BROWSER on this DEVICE will currently permit —
+        // the microphone, notifications, and whether anything can be heard at
+        // all — each stating what is true now and offering the one action that
+        // can change it.
+        //
+        // A REGISTRY CARD PLUS A ROUTE, never a tab on Voice or on
+        // Notifications (CLAUDE.md's Settings UI Pattern, rules 1 and 2). A
+        // destination gate is about REACHABILITY and a tab gate is about
+        // CONTENT, and this is the former: Voice holds what a learner PREFERS
+        // (which voice, how fast, whether a spoken answer submits itself) and
+        // Notifications holds WHICH events reach them; this page holds what
+        // the browser will allow either of those to do. Folding it into either
+        // would file "your browser is blocking the microphone" under a heading
+        // about preferences the block makes unreachable — and it belongs to
+        // BOTH of them, which is precisely what a shared destination is for.
+        //
+        // AFTER Voice and Notifications, not before: a learner arrives here
+        // from one of those two, having found a preference that is not taking
+        // effect. It is the answer to a question the neighbours raise.
+        //
+        // NO `permission`, like every card in this file — and for a stronger
+        // reason than most of them: this page makes NO authenticated API call
+        // at all. There is no controller behind it, so there is no string to
+        // mirror and none may be invented; a gate would lock a learner out of
+        // finding out why their own microphone is not working.
+        title: 'Device & permissions',
+        description:
+          'What this browser is allowing on this device: the microphone, notifications, and sound.',
+        Icon: PhonelinkSetupIcon,
+        path: '/settings/device',
       },
     ],
   },
