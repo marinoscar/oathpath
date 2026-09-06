@@ -1742,8 +1742,8 @@ test.describe('Voice foundation (issue #114), epic #58 (E9)', () => {
   });
 
   // ===========================================================================
-  // TEST 11 (E13 scenario 4) — "Type instead" is reachable at every phase of
-  // the loop
+  // TEST 11 (E13 scenario 4, extended by issue #360 / E15) — "Type instead" is
+  // reachable at every phase of the loop
   // ===========================================================================
   //
   // Five tests, one per named `ConversationPhase`
@@ -1751,7 +1751,20 @@ test.describe('Voice foundation (issue #114), epic #58 (E9)', () => {
   // five times — the Vitest sibling
   // (`PracticeSessionPage.conversation.test.tsx`) does the identical thing
   // with `it.each`.
-
+  //
+  // `ConversationPhase` carries SEVEN values today, not the five below —
+  // issue #349 (epic #345) added `preparing` between the tap and
+  // `speakingQuestion`. `idle` is the seventh and is not one of "every phase
+  // of the LOOP": at `idle` there is no loop running to leave, so "Type
+  // instead" leaving it is not a claim that means anything. `preparing` is
+  // covered by its own test below rather than folded into this loop: with
+  // Chromium's fake-device flags (`playwright.config.ts`), `getUserMedia`
+  // resolves in a single microtask with no real permission dialogue to hold
+  // the phase open, so `driveConversationToPhase`'s "wait for the phase's own
+  // text, then act" shape — which every other phase below can rely on — is
+  // not something a `preparing` case can honestly promise. See that test's own
+  // comment for how it is asserted instead, on the same footing as this file's
+  // own acknowledged `processing` race below.
   const CONVERSATION_PHASES = [
     'speakingQuestion',
     'listening',
@@ -1861,6 +1874,69 @@ test.describe('Voice foundation (issue #114), epic #58 (E9)', () => {
   }
 
   // ===========================================================================
+  // TEST 11b (issue #349, epic #345 / E15, issue #360) — "Type instead" from
+  // `preparing`, the sixth of the seven `ConversationPhase` values
+  // ===========================================================================
+  //
+  // NOT `driveConversationToPhase`-shaped, on purpose — see the comment above
+  // `CONVERSATION_PHASES`. There is no phase-specific text to wait for that
+  // would not itself risk missing the window: with the fake-device Chromium
+  // flags this suite launches with, `getUserMedia` has no real permission
+  // dialogue to hold open, so `preparing` can resolve to `speakingQuestion` in
+  // a single microtask. What this test asserts instead does not depend on
+  // catching it exactly: tapping Start and then IMMEDIATELY tapping "Type
+  // instead" — with no wait between them — must land the learner back on
+  // typing, with nothing lost, whether that second tap happened to land while
+  // still `preparing` or a moment later once the device had already opened.
+  // Both are "Type instead reachable essentially immediately after Start",
+  // which is the actual claim `preparing` exists to make true — a learner
+  // must never be stuck watching a spinner with no way out.
+  test('conversation mode: "Type instead" immediately after Start (preparing) leaves the loop, keeps the session', async ({
+    page,
+  }) => {
+    await page.addInitScript(installConversationTestSeam);
+    await page.addInitScript(installFakeMediaRecorder);
+
+    const email = testEmail('conv-type-preparing');
+    const { accessToken } = await seedOnboarding(page, { email, onboarding: 'full' });
+    await page.waitForURL('/', { timeout: 10000 });
+    const headers = { Authorization: `Bearer ${accessToken}` };
+    const userId = await fetchUserId(page, headers);
+    createdUserIds.push(userId);
+
+    await patchConversationMode(page, accessToken, true);
+
+    const sessionId = await startQuickFive(page);
+    await expect(page.getByRole('heading', { level: 2 })).toBeVisible();
+    await resetTapCount(page);
+
+    const start = page.getByRole('button', { name: /start hands-free/i });
+    await expect(start).toBeVisible();
+    await start.click();
+
+    // NO WAIT. The one tap this test is about lands as close to `preparing`
+    // as this suite can honestly get.
+    await page.getByRole('button', { name: /type instead/i }).click();
+
+    await expect(page.getByRole('button', { name: /^text$/i })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    await expect(page.getByLabel('Your answer')).toBeVisible();
+    await expect(page.getByRole('button', { name: /start hands-free/i })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: /^stop$/i })).toHaveCount(0);
+    await expect(page.getByText(/conversation mode has stopped/i)).toHaveCount(0);
+
+    // THE SESSION ITSELF SURVIVED — the question the loop was about to read
+    // is still the one on screen, unanswered, because a `preparing` exit
+    // records nothing: no `getUserMedia` result, no transcript, no attempt.
+    const detail = await fetchSessionDetail(page, headers, sessionId);
+    expect(detail.progress.answered).toBe(0);
+
+    expect(await countStorageObjectsUploadedBy([userId])).toBe(0);
+  });
+
+  // ===========================================================================
   // TEST 12 (E13 scenario 5) — a mic-permission denial exits the loop with a
   // spoken AND a rendered reason
   // ===========================================================================
@@ -1914,6 +1990,237 @@ test.describe('Voice foundation (issue #114), epic #58 (E9)', () => {
 
     expect(await countStorageObjectsUploadedBy([userId])).toBe(0);
   });
+
+  // ===========================================================================
+  // TEST 13 (issue #360, epic #345 / E15) — a permission denial is caught
+  // BEFORE the session starts, not on the first tap
+  // ===========================================================================
+  //
+  // Test 12 above already proves a denial is caught "at the very first device
+  // request" — but that is still a consequence of a TAP: `getUserMedia`
+  // itself is what discovers the block, after Start has been pressed and the
+  // loop has already committed to opening a device. Issue #349 (epic #345)
+  // added a SECOND, earlier signal — `useMediaReadiness`'s own
+  // `navigator.permissions.query({ name: 'microphone' })` preflight, read on
+  // MOUNT, well before any tap — precisely so a learner whose microphone is
+  // already blocked sees that on the session screen from the moment it loads,
+  // with Start never pressed at all. This is the claim Test 12 cannot make.
+  test('conversation mode: a microphone already blocked is shown before Start is ever tapped', async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      // A fake Permissions API, observational-only — `useMediaReadiness.ts`
+      // calls `query()` from an effect on mount, never from a tap, so this is
+      // read before the learner does anything at all.
+      Object.defineProperty(navigator, 'permissions', {
+        configurable: true,
+        value: {
+          query: (descriptor: PermissionDescriptor) => {
+            if (descriptor.name !== 'microphone') {
+              return Promise.resolve({
+                state: 'granted' as PermissionState,
+                addEventListener: () => {},
+                removeEventListener: () => {},
+              });
+            }
+            return Promise.resolve({
+              state: 'denied' as PermissionState,
+              addEventListener: () => {},
+              removeEventListener: () => {},
+            });
+          },
+        },
+      });
+    });
+    await page.addInitScript(installConversationTestSeam);
+
+    const email = testEmail('conv-preflight-denied');
+    const { accessToken } = await seedOnboarding(page, { email, onboarding: 'full' });
+    await page.waitForURL('/', { timeout: 10000 });
+    const headers = { Authorization: `Bearer ${accessToken}` };
+    const userId = await fetchUserId(page, headers);
+    createdUserIds.push(userId);
+
+    await patchConversationMode(page, accessToken, true);
+
+    await startQuickFive(page);
+    await expect(page.getByRole('heading', { level: 2 })).toBeVisible();
+    await resetTapCount(page);
+
+    // THE PREFLIGHT NOTICE, ON SCREEN, WITH NOTHING TAPPED. The identical
+    // `describeCaptureProblem('permission_denied')` sentence Test 12 asserts
+    // for the on-tap discovery — a preflight invents no copy of its own, per
+    // `useMediaReadiness.ts`'s own header.
+    const NOTICE =
+      'Your browser is blocking the microphone for this site. ' +
+      'Open the site permissions from the icon in your address bar, allow the microphone, then reload this page.';
+    await expect(page.getByText(NOTICE, { exact: true })).toBeVisible();
+
+    // Start hands-free is still THERE — the preflight informs, it does not
+    // remove the control — but the learner never had to press it to learn
+    // their microphone will not work.
+    await expect(page.getByRole('button', { name: /start hands-free/i })).toBeVisible();
+    expect(await tapCount(page)).toBe(0);
+
+    expect(await countStorageObjectsUploadedBy([userId])).toBe(0);
+  });
+
+  // ===========================================================================
+  // TEST 14 (issue #360, epic #345 / E15) — the voice surface fits one small
+  // viewport with no document scroll
+  // ===========================================================================
+  //
+  // `VoiceSurface.tsx`'s own header states the structural claim this test
+  // exercises for real, at a real viewport, rather than only reading the
+  // `data-scrollable` markers a Vitest/jsdom test can see without layout:
+  // 360x640 is a small, real phone viewport (`playwright.config.ts` does not
+  // fix one, so this test sets its own), and the two controls that must
+  // always be reachable — Stop and Type instead — must be so without the
+  // *document* ever scrolling. Content that overflows scrolls INSIDE its own
+  // container instead (the question prompt, mainly), which is the property
+  // this test tells apart from "nothing overflows at all" by deliberately
+  // reaching a phase with the longest on-screen content — `speakingAnswer`,
+  // which is showing the accepted answer AND the verdict AND the coach line
+  // at once.
+  test('the voice surface fits 360x640 with no document scroll', async ({ page }) => {
+    await page.setViewportSize({ width: 360, height: 640 });
+
+    await page.addInitScript(installConversationTestSeam);
+    await page.addInitScript(installFakeMediaRecorder);
+
+    const email = testEmail('conv-viewport');
+    const { accessToken } = await seedOnboarding(page, { email, onboarding: 'full' });
+    await page.waitForURL('/', { timeout: 10000 });
+    const headers = { Authorization: `Bearer ${accessToken}` };
+    const userId = await fetchUserId(page, headers);
+    createdUserIds.push(userId);
+
+    await patchConversationMode(page, accessToken, true);
+
+    await setSpeechAutoEnd(page, false);
+    await startHandsFree(page);
+    await finishHeldSpeech(page);
+    await expect(
+      page.getByText('Listening. Answer when you are ready.', { exact: true }),
+    ).toBeVisible();
+    await driveOneTurn(page, 'TRANSCRIPT:not the accepted answer, deliberately');
+    await expect(page.getByText('Telling you the answer.', { exact: true })).toBeVisible({
+      timeout: VERDICT_REGION_TIMEOUT,
+    });
+
+    // NO DOCUMENT SCROLL. `document.scrollingElement` is `null` only in the
+    // most exotic embeds; on every real browser this suite targets it is
+    // `<html>`, and its scroll extent being zero is the literal claim
+    // "the page itself never scrolls" — content that overflows must have
+    // scrolled inside a container instead, not stretched the document.
+    const documentScrollable = await page.evaluate(() => {
+      const el = document.scrollingElement;
+      return el ? el.scrollHeight - el.clientHeight : 0;
+    });
+    expect(documentScrollable).toBeLessThanOrEqual(1); // sub-pixel rounding only
+
+    // AND THE TWO CONTROLS A LEARNER MUST ALWAYS BE ABLE TO REACH ARE
+    // ACTUALLY ON SCREEN, not merely present in the DOM off the visible area.
+    await expect(page.getByRole('button', { name: /^stop$/i })).toBeInViewport();
+    await expect(page.getByRole('button', { name: /type instead/i })).toBeInViewport();
+
+    expect(await countStorageObjectsUploadedBy([userId])).toBe(0);
+  });
+
+  // ===========================================================================
+  // TEST 15 (issue #360, epic #345 / E15) — a wrong answer must be audibly
+  // distinguishable from a right one, in the hands-free loop's own TTS voice
+  // ===========================================================================
+  //
+  // `apps/api/src/practice/spoken-turn.ts` (#351) composes the fix; this is
+  // the end-to-end claim the whole epic is judged against, restated in
+  // `apps/api/src/practice/spoken-turn.spec.ts` at the unit level ("no two
+  // outcomes produce the same spoken turn") and here, once, at the level a
+  // learner actually experiences: what `speechSynthesis` says out loud.
+  //
+  // MARKED `test.fixme` — NOT DELETED, NOT WEAKENED — because writing it
+  // surfaced that `useConversationSession.ts`'s `gradeTranscript` never
+  // adopted `attempt.spokenTurn`: `PracticeSessionPage.tsx`'s
+  // `conversationSubmit` still builds `ConversationGrade.spokenAnswer` as
+  // `graded.acceptedAnswers[0]?.text ?? null` — the EXACT pre-#351 line
+  // `spoken-turn.ts`'s own header quotes as "the defect" — and speaks only
+  // that string, on every outcome, via `say(grade.spokenAnswer, 'answer')`.
+  // `VoiceSurface`'s VISUAL live region does render the full composed turn
+  // (so a screen-reader user hears it correctly), but the app's own spoken
+  // voice — the one a learner walking with the phone in a pocket actually
+  // relies on — still says only the accepted answer, on a correct answer AND
+  // on a spent-retry miss alike. Filed as
+  // https://github.com/marinoscar/oathpath/issues/375, per this issue's own
+  // Exclusions clause ("if a test cannot pass without a product change, that
+  // change is filed as its own issue rather than smuggled in here") — this
+  // spec asserts the CORRECT, desired behaviour and is expected to fail until
+  // #375 lands.
+  test.fixme(
+    'conversation mode: a correct answer and a spent-retry wrong answer are NOT byte-identical audio (see issue #375)',
+    async ({ page }) => {
+      await page.addInitScript(installConversationTestSeam);
+      await page.addInitScript(installFakeMediaRecorder);
+
+      const email = testEmail('conv-audible');
+      const { accessToken } = await seedOnboarding(page, { email, onboarding: 'full' });
+      await page.waitForURL('/', { timeout: 10000 });
+      const headers = { Authorization: `Bearer ${accessToken}` };
+      const userId = await fetchUserId(page, headers);
+      createdUserIds.push(userId);
+
+      await patchConversationMode(page, accessToken, true);
+
+      const sessionId = await startHandsFree(page);
+      const { questionId, acceptedAnswer } = await currentQuestionAndAnswer(
+        page,
+        headers,
+        sessionId,
+      );
+
+      // Q1: answered CORRECTLY.
+      await driveOneTurn(page, `TRANSCRIPT:${acceptedAnswer}`);
+      await expect(page.getByText('Telling you the answer.', { exact: true })).toBeVisible({
+        timeout: VERDICT_REGION_TIMEOUT,
+      });
+      const spokenAfterCorrect = await spokenTexts(page);
+      // THE DESIRED BEHAVIOUR: the verdict is spoken, and the bare accepted
+      // answer text is NOT (composeSpokenTurn never speaks the answer on a
+      // correct outcome).
+      expect(spokenAfterCorrect).toEqual(expect.arrayContaining(["That’s right."]));
+      expect(spokenAfterCorrect).not.toEqual(expect.arrayContaining([acceptedAnswer]));
+
+      await expect(
+        page.getByText('Moving on to the next question.', { exact: true }),
+      ).toBeVisible();
+      await finishHeldSpeech(page);
+      await expect(page.getByText('Question 2 of 5', { exact: true })).toBeVisible();
+
+      // Q2: missed TWICE, so the retry is spent by the second miss — the case
+      // this issue's own body names explicitly.
+      await driveOneTurn(page, 'TRANSCRIPT:this is not the right answer at all');
+      await expect(page.getByText('Telling you the answer.', { exact: true })).toBeVisible({
+        timeout: VERDICT_REGION_TIMEOUT,
+      });
+      await expect(
+        page.getByText('Listening. Answer when you are ready.', { exact: true }),
+      ).toBeVisible();
+      await driveOneTurn(page, 'TRANSCRIPT:still not the right answer either');
+      await expect(page.getByText('Telling you the answer.', { exact: true })).toBeVisible({
+        timeout: VERDICT_REGION_TIMEOUT,
+      });
+      const spokenAfterSecondMiss = await spokenTexts(page);
+
+      // THE DESIRED BEHAVIOUR, AND THE ONE THIS FILE CANNOT MAKE PASS TODAY:
+      // the wrong-answer turn must not be the identical sequence a correct
+      // answer produces.
+      expect(spokenAfterSecondMiss).not.toEqual(spokenAfterCorrect);
+      expect(spokenAfterSecondMiss).toEqual(
+        expect.arrayContaining(['That one didn’t match.']),
+      );
+
+      expect(await countStorageObjectsUploadedBy([userId])).toBe(0);
+    },
+  );
 
   test.afterAll(async () => {
     // A whole-file sweep across every learner this spec created, on top of
