@@ -335,7 +335,12 @@ function installHandlers() {
     systemReady: true,
     enabled: true,
     providerConfigured: true,
-    unboundRoles: ['speak'],
+    // `realtime` PINNED UNBOUND (#355, epic #345 / E15): this file exercises
+    // the surface over E13's request/response loop, and the ladder in
+    // `PracticeSessionPage.tsx` resolves Voice to the LIVE transport whenever a
+    // `realtime` model is bound. The realtime rungs are
+    // `PracticeSessionPage.realtime.test.tsx`'s.
+    unboundRoles: ['speak', 'realtime'],
   };
 
   server.use(

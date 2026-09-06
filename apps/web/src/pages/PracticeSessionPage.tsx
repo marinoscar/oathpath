@@ -251,6 +251,7 @@ import {
 } from '@mui/material';
 import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 import MicIcon from '@mui/icons-material/Mic';
+import StopIcon from '@mui/icons-material/Stop';
 import {
   Link as RouterLink,
   Navigate,
@@ -1194,15 +1195,33 @@ export default function PracticeSessionPage() {
    * Deliberately an effect with NO dependency array: what it waits for is a
    * COMMIT IN WHICH `inputRef.current` is non-null, and that is not any one
    * value it could depend on — it is the render in which the voice surface
-   * came down and this page's own form went up. It fires at most once per
-   * request, because it clears the flag itself.
+   * came down and this page's own form went up.
+   *
+   * THE REQUEST OUTLIVES A REMOUNT, and that is why the flag is not cleared by
+   * the first successful `focus()`. Leaving the surface settles over more than
+   * one commit — the loop stops, the other transport is told to stop, the form
+   * goes up — and a `<TextField>` that is REMOUNTED rather than re-rendered
+   * brings a fresh DOM node with it. jsdom and browsers alike then reset
+   * `activeElement` to `<body>` with NO `focusout` event to react to, so a
+   * one-shot request focuses a node that is about to be thrown away and the
+   * learner is left on `<body>` with nothing coming.
+   *
+   * So the flag clears only once the node that HAS focus is the same node this
+   * effect focused on the previous commit — i.e. it survived a commit. Until
+   * then every commit re-applies it. If no further commit arrives, the field is
+   * focused anyway and the stale flag costs one `===` per commit.
    */
   const focusAnswerFieldRef = useRef(false);
+  const lastFocusedAnswerFieldRef = useRef<HTMLInputElement | null>(null);
   useEffect(() => {
     if (!focusAnswerFieldRef.current) return;
     const field = inputRef.current;
     if (!field) return;
-    focusAnswerFieldRef.current = false;
+    if (document.activeElement === field && lastFocusedAnswerFieldRef.current === field) {
+      focusAnswerFieldRef.current = false;
+      return;
+    }
+    lastFocusedAnswerFieldRef.current = field;
     field.focus();
   });
 
