@@ -48,8 +48,46 @@
  * never fired by arrowing through the radio group. Each of those would spend
  * somebody's money on a gesture that is not a request for audio. This is
  * `VoiceSettings.tsx`'s rule, reused verbatim rather than re-derived, and its
- * machinery (`PreviewState`, the in-flight ref, `releaseAudio`, `playSample`,
- * the always-mounted live region) is reused with it.
+ * machinery (`PreviewState`, the in-flight ref, `releaseSample`, the
+ * always-mounted live region) is reused with it.
+ *
+ * =============================================================================
+ * D1. THE ELEMENT IS UNLOCKED INSIDE THE PRESS, BEFORE THE FIRST `await`
+ * =============================================================================
+ *
+ * Issue #389, and the reason `beginHear` exists as a separate function from
+ * `requestSample`. A mobile browser only plays audio through an element that
+ * was itself started during a user gesture, and `synthesizeSpeech` is a
+ * network round trip — so the element this page used to build in the
+ * continuation was an element the press never touched. Android Chrome and iOS
+ * Safari reject its `play()`, and they reject it silently: from the learner's
+ * side, Hear simply did nothing at all.
+ *
+ * `beginHear` is therefore SYNCHRONOUS, and `lib/audioUnlock.ts`'s
+ * `acquireAndPrimeAudio` runs in it before anything is awaited. That module's
+ * header carries the full argument — including why the priming source is a
+ * data URI of silence rather than a sourceless element — and it is the one
+ * place it is written down for all three call sites (#383, #389).
+ *
+ * =============================================================================
+ * D2. BLOCKED PLAYBACK IS NAMED. IT IS NEVER RETURNED TO `idle` IN SILENCE
+ * =============================================================================
+ *
+ * Also #389, and the same fix #383 made on `/settings/voice`. A rejected
+ * `play()` used to run the same `onEnd` a finished sample runs, which set the
+ * state back to `idle` — so "your phone would not play this" and "you have
+ * just heard it" looked identical on screen. Blocked playback is the ONE
+ * outcome a learner most needs named, because it is the one they can act on:
+ * unmute the phone, press Hear again.
+ *
+ * So the three callbacks mean three separate things — `onEnded` (the sample
+ * finished), `onBlocked` ({@link COACH_PLAYBACK_BLOCKED_MESSAGE}), and
+ * `onError` (the element failed on the bytes). Collapsing any of them back
+ * into a shared handler restores the silence this fixed.
+ *
+ * IT IS STILL NOT AN ERROR, and the copy must never say the product is broken.
+ * Every sample on this page is readable without any audio at all, and the
+ * written coach works regardless; what failed is one optional sample.
  *
  * =============================================================================
  * E. `unfiltered` IS OPT-IN, AND SAYS WHAT IT IS BEFORE IT IS CHOSEN
@@ -85,6 +123,11 @@ import {
 import VolumeUpIcon from '@mui/icons-material/VolumeUp';
 import { Link as RouterLink } from 'react-router-dom';
 
+import {
+  acquireAndPrimeAudio,
+  playAudioSample,
+  releaseAudioSample,
+} from '../../lib/audioUnlock';
 import { synthesizeSpeech } from '../../services/api';
 import type {
   CoachPersona,
@@ -106,6 +149,20 @@ export const DEFAULT_COACH_PERSONA: CoachPersona = 'supportive';
 
 /** Reactions are on unless a learner turns them off. */
 export const DEFAULT_COACH_REACTIONS = true;
+
+/**
+ * What a blocked `play()` says.
+ *
+ * EXPORTED SO A TEST CAN PIN IT (#389), exactly as `VoiceSettings.tsx`'s own
+ * `PLAYBACK_BLOCKED_MESSAGE` is. It names the one thing that actually happened
+ * and the one thing the learner can do about it, and it stops — no "something
+ * went wrong", no alert, and no suggestion that the page is broken, because it
+ * is not: every sample on it is readable without any sound at all, which is
+ * the sentence that closes it.
+ */
+export const COACH_PLAYBACK_BLOCKED_MESSAGE =
+  'Your browser blocked the sample from playing. Check that your phone is not ' +
+  'muted, then press Hear again. Every sample is still readable above.';
 
 /** The persona this learner speaks with, given whatever is stored. */
 export function resolvePersona(
@@ -197,31 +254,37 @@ export function CoachSettings({
   /** Guards a double press: a second press mid-request must not spend twice. */
   const previewRef = useRef(false);
 
-  const releaseAudio = useCallback(() => {
-    const audio = audioRef.current;
-    if (audio) {
-      audio.onended = null;
-      audio.onerror = null;
-      audio.pause();
-      audioRef.current = null;
-    }
-    if (objectUrlRef.current) {
-      URL.revokeObjectURL(objectUrlRef.current);
-      objectUrlRef.current = null;
-    }
-    previewRef.current = false;
+  /**
+   * Let go of the SAMPLE — the playback and the bytes — and of nothing else.
+   *
+   * NOT the element: it carries the user activation of the press that unlocked
+   * it (rule D1), and a replacement would carry none. Discarding it is an
+   * unmount-only act, below.
+   */
+  const releaseSample = useCallback(() => {
+    releaseAudioSample({ audioRef, objectUrlRef });
   }, []);
 
-  // Nothing should still be playing after this page unmounts.
-  useEffect(() => releaseAudio, [releaseAudio]);
+  // Leaving the page silences the sample, lets go of its bytes, and is the ONE
+  // place the element itself is discarded.
+  useEffect(
+    () => () => {
+      releaseSample();
+      audioRef.current = null;
+      previewRef.current = false;
+    },
+    [releaseSample],
+  );
 
-  const hearSample = useCallback(
+  /**
+   * The ASYNC half of a preview: one synthesis call, then the bytes.
+   *
+   * **Never wired to an event handler.** `beginHear` below is the click
+   * handler, and it runs the gesture-time half first — see rule D1 for why
+   * that order is load-bearing rather than stylistic.
+   */
+  const requestSample = useCallback(
     async (option: CoachPersonaOption) => {
-      if (previewRef.current) return;
-      releaseAudio();
-      previewRef.current = true;
-      setPreview({ kind: 'preparing', persona: option.key });
-
       let result;
       try {
         result = await synthesizeSpeech(option.sampleLine);
@@ -265,12 +328,28 @@ export function CoachSettings({
         return;
       }
 
-      const played = playSample(result.audio, {
+      const { attached: played } = playAudioSample(result.audio, {
         audioRef,
         objectUrlRef,
-        onEnd: () => {
-          releaseAudio();
+        // Finished. Nothing to say — the learner just heard it.
+        onEnded: () => {
+          releaseSample();
           setPreview({ kind: 'idle' });
+        },
+        // BLOCKED, which is a different thing from finished and says so. The
+        // remedy is the learner's own and it is one sentence long (rule D2).
+        onBlocked: () => {
+          releaseSample();
+          setPreview({ kind: 'message', text: COACH_PLAYBACK_BLOCKED_MESSAGE });
+        },
+        // The element rejected the bytes. Also stated, for the same reason:
+        // returning quietly to `idle` reads as "that was the sample".
+        onError: () => {
+          releaseSample();
+          setPreview({
+            kind: 'message',
+            text: `We couldn\u2019t play the ${option.label} sample just now. Reading it above works either way.`,
+          });
         },
       });
 
@@ -283,7 +362,31 @@ export function CoachSettings({
             },
       );
     },
-    [releaseAudio],
+    [releaseSample],
+  );
+
+  /**
+   * THE CLICK HANDLER, and the synchronous half of hearing a sample.
+   *
+   * Everything the browser's autoplay policy measures happens here, inside the
+   * activation window the press opened: the element is acquired and primed
+   * before a single `await` has been reached. `requestSample` is then started
+   * detached — see rule D1 for why splitting these two is the fix for #389
+   * rather than a tidying-up.
+   */
+  const beginHear = useCallback(
+    (option: CoachPersonaOption) => {
+      if (previewRef.current) return;
+
+      // ─── GESTURE TIME. Nothing below this line may move after an `await`. ──
+      releaseSample();
+      acquireAndPrimeAudio(audioRef);
+
+      previewRef.current = true;
+      setPreview({ kind: 'preparing', persona: option.key });
+      void requestSample(option);
+    },
+    [releaseSample, requestSample],
   );
 
   const previewStatusText =
@@ -385,8 +488,12 @@ export function CoachSettings({
                       startIcon={<VolumeUpIcon />}
                       // ONLY `onClick`. See rule D — focus, hover and arrowing
                       // through the group must never spend the learner's key.
+                      //
+                      // `beginHear`, NOT `void requestSample(...)`: the handler
+                      // has to be SYNCHRONOUS so the element is unlocked inside
+                      // the activation window this press opened (rule D1).
                       onClick={() => {
-                        void hearSample(option);
+                        beginHear(option);
                       }}
                       disabled={isSaving || preview.kind === 'preparing'}
                       // NAMES THE PERSONA: "Hear" alone is four identical
@@ -463,52 +570,6 @@ export function CoachSettings({
       </Card>
     </>
   );
-}
-
-/**
- * Play synthesized bytes, returning whether playback was started.
- *
- * Deliberately NOT awaited. `HTMLAudioElement.play()` resolves when playback
- * BEGINS, which in jsdom (and behind an autoplay policy) may be never — so
- * this reports "the element accepted the source and we asked it to play", and
- * `onEnd` reports what actually happened. Same shape, same reasoning, as
- * `VoiceSettings.tsx`'s own.
- */
-function playSample(
-  blob: Blob,
-  ctx: {
-    audioRef: { current: HTMLAudioElement | null };
-    objectUrlRef: { current: string | null };
-    onEnd: () => void;
-  },
-): boolean {
-  if (
-    typeof URL === 'undefined' ||
-    typeof URL.createObjectURL !== 'function' ||
-    typeof Audio === 'undefined'
-  ) {
-    return false;
-  }
-
-  const url = URL.createObjectURL(blob);
-  ctx.objectUrlRef.current = url;
-
-  const audio = new Audio(url);
-  ctx.audioRef.current = audio;
-  audio.onended = ctx.onEnd;
-  audio.onerror = ctx.onEnd;
-
-  try {
-    // Handled rather than dropped: an autoplay policy blocking sound the
-    // learner explicitly asked for is not an error state, it just means no
-    // sample is coming.
-    void Promise.resolve(audio.play()).catch(() => ctx.onEnd());
-  } catch {
-    ctx.onEnd();
-    return false;
-  }
-
-  return true;
 }
 
 export default CoachSettings;
