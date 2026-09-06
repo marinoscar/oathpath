@@ -343,6 +343,26 @@ spec in this file.
 
 ### Fixed
 
+- **Audio the learner pressed for made no sound on a phone (issue #389).**
+  A mobile browser plays audio only through an element that was itself
+  started during a user gesture, and every premium-voice surface here
+  synthesizes over the network first — so the `<audio>` element built after
+  that round trip was one the press never touched, and Android Chrome and
+  iOS Safari rejected its `play()` silently. Issue #383 had fixed exactly
+  one screen; the same bug was still live on **`/settings/coach`**, where
+  the Hear button simply did nothing at all, and on **`QuestionAudio`'s
+  press-to-play path**, where the browser-voice fall-through hid it — the
+  learner heard the question in the free voice while paying their own key
+  for the premium one. The ordering rule now has one home,
+  `apps/web/src/lib/audioUnlock.ts`, used by all three call sites instead
+  of being restated (or quietly undone) at each. `/settings/coach` also
+  gains #383's second half: a refused `play()` no longer runs the same
+  handler a finished sample runs, so "your browser blocked this" and "you
+  have just heard it" are no longer the same silence. **`QuestionAudio`'s
+  autoplay path deliberately primes nothing** — when
+  `voice.readQuestionsAloud` starts a question with no tap there is no
+  gesture to prime from, and the browser-voice fall-through is the correct
+  design there (`docs/specs/voice.md` §1, §5.2).
 - **The installer and the API's own documentation pointed at a different
   repository.** `install.sh` defaulted to cloning `marinoscar/EnterpriseAppBase`
   and the OpenAPI contact and external-docs URLs pointed there too. That
