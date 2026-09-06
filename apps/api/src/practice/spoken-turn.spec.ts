@@ -112,6 +112,58 @@ describe('composeSpokenTurn', () => {
       expect(new Set(serialised).size).toBe(serialised.length);
     });
 
+    it('produces a DISTINCT turn for a retry-armed miss too — issue #360\'s literal union', () => {
+      // Issue #360 asks for this AS A PROPERTY OVER THE OUTCOME UNION,
+      // explicitly including "a retry-armed miss" as a fifth case alongside
+      // the four bare outcomes above — not merely a different `retryBoundary`
+      // on an otherwise-equal `lines` array. A retry-armed `incorrect` reorders
+      // the coach line ahead of the answer (see the module header on the
+      // conditional reordering), so its `lines` sequence is not just "the
+      // incorrect turn with a boundary attached" — it is genuinely a different
+      // sequence, and this is the assertion that a future change collapsing
+      // the two back together would fail.
+      const turns = new Map<string, string[]>();
+
+      const NAMED_CASES: Array<[string, Partial<SpokenTurnFacts>]> = [
+        ['correct', { outcome: 'correct' }],
+        ['partial', { outcome: 'partial' }],
+        ['incorrect', { outcome: 'incorrect' }],
+        ['skipped', { outcome: 'skipped' }],
+        [
+          'incorrect, retry armed',
+          { outcome: 'incorrect', retryArmed: true, heard: 'the consternation' },
+        ],
+      ];
+
+      for (const [key, overrides] of NAMED_CASES) {
+        turns.set(
+          key,
+          composeSpokenTurn(facts({ coachReaction: null, ...overrides })).lines,
+        );
+      }
+
+      // No two of the five named cases speak the same sequence.
+      const serialised = [...turns.entries()].map(
+        ([key, lines]) => [key, lines.join('|')] as const,
+      );
+      const seen = new Map<string, string>();
+      for (const [key, joined] of serialised) {
+        const collision = seen.get(joined);
+        expect({ key, collidesWith: collision }).toEqual({
+          key,
+          collidesWith: undefined,
+        });
+        seen.set(joined, key);
+      }
+
+      // And specifically: the retry-armed case really is a distinct sequence
+      // from the plain `incorrect` turn it is a variant of, not merely a
+      // `retryBoundary` bolted onto the same `lines`.
+      expect(turns.get('incorrect, retry armed')).not.toEqual(
+        turns.get('incorrect'),
+      );
+    });
+
     it('says something different again when the recogniser was not trusted', () => {
       // `misheard` is a statement about the MICROPHONE, never about the
       // speaker (`docs/specs/voice.md` §3), so it must not sound like being
@@ -433,6 +485,112 @@ describe('composeSpokenTurn', () => {
             line === spokenAcceptedAnswer(ANSWER) ||
             line === 'A curated line.',
         ).toBe(true);
+      }
+    });
+  });
+
+  // ===========================================================================
+  // THE PERSONA REACHES AUDIO — issue #360, epic #345 (E15)
+  // ===========================================================================
+  //
+  // E14's locked decision 3 (`docs/specs/coach-personality.md`): a persona
+  // "never affects grading, scoring, readiness, or what counts as a correct
+  // answer — it changes wording only." This is that decision, asserted at the
+  // one place it reaches speech. Four personas fed the SAME underlying
+  // attempt must produce four DIFFERENT spoken turns (proving the persona
+  // actually reaches audio at all — the defect E14 shipped, per issue #360's
+  // own problem statement, was a personality that reached no audio anywhere)
+  // and an IDENTICAL verdict — proving the difference is confined to the
+  // coach's own line and nothing this module decides on its own.
+  describe('the persona reaches audio, and changes wording only', () => {
+    const PERSONAS = ['supportive', 'academic', 'playful', 'unfiltered'] as const;
+
+    it('produces a DIFFERENT spoken turn per persona, for the identical attempt', () => {
+      const turnsByPersona = new Map<string, string[]>();
+
+      for (const persona of PERSONAS) {
+        const coachText = reactionLine(persona, 'answer.incorrect', ATTEMPT_ID);
+        turnsByPersona.set(
+          persona,
+          composeSpokenTurn(
+            facts({ outcome: 'incorrect', coachReaction: { text: coachText } }),
+          ).lines,
+        );
+      }
+
+      const serialised = [...turnsByPersona.values()].map((lines) =>
+        lines.join('|'),
+      );
+      // All four are pairwise distinct — a persona whose bank happened to
+      // collide with another's for this seed would silently fail to "reach
+      // audio" in any way a learner could actually hear.
+      expect(new Set(serialised).size).toBe(PERSONAS.length);
+    });
+
+    it('leaves the VERDICT — the element E15 exists to protect — byte-identical across every persona', () => {
+      // The verdict is `SPOKEN_VERDICT_LINES`-derived and never touches the
+      // coach bank at all, so this is true by construction; it is asserted
+      // anyway because "true by construction" is exactly the property a
+      // careless future edit (inlining the coach's wording into the verdict
+      // line, say) could break without any type error.
+      const verdictLines = new Set(
+        PERSONAS.map((persona) => {
+          const coachText = reactionLine(persona, 'answer.incorrect', ATTEMPT_ID);
+          const turn = composeSpokenTurn(
+            facts({ outcome: 'incorrect', coachReaction: { text: coachText } }),
+          );
+          return turn.lines[0]; // verdict is always first when nothing was "heard"
+        }),
+      );
+
+      expect(verdictLines).toEqual(new Set([SPOKEN_VERDICT_LINES.incorrect]));
+    });
+
+    it('leaves `spokenVerdictKey` — and so `failureCause`\'s influence on it — untouched by persona', () => {
+      // `spokenVerdictKey` takes no persona parameter at all: this is the
+      // structural half of "identical verdict AND failureCause", stated as a
+      // type-level fact rather than only an output comparison — the function
+      // a persona would have to be threaded through to affect the verdict does
+      // not accept one.
+      const key = spokenVerdictKey({
+        outcome: 'incorrect',
+        gradingMethod: 'ai',
+        failureCause: 'misheard',
+      });
+
+      // Calling it with the identical facts from every persona's "world" still
+      // yields the one key — there is no fifth argument to vary.
+      for (const _persona of PERSONAS) {
+        expect(
+          spokenVerdictKey({
+            outcome: 'incorrect',
+            gradingMethod: 'ai',
+            failureCause: 'misheard',
+          }),
+        ).toBe(key);
+      }
+      expect(key).toBe('misheard');
+    });
+
+    it('differs across every persona for a MISS on every outcome the loop can grade, not only `incorrect`', () => {
+      // Broader than the headline test above: `partial` and a `self_marked`
+      // correct both carry a coach line too, and both must show the same
+      // reach-audio property.
+      for (const outcome of ['partial', 'correct'] as const) {
+        const gradingMethod = outcome === 'correct' ? 'self' : 'exact';
+        const event = outcome === 'correct' ? 'answer.self_marked' : 'answer.partial';
+
+        const lines = PERSONAS.map((persona) => {
+          const coachText = reactionLine(persona, event, ATTEMPT_ID);
+          return composeSpokenTurn(
+            facts({ outcome, gradingMethod, coachReaction: { text: coachText } }),
+          ).lines.join('|');
+        });
+
+        expect({ outcome, distinct: new Set(lines).size }).toEqual({
+          outcome,
+          distinct: PERSONAS.length,
+        });
       }
     });
   });
