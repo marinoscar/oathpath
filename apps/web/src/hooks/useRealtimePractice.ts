@@ -117,6 +117,7 @@ import {
 import {
   openRealtimeConnection,
   type RealtimeConnection,
+  type RealtimeProviderError,
   type RealtimeSpeechEvent,
   type RealtimeToolCallEvent,
 } from '../services/realtimeConnection';
@@ -178,6 +179,28 @@ export const REALTIME_PRACTICE_HIDDEN_LINE =
 /** Rendered when the engine says the session is complete. Not a failure. */
 export const REALTIME_PRACTICE_COMPLETE_LINE =
   'That is the whole session. Nicely done.';
+
+/**
+ * Rendered — never spoken — when the provider reports an error mid-session.
+ *
+ * ISSUE #385, AND THE POINT IS THAT SILENCE IS NOW EXPLAINED. A provider error
+ * usually ends one TURN rather than the session: the coach misses a question
+ * and the connection stays up, so the honest thing is a sentence on screen and
+ * a way out, not a fallback that abandons a working connection.
+ *
+ * CODE-OWNED, and it names no provider, no code and no error string — those go
+ * to the console for a developer. A learner cannot act on
+ * `conversation_already_has_active_response`; they can act on "ask it again".
+ *
+ * NOT SPOKEN, unlike the fallback and idle lines. Those announce that the loop
+ * itself has changed and a learner who is not looking at the screen has to be
+ * told; this one describes a hiccup in a session that is still running, and
+ * talking over a coach who may be mid-sentence to report a hiccup is worse than
+ * the hiccup.
+ */
+export const REALTIME_PRACTICE_PROVIDER_ERROR_LINE =
+  'The voice connection hit a snag. If the coach goes quiet, ask it to repeat ' +
+  'the question — or stop and carry on here.';
 
 /** Why the spoken practice session cannot continue. A closed set. */
 export type RealtimePracticeFallbackCode =
@@ -288,6 +311,27 @@ export type RealtimePracticeStage =
 
 export interface UseRealtimePracticeReturn {
   stage: RealtimePracticeStage;
+  /**
+   * When THIS spoken session began, as an epoch millisecond, or `null`.
+   *
+   * ISSUE #387, AND IT IS A COST FIGURE RATHER THAN A DECORATION. A realtime
+   * connection bills the learner's own key by the minute (epic #345, decision
+   * 7), so the elapsed clock a learner reads is the only running statement of
+   * what a session is costing them — and a clock that restarts systematically
+   * under-reports it.
+   *
+   * SET ONCE, WHEN `start()` OPENS THE SESSION, and deliberately NOT re-set by
+   * a re-mint: `MAX_RECONNECTS` reconnections are one continuous session to the
+   * learner, they are billed as one, and a clock that restarted on each would
+   * hide exactly the sessions that cost the most. `retry()` does re-set it,
+   * because that is a new session after a fallback rather than a repair of this
+   * one.
+   *
+   * It is not cleared when the session ends: the only reader is the surface,
+   * which is unmounted by then, and a second place that clears it is a second
+   * place for it to disagree with `stage`.
+   */
+  startedAt: number | null;
   /** Set exactly when `stage === 'fallback'`. The ladder's input. */
   fallback: RealtimePracticeFallback | null;
   /** The last thing this hook has to say, spoken or not. */
@@ -432,6 +476,8 @@ export function useRealtimePractice(
   const [isCoachSpeaking, setIsCoachSpeaking] = useState(false);
   const [heard, setHeard] = useState<string | null>(null);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
+  /** See {@link UseRealtimePracticeReturn.startedAt}. */
+  const [startedAt, setStartedAt] = useState<number | null>(null);
 
   const isMounted = useIsMounted();
 
@@ -763,6 +809,10 @@ export function useRealtimePractice(
         setStage('connecting');
         setFallback(null);
         setNotice(null);
+        // THE SESSION'S OWN CLOCK, STARTED ONCE. A re-mint continues the same
+        // session on the same key and must not restart it — see
+        // `UseRealtimePracticeReturn.startedAt`.
+        if (!isReconnect) setStartedAt(Date.now());
       }
 
       // ---- 1. The microphone ------------------------------------------------
@@ -835,6 +885,7 @@ export function useRealtimePractice(
             // coach, and nothing but the label differs.
             onOfficerSpeech: (event) => coachSpeechRef.current(event),
             onApplicantSpeech: (event) => learnerSpeechRef.current(event),
+            onProviderError: (error) => providerErrorRef.current(error),
             onRemoteStream: (remote) => {
               if (isMounted()) setRemoteStream(remote);
             },
@@ -915,6 +966,34 @@ export function useRealtimePractice(
   );
   const learnerSpeechRef = useRef(learnerSpeech);
   learnerSpeechRef.current = learnerSpeech;
+
+  /**
+   * The provider reported an error (#385).
+   *
+   * TWO AUDIENCES, TWO RENDERINGS, AND NEITHER IS A TEARDOWN. The console line
+   * carries the provider's own code and prose, which is what a developer needs
+   * and what a learner cannot use; the notice is this hook's own sentence,
+   * which is what a learner needs. The session is left running because most of
+   * these end a single turn — falling back here would close a live, working
+   * connection over a hiccup the next question would not have noticed.
+   */
+  const providerError = useCallback(
+    (error: RealtimeProviderError) => {
+      console.warn(
+        '[realtime practice] the provider reported an error',
+        error.code,
+        error.message,
+      );
+      if (!isMounted()) return;
+      setNotice({
+        message: REALTIME_PRACTICE_PROVIDER_ERROR_LINE,
+        spoken: false,
+      });
+    },
+    [isMounted],
+  );
+  const providerErrorRef = useRef(providerError);
+  providerErrorRef.current = providerError;
 
   const closed = useCallback(
     (reason: 'closed' | 'dropped') => {
@@ -1003,6 +1082,7 @@ export function useRealtimePractice(
 
   return {
     stage,
+    startedAt,
     fallback,
     notice,
     questionId,

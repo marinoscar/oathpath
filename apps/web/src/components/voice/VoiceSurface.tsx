@@ -158,6 +158,27 @@ export interface VoiceSurfaceProps {
   getLevel: () => number;
   /** What was heard, as it was graded, or `null` before anything is graded. */
   heard: string | null;
+  /**
+   * When the SESSION started, as an epoch millisecond, or `null`.
+   *
+   * ISSUE #387, AND MOUNT IS NOT A SAFE PROXY FOR IT. This surface is mounted
+   * and unmounted by its host, and the host takes it off the screen for
+   * reasons that have nothing to do with the session ending — a re-read of
+   * `GET /api/practice/sessions/:id` after every question used to replace the
+   * whole page with a spinner, which remounted this component once per
+   * question and restarted the clock with it (measured: 0:09 at 12s, 0:04 at
+   * 29s, 0:11 at 68s). That remount is fixed at its source, and this prop is
+   * why the clock is right even if another one is ever introduced.
+   *
+   * It matters because the clock is a COST guardrail, not a decoration: voice
+   * practice bills the learner's own key by the minute (epic #345, decision 7,
+   * and {@link VOICE_SURFACE_KEY_NOTE} directly beside it), so a timer that
+   * resets systematically under-reports what a session is spending.
+   *
+   * `null` falls back to mount time, which is right for a host that genuinely
+   * mounts this once per session and has no separate start to hand over.
+   */
+  startedAt?: number | null;
   /** The composed turn (#351). See the file header. */
   spokenTurn: string[];
   /** Where the retry-deferred tail begins (#351), or `null`. */
@@ -186,6 +207,7 @@ export function VoiceSurface({
   planned,
   getLevel,
   heard,
+  startedAt = null,
   spokenTurn,
   retryBoundary,
   onStop,
@@ -196,25 +218,42 @@ export function VoiceSurface({
   const rootRef = useRef<HTMLElement | null>(null);
 
   /**
-   * The elapsed timer.
+   * The elapsed timer, measured from the SESSION's start (#387).
    *
-   * Started at MOUNT, which is exactly when the voice session starts — this
-   * surface is entered by the session running and left by it stopping, so
-   * there is no separate "session started at" to thread through and no way for
-   * the two to disagree.
+   * Mount time is only the fallback, for a host with no start to hand over —
+   * see {@link VoiceSurfaceProps.startedAt} for why mount is not a safe proxy
+   * for a session that outlives several of this component's lifetimes.
+   *
+   * IT CANNOT RUN BACKWARDS WHILE THIS IS MOUNTED. The earliest start ever
+   * seen is what it measures from, so a host that re-reports a session's start
+   * — a re-mint publishing a fresh timestamp, a transport handover — can only
+   * ever leave the clock alone, never rewind it. A clock that jumped down is
+   * the exact failure this is fixing, and it is worth being unable to express
+   * rather than merely careful about.
+   */
+  const mountedAtRef = useRef<number>(Date.now());
+  const earliestStartRef = useRef<number>(startedAt ?? mountedAtRef.current);
+  earliestStartRef.current = Math.min(
+    earliestStartRef.current,
+    startedAt ?? mountedAtRef.current,
+  );
+
+  /**
+   * A render every second, so the number below is never more than a second
+   * stale. The number itself is read at RENDER time rather than stored, so a
+   * re-render for any other reason — a phase change, a new question — shows a
+   * current clock instead of the last tick's.
    *
    * It is NOT inside the live region: a per-second announcement of a running
    * clock is the single most hostile thing a screen reader could be asked to
    * do, and the number is on screen for whoever wants it.
    */
-  const startedAtRef = useRef<number>(Date.now());
-  const [elapsedMs, setElapsedMs] = useState(0);
+  const [, tick] = useState(0);
   useEffect(() => {
-    const timer = setInterval(() => {
-      setElapsedMs(Date.now() - startedAtRef.current);
-    }, 1000);
+    const timer = setInterval(() => tick((count) => count + 1), 1000);
     return () => clearInterval(timer);
   }, []);
+  const elapsedMs = Date.now() - earliestStartRef.current;
 
   /**
    * Lock the document while this is up, and put it back exactly as it was.

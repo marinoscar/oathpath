@@ -489,6 +489,54 @@ describe('the guardrails and the keyboard', () => {
     }
   });
 
+  it('measures from the SESSION start it is given, not from its own mount', () => {
+    // ISSUE #387. This component is mounted and unmounted by its host for
+    // reasons that have nothing to do with a session ending — a re-read of the
+    // session after every question used to do exactly that — and the clock is
+    // a COST figure on the learner's own key, so one that restarts
+    // systematically under-reports what a session is spending.
+    renderSurface({ startedAt: Date.now() - 65_000 });
+    expect(screen.getByText('Elapsed 1:05')).toBeInTheDocument();
+  });
+
+  it('falls back to mount for a host that has no session start to hand over', () => {
+    renderSurface({ startedAt: null });
+    expect(screen.getByText('Elapsed 0:00')).toBeInTheDocument();
+  });
+
+  it('never runs backwards, whatever start the host re-reports', () => {
+    // A clock that jumped DOWN is the failure being fixed, so it is worth
+    // being unable to express rather than merely careful about: a re-mint
+    // publishing a fresh timestamp, or a handover between transports, can only
+    // ever leave the clock alone.
+    const view = renderSurface({ startedAt: Date.now() - 65_000 });
+    expect(screen.getByText('Elapsed 1:05')).toBeInTheDocument();
+
+    view.rerender(
+      <ThemeProvider theme={lightTheme}>
+        <VoiceSurface
+          phase="listening"
+          phaseText="Listening. Answer when you are ready."
+          notice={null}
+          questionNumber={1}
+          questionPrompt="What is the supreme law of the land?"
+          position={2}
+          planned={5}
+          getLevel={getLevel}
+          heard={null}
+          startedAt={Date.now()}
+          spokenTurn={[]}
+          retryBoundary={null}
+          onStop={onStop}
+          onTypeInstead={onTypeInstead}
+        />
+      </ThemeProvider>,
+    );
+
+    expect(screen.getByText('Elapsed 1:05')).toBeInTheDocument();
+    expect(screen.queryByText('Elapsed 0:00')).toBeNull();
+  });
+
   it('does not put the clock in the live region', () => {
     renderSurface();
     // A per-second announcement of a running clock is the single most hostile

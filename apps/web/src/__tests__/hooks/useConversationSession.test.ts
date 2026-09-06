@@ -132,8 +132,11 @@ const earconsSpies = vi.hoisted(() => ({
 vi.mock('../../lib/earcons', () => earconsSpies);
 
 // ---------------------------------------------------------------------------
-// `navigator.wakeLock`, faked — enough of it to prove the lock is taken while
-// the loop runs and dropped on every way out of it.
+// `navigator.wakeLock`, faked — kept, and now proving the OPPOSITE (#388):
+// this driver never requests a lock at all. The screen belongs to the SESSION,
+// not to one transport's driver, so `PracticeSessionPage` holds exactly one
+// lock above both drivers and this hook holds none. The fake stays installed
+// so that a lock re-added here would be observed rather than invisible.
 // ---------------------------------------------------------------------------
 
 class FakeSentinel {
@@ -449,9 +452,11 @@ describe('useConversationSession — the happy loop, transition by transition', 
     expect(harness.speech.calls).toEqual([
       { text: QUESTION_ONE.text, kind: 'question' },
     ]);
-    // The wake lock is taken by entering a running phase, not by a separate call.
     expect(view.result.current.isRunning).toBe(true);
-    expect(sentinels).toHaveLength(1);
+    // AND NO WAKE LOCK IS TAKEN HERE (#388). Running is what the host reads to
+    // decide the screen should stay lit; taking the lock as well would be a
+    // second sentinel the moment the other transport is also under way.
+    expect(sentinels).toHaveLength(0);
   });
 
   it('sits in `preparing` while the permission prompt is open — it does NOT claim to be asking', async () => {
@@ -475,10 +480,11 @@ describe('useConversationSession — the happy loop, transition by transition', 
 
     // AND IT IS RUNNING. `preparing` is a phase rather than a hold at `idle`
     // precisely so these three stay true across the device round-trip: a second
-    // tap cannot open a second prompt, the wake lock is held, and a host renders
-    // Stop rather than a Start button that has already been pressed.
+    // tap cannot open a second prompt, the host holds the screen awake off the
+    // back of `isRunning` (#388), and a host renders Stop rather than a Start
+    // button that has already been pressed.
     expect(view.result.current.isRunning).toBe(true);
-    expect(sentinels).toHaveLength(1);
+    expect(sentinels).toHaveLength(0);
     await act(async () => {
       view.result.current.start();
     });
@@ -1476,12 +1482,11 @@ describe('useConversationSession — every involuntary exit is spoken', () => {
   ];
 
   it.each(CODES)(
-    '%s exits the loop cleanly, speaks its own reason, and releases stream + wake lock',
+    '%s exits the loop cleanly, speaks its own reason, and releases the stream',
     async (code) => {
       const harness = makeHarness();
       const view = mount(harness);
       await startToListening(harness, view);
-      expect(sentinels).toHaveLength(1);
 
       await act(async () => {
         harness.failCapture(code);
@@ -1500,7 +1505,9 @@ describe('useConversationSession — every involuntary exit is spoken', () => {
       expect(harness.speech.said(`${problem.message} ${problem.remedy}`)).toBe(true);
       expect(harness.capture.releaseStream).toHaveBeenCalled();
       expect(harness.voiceActivity.disarm).toHaveBeenCalled();
-      expect(sentinels[0].release).toHaveBeenCalled();
+      // The screen is released by the HOST, which reads `isRunning` — now
+      // false. See `PracticeSessionPage`'s `useWakeLock` call (#388).
+      expect(view.result.current.isRunning).toBe(false);
     },
   );
 
@@ -1529,7 +1536,7 @@ describe('useConversationSession — every involuntary exit is spoken', () => {
     expect(view.result.current.notice?.reason).toBe('transcribe_unavailable');
     expect(harness.speech.said(CONVERSATION_NOTICE_TRANSCRIBE_UNAVAILABLE)).toBe(true);
     expect(harness.capture.releaseStream).toHaveBeenCalled();
-    expect(sentinels[0].release).toHaveBeenCalled();
+    expect(view.result.current.isRunning).toBe(false);
   });
 
   it('a grade that could not be recorded leaves the loop, spoken', async () => {
@@ -1644,7 +1651,7 @@ describe('useConversationSession — the learner is never held', () => {
     expect(harness.capture.releaseStream).toHaveBeenCalled();
     expect(harness.voiceActivity.disarm).toHaveBeenCalled();
     expect(harness.speech.stop).toHaveBeenCalled();
-    expect(sentinels[0].release).toHaveBeenCalled();
+    expect(view.result.current.isRunning).toBe(false);
   });
 
   it.each(PHASES)('Type instead exits immediately from $name', async ({ name, reach }) => {
@@ -1818,22 +1825,23 @@ describe('useConversationSession — unmount', () => {
   ];
 
   it.each(PHASES)(
-    'releases the stream, the wake lock, the voice AND the shared AudioContext when unmounted in $name',
+    'releases the stream, the voice AND the shared AudioContext when unmounted in $name',
     async ({ name, reach }) => {
       const harness = makeHarness();
       const view = mount(harness);
       await reach(harness, view);
       expect(phaseOf(view)).toBe(name);
-      expect(sentinels).toHaveLength(1);
+      // NOTHING TO RELEASE THAT WAS NEVER TAKEN (#388): the wake lock is the
+      // host page's, and unmounting this hook unmounts nothing of it.
+      expect(sentinels).toHaveLength(0);
 
       view.unmount();
 
       expect(harness.capture.releaseStream).toHaveBeenCalled();
       expect(harness.voiceActivity.disarm).toHaveBeenCalled();
       expect(harness.speech.stop).toHaveBeenCalled();
-      expect(sentinels[0].release).toHaveBeenCalled();
-      // Issue #314: the fourth thing unmount must release, alongside the
-      // stream, the wake lock and the voice — `closeSharedAudioContext()`
+      // Issue #314: the third thing unmount must release, alongside the
+      // stream and the voice — `closeSharedAudioContext()`
       // (`../../lib/earcons`, spied at the top of this file) is called on
       // EVERY one of the five phases, not merely asserted not to crash.
       expect(earconsSpies.closeSharedAudioContext).toHaveBeenCalled();

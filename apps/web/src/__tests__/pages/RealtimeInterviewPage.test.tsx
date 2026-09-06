@@ -684,6 +684,81 @@ describe('the relay', () => {
     expect(JSON.parse(String(item.output))).toEqual(nextQuestionResult());
   });
 
+  it('posts ONE call when the provider announces it twice (#385)', async () => {
+    // The de-duplication lives in `services/realtimeConnection.ts`, which this
+    // transport SHARES with spoken practice — so the interview inherits both
+    // the defect and the fix. Without the guard the officer's turn was posted
+    // to `POST /api/interviews/:id/realtime/tool-calls` twice and answered
+    // with two `response.create`s, the second of which the provider rejects
+    // and the interview falls silent on.
+    const user = userEvent.setup();
+    renderVoice();
+    await startSession(user);
+
+    toolResults = [nextQuestionResult()];
+    await modelCalls('next_question');
+
+    // The OTHER shape for the same call, which the current Realtime API emits
+    // alongside the first.
+    await emit({
+      type: 'response.output_item.done',
+      item: {
+        type: 'function_call',
+        call_id: 'call-next_question',
+        name: 'next_question',
+        arguments: '{}',
+      },
+    });
+
+    expect(toolCalls).toHaveLength(1);
+    expect(
+      channelSends.filter((sent) => sent.type === 'conversation.item.create'),
+    ).toHaveLength(1);
+    // The line that stalls the turn when there are two of it. A bare
+    // `response.create` is the tool-result one; the opening turn's carries a
+    // `response.instructions` and is `speakVerbatim`'s.
+    expect(
+      channelSends.filter(
+        (sent) => sent.type === 'response.create' && sent.response === undefined,
+      ),
+    ).toHaveLength(1);
+  });
+
+  it('shows the applicant that the provider reported a problem (#385)', async () => {
+    // There was no `error` branch at all, so a rejection that stalled a turn
+    // reached nobody. The interview is NOT torn down — most of these end one
+    // turn — but silence with nothing on screen is the one outcome that is
+    // definitely wrong.
+    const user = userEvent.setup();
+    renderVoice();
+    await startSession(user);
+
+    await emit({
+      type: 'error',
+      error: {
+        type: 'invalid_request_error',
+        code: 'conversation_already_has_active_response',
+        message: 'Conversation already has an active response.',
+      },
+    });
+
+    expect(
+      await screen.findByText(/the voice connection hit a snag/i),
+    ).toBeInTheDocument();
+
+    // AND THE PROVIDER'S OWN PROSE IS NOT ON THE SCREEN. An applicant cannot
+    // act on `conversation_already_has_active_response`; it goes to the
+    // console, for a developer.
+    expect(
+      screen.queryByText(/conversation_already_has_active_response/i),
+    ).toBeNull();
+
+    // Still live: the end control is the applicant's, not an error's.
+    expect(
+      screen.getByRole('button', { name: /end this interview/i }),
+    ).toBeEnabled();
+  });
+
   it('relays a REFUSAL as a result, with its instruction, not as an error', async () => {
     const user = userEvent.setup();
     const { container } = renderVoice();

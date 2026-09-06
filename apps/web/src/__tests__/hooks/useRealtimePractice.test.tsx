@@ -29,6 +29,7 @@ import { act, renderHook, waitFor } from '@testing-library/react';
 import {
   MAX_RECONNECTS,
   REALTIME_PRACTICE_IDLE_MS,
+  REALTIME_PRACTICE_PROVIDER_ERROR_LINE,
   useRealtimePractice,
   type RealtimePracticeMicrophonePort,
 } from '../../hooks/useRealtimePractice';
@@ -705,6 +706,140 @@ describe('the degradation ladder’s client half', () => {
     expect(view.result.current.notice?.message).toBe(
       view.result.current.fallback?.message,
     );
+  });
+});
+
+// -----------------------------------------------------------------------------
+// Issue #385: one call, however many shapes announce it
+// -----------------------------------------------------------------------------
+
+describe('a doubly-announced tool call is relayed once', () => {
+  it('posts ONE tool call and sends ONE response.create for one call id', async () => {
+    toolResults = [
+      nothingOutstanding(),
+      askedResult(),
+      {
+        status: 'ok',
+        tool: 'grade_answer',
+        say: ['That is right.'],
+        then: 'ask_next_question',
+        questionId: null,
+      },
+    ];
+    const view = renderRealtime();
+    await act(async () => view.result.current.start());
+    await completeHandshake();
+    await waitFor(() => expect(toolCalls.length).toBe(2));
+
+    const beforeGrade = channelSends.length;
+
+    // THE CURRENT REALTIME API EMITS BOTH OF THESE FOR ONE FUNCTION CALL.
+    await modelCalls('grade_answer', {
+      questionId: 'question-1',
+      transcript: 'the Constitution',
+    });
+    await emit({
+      type: 'response.output_item.done',
+      item: {
+        type: 'function_call',
+        call_id: 'call-grade_answer',
+        name: 'grade_answer',
+        arguments: JSON.stringify({
+          questionId: 'question-1',
+          transcript: 'the Constitution',
+        }),
+      },
+    });
+    await waitFor(() => expect(toolCalls.length).toBe(3));
+
+    // ONE POST to `POST /api/practice/sessions/:id/realtime/tool-calls`. The
+    // duplicate double-recorded a graded attempt against the engine.
+    expect(toolCalls).toHaveLength(3);
+
+    const afterGrade = channelSends.slice(beforeGrade);
+    expect(
+      afterGrade.filter((sent) => sent.type === 'conversation.item.create'),
+    ).toHaveLength(1);
+    // AND ONE `response.create`. The second lands while a response is active,
+    // the provider rejects it, and the coach never reads the question aloud —
+    // #385's measured 17.0s and 15.2s silences.
+    expect(
+      afterGrade.filter(
+        (sent) => sent.type === 'response.create' && sent.response === undefined,
+      ),
+    ).toHaveLength(1);
+  });
+
+  it('tells the learner when the provider reports an error, and stays live', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      toolResults = [nothingOutstanding(), askedResult()];
+      const view = renderRealtime();
+      await act(async () => view.result.current.start());
+      await completeHandshake();
+      await waitFor(() => expect(view.result.current.stage).toBe('live'));
+
+      await emit({
+        type: 'error',
+        error: {
+          type: 'invalid_request_error',
+          code: 'conversation_already_has_active_response',
+          message: 'Conversation already has an active response.',
+        },
+      });
+
+      // RENDERED, in this hook's own code-owned words.
+      expect(view.result.current.notice?.message).toBe(
+        REALTIME_PRACTICE_PROVIDER_ERROR_LINE,
+      );
+      // NOT SPOKEN: the coach may be mid-sentence, and this describes a hiccup
+      // rather than a change in the loop.
+      expect(view.result.current.notice?.spoken).toBe(false);
+      expect(view.speak).not.toHaveBeenCalled();
+
+      // AND LOGGED, with the provider's own code — which the learner never sees.
+      expect(warn).toHaveBeenCalled();
+      expect(JSON.stringify(warn.mock.calls)).toContain(
+        'conversation_already_has_active_response',
+      );
+
+      // The session is untouched. Closing a live, working connection over an
+      // error that ended one turn would be worse than the error.
+      expect(view.result.current.stage).toBe('live');
+      expect(view.result.current.fallback).toBeNull();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
+
+// -----------------------------------------------------------------------------
+// Issue #387: the session's own clock
+// -----------------------------------------------------------------------------
+
+describe('the cost clock measures the session, not a mount', () => {
+  it('publishes one start, and a re-mint does not restart it', async () => {
+    toolResults = [nothingOutstanding(), askedResult()];
+    const view = renderRealtime();
+    expect(view.result.current.startedAt).toBeNull();
+
+    await act(async () => view.result.current.start());
+    await completeHandshake();
+    await waitFor(() => expect(view.result.current.stage).toBe('live'));
+
+    const started = view.result.current.startedAt;
+    expect(started).toBeTypeOf('number');
+
+    // A DROP AND A RE-MINT ARE ONE SESSION on the learner's own key, billed as
+    // one — so the clock they are reading must not go back to zero.
+    await act(async () => {
+      channel().onclose?.();
+      await Promise.resolve();
+    });
+    await completeHandshake(2);
+    await waitFor(() => expect(view.result.current.stage).toBe('live'));
+
+    expect(view.result.current.startedAt).toBe(started);
   });
 });
 

@@ -161,6 +161,7 @@ export default function RealtimeInterviewPage() {
     fallback,
     transcript,
     isOfficerSpeaking,
+    providerNotice,
     phase,
     progress,
     awaitingCompletion,
@@ -345,6 +346,16 @@ export default function RealtimeInterviewPage() {
         {completeError && (
           <Alert severity="error" role="alert" sx={{ mb: 3 }}>
             {completeError}
+          </Alert>
+        )}
+
+        {/* A provider error, reported rather than swallowed (#385). `status`
+            rather than `alert`: the interview is still running and the officer
+            may be mid-sentence, so this is not worth interrupting a screen
+            reader for — it is worth being on the screen. */}
+        {providerNotice && (
+          <Alert severity="warning" role="status" sx={{ mb: 3 }}>
+            {providerNotice}
           </Alert>
         )}
 

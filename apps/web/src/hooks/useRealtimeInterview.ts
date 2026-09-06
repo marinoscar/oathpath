@@ -90,6 +90,7 @@ import {
   isRealtimeToolName,
   openRealtimeConnection,
   type RealtimeConnection,
+  type RealtimeProviderError,
   type RealtimeSpeechEvent,
   type RealtimeToolCallEvent,
 } from '../services/realtimeConnection';
@@ -203,6 +204,21 @@ export interface UseRealtimeInterviewReturn {
   /** True while the officer's words are still arriving. */
   isOfficerSpeaking: boolean;
 
+  /**
+   * One sentence about a provider error, or `null` (#385).
+   *
+   * NOT A FALLBACK AND NOT AN ENDING. The provider reports errors that end a
+   * single TURN as well as ones that end a session, and the two are not
+   * distinguishable from the payload — so the interview is left running and
+   * the applicant is told, once, that the officer may have missed something.
+   * Silence with nothing on screen is what #385 measured, and it is the one
+   * outcome that is definitely wrong.
+   *
+   * Code-owned copy. The provider's own code and prose go to the console, for
+   * a developer; an applicant cannot act on either.
+   */
+  providerNotice: string | null;
+
   phase: InterviewPhase | null;
   progress: InterviewProgress | null;
   awaitingCompletion: boolean;
@@ -249,6 +265,11 @@ export interface UseRealtimeInterviewReturn {
  * the text transport with progress intact"), and a screen that told them their
  * AI provider had refused a mint would be explaining the wrong layer.
  */
+/** Rendered when the provider reports an error mid-interview (#385). */
+export const REALTIME_INTERVIEW_PROVIDER_ERROR_LINE =
+  'The voice connection hit a snag. If the officer goes quiet, say “could you ' +
+  'repeat that” — or end the interview and carry on in text.';
+
 const CONNECTION_LOST: RealtimeFallback = {
   code: 'connection_lost',
   message: 'The voice connection dropped and could not be re-established.',
@@ -270,6 +291,7 @@ export function useRealtimeInterview(
 
   const [transcript, setTranscript] = useState<RealtimeTranscriptEntry[]>([]);
   const [isOfficerSpeaking, setIsOfficerSpeaking] = useState(false);
+  const [providerNotice, setProviderNotice] = useState<string | null>(null);
 
   const [phase, setPhase] = useState<InterviewPhase | null>(null);
   const [progress, setProgress] = useState<InterviewProgress | null>(null);
@@ -644,6 +666,7 @@ export function useRealtimeInterview(
             onToolCall: (event) => handleToolCallRef.current(event),
             onOfficerSpeech: (event) => officerSpeechRef.current(event),
             onApplicantSpeech: (event) => applicantSpeechRef.current(event),
+            onProviderError: (error) => providerErrorRef.current(error),
             onRemoteStream: (remote) => {
               if (isMounted()) setRemoteStream(remote);
             },
@@ -718,6 +741,30 @@ export function useRealtimeInterview(
   }, [isMounted]);
   const applicantSpeechRef = useRef(applicantSpeech);
   applicantSpeechRef.current = applicantSpeech;
+
+  /**
+   * The provider reported an error (#385).
+   *
+   * TWO AUDIENCES, TWO RENDERINGS, AND NEITHER IS A TEARDOWN — the identical
+   * handling `useRealtimePractice` gives the same event, for the identical
+   * reason: closing a live connection over an error that ended one turn would
+   * move an applicant to the text transport mid-interview for a hiccup the
+   * next question would not have noticed.
+   */
+  const providerError = useCallback(
+    (error: RealtimeProviderError) => {
+      console.warn(
+        '[realtime interview] the provider reported an error',
+        error.code,
+        error.message,
+      );
+      if (!isMounted()) return;
+      setProviderNotice(REALTIME_INTERVIEW_PROVIDER_ERROR_LINE);
+    },
+    [isMounted],
+  );
+  const providerErrorRef = useRef(providerError);
+  providerErrorRef.current = providerError;
 
   const closed = useCallback(
     (reason: 'closed' | 'dropped') => {
@@ -841,6 +888,7 @@ export function useRealtimeInterview(
 
     transcript,
     isOfficerSpeaking,
+    providerNotice,
 
     phase,
     progress,

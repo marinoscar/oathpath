@@ -180,7 +180,6 @@ import type {
 } from './useAudioCapture';
 import { useIsMounted } from './useIsMounted';
 import type { UseVoiceActivityReturn, VoiceActivityEvent } from './useVoiceActivity';
-import { useWakeLock, type UseWakeLockState } from './useWakeLock';
 
 // ---------------------------------------------------------------------------
 // Tunables. Named constants in one place, for the reason `useVoiceActivity`'s
@@ -511,8 +510,24 @@ export interface UseConversationSessionReturn {
   isRunning: boolean;
   /** The last exit's reason, spoken and renderable. Cleared by the next start. */
   notice: ConversationNotice | null;
-  /** The screen wake lock, for a host that wants to say it could not be held. */
-  wakeLock: UseWakeLockState;
+  /**
+   * NO `wakeLock` HERE ANY MORE — THE SCREEN IS THE SESSION'S, NOT THE
+   * DRIVER'S (#388).
+   *
+   * This hook used to call `useWakeLock(phase !== 'idle')` itself and publish
+   * the result for a host that wanted to say the screen could not be held. It
+   * was the ONLY call site in the application, and it was gated on THIS
+   * driver's phase — so on the realtime transport, where this hook is mounted
+   * but never runs, the phase stayed `idle` and the lock was never requested
+   * at all. A learner talking to the live coach watched the phone go dark and
+   * the session suspend, on a metered connection that kept billing.
+   *
+   * The lock now lives one level up, in `PracticeSessionPage`, held for
+   * "a voice session is under way" — either transport. It is deliberately NOT
+   * ALSO held here: two hooks each requesting one is two sentinels, and across
+   * a mid-session fallback from realtime to this loop the two would overlap.
+   * One owner, one lock, one release. See `useWakeLock`'s own header.
+   */
   /** Begin. A no-op when already running or when there is no question. */
   start: () => void;
   /** End it now, from any phase. Defaults to the silent, deliberate exit. */
@@ -1148,8 +1163,9 @@ export function useConversationSession(
    * Unmount mid-loop.
    *
    * The stream, the pulse, the timers and the shared `AudioContext` all go.
-   * The wake lock is released by `useWakeLock`'s own unmount, which is the
-   * whole reason it is a declarative hook.
+   * The wake lock is not among them: it is the host page's (#388), released by
+   * `useWakeLock`'s own unmount there, which is the whole reason it is a
+   * declarative hook.
    *
    * `hasRunRef` gates the two SHARED things — the capture stream and the
    * module-level audio context — because a host that mounted this hook and
@@ -1175,13 +1191,10 @@ export function useConversationSession(
     [clearTimers],
   );
 
-  const wakeLock = useWakeLock(phase !== 'idle');
-
   return {
     phase,
     isRunning: phase !== 'idle',
     notice,
-    wakeLock,
     start,
     stop,
     skip,

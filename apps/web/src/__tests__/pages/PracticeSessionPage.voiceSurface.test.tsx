@@ -811,15 +811,25 @@ afterEach(() => {
 describe('the stage → phase mapping', () => {
   it('maps the two stages a session is under way in, and nothing else', () => {
     // The two that matter, and the only two the gate ever renders.
-    expect(realtimeStageAsPhase('connecting')).toBe('preparing');
-    expect(realtimeStageAsPhase('live')).toBe('listening');
+    expect(realtimeStageAsPhase('connecting', false)).toBe('preparing');
+    expect(realtimeStageAsPhase('connecting', true)).toBe('preparing');
+
+    // `live` IS TWO PICTURES, NOT ONE (#386). It used to collapse to
+    // `listening` unconditionally, so the surface read "Listening" for the
+    // whole session — including while the coach was reading the question out
+    // loud, which invited a learner to answer a question that had not
+    // finished being asked.
+    expect(realtimeStageAsPhase('live', false)).toBe('listening');
+    expect(realtimeStageAsPhase('live', true)).toBe('speakingQuestion');
 
     // The three the surface must NOT be showing for. They map to `idle` so the
     // mapping is total; correctness for them comes from the gate excluding
     // them, which is the next `describe`.
-    expect(realtimeStageAsPhase('idle')).toBe('idle');
-    expect(realtimeStageAsPhase('fallback')).toBe('idle');
-    expect(realtimeStageAsPhase('ended')).toBe('idle');
+    for (const speaking of [false, true]) {
+      expect(realtimeStageAsPhase('idle', speaking)).toBe('idle');
+      expect(realtimeStageAsPhase('fallback', speaking)).toBe('idle');
+      expect(realtimeStageAsPhase('ended', speaking)).toBe('idle');
+    }
   });
 
   it('calls exactly `connecting` and `live` a session under way', () => {

@@ -633,6 +633,65 @@ too, so a reader of either spec is told which transport the state machine
 in front of them describes, rather than left to infer it from which
 document they happened to open first.
 
+### 8.2 One relay per tool call, and a silent turn is nudged once
+
+*(Added by issue #385; not covered when this document was first written,
+which described only the tool **contract** §3-§5 enforce server-side and
+said nothing about how a provider event becomes an `onToolCall` call on the
+web side of the same connection.)*
+
+`handleProviderEvent` (`apps/web/src/services/realtimeConnection.ts`) is
+the one function that turns a raw provider event into a call on
+`RealtimeConnectionHandlers`, shared verbatim by this transport and the
+mock-interview one (`realtime-interview.md`'s transport). Two provider
+event shapes announce **one** function call —
+`response.function_call_arguments.done` and a `function_call`
+`response.output_item.done` — because different model versions emit
+different subsets, and the current Realtime API emits **both** for a
+single call. A per-connection `RealtimeTurnTracker`
+(`createRealtimeTurnTracker`) is a **required** third argument to
+`handleProviderEvent`, so a caller cannot compile without one; its
+`claimToolCall(callId)` is the single choke point both event shapes funnel
+through (`relayToolCall`), returning `true` only the first time a given
+`callId` is seen. Before this fix every `next_question`/`grade_answer`/
+`skip_question`/`repeat_question`/`end_session` call was relayed twice
+with the same `callId`, `sendToolResult` sent two `response.create`s for
+one result, and the provider rejected the second with
+`conversation_already_has_active_response` — measured as a 15-17 second
+silence with a question on screen and nothing spoken. The tracker's
+memory is bounded at `TOOL_CALL_MEMORY` (64 ids, oldest evicted): the
+duplicate is always adjacent — the two shapes for one call arrive
+milliseconds apart in the same response — so 64 is slack, not a tuned
+limit.
+
+**A provider `error` event is reported, never swallowed, and never a
+teardown.** `RealtimeConnectionHandlers.onProviderError` is now
+**required** on the interface (an optional handler is one a caller can
+silently forget, which is exactly how this fix's own symptom went
+unreported). `useRealtimePractice`'s implementation logs the provider's
+own `code`/`message` to the console for a developer and sets a
+**non-spoken** notice (`REALTIME_PRACTICE_PROVIDER_ERROR_LINE`) for the
+learner — never a bespoke sentence naming the provider's own error string,
+which a learner cannot act on. The connection stays open: most provider
+errors end one turn, not the session, so tearing down a live connection
+over one rejected `response.create` would cost a working session over a
+hiccup the next question would not have noticed.
+
+**A tool result that produces no model activity within
+`REALTIME_STALL_NUDGE_MS` (6 seconds) is nudged once.** `sendToolResult`
+arms this after every `response.create` it sends and cancels it on any
+sign the model is producing something — `response.created`, an audio
+buffer or delta, a transcript delta, or a further tool call
+(`MODEL_ACTIVITY_EVENTS`, deliberately excluding `response.done`, which
+ends the very response the nudge is watching for). If none of those
+happen before the timer fires, one bare `response.create` is sent to
+unstick the turn; the nudge is cleared and re-armed by the next tool
+result, so a genuinely dead connection is prodded once rather than polled
+on a loop that spends the learner's own key. This is a **per-turn**
+liveness check, distinct from §10's idle-disconnect bound, which closes
+the whole connection after a longer silence with no tool call or speech at
+all.
+
 ## 9. `inputMode`/`promptMode` provenance, and the deferred `transport` column
 
 **`inputMode: 'spoken'`, `promptMode: 'heard'`** — identical to the
@@ -755,6 +814,30 @@ billing sentence appears once**, on that same control: the learner's own AI
 key is billed by the minute for realtime audio, stated plainly rather than
 buried in a settings page, with no invented per-minute price this document
 does not have a real number for.
+
+**The elapsed timer measures the session's own start, not the surface's
+mount.** `useRealtimePractice`'s `startedAt` is set once, when `start()`
+opens the connection, and is **not** reset by a re-mint (§10's own bounded
+reconnects are one continuous, one-billed session) — only `retry()` resets
+it, because that begins a new session after a fallback. `VoiceSurface`
+takes this as a `startedAt` prop and keeps the earliest value it has ever
+seen, so a host that briefly takes the surface off screen and remounts it
+(issue #387's own bug, on the request/response transport) can never make
+the clock run backwards.
+
+**The screen wake lock is the page's, not this transport's own.** There is
+exactly one `useWakeLock` call in the application
+(`useWakeLock.test.ts` reads the source tree and fails the build on a
+second one), in `PracticeSessionPage.tsx`, gated on `voiceSessionIsUnderWay`
+— `conversation.isRunning` (the request/response loop) OR
+`realtimeSessionIsUnderWay(realtimeStage)` (this transport) — so a session
+on either transport holds the identical lock and a mid-session fallback
+between them (§8) is a release-then-re-acquire on the same hook, never two
+overlapping sentinels. This transport has no wake-lock call site of its
+own: it never held one directly, and the shipped bug was exactly that
+absence — see `docs/specs/conversation-mode.md` §8 for the full account,
+including why the long-standing `<video>`-element fallback for a browser
+with no Wake Lock API was considered and rejected.
 
 ## 11. Echo suppression: structural, then probabilistic
 
