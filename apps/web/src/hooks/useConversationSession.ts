@@ -3,9 +3,9 @@
  *
  * Issue #312, epic #304 / E13 ("Conversation mode"). This is the driver
  * `docs/specs/conversation-mode.md` §4 names: the thing that reads a question
- * aloud, hears the answer, sends it to be transcribed and graded, speaks the
- * accepted answer, and moves on — so a learner practising on a walk taps once
- * at the start and not again.
+ * aloud, hears the answer, sends it to be transcribed and graded, speaks what
+ * the coach has to say about it, and moves on — so a learner practising on a
+ * walk taps once at the start and not again.
  *
  * ```
  * idle
@@ -17,9 +17,12 @@
  *  └─ end of turn ──────────────────────────► processing
  * processing             transcribe → submit → grade; the soft "working" pulse
  *  └─ graded ───────────────────────────────► speakingAnswer
- * speakingAnswer         TTS reads the accepted answer
- *  ├─ correct ──────────────────────────────► advancing
- *  └─ missed AND no retry used ─► "say that again" ──► listening (retry)
+ * speakingAnswer         TTS reads the server's composed turn (#379) — the
+ *                        verdict, the reason, the coach's line, and the
+ *                        accepted answer — up to `retryBoundary`
+ *  ├─ retry off the table ─► the deferred tail ─────► advancing
+ *  └─ missed AND no retry used ─► "say that again" ──► listening (retry; the
+ *                                 tail, where the answer is, stays unsaid)
  * advancing              a short pause, then advance()
  * ```
  *
@@ -357,21 +360,74 @@ export type ConversationVoiceActivityPort = Pick<
  * What came back from grading one spoken answer.
  *
  * Deliberately NOT `PracticeAttemptResult`. The driver needs three facts —
- * did it land, what should be read aloud, and is the grade untrustworthy —
+ * did it land, what should be SAID about it, and is the grade untrustworthy —
  * and taking the whole attempt shape would couple this machine to the practice
  * API's response for no gain and make the mock in every test a page of
  * fixture. The host, which already has the full result, answers the three.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THE MIDDLE FACT IS A LIST AND AN INDEX, AND NOT ONE STRING (issue #379)
+ * ---------------------------------------------------------------------------
+ *
+ * It used to be `spokenAnswer: string | null` — the bare first accepted
+ * answer — and this driver read that one string aloud. Two defects lived in
+ * that shape, and neither was fixable by rewording anything here:
+ *
+ *  1. **The verdict and the coach were never spoken.** A learner who was RIGHT
+ *     and a learner who was WRONG heard byte-identical audio — "the
+ *     Constitution" either way — which is precisely the failure a hands-free
+ *     session cannot survive, because there is no screen being looked at to
+ *     disambiguate it.
+ *  2. **The accepted answer was spoken BEFORE the retry was offered.** A retry
+ *     offered after the answer has been read out is a repeat-after-me, and the
+ *     `correct` attempt it records proves nothing about recall.
+ *
+ * Both were already solved on the server: `practice/spoken-turn.ts` composes
+ * the ordered lines and says where the retry-deferred tail begins, and the
+ * screen has honoured that boundary since #356 (`VoiceSurface`'s
+ * `visibleSpokenTurn`). This port carries the same two values through to the
+ * AUDIO so the two cannot disagree — a screen that hides the answer while the
+ * speaker reads it out is the same defect wearing a different sense.
  */
 export interface ConversationGrade {
   /** The recorded outcome. Anything but `correct` is a miss. */
   outcome: PracticeOutcome;
   /**
-   * The accepted answer to read aloud, or `null` to say nothing.
+   * The lines the coach says about this attempt, in reading order.
    *
-   * `null` is ordinary, not an error: a question whose answer resolution needs
-   * a state the learner has not set has nothing to read.
+   * SPOKEN VERBATIM, ONE `speak` CALL PER ELEMENT, AND NEVER RE-DERIVED HERE.
+   * The verdict, the grader's reason, the accepted answer and the coach's line
+   * are all selected and ordered server-side; a driver that rebuilt any of
+   * them from `outcome` would be a second description of one verdict, free to
+   * disagree with the first — and the one a learner would trust is whichever
+   * they noticed second.
+   *
+   * An array rather than one joined string because the pacing between elements
+   * is the point: each is its own utterance, interruptible, with the loop's
+   * own liveness check between them.
+   *
+   * Empty is tolerated and means "say nothing" — the server's composer
+   * guarantees at least the verdict, so an empty turn is a host that had
+   * nothing rather than a state this machine reasons about. It advances.
    */
-  spokenAnswer: string | null;
+  spokenTurn: readonly string[];
+  /**
+   * Index into {@link spokenTurn} at which the retry-deferred tail begins, or
+   * `null` when no retry of this attempt is available.
+   *
+   * `null` → speak the whole array; there is nothing to hold back. A number
+   * `k` → speak `spokenTurn.slice(0, k)`, then offer the retry, and speak
+   * `spokenTurn.slice(k)` only once retrying is off the table — the learner's
+   * one-per-question budget is spent, or the attempt did not miss. `k` equal
+   * to the array's length is legitimate and means a retry is armed with
+   * nothing deferred.
+   *
+   * It is an OPPORTUNITY, never an instruction. Whether a retry is actually
+   * offered is this driver's call and only this driver's: the per-question
+   * budget lives in {@link retryUsedRef} and the server cannot see it. What
+   * the server decides is only what is safe to say BEFORE one.
+   */
+  retryBoundary: number | null;
   /**
    * The recogniser was not trusted (`failureCause: 'misheard'`).
    *
@@ -782,7 +838,7 @@ export function useConversationSession(
     [finish, isCurrent, say, toAdvancing, toListening],
   );
 
-  /** Grade the transcript, read the accepted answer, then retry or move on. */
+  /** Grade the transcript, speak the composed turn, then retry or move on. */
   const gradeTranscript = useCallback(
     async (heard: string, confidence: number | null, turn: number) => {
       const opts = optionsRef.current;
@@ -811,18 +867,50 @@ export function useConversationSession(
       // the machine as the start of an answer.
       optionsRef.current.voiceActivity.disarm();
 
-      if (grade.spokenAnswer) {
-        await say(grade.spokenAnswer, 'answer');
+      // THE SERVER'S COMPOSED TURN, SPOKEN VERBATIM AND IN ITS OWN ORDER
+      // (#379). One utterance per element rather than one joined string: the
+      // pacing between them is why `spokenTurn` is an array at all, and the
+      // liveness check after each await is the same one every other await in
+      // this file carries — a turn that was invalidated mid-verdict must not
+      // finish reading it into a session that has moved on.
+      //
+      // `?? []` and the clamp are defensive, not expected: `composeSpokenTurn`
+      // guarantees at least the verdict and an in-range index. A turn that
+      // arrived empty anyway speaks nothing and still ADVANCES — silence here
+      // is the bug this issue closed, and a hang would be worse than either.
+      const lines = grade.spokenTurn ?? [];
+      const deferFrom = Math.max(
+        0,
+        Math.min(grade.retryBoundary ?? lines.length, lines.length),
+      );
+
+      for (const line of lines.slice(0, deferFrom)) {
+        await say(line, 'answer');
         if (!isCurrent(turn)) return;
       }
 
       const missed = grade.outcome !== 'correct' || grade.misheard === true;
       if (missed && !retryUsedRef.current) {
+        // THE TAIL IS NOT SPOKEN HERE, and that is the whole point of the
+        // boundary: everything from `deferFrom` on is where the accepted
+        // answer lives, and reading it out before inviting another go makes
+        // the retry a repeat-after-me and the `correct` attempt it records
+        // worthless as evidence.
         retryUsedRef.current = true;
         await say(CONVERSATION_NUDGE_RETRY);
         if (!isCurrent(turn)) return;
         toListening();
         return;
+      }
+
+      // Retrying is off the table — the budget is spent, or nothing missed —
+      // so the deferred tail is owed. This is also the branch the SECOND
+      // answer of a retry lands in: `retryUsedRef` is already true by then, so
+      // a learner who takes the retry and misses again still hears the answer
+      // rather than losing it to the branch above.
+      for (const line of lines.slice(deferFrom)) {
+        await say(line, 'answer');
+        if (!isCurrent(turn)) return;
       }
 
       toAdvancing(turn);

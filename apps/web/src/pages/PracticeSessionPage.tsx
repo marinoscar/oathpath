@@ -1598,10 +1598,15 @@ export default function PracticeSessionPage() {
 
       return {
         outcome: attempt.outcome,
-        // The FIRST accepted answer, which is what the hand-driven verdict
-        // reads aloud too. `null` — a question whose answers need a state this
-        // learner has not set — is ordinary, and the driver says nothing.
-        spokenAnswer: graded.acceptedAnswers[0]?.text ?? null,
+        // THE SERVER'S COMPOSED TURN, HANDED OVER VERBATIM (#379). This page
+        // re-derives nothing — not the verdict, not the coach's line, not
+        // which accepted answer to read — for the reason `VoiceSurface`'s
+        // header already gives for the screen: a second description of one
+        // verdict is free to disagree with the first, and the one a learner
+        // trusts is whichever they noticed second. The same two fields now
+        // drive the audio, so the surface and the speaker cannot diverge.
+        spokenTurn: attempt.spokenTurn,
+        retryBoundary: attempt.retryBoundary,
         // The server's own verdict about the recogniser, never this page's.
         misheard: attempt.failureCause === 'misheard',
       };
