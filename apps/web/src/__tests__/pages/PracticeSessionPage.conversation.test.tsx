@@ -41,7 +41,7 @@
  */
 
 import { CssBaseline, ThemeProvider } from '@mui/material';
-import { act, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
@@ -51,6 +51,7 @@ import { AiStatusProvider } from '../../contexts/AiStatusContext';
 import { AuthContext } from '../../contexts/AuthContext';
 import PracticeSessionPage from '../../pages/PracticeSessionPage';
 import { describeCaptureProblem } from '../../hooks/useAudioCapture';
+import { CONVERSATION_NUDGE_RETRY } from '../../hooks/useConversationSession';
 import { lightTheme } from '../../theme';
 import type {
   AiStatus,
@@ -361,13 +362,39 @@ function installMediaEnvironment({
   });
 }
 
-/** Let whatever is speaking finish, the way a real engine eventually does. */
+/**
+ * Let whatever is speaking finish, the way a real engine eventually does.
+ *
+ * IT DRAINS RATHER THAN ENDING ONE UTTERANCE (#379). A graded answer is no
+ * longer a single string — it is the server's composed turn, one utterance per
+ * element, each awaited before the next is spoken — so ending only the
+ * utterances that happen to be live at the instant this is called leaves the
+ * loop stuck part-way through its own verdict. The bound is a guard against a
+ * loop that speaks forever, not an expected count.
+ */
 async function finishSpeaking() {
-  await act(async () => {
-    const live = speech.live;
-    speech.live = [];
-    for (const utterance of live) utterance.onend?.();
-  });
+  // EACH PASS IS ITS OWN `act` SCOPE, and that is load-bearing rather than
+  // stylistic. A turn is several utterances, and the next one is only spoken
+  // once the previous one's `onFinished` has resolved the page's `speak`
+  // promise, the driver has called `speak` again, and the state change that
+  // remounts the player has been COMMITTED. React flushes that commit when an
+  // `act` scope exits, so a single long-running scope with awaits inside it
+  // ends the first line and then waits forever for a second that cannot be
+  // spoken until it returns.
+  let idle = 0;
+  for (let guard = 0; guard < 40 && idle < 3; guard += 1) {
+    await act(async () => {
+      const live = speech.live;
+      speech.live = [];
+      if (live.length === 0) {
+        idle += 1;
+      } else {
+        idle = 0;
+        for (const utterance of live) utterance.onend?.();
+      }
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+  }
 }
 
 // -----------------------------------------------------------------------------
@@ -392,6 +419,55 @@ const QUESTION_2: PracticeQuestion = {
   categoryId: 'category-1',
   dynamicScope: 'none',
 };
+
+// -----------------------------------------------------------------------------
+// THE COMPOSED SPOKEN TURN, AS THE SERVER SENDS IT (#379, #351)
+// -----------------------------------------------------------------------------
+//
+// `practice/spoken-turn.ts` composes these server-side; the page hands them to
+// the driver verbatim and re-derives nothing. They are reproduced here in the
+// server's own element order — acknowledgement, verdict, coach, answer, with
+// the answer behind `retryBoundary` when a retry is armed — so a green run
+// here is a run against the arrangement a real response carries.
+//
+// The point of having them at all is the one assertion this file could not
+// make before: a CORRECT attempt and an INCORRECT one must produce DIFFERENT
+// spoken text. The loop used to say `acceptedAnswers[0].text` and nothing
+// else, so both produced "the Constitution" and a learner whose phone was in
+// their pocket could not tell which had happened.
+// -----------------------------------------------------------------------------
+
+const VERDICT_CORRECT = 'That’s right.';
+const VERDICT_INCORRECT = 'That one didn’t match.';
+const HEARD_LINE = 'I heard: the Constitution.';
+const ANSWER_LINE = 'The answer is: the Constitution.';
+const COACH_LINE = 'Nice work — keep going.';
+
+/**
+ * `composeSpokenTurn`'s two shipped shapes, in miniature.
+ *
+ * `retryArmed` reorders elements 4 and 5 and moves the accepted answer behind
+ * the boundary, exactly as the server does — the coach's line stays adjacent
+ * to the retry offer and the answer becomes the tail.
+ */
+function composedTurn(
+  outcome: PracticeOutcome,
+  retryArmed: boolean,
+): { spokenTurn: string[]; retryBoundary: number | null } {
+  if (outcome === 'correct') {
+    return { spokenTurn: [VERDICT_CORRECT, COACH_LINE], retryBoundary: null };
+  }
+  if (retryArmed) {
+    return {
+      spokenTurn: [HEARD_LINE, VERDICT_INCORRECT, COACH_LINE, ANSWER_LINE],
+      retryBoundary: 3,
+    };
+  }
+  return {
+    spokenTurn: [HEARD_LINE, VERDICT_INCORRECT, ANSWER_LINE, COACH_LINE],
+    retryBoundary: null,
+  };
+}
 
 const SESSION_BASE: PracticeSession = {
   id: SESSION_ID,
@@ -445,6 +521,10 @@ function makeAttempt(overrides: Partial<PracticeAttempt> = {}): PracticeAttempt 
         },
       ],
     },
+    coachReaction: { text: COACH_LINE, persona: 'supportive' },
+    // The default is the `correct` turn; the attempt handler below overrides
+    // both fields together whenever it grades a miss.
+    ...composedTurn('correct', false),
     ...overrides,
   };
 }
@@ -537,11 +617,17 @@ function installHandlers(options: Options = {}) {
       async ({ request }) => {
         const input = (await request.json()) as RecordPracticeAttemptInput;
         posted.push(input);
+        const outcome = options.outcome ?? 'correct';
+        // A retry is armed only for an attempt the server would accept a retry
+        // OF — never for one that is already a retry. That is what makes the
+        // second answer of a retry pair carry `retryBoundary: null`.
+        const isRetry = (input.retryOfAttemptId ?? null) !== null;
         const attempt = makeAttempt({
           id: `attempt-${posted.length}`,
           questionId: input.questionId,
-          outcome: options.outcome ?? 'correct',
+          outcome,
           retryOfAttemptId: input.retryOfAttemptId ?? null,
+          ...composedTurn(outcome, !isRetry),
         });
         const result: PracticeAttemptResult = {
           attempt,
@@ -792,6 +878,43 @@ async function startLoop(user: ReturnType<typeof userEvent.setup>) {
   await waitFor(() => expect(speech.spoken).toContain(QUESTION_1.prompt));
 }
 
+/**
+ * Drive one whole turn and return every line the coach SPOKE about the answer.
+ *
+ * The question prompts are filtered out rather than timed around: the loop
+ * advances on a real timer here, so question 2 can legitimately land in
+ * `speech.spoken` before the assertion runs, and a case about the verdict
+ * should not fail because of it.
+ */
+async function spokenAboutTheAnswer(
+  user: ReturnType<typeof userEvent.setup>,
+): Promise<string[]> {
+  await startLoop(user);
+  await finishSpeaking();
+  await screen.findByText('Listening. Answer when you are ready.');
+
+  // The turn is several utterances; letting them end by themselves is what
+  // makes "what did the coach say about this answer" a single observation.
+  speech.autoEnd = true;
+  speech.spoken = [];
+
+  emitVoiceActivity('onset');
+  emitVoiceActivity('endOfTurn');
+  deliverRecording();
+
+  await waitFor(() => expect(posted).toHaveLength(1));
+  await screen.findByText('Telling you the answer.');
+  // Wait for the turn to be OVER rather than merely started: the retry offer
+  // is part of what the loop says about this answer, and it comes last.
+  await waitFor(() =>
+    expect(screen.queryByText('Telling you the answer.')).not.toBeInTheDocument(),
+  );
+
+  return speech.spoken.filter(
+    (line) => line !== QUESTION_1.prompt && line !== QUESTION_2.prompt,
+  );
+}
+
 describe('the hands-free loop', () => {
   it('reads, hears, grades, answers and moves on — from ONE tap', async () => {
     const user = userEvent.setup();
@@ -823,10 +946,14 @@ describe('the hands-free loop', () => {
     expect(posted[0].transcript).toBe('the Constitution');
     expect(posted[0].promptMode).toBe('heard');
 
-    // The accepted answer is read back, and then the loop moves on by itself.
+    // The composed turn is read back — the VERDICT among it, not just an
+    // answer string — and then the loop moves on by itself.
     await screen.findByText('Telling you the answer.');
-    await waitFor(() => expect(speech.spoken).toContain('the Constitution'));
+    await waitFor(() => expect(speech.spoken).toContain(VERDICT_CORRECT));
     await finishSpeaking();
+    // The whole turn, not only its first line: the coach's own sentence is an
+    // utterance of its own and is spoken once the verdict has finished.
+    expect(speech.spoken).toContain(COACH_LINE);
 
     await screen.findByRole('heading', { level: 2, name: QUESTION_2.prompt });
     // …and it is ASKED, not merely rendered. The same race `startLoop` guards
@@ -834,6 +961,68 @@ describe('the hands-free loop', () => {
     // the loop's player mounts, so waiting on either alone leaves the mount
     // that speaks question 2 still pending when the case ends.
     await waitFor(() => expect(speech.spoken).toContain(QUESTION_2.prompt));
+  });
+
+  // ---------------------------------------------------------------------------
+  // THE REGRESSION GUARD FOR #379, AS ONE ASSERTION.
+  //
+  // The page used to hand the driver `spokenAnswer: acceptedAnswers[0].text`
+  // and nothing else, so the coach said "the Constitution" whether the learner
+  // had been right or wrong — byte-identical audio for the two outcomes a
+  // hands-free learner most needs to tell apart, because the screen they would
+  // otherwise read it from is in their pocket.
+  //
+  // Every other assertion in this file would still have passed with that
+  // defect in place. This one is the whole bug, stated once: the verdict must
+  // reach the SPEAKER, not only the surface.
+  // ---------------------------------------------------------------------------
+  it('THE REGRESSION GUARD: speaks the VERDICT — a correct and an incorrect answer do not sound the same', async () => {
+    installHandlers();
+    renderSession();
+    const rightLines = await spokenAboutTheAnswer(userEvent.setup());
+
+    expect(rightLines).toContain(VERDICT_CORRECT);
+    expect(rightLines).not.toContain(VERDICT_INCORRECT);
+
+    // A second session, identical but for the grade the server returns.
+    cleanup();
+    posted = [];
+    transcribeCalls = 0;
+    speech.spoken = [];
+    captureControl.reset();
+    installHandlers({ outcome: 'incorrect' });
+    renderSession();
+    const wrongLines = await spokenAboutTheAnswer(userEvent.setup());
+
+    expect(wrongLines).toContain(VERDICT_INCORRECT);
+    expect(wrongLines).not.toContain(VERDICT_CORRECT);
+
+    // And the two turns are not the same audio, which is the claim itself.
+    expect(rightLines).not.toEqual(wrongLines);
+  });
+
+  it('withholds the accepted answer while a retry is armed, and speaks it on the following turn', async () => {
+    installHandlers({ outcome: 'incorrect' });
+    renderSession();
+    const user = userEvent.setup();
+
+    const firstTurn = await spokenAboutTheAnswer(user);
+
+    // The retry offer, WITHOUT the accepted answer: reading it out first would
+    // make the next answer a repeat-after-me and the attempt it records
+    // worthless as evidence. `VoiceSurface` has honoured the same boundary on
+    // screen since #356; this is the audio half of it.
+    expect(firstTurn).toContain(CONVERSATION_NUDGE_RETRY);
+    expect(firstTurn).not.toContain(ANSWER_LINE);
+    await screen.findByText('Listening. Answer when you are ready.');
+
+    // The second answer spends the budget, so the tail is owed.
+    speech.spoken = [];
+    emitVoiceActivity('onset');
+    emitVoiceActivity('endOfTurn');
+    deliverRecording();
+    await waitFor(() => expect(posted).toHaveLength(2));
+    await waitFor(() => expect(speech.spoken).toContain(ANSWER_LINE));
   });
 
   it('stops, spoken and on screen, when there is no next question', async () => {
