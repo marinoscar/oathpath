@@ -89,6 +89,14 @@
  * preference; the settings switch that writes that preference is in
  * `components/settings/VoiceSettings.tsx` (issue #357).
  *
+ * THE ONE EXCEPTION IS `playTestTone` (issue #384), which ignores that flag on
+ * purpose: it is not a cue the app decided to make, it is the direct answer to
+ * a learner pressing "Play a test tone" on `/settings/device` to find out
+ * whether their device is audible at all, and answering that press with
+ * silence would hand a learner who turned cues off the exact symptom they came
+ * to diagnose. Its own doc comment carries the full argument; nothing else in
+ * this file may copy it.
+ *
  * Every cue is also a no-op when there is no `AudioContext` to play it through
  * — jsdom, an older Safari, a context the browser refuses to start before a
  * user gesture — and none of them throws, ever. An audio cue is a courtesy on
@@ -516,6 +524,101 @@ export function playEarcon(descriptor: EarconDescriptor): void {
   } catch {
     // A half-implemented Web Audio (some embedded webviews) can throw from any
     // of the calls above. A missing sound must never take a session with it.
+  }
+}
+
+/**
+ * Can this platform play a synthesised tone at all?
+ *
+ * Issue #384. WITHOUT CREATING A CONTEXT — the same discipline
+ * {@link peekSharedAudioContextState} keeps, and for the same reason: the
+ * device page asks this question while merely rendering, and a check that
+ * built an `AudioContext` (and opened an audio device) to answer it would be
+ * a side effect on a screen nobody has asked for a sound yet.
+ *
+ * `false` means jsdom, a very old browser, or a runtime with no Web Audio —
+ * a supported outcome, and one the caller should EXPLAIN rather than offer a
+ * button that is guaranteed to do nothing.
+ */
+export function isWebAudioSupported(): boolean {
+  return resolveAudioContextConstructor() !== null;
+}
+
+/**
+ * "Can you hear this?" — a rising two-tone, D5 then A5, half a second long.
+ *
+ * Issue #384. LONGER AND LOUDER THAN EVERY CUE ABOVE, deliberately. The cues
+ * are punctuation under a voice: they are meant to be noticed without being
+ * attended to, so they are short and quiet. This one is the opposite kind of
+ * sound — a learner has pressed a button whose entire question is "is this
+ * device audible right now?", and a 70 ms whisper answers that question badly:
+ * a learner who hears nothing cannot tell a muted phone from a cue too faint
+ * to catch over a bus.
+ *
+ * It is still an envelope-shaped sine pair rather than a beep, for the reason
+ * {@link ENVELOPE_SECONDS} exists — a gain step clicks, and on a cheap phone
+ * speaker the click is most of what you hear, which would make the test tone a
+ * worse test than silence.
+ */
+export const TEST_TONE_EARCON: EarconDescriptor = {
+  name: 'test-tone',
+  wave: 'sine',
+  tones: [
+    { frequency: 587.33, durationMs: 200, gain: 0.16 },
+    { frequency: 880, durationMs: 260, gain: 0.16, atMs: 200 },
+  ],
+};
+
+/** What one press of the test tone actually managed to do. */
+export type TestToneResult =
+  /** Scheduled on a live context. Whether a human HEARD it is unknowable. */
+  | 'played'
+  /** No Web Audio, or the browser refused to build a context. */
+  | 'unsupported'
+  /** A context exists and something in it threw. */
+  | 'failed';
+
+/**
+ * Play the test tone once, and say what happened.
+ *
+ * =============================================================================
+ * THE ONE DELIBERATE BYPASS OF THE `enabled` SWITCH IN THIS MODULE
+ * =============================================================================
+ *
+ * Every other player here returns early when `setEarconsEnabled(false)` has
+ * been called, and that is right for a CUE: a cue is a sound the app makes on
+ * its own initiative, and `voice.soundCues` is the learner's answer to whether
+ * it may. This is not a cue. It is the direct, immediate result of a learner
+ * pressing a button labelled "Play a test tone" in order to find out whether
+ * their device can make a sound at all — and answering that press with silence
+ * because of a preference about practice cues would give a learner with cues
+ * turned off exactly the symptom they came to this screen to diagnose, and no
+ * way to tell it from a muted phone. Honouring the switch here would make the
+ * switch itself indistinguishable from a fault.
+ *
+ * It stays inside this module rather than becoming a second tone generator
+ * somewhere else: {@link scheduleTone} is still the only place an oscillator
+ * is ever constructed, the shared context is still the only context, and a
+ * later swap to designed audio still lands here and nowhere else.
+ *
+ * CALL THIS FROM A CLICK HANDLER AND FROM NOTHING ELSE. It reaches
+ * {@link getSharedAudioContext}, which CREATES and resumes a context — a
+ * browser only permits that from a user gesture, and a mounted effect calling
+ * it would both fail and build a context on a page that has made no sound.
+ * NEVER THROWS, like every other player in this file.
+ */
+export function playTestTone(): TestToneResult {
+  const context = getSharedAudioContext();
+  if (!context) return 'unsupported';
+
+  try {
+    const cueStart = context.currentTime + SCHEDULING_LEAD_SECONDS;
+    for (const tone of TEST_TONE_EARCON.tones) {
+      scheduleTone(context, TEST_TONE_EARCON.wave, tone, cueStart);
+    }
+    return 'played';
+  } catch {
+    return 'failed';
   }
 }
 

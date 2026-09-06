@@ -44,10 +44,12 @@ import {
   SESSION_END_EARCON,
   SESSION_FAILED_EARCON,
   SESSION_START_EARCON,
+  TEST_TONE_EARCON,
   areEarconsEnabled,
   closeSharedAudioContext,
   getSharedAudioContext,
   isProcessingPulseRunning,
+  isWebAudioSupported,
   playAdvancingEarcon,
   playCapturedEarcon,
   playEarcon,
@@ -56,6 +58,7 @@ import {
   playSessionEndEarcon,
   playSessionFailedEarcon,
   playSessionStartEarcon,
+  playTestTone,
   setEarconsEnabled,
   startProcessingPulse,
   startPulse,
@@ -575,5 +578,69 @@ describe('earcons — the single switch', () => {
     setEarconsEnabled(true);
     playListeningEarcon();
     expect(FakeAudioContext.instances).toHaveLength(1);
+  });
+});
+
+/**
+ * `playTestTone` (issue #384) — the module's one deliberate exception to its
+ * own switch, and the only sound here a learner asks for by name.
+ *
+ * The exception is the whole subject: honouring `voice.soundCues` on a button
+ * whose entire question is "is this device audible at all?" would hand a
+ * learner who turned cues off exactly the symptom they came to `/settings/device`
+ * to diagnose, with no way to tell a preference from a muted phone. Every other
+ * player in this module must keep obeying the switch, which is asserted here
+ * alongside, so a future edit cannot generalise the exception by accident.
+ */
+describe('playTestTone — the device audibility check', () => {
+  it('sounds even when cues are switched off, unlike every other player here', () => {
+    setEarconsEnabled(false);
+
+    expect(playTestTone()).toBe('played');
+    const context = currentFake();
+    expect(context.oscillators.length).toBe(TEST_TONE_EARCON.tones.length);
+
+    // The exception is exactly one function wide.
+    const before = context.oscillators.length;
+    playListeningEarcon();
+    playSessionStartEarcon();
+    playEarcon(CAPTURED_EARCON);
+    expect(context.oscillators.length).toBe(before);
+  });
+
+  it('reports `unsupported` rather than throwing where there is no Web Audio', () => {
+    closeSharedAudioContext();
+    removeAudioContext();
+
+    expect(isWebAudioSupported()).toBe(false);
+    expect(() => playTestTone()).not.toThrow();
+    expect(playTestTone()).toBe('unsupported');
+  });
+
+  it('answers `isWebAudioSupported` without building a context', () => {
+    closeSharedAudioContext();
+    FakeAudioContext.instances = [];
+
+    expect(isWebAudioSupported()).toBe(true);
+    // THE POINT: the device page asks this while merely rendering, so a check
+    // that constructed a context (and opened an audio device) to answer it
+    // would be a side effect on a screen nobody has asked for a sound yet.
+    expect(FakeAudioContext.instances).toHaveLength(0);
+  });
+
+  it('is longer and louder than the cues — it is meant to be heard, not noticed', () => {
+    // A 70 ms whisper answers "can you hear this?" badly: a learner who hears
+    // nothing cannot tell a muted phone from a cue too faint to catch.
+    const cueGain = Math.max(...QUESTION_EARCON.tones.map((tone) => tone.gain));
+    const toneGain = Math.max(...TEST_TONE_EARCON.tones.map((tone) => tone.gain));
+    expect(toneGain).toBeGreaterThan(cueGain);
+
+    const total = TEST_TONE_EARCON.tones.reduce(
+      (longest, tone) => Math.max(longest, (tone.atMs ?? 0) + tone.durationMs),
+      0,
+    );
+    expect(total).toBeGreaterThan(300);
+    // Still a fraction of a second — a test tone nobody waits out.
+    expect(total).toBeLessThan(1000);
   });
 });

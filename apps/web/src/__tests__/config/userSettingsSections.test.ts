@@ -280,3 +280,89 @@ describe('USER_SETTINGS_SECTIONS - Voice card (issue #288)', () => {
     expect(new Set(paths).size).toBe(paths.length);
   });
 });
+
+/**
+ * Issue #384. `/settings/device` — what this browser on this device will
+ * currently permit — takes the same shape CLAUDE.md's Settings UI Pattern
+ * requires of every settings surface: a registry card plus a route, never a
+ * new tab on Voice or on Notifications.
+ *
+ * The route half and the no-permission half are already asserted generically
+ * above — "routes EVERY user-settings card path in App.tsx, each with no
+ * permission gate" loops over the whole registry, so this card inherits both
+ * for free, INCLUDING the drift the registry exists to prevent (a card whose
+ * `path` has no route is a hub tile that lands the learner on Home). What is
+ * left here is what is specific to THIS card.
+ */
+describe('USER_SETTINGS_SECTIONS - Device & permissions card (issue #384)', () => {
+  function findDeviceCard() {
+    for (const section of USER_SETTINGS_SECTIONS) {
+      const card = section.cards.find((c) => c.path === '/settings/device');
+      if (card) return card;
+    }
+    return undefined;
+  }
+
+  it('is present in the registry, with a real title and description', () => {
+    const card = findDeviceCard();
+    expect(card).toBeDefined();
+    expect(card?.title).toBe('Device & permissions');
+    // Written as user-facing copy naming the three rows, not the field names
+    // restated.
+    expect(card?.description).toMatch(/microphone/i);
+    expect(card?.description).toMatch(/notifications/i);
+    expect(card?.description).toMatch(/sound/i);
+  });
+
+  it('declares no permission - the page makes no authenticated API call at all', () => {
+    // The strongest version of this file's own rule: there is no controller
+    // behind this page, so there is not merely no string worth mirroring -
+    // there is no string in existence to mirror. Inventing one would gate a
+    // learner out of finding out why their own microphone is not working.
+    const card = findDeviceCard();
+    expect(card).toBeDefined();
+    expect('permission' in (card as object)).toBe(false);
+    expect(card?.permission).toBeUndefined();
+  });
+
+  it('is grouped under Account, after Notifications - a device is not a credential', () => {
+    const accountSection = USER_SETTINGS_SECTIONS.find((s) => s.label === 'Account');
+    expect(accountSection).toBeDefined();
+
+    const paths = accountSection!.cards.map((c) => c.path);
+    expect(paths).toContain('/settings/device');
+    // After its two neighbours: a learner arrives here from one of them,
+    // having found a preference that is not taking effect.
+    expect(paths.indexOf('/settings/device')).toBeGreaterThan(
+      paths.indexOf('/settings/notifications'),
+    );
+    expect(paths.indexOf('/settings/device')).toBeGreaterThan(
+      paths.indexOf('/settings/voice'),
+    );
+
+    const securitySection = USER_SETTINGS_SECTIONS.find((s) => s.label === 'Security');
+    expect(securitySection?.cards.some((c) => c.path === '/settings/device')).toBe(false);
+  });
+
+  it('adds a card rather than a tab: no existing card path is reused or replaced', () => {
+    // CLAUDE.md Settings UI Pattern rule 2 in its checkable form - every card
+    // that existed before #384 is still its own destination, and the new one
+    // is not folded into any of them.
+    const paths = USER_SETTINGS_SECTIONS.flatMap((s) => s.cards.map((c) => c.path));
+    expect(paths).toEqual(
+      expect.arrayContaining([
+        '/settings/device',
+        '/settings/voice',
+        '/settings/coach',
+        '/settings/journey',
+        '/settings/profile',
+        '/settings/appearance',
+        '/settings/notifications',
+        '/settings/ai',
+        '/settings/tokens',
+        '/settings/reset',
+      ]),
+    );
+    expect(new Set(paths).size).toBe(paths.length);
+  });
+});

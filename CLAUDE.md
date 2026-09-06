@@ -1426,6 +1426,45 @@ each; do not re-derive a different reason for any of them):
   coaching-gap surface that motivated it. A later epic wiring it would use
   the identical fragment-plus-floor shape, not a new pattern.
 
+### Asking for a device permission
+
+**Never on mount, never on navigation, never on app start.** Every
+`getUserMedia`, every `Notification.requestPermission()`, and every
+`AudioContext` creation or resume in `apps/web` must be reachable only from
+a real click. This is not a style rule and it is not recoverable: browsers
+penalise gestureless prompts (Chrome's quieter UI can auto-block them,
+Firefox requires the gesture, Safari has required one for
+`Notification.requestPermission()` since 16.4, and `getUserMedia` on load
+simply fails on iOS Safari), and a denial is **effectively permanent** —
+this application cannot re-prompt and cannot undo it, so a prompt spent on
+somebody who has not been given a reason to say yes kills the feature for
+them forever.
+
+The consequences, each already load-bearing somewhere:
+
+- **Observe with the existing hooks, which never request.**
+  `useBrowserNotificationPermission` (notifications) and
+  `useMediaReadiness` (microphone) run on mount and are safe there
+  precisely because neither prompts. `'unknown'` is NOT `'denied'` —
+  `useMediaReadiness`'s header states why rendering an unknown as a block
+  is a confident, specific, wrong instruction.
+- **Request through the existing door.** There is one
+  `Notification.requestPermission()` call site in this codebase,
+  `services/browserNotifications.ts`'s
+  `requestBrowserNotificationPermission`; do not add a second.
+- **A blocked state gets an explanation and no button** — the app has no
+  action to offer, and a control that can only fail reads as the product
+  being broken on top of the permission being off.
+- **Microphone copy is `describeCaptureProblem`'s, verbatim**
+  (`hooks/useAudioCapture.ts`'s seven-remedy table), rendered through
+  `components/voice/MicrophoneReadinessNotice.tsx`. Never write a second
+  "microphone unavailable" sentence.
+
+`/settings/device` (issue #384) is the worked example and the place a
+learner is sent: `apps/web/src/components/settings/DevicePermissions.tsx`'s
+header carries the full argument, and its tests assert the invariant over
+that file's own source. See [`docs/specs/voice.md`](docs/specs/voice.md) §5.1.
+
 ### Adding a practice session kind
 
 `practice_sessions.kind` is a five-value Postgres enum — `quick`, `category`,
