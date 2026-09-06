@@ -15,7 +15,26 @@
  *      Safari) and a rejected request (battery saver, policy, hidden tab) both
  *      leave the caller working, throw nothing, and show nothing. The wake
  *      lock is an optimisation on a session that works without it.
+ *
+ * Issue #388 adds two STRUCTURAL claims, both read from the source tree,
+ * because neither can be observed from this hook's own behaviour:
+ *
+ *   4. THERE IS EXACTLY ONE OWNER. One `useWakeLock` call in the whole
+ *      application, in `PracticeSessionPage`, gated on "a voice session is
+ *      under way" for BOTH transports. The bug this closes is the shipped one
+ *      — the call used to live inside `useConversationSession`, gated on that
+ *      driver's phase, so the realtime transport never took a lock at all —
+ *      and the bug it prevents is the one a fix could easily introduce: a
+ *      second call site means two sentinels whose held spans overlap across a
+ *      mid-session fallback, and the loser is released by nobody.
+ *   5. THE `<video>` FALLBACK IS ABSENT ON PURPOSE. `useWakeLock.ts`'s header
+ *      records the five reasons; this file pins the decision so that adding
+ *      one is a deliberate edit to both, never a drive-by.
  */
+
+import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { dirname, join, relative, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { StrictMode, createElement, type ReactNode } from 'react';
 import { act, renderHook } from '@testing-library/react';
@@ -386,5 +405,107 @@ describe('useWakeLock — unavailable is a non-event', () => {
 
     expect(() => unmount()).not.toThrow();
     await settle();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 4 and 5: the two claims about the SOURCE, which no behavioural test can make
+// ---------------------------------------------------------------------------
+
+const SRC = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
+
+/** Every `.ts`/`.tsx` under `src/`, tests excluded — the shipped application. */
+function shippedSources(): string[] {
+  const found: string[] = [];
+  const walk = (dir: string) => {
+    for (const entry of readdirSync(dir)) {
+      const full = join(dir, entry);
+      if (statSync(full).isDirectory()) {
+        if (entry === '__tests__' || entry === '__mocks__') continue;
+        walk(full);
+        continue;
+      }
+      if (/\.tsx?$/.test(entry)) found.push(full);
+    }
+  };
+  walk(SRC);
+  return found;
+}
+
+/** One file's source with every comment stripped. Code only. */
+function codeOf(file: string): string {
+  return readFileSync(file, 'utf8')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/^\s*\/\/.*$/gm, '');
+}
+
+describe('exactly one owner holds the screen (#388)', () => {
+  it('is called from one file, and that file is the practice session page', () => {
+    const callers = shippedSources()
+      .filter((file) => !file.endsWith(join('hooks', 'useWakeLock.ts')))
+      .filter((file) => /\buseWakeLock\s*\(/.test(codeOf(file)))
+      .map((file) => relative(SRC, file));
+
+    // A SECOND ENTRY HERE IS THE BUG, not a style note. Two hooks each
+    // requesting a lock is two sentinels: across a mid-session fallback from
+    // the realtime transport to E13's loop their held spans overlap, and the
+    // one that loses `sentinelRef` is held until the tab closes. The
+    // single-lock guarantee is this list having one element.
+    expect(callers).toEqual([join('pages', 'PracticeSessionPage.tsx')]);
+  });
+
+  it('is not called by either voice driver — the screen is the session’s', () => {
+    // The shipped regression, pinned by name. `useConversationSession` held
+    // the only lock in the application and gated it on ITS OWN phase, so a
+    // realtime session — where that hook is mounted and never runs — went
+    // unprotected on a metered connection.
+    for (const driver of ['useConversationSession.ts', 'useRealtimePractice.ts']) {
+      const code = codeOf(join(SRC, 'hooks', driver));
+      expect(code).not.toMatch(/useWakeLock/);
+      expect(code).not.toMatch(/navigator\.wakeLock/);
+    }
+  });
+});
+
+describe('the `<video>` fallback is rejected, not forgotten (#388)', () => {
+  it('ships no video element, and no other media-element workaround', () => {
+    const code = codeOf(join(SRC, 'hooks', 'useWakeLock.ts'));
+
+    // The NoSleep.js trick — a muted, looping, `playsinline` one-frame video
+    // played for the life of the session — is deliberately not here. The five
+    // reasons are in the hook's own header; the load-bearing one is that it
+    // would replace an honest warning with an unverifiable promise, on the
+    // very transport whose audio graph it could disturb.
+    for (const forbidden of [
+      /createElement\(\s*['"]video['"]/,
+      /<video/i,
+      /playsinline/i,
+      /HTMLVideoElement/,
+      /\bnosleep\b/i,
+    ]) {
+      expect(code).not.toMatch(forbidden);
+    }
+  });
+
+  it('says why, in the file itself, so the decision outlives this test', () => {
+    // The header is where a future reader looks. A rejection with no recorded
+    // reason is indistinguishable from an oversight, and this module's whole
+    // posture is being honest about the case it cannot save.
+    const header = readFileSync(join(SRC, 'hooks', 'useWakeLock.ts'), 'utf8');
+    expect(header).toMatch(/`<video>` FALLBACK IS REJECTED/);
+  });
+
+  it('leaves the honest warning as the only degradation, and reports it', async () => {
+    // No API at all: the hook reports `isSupported: false` and holds nothing —
+    // which is exactly the state `PracticeSessionPage` renders its "keep the
+    // page open" footnote from. Nothing is played, nothing is appended.
+    const before = document.querySelectorAll('video').length;
+
+    const { result } = renderHook(() => useWakeLock(true));
+    await settle();
+
+    expect(result.current.isSupported).toBe(false);
+    expect(result.current.isHeld).toBe(false);
+    expect(document.querySelectorAll('video')).toHaveLength(before);
   });
 });
