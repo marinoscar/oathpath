@@ -448,12 +448,17 @@ reader should not assume was verified:
    reachable from `preparing` (the sixth of the now-seven
    `ConversationPhase` values); a microphone already blocked shown before
    Start is ever tapped; the voice surface fitting 360×640 with no document
-   scroll; and, marked `test.fixme` pending the issue below, a correct
-   answer and a spent-retry wrong answer NOT being byte-identical audio.
+   scroll; and a correct answer and a spent-retry wrong answer NOT being
+   byte-identical audio — added by #360 as a `test.fixme` pending the issue
+   below, and made a live test (not merely un-skipped — the scenario stayed
+   as-written per this file's own Exclusions clause) by PR #377 once #375
+   landed. All five scenarios are live in `tests/e2e/specs/voice.spec.ts`
+   today; `grep -n test.fixme` against that file returns nothing.
    `tsc --noEmit -p tests/e2e/tsconfig.json` is clean; nobody ran the
-   walk, for the identical reason E13's own footnote above already gives
-   (no Docker daemon, no compose stack, no microphone in this
-   environment).
+   walk itself, for the identical reason E13's own footnote above already
+   gives (no Docker daemon, no compose stack, no microphone in this
+   environment) — PR #377 changed which scenarios exist in the file, not
+   whether this environment can execute a Playwright browser.
 2. **The manual real-microphone checklist has not been run for E15
    either** — `docs/specs/realtime-interview.md` §11's eight items, reused
    verbatim for the live practice transport per
@@ -465,26 +470,44 @@ reader should not assume was verified:
 3. **A real, live gap was found rather than fixed while extending this
    epic's own test coverage, tracked as
    [issue #375](https://github.com/marinoscar/oathpath/issues/375) rather
-   than silently left for a future reader to rediscover:**
-   `useConversationSession.ts`'s hands-free loop never adopted
-   `attempt.spokenTurn` (issue #351's own fix) — it still speaks only the
-   bare accepted answer via `speechSynthesis`, on every outcome, so a
-   learner relying on the app's own voice (rather than a screen reader,
-   which does hear the correct composed turn through `VoiceSurface`'s live
-   region) still cannot tell a correct answer from a wrong one by ear once
-   a retry is spent. This is the epic's own headline acceptance property,
-   unmet on this one transport; #360's own test suite documents it as a
+   than silently left for a future reader to rediscover — and now closed.**
+   `useConversationSession.ts`'s hands-free loop had never adopted
+   `attempt.spokenTurn` (issue #351's own fix) — it spoke only the bare
+   accepted answer via `speechSynthesis`, on every outcome, so a learner
+   relying on the app's own voice (rather than a screen reader, which did
+   hear the correct composed turn through `VoiceSurface`'s live region)
+   could not tell a correct answer from a wrong one by ear once a retry was
+   spent. That was the epic's own headline acceptance property, unmet on
+   this one transport, and #360's own test suite recorded it as a
    `test.fixme` rather than a passing claim.
 
+   **Closed by [PR #377](https://github.com/marinoscar/oathpath/pull/377),
+   merged to `main` as `c8a4c18`.** `ConversationGrade.spokenAnswer` is gone
+   from `useConversationSession.ts` entirely, replaced with `spokenTurn:
+   string[]` and `retryBoundary: number | null` — the API's own field names
+   and meanings (#351), passed through verbatim. `gradeTranscript` now
+   speaks `spokenTurn.slice(0, boundary)`; on a miss with the one retry
+   still unspent it speaks the retry nudge and returns **without** the
+   deferred tail (typically the accepted answer), so a learner who still has
+   a retry is never told the answer first; otherwise it speaks the tail and
+   advances. `retryBoundary === null` speaks the whole array; a negative
+   boundary is clamped rather than handed to `slice`. The `test.fixme`
+   scenario named above is now a live, passing test. Verified by unit tests
+   and `tsc --noEmit` only — see the web suite count below; no Playwright
+   walk and no real microphone confirmed this, for the same reasons item 1
+   and item 2 above give.
+
 What *was* verified for E15: the full API suite (5,184 tests, 74 skipped,
-zero failures) and the full web suite (3,478 tests, 3 skipped, zero
-failures), both against the pre-existing baseline; `tsc --noEmit` clean on
-both workspaces; the equivalence test proving one grading path across both
-transports; the source-reading purity tests proving the realtime handler
-never re-implements a verdict; and the degradation-ladder tests proving all
-three rungs and the mid-session fallback, including its spoken notice and
-that no progress is lost — see `CHANGELOG.md`'s own E15 entry for the exact
-counts.
+zero failures) — unchanged by PR #377 — and the full web suite, now 3,485
+tests passed, 3 skipped, zero failures (up from 3,478 before PR #377; the
++7 is the fix's own new coverage in `useConversationSession.test.ts` and
+`PracticeSessionPage.conversation.test.tsx`), both against the pre-existing
+baseline; `tsc --noEmit` clean on both workspaces; the equivalence test
+proving one grading path across both transports; the source-reading purity
+tests proving the realtime handler never re-implements a verdict; and the
+degradation-ladder tests proving all three rungs and the mid-session
+fallback, including its spoken notice and that no progress is lost — see
+`CHANGELOG.md`'s own E15 entry for the exact counts.
 
 ## 4. Why this order
 

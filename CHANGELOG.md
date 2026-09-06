@@ -226,16 +226,33 @@ production build eliminates it.
 
   **A real, live gap this epic's own closing test pass (issue #360) found
   rather than fixed, tracked as
-  [issue #375](https://github.com/marinoscar/oathpath/issues/375):**
-  `useConversationSession.ts`'s hands-free loop never adopted
-  `attempt.spokenTurn` — it still speaks only the bare accepted answer, on
+  [issue #375](https://github.com/marinoscar/oathpath/issues/375) — now
+  closed:** `useConversationSession.ts`'s hands-free loop had never
+  adopted `attempt.spokenTurn` — it spoke only the bare accepted answer, on
   every outcome, via the exact pre-#351 line `spoken-turn.ts`'s own header
-  names as the original defect. `VoiceSurface`'s visual live region does
-  render the full composed turn correctly (so a screen-reader user hears
+  names as the original defect. `VoiceSurface`'s visual live region did
+  render the full composed turn correctly (so a screen-reader user heard
   it), but the app's own `speechSynthesis` voice — what a learner walking
-  with the phone in a pocket actually relies on — does not yet. Filed
-  rather than fixed here, per issue #360's own scope (tests and docs only,
+  with the phone in a pocket actually relies on — did not. Filed rather
+  than fixed at the time, per issue #360's own scope (tests and docs only,
   no product code).
+
+  **Closed by [PR #377](https://github.com/marinoscar/oathpath/pull/377)
+  (`fix/e15-375-speak-turn`), merged to `main` as `c8a4c18`.**
+  `ConversationGrade.spokenAnswer` is gone from
+  `useConversationSession.ts`'s own type entirely, replaced with
+  `spokenTurn: string[]` and `retryBoundary: number | null` — the API's
+  own field names and meanings (#351), passed through verbatim rather than
+  re-derived. `gradeTranscript` now speaks `spokenTurn.slice(0, boundary)`
+  one utterance per element; on a miss with the one-per-question retry
+  still unspent it speaks the retry nudge and returns **without** the
+  deferred tail (typically the accepted answer) — so a learner who still
+  has a retry is never told the answer first — and otherwise speaks the
+  tail and advances. `retryBoundary === null` speaks the whole array; a
+  negative boundary is clamped rather than handed to `slice`. Verified by
+  unit tests and `tsc --noEmit` only, not by the Playwright walk or a real
+  microphone — see the web suite count below and the manual checklist
+  immediately following, which this PR does not touch.
 
 **Manual real-microphone checklist (E15, epic #345): not run, on the
 identical basis E12's and E13's own footnotes above already state, restated
@@ -268,7 +285,10 @@ ships to production:
 **What *was* run for this epic:** the full API suite (`npm test`,
 `--maxWorkers=2`) — 207 suites, 5,184 tests passed, 74 skipped, zero
 failures — and the full web suite (`vitest run`, sharded) — 174 files,
-3,478 tests passed, 3 skipped, zero failures — both against the baseline
+**3,485 tests passed, 3 skipped, zero failures** (up from 3,478 passed
+before PR #377 closed issue #375; the +7 is that PR's own new coverage in
+`useConversationSession.test.ts` and
+`PracticeSessionPage.conversation.test.tsx`) — both against the baseline
 this repository already carried, plus `tsc --noEmit` clean on both
 workspaces. Issue #360 added: a property test asserting no two outcomes
 (including a retry-armed miss) produce the same composed spoken turn; a
@@ -279,11 +299,18 @@ and five Playwright scenarios extending `voice.spec.ts` — a one-tap
 fresh-start journey, "Type instead" reachable from `preparing` (the sixth
 of the now-seven `ConversationPhase` values), a microphone already blocked
 shown before Start is ever tapped, the voice surface fitting 360×640 with
-no document scroll, and (marked `test.fixme`, pending issue #375) a
+no document scroll, and (added as `test.fixme`, pending issue #375) a
 correct answer and a spent-retry wrong answer NOT being byte-identical
 audio. Like every Playwright spec in this repository, none of the five was
 executed here — `tsc --noEmit -p tests/e2e/tsconfig.json` is clean, which
 is the one thing about them this environment could actually confirm.
+**The fifth scenario is no longer `test.fixme`: PR #377 closed issue #375
+and the scenario is a live test in `tests/e2e/specs/voice.spec.ts` today**
+(`grep -n test.fixme` against that file returns nothing) — verified by
+`tsc --noEmit -p tests/e2e/tsconfig.json` staying clean and by the unit
+test counts above, not by actually running the Playwright walk, which
+remains unexecuted in this environment for the same reason as every other
+spec in this file.
 
 ### Changed
 
