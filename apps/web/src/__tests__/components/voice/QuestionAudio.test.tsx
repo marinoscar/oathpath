@@ -14,6 +14,11 @@
  *   2. Explaining the absence — rendering `AiNotReady`-shaped copy over an
  *      unbound `speak` — which tells somebody the product is broken while it is
  *      reading their question to them.
+ *
+ * Since #389 it also pins the ASYMMETRY between a press and an autoplay: a
+ * press primes the audio element inside the click (so a phone will let the
+ * premium clip play at all), and an autoplay must NOT — there is no tap to
+ * spend, and the browser-voice fall-through is the design there.
  */
 
 import { ThemeProvider } from '@mui/material/styles';
@@ -29,6 +34,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { QuestionAudio } from '../../../components/voice/QuestionAudio';
 import { AiStatusProvider } from '../../../contexts/AiStatusContext';
+import { SILENT_PRIMING_SOURCE } from '../../../lib/gestureAudio';
 import { darkTheme, lightTheme } from '../../../theme';
 import type { AiStatus } from '../../../types';
 import { server } from '../../mocks/server';
@@ -323,6 +329,132 @@ describe('the premium voice is opt-in, on top', () => {
     expect(screen.queryByText(/not available yet/i)).toBeNull();
     expect(screen.queryByText(/administrator/i)).toBeNull();
     expect(screen.queryByText(/provider refused/i)).toBeNull();
+  });
+});
+
+// ===========================================================================
+// A press is primed; an autoplay is not (#389)
+// ===========================================================================
+
+describe('the mobile autoplay unlock', () => {
+  /**
+   * A fake `Audio` that tells the PRIMING `play()` from real playback.
+   *
+   * The priming call is muted and carries the module's two-millisecond silent
+   * source; playback is unmuted and carries a blob URL. A double that recorded
+   * both the same way would pass whether or not the fix were present.
+   */
+  function installAudio() {
+    const played: string[] = [];
+    const primed: string[] = [];
+
+    class FakeAudio {
+      src = '';
+      muted = false;
+      preload = '';
+      currentTime = 0;
+      onplay: (() => void) | null = null;
+      onended: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+
+      play(): Promise<void> {
+        if (this.muted) {
+          primed.push(this.src);
+          return Promise.reject(new Error('priming'));
+        }
+        played.push(this.src);
+        this.onplay?.();
+        return Promise.resolve();
+      }
+
+      pause() {}
+      setAttribute() {}
+      removeAttribute() {
+        this.src = '';
+      }
+    }
+
+    const real = (window as unknown as { Audio?: unknown }).Audio;
+    (window as unknown as { Audio: unknown }).Audio = FakeAudio;
+    return { played, primed, restore: () => {
+      (window as unknown as { Audio?: unknown }).Audio = real;
+    } };
+  }
+
+  it('primes the element inside the press, BEFORE the synthesis await', async () => {
+    installSpeechSynthesis();
+    mockStatus({ unboundRoles: [] });
+    const audio = installAudio();
+
+    renderIt({ text: QUESTION, premiumVoice: true });
+    await waitFor(() => expect(statusCalls).toBe(1));
+
+    fireEvent.click(
+      screen.getByRole('button', { name: /read the question aloud/i }),
+    );
+
+    // THE ASSERTION THIS TEST EXISTS FOR. The element was primed while the
+    // click was still being handled — before the synthesis round trip, which is
+    // the `await` that closes the gesture a phone grants sound on. A version
+    // that primes after the await, or not at all, records nothing here and
+    // plays no premium audio on any real phone.
+    expect(audio.primed).toEqual([SILENT_PRIMING_SOURCE]);
+
+    await waitFor(() => expect(audio.played).toHaveLength(1));
+    audio.restore();
+  });
+
+  it('primes NOTHING on autoplay, where there is no tap to spend', async () => {
+    installSpeechSynthesis();
+    mockStatus({ unboundRoles: [] });
+    const audio = installAudio();
+
+    const tree = (text: string) => (
+      <ThemeProvider theme={lightTheme}>
+        <AiStatusProvider>
+          <QuestionAudio text={text} premiumVoice autoPlay />
+        </AiStatusProvider>
+      </ThemeProvider>
+    );
+
+    // Rendered, then moved to a NEW question once the status has landed: that
+    // second autoplay is the one where the premium route is genuinely
+    // reachable, and it is the one this test is about. (The mount's own
+    // autoplay runs before the status arrives, so `usePremium` is false there
+    // and it never reaches the premium branch at all.)
+    const { rerender } = render(tree(QUESTION));
+    await waitFor(() => expect(statusCalls).toBe(1));
+    rerender(tree('What is the supreme law of the land?'));
+
+    // NOT AN OVERSIGHT — the rule (`docs/specs/voice.md` §1, and this
+    // component's header). `readQuestionsAloud` starts a question with no
+    // gesture, so a priming call here would be the page trying to unlock sound
+    // nobody asked for. The premium clip is still attempted, and a browser that
+    // refuses it falls through to `speechSynthesis`, which needs none of this.
+    await waitFor(() => expect(synthesizeCalls).toBe(1));
+    expect(audio.primed).toEqual([]);
+    audio.restore();
+  });
+
+  it('builds no element at all when `speak` is unbound', async () => {
+    installSpeechSynthesis();
+    mockStatus({ unboundRoles: ['speak'] });
+    const audio = installAudio();
+
+    renderIt({ text: QUESTION, premiumVoice: true });
+    await waitFor(() => expect(statusCalls).toBe(1));
+
+    fireEvent.click(
+      screen.getByRole('button', { name: /read the question aloud/i }),
+    );
+
+    // The browser voice is not subject to any of this — `speechSynthesis`
+    // needs no element and no unlock — so on every fresh install this press
+    // spends no gesture and constructs nothing.
+    await waitFor(() => expect(spoken).toHaveLength(1));
+    expect(audio.primed).toEqual([]);
+    expect(audio.played).toEqual([]);
+    audio.restore();
   });
 });
 

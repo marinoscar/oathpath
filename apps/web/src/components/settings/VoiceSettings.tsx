@@ -56,7 +56,7 @@
  * charge.
  *
  * =============================================================================
- * ONE REUSED `<audio>`, UNLOCKED BEFORE THE FIRST `await` (#383)
+ * ONE REUSED `<audio>`, UNLOCKED BEFORE THE FIRST `await` (#383, #389)
  * =============================================================================
  *
  * A phone will not let a page make sound unless the element making it was
@@ -68,22 +68,21 @@
  * correctly refused. Eleven Preview buttons greyed out, came back, and made no
  * sound at all, with nothing on screen to say why.
  *
- * Two properties fix it, and BOTH are load-bearing:
+ * `lib/gestureAudio.ts` holds the fix, and holds it ONCE: #389 found the same
+ * construct-after-`await` shape on the coach preview and on premium question
+ * audio. The mechanics live in that module's header — why the element is
+ * claimed and primed synchronously in the click handler, why it is the SAME
+ * element every press, why the priming clip is silent and muted — rather than
+ * being restated here. Two things about this file follow from it:
  *
- *   1. THERE IS EXACTLY ONE `<audio>` ELEMENT, kept in `audioRef` for the life
- *      of the component. The unlock is granted per ELEMENT, so building a
- *      fresh one per press throws away the permission the previous press
- *      earned. It is emptied between presses (`releaseAudio`) and replaced
- *      never.
- *   2. IT IS PRIMED SYNCHRONOUSLY INSIDE THE CLICK HANDLER — muted, sourceless
- *      `play()`, rejection swallowed — BEFORE the first `await`. That call is
- *      what spends the gesture and marks the element user-initiated; the real
- *      `play()`, seconds later on the same element, then inherits it.
+ *   1. `primeGestureAudio` is called BEFORE the `await` in `previewVoice`.
+ *      Moving it below — or "tidying" it into `playPreparedSample`, where the
+ *      rest of the audio handling lives — restores the silence exactly.
+ *   2. `gestureSlotRef` is emptied between presses and REPLACED NEVER; only
+ *      the unmount effect lets go of the element itself.
  *
- * A later refactor that moves `primePreviewAudio()` below the `await`, or that
- * nulls `audioRef` between presses, restores the silence exactly and breaks
- * nothing a desktop test would notice. `VoiceSettingsPage.test.tsx` pins the
- * priming call for that reason.
+ * Neither breaks anything a desktop test would notice, which is why
+ * `VoiceSettingsPage.test.tsx` pins the priming call.
  *
  * AND A REFUSAL IS NOW VISIBLE. A rejected `play()` used to be routed into the
  * same `onEnd` as a clip that finished — byte-identical, to the learner, to
@@ -114,6 +113,14 @@ import {
 import VolumeUpIcon from '@mui/icons-material/VolumeUp';
 import visuallyHidden from '@mui/utils/visuallyHidden';
 
+import {
+  createGestureAudioSlot,
+  playPreparedSample,
+  primeGestureAudio,
+  releaseGestureAudio,
+  releaseGestureSample,
+  type GestureAudioSlot,
+} from '../../lib/gestureAudio';
 import { synthesizeSpeech } from '../../services/api';
 import {
   DEFAULT_VOICE_AUTO_SUBMIT_SPOKEN,
@@ -277,12 +284,12 @@ export function VoiceSettings({
   /**
    * THE ONE `<audio>` ELEMENT, for the life of the component.
    *
-   * Never nulled between presses — see the file header. The autoplay unlock a
-   * tap earns belongs to this element, so replacing it is how the fix undoes
-   * itself. Created lazily by `primePreviewAudio`, dropped only on unmount.
+   * Never nulled between presses — see the file header and
+   * `lib/gestureAudio.ts`. The autoplay unlock a tap earns belongs to this
+   * element, so replacing it is how the fix undoes itself. Created lazily by
+   * `primeGestureAudio`, dropped only on unmount.
    */
-  const audioRef = useRef<HTMLAudioElement | null>(null);
-  const objectUrlRef = useRef<string | null>(null);
+  const gestureSlotRef = useRef<GestureAudioSlot>(createGestureAudioSlot());
 
   /**
    * WHICH PRESS THE CURRENTLY INTERESTING ONE IS.
@@ -301,21 +308,7 @@ export function VoiceSettings({
    * element**, which is the whole point (file header, property 1).
    */
   const releaseAudio = useCallback(() => {
-    const audio = audioRef.current;
-    if (audio) {
-      audio.pause();
-      audio.onended = null;
-      audio.onerror = null;
-      // `removeAttribute`, not `src = ''`: an empty string resolves against the
-      // document URL, so the element would go and try to load this page as
-      // media and report the 404 as a decode error.
-      audio.removeAttribute('src');
-    }
-    const url = objectUrlRef.current;
-    objectUrlRef.current = null;
-    if (url && typeof URL.revokeObjectURL === 'function') {
-      URL.revokeObjectURL(url);
-    }
+    releaseGestureSample(gestureSlotRef.current);
     previewRef.current = false;
   }, []);
 
@@ -325,61 +318,11 @@ export function VoiceSettings({
   // kept, not the thing being cleaned up.
   useEffect(
     () => () => {
-      releaseAudio();
-      audioRef.current = null;
+      releaseGestureAudio(gestureSlotRef.current);
+      previewRef.current = false;
     },
-    [releaseAudio],
+    [],
   );
-
-  /**
-   * Hand back the one `<audio>` element, unlocked for the gesture in progress.
-   *
-   * **MUST BE CALLED SYNCHRONOUSLY FROM THE CLICK HANDLER, BEFORE THE FIRST
-   * `await`.** Everything about this function is that requirement; see the
-   * file header for what a phone does when it is not met. The muted, sourceless
-   * `play()` below is not an attempt to make sound — it is the call that spends
-   * the tap and marks this element as one the learner asked to hear. Its
-   * rejection is expected (there is nothing to play) and deliberately dropped.
-   *
-   * Returns `null` where there is no `Audio` constructor at all — jsdom, a
-   * stripped embedded browser — so the caller degrades to saying so rather than
-   * throwing.
-   */
-  const primePreviewAudio = useCallback((): HTMLAudioElement | null => {
-    if (typeof Audio === 'undefined') return null;
-
-    let audio = audioRef.current;
-    if (!audio) {
-      // No source argument: the element must exist and be unlocked BEFORE the
-      // bytes do, which is the entire ordering this fix is about.
-      audio = new Audio();
-      audio.preload = 'auto';
-      // iOS reads the ATTRIBUTE. The matching `playsInline` property is typed
-      // on video elements only, and an attribute is what the platform honours
-      // here anyway. `?.` because a test double need not implement it.
-      audio.setAttribute?.('playsinline', '');
-      audioRef.current = audio;
-    }
-
-    // Muted, because at this instant the element has no source and there is
-    // nothing to hear — and because an unmuted priming call is exactly the
-    // "page that made a noise I did not ask for" a browser is entitled to
-    // punish. Unmuted again in `playPreparedSample`, on the same element.
-    audio.muted = true;
-    try {
-      const started: unknown = audio.play();
-      if (started && typeof (started as Promise<void>).catch === 'function') {
-        // EXPECTED, AND NOT AN ERROR. Older browsers return `undefined` here,
-        // which is why the promise is feature-detected rather than assumed.
-        void (started as Promise<void>).catch(() => {});
-      }
-    } catch {
-      // A synchronous throw is the same non-event: the gesture is spent either
-      // way, and whether it worked is answered by the real `play()` later.
-    }
-
-    return audio;
-  }, []);
 
   /**
    * Speak the sample in one specific voice. **Called from a click handler and
@@ -404,7 +347,7 @@ export function VoiceSettings({
       // handling lives — reintroduces #383 exactly, and does it silently: every
       // desktop browser and every test double plays fine either way.
       // ---------------------------------------------------------------------
-      const audio = primePreviewAudio();
+      const audio = primeGestureAudio(gestureSlotRef.current);
 
       previewRef.current = true;
       const token = ++previewSeqRef.current;
@@ -478,43 +421,47 @@ export function VoiceSettings({
         return;
       }
 
-      const played = playPreparedSample(audio, result.audio, {
-        objectUrlRef,
-        onEnded: () => {
-          if (!isCurrent()) return;
-          releaseAudio();
-          setPreview({ kind: 'idle' });
+      const attempt = playPreparedSample(
+        audio,
+        result.audio,
+        gestureSlotRef.current,
+        {
+          onEnded: () => {
+            if (!isCurrent()) return;
+            releaseAudio();
+            setPreview({ kind: 'idle' });
+          },
+          // BLOCKED IS NOT FINISHED (#383). Until this branch existed both
+          // landed in the same callback, so a learner whose browser refused the
+          // sample saw precisely what a learner who heard it saw: the row going
+          // quiet. The remedy is theirs, so it is offered — and the reassurance
+          // is the page's standing one, because it is true.
+          onBlocked: () => {
+            if (!isCurrent()) return;
+            releaseAudio();
+            setPreview({
+              kind: 'message',
+              voiceId,
+              text: 'Your browser blocked the sample from playing. Press Preview again, or check that the phone is not muted. Your browser still reads everything aloud.',
+            });
+          },
+          // A DIFFERENT FAILURE, SO A DIFFERENT SENTENCE. The bytes arrived and
+          // the element could not make sense of them — telling this learner to
+          // press the button again, as the blocked message does, would send
+          // them round a loop that cannot end.
+          onDecodeError: () => {
+            if (!isCurrent()) return;
+            releaseAudio();
+            setPreview({
+              kind: 'message',
+              voiceId,
+              text: `The ${label} sample arrived, but your browser could not play it. Your browser still reads everything aloud.`,
+            });
+          },
         },
-        // BLOCKED IS NOT FINISHED (#383). Until this branch existed both landed
-        // in the same callback, so a learner whose browser refused the sample
-        // saw precisely what a learner who heard it saw: the row going quiet.
-        // The remedy is theirs, so it is offered — and the reassurance is the
-        // page's standing one, because it is true.
-        onBlocked: () => {
-          if (!isCurrent()) return;
-          releaseAudio();
-          setPreview({
-            kind: 'message',
-            voiceId,
-            text: 'Your browser blocked the sample from playing. Press Preview again, or check that the phone is not muted. Your browser still reads everything aloud.',
-          });
-        },
-        // A DIFFERENT FAILURE, SO A DIFFERENT SENTENCE. The bytes arrived and
-        // the element could not make sense of them — telling this learner to
-        // press the button again, as the blocked message does, would send them
-        // round a loop that cannot end.
-        onDecodeError: () => {
-          if (!isCurrent()) return;
-          releaseAudio();
-          setPreview({
-            kind: 'message',
-            voiceId,
-            text: `The ${label} sample arrived, but your browser could not play it. Your browser still reads everything aloud.`,
-          });
-        },
-      });
+      );
 
-      if (played) {
+      if (attempt) {
         setPreview({ kind: 'playing', voiceId, label });
         return;
       }
@@ -525,7 +472,7 @@ export function VoiceSettings({
         text: `We couldn't play the ${label} sample just now. Your browser still reads everything aloud.`,
       });
     },
-    [primePreviewAudio, releaseAudio],
+    [releaseAudio],
   );
 
   const previewStatusText =
@@ -1088,81 +1035,6 @@ export function VoiceSettings({
       </Card>
     </>
   );
-}
-
-/**
- * Pour synthesized bytes into the ALREADY-PRIMED element, returning whether
- * playback was asked for.
- *
- * TAKES THE ELEMENT RATHER THAN MAKING ONE (#383). Constructing an
- * `HTMLAudioElement` here — which is what this function used to do — is what
- * put the construction after the synthesis `await` and lost the gesture, so
- * the element arrives as an argument and this function's only job is the
- * source, the handlers and the ask. `primePreviewAudio` is the only place an
- * element is ever built.
- *
- * Deliberately NOT awaited by the caller. `HTMLAudioElement.play()` resolves
- * when playback BEGINS, which in jsdom (and behind an autoplay policy) may be
- * never — so this reports "the element accepted the source and we asked it to
- * play", and the three callbacks report what actually happened. `false` means
- * there was nothing here that could play at all.
- *
- * THREE CALLBACKS, NOT ONE. Finishing, being refused, and failing to decode
- * are three different things to say to a learner, and collapsing them into a
- * single `onEnd` is what made a blocked preview indistinguishable from a
- * played one.
- */
-function playPreparedSample(
-  audio: HTMLAudioElement,
-  blob: Blob,
-  ctx: {
-    objectUrlRef: { current: string | null };
-    /** The clip reached its end. A genuine completion. */
-    onEnded: () => void;
-    /** `play()` was refused — an autoplay policy, most often. */
-    onBlocked: () => void;
-    /** The element has bytes it cannot make sense of. */
-    onDecodeError: () => void;
-  },
-): boolean {
-  if (typeof URL === 'undefined' || typeof URL.createObjectURL !== 'function') {
-    return false;
-  }
-
-  const url = URL.createObjectURL(blob);
-  ctx.objectUrlRef.current = url;
-
-  audio.onended = ctx.onEnded;
-  audio.onerror = ctx.onDecodeError;
-
-  audio.src = url;
-  // Unmuted here, and only here: it was muted for the priming call so that
-  // spending the gesture could not itself make a noise.
-  audio.muted = false;
-  try {
-    // The element is reused, so it may be sitting at the end of the last
-    // sample. A seek before any metadata has loaded can throw, and that is not
-    // worth failing a preview over — a fresh source starts at zero anyway.
-    audio.currentTime = 0;
-  } catch {
-    /* Nothing to rewind. */
-  }
-
-  try {
-    const started: unknown = audio.play();
-    if (started && typeof (started as Promise<void>).then === 'function') {
-      // The rejection is REPORTED rather than dropped. It is not an error —
-      // the browser voice still reads everything — but it is a different
-      // outcome from a sample that played, and the learner is owed the
-      // difference. Older browsers return `undefined` here, hence the check.
-      void (started as Promise<void>).catch(() => ctx.onBlocked());
-    }
-  } catch {
-    ctx.onBlocked();
-    return false;
-  }
-
-  return true;
 }
 
 export default VoiceSettings;

@@ -113,6 +113,39 @@
  * `ACTIVE_PLAYERS` is one player silencing another; this is the CALLER cutting
  * playback off — a driver that has heard the learner start speaking — which no
  * amount of coordination between players can observe.
+ *
+ * =============================================================================
+ * A PRESS IS PRIMED. AUTOPLAY IS NOT, AND MUST NOT BE (#389)
+ * =============================================================================
+ *
+ * A mobile browser only lets a page make sound from an element created or
+ * played inside a user gesture, and a gesture closes at the first `await` — so
+ * the premium path's `new Audio(url)`, built AFTER `await synthesizeSpeech`,
+ * was asking a brand new element to play long after the tap that justified it.
+ * Every mobile browser refused. This one failed QUIETLY rather than visibly
+ * (the browser voice below reads the same question, so the learner still hears
+ * it), which is precisely why it went unnoticed: what a learner lost was the
+ * premium voice they are paying their own key for, on every phone, with
+ * nothing anywhere to say so.
+ *
+ * `play(fromGesture)` therefore takes the ONE fact this component cannot infer
+ * for itself, and the button is the only caller that passes `true`:
+ *
+ *   - PRESSED: `primeGestureAudio` runs synchronously, before the `await`, and
+ *     the bytes are poured into that already-permitted element. See
+ *     `lib/gestureAudio.ts` for the mechanics and for what a refactor that
+ *     moves the call below the `await` silently restores.
+ *   - AUTOPLAY: NOTHING IS PRIMED, DELIBERATELY. When
+ *     `voice.readQuestionsAloud` starts a question there is no tap to spend,
+ *     so there is no gesture to prime FROM — a priming call there would be the
+ *     page trying to unlock sound nobody asked for, which is the behaviour
+ *     autoplay policies exist to refuse. The fall-through to the browser's own
+ *     `speechSynthesis` is the correct design on that path
+ *     (`docs/specs/voice.md` §1), it already handles a blocked premium clip
+ *     (`playBlob` returns `false`), and it is unchanged.
+ *
+ * The element itself is claimed through the same slot on both paths, so it is
+ * built once and reused — the autoplay path simply never unlocks it.
  */
 
 import StopIcon from '@mui/icons-material/Stop';
@@ -128,6 +161,15 @@ import {
 } from 'react';
 
 import { useOptionalAiStatus } from '../../contexts/AiStatusContext';
+import {
+  claimGestureAudio,
+  createGestureAudioSlot,
+  playPreparedSample,
+  primeGestureAudio,
+  releaseGestureAudio,
+  releaseGestureSample,
+  type GestureAudioSlot,
+} from '../../lib/gestureAudio';
 import { synthesizeSpeech } from '../../services/api';
 
 /** Which voice actually spoke. See {@link QuestionAudioProps.onPlayed}. */
@@ -429,8 +471,16 @@ export function QuestionAudio({
    * checks this before touching state or starting playback.
    */
   const requestRef = useRef(0);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
-  const objectUrlRef = useRef<string | null>(null);
+
+  /**
+   * THE ONE `<audio>` ELEMENT, plus whatever sample is loaded into it.
+   *
+   * Kept for the life of the component and emptied between plays — the mobile
+   * autoplay unlock a press earns belongs to the ELEMENT, so rebuilding it per
+   * play throws away what the previous press earned. See the file header and
+   * `lib/gestureAudio.ts`.
+   */
+  const gestureSlotRef = useRef<GestureAudioSlot>(createGestureAudioSlot());
 
   /**
    * The latest `onFinished`, without making it a callback dependency.
@@ -480,10 +530,17 @@ export function QuestionAudio({
 
   const supportsBrowserSpeech = browserSpeechAvailable();
 
-  const revokeObjectUrl = useCallback(() => {
-    const url = objectUrlRef.current;
-    objectUrlRef.current = null;
-    if (url && typeof URL.revokeObjectURL === 'function') URL.revokeObjectURL(url);
+  /**
+   * Drop the SAMPLE — the bytes, the source and the handlers. **Keeps the
+   * element.**
+   *
+   * That last part is the #389 constraint: between plays the element is the
+   * thing being kept, not the thing being cleaned up, because the unlock is
+   * granted per element. `releaseGestureAudio` (unmount only) is what lets go
+   * of it.
+   */
+  const releaseSample = useCallback(() => {
+    releaseGestureSample(gestureSlotRef.current);
   }, []);
 
   /** Silence whatever is playing and let go of its bytes. Idempotent. */
@@ -494,19 +551,14 @@ export function QuestionAudio({
       window.speechSynthesis.cancel();
     }
 
-    const audio = audioRef.current;
-    audioRef.current = null;
-    if (audio) {
-      audio.pause();
-      // Detach the source before the URL is revoked, so the element is not left
-      // holding a handle to bytes we have just released.
-      audio.removeAttribute('src');
-    }
-    revokeObjectUrl();
+    // Pauses the element, detaches its source and revokes the blob URL — in
+    // that order, so the element is never left holding a handle to bytes we
+    // have just released.
+    releaseSample();
 
     setIsSpeaking(false);
     setIsPreparing(false);
-  }, [revokeObjectUrl]);
+  }, [releaseSample]);
 
   // THE CALLER'S OWN BARGE-IN (#311). `stop` is already idempotent and already
   // the callback `ACTIVE_PLAYERS` holds, so the handle is that exact function
@@ -519,6 +571,11 @@ export function QuestionAudio({
   // A question still being read aloud over the next one is disorienting, and on
   // the premium path it is also audio nobody is listening to.
   useEffect(() => stop, [stop, text]);
+
+  // THE ELEMENT is released here and nowhere else — the effect above runs on
+  // every `text` change too, and dropping the element there would throw away
+  // the unlock a press earned for every question after the first (#389).
+  useEffect(() => () => releaseGestureAudio(gestureSlotRef.current), []);
 
   // Join the "one voice at a time" set for as long as this instance is mounted.
   // See the file header: this is what makes a SECOND mount — the accepted
@@ -578,101 +635,125 @@ export function QuestionAudio({
     [finish, onPlayed, rate, supportsBrowserSpeech, text, unavailableMessage],
   );
 
-  const play = useCallback(async () => {
-    setMessage(null);
-    // EVERY OTHER MOUNTED PLAYER FIRST, then this one's own leftovers. The
-    // order matters: `speakWithBrowser` below hands an utterance to the same
-    // global engine every other instance's `stop()` cancels, so cancelling
-    // after starting would silence the thing we are starting.
-    stopOtherPlayers(stop);
-    stop();
-    const request = (requestRef.current += 1);
+  const play = useCallback(
+    async (fromGesture = false) => {
+      setMessage(null);
+      // EVERY OTHER MOUNTED PLAYER FIRST, then this one's own leftovers. The
+      // order matters: `speakWithBrowser` below hands an utterance to the same
+      // global engine every other instance's `stop()` cancels, so cancelling
+      // after starting would silence the thing we are starting.
+      stopOtherPlayers(stop);
+      stop();
+      const request = (requestRef.current += 1);
 
-    if (usePremium) {
-      setIsPreparing(true);
-      try {
-        // `voice` is the learner's stored preference, or absent — in which
-        // case the provider chooses, and the request omits the key entirely
-        // rather than sending an empty one (see `synthesizeSpeech`).
-        const result = await synthesizeSpeech(text, { voice });
-        if (request !== requestRef.current) return;
+      // ---------------------------------------------------------------------
+      // BEFORE THE FIRST `await`, AND ONLY WHEN A PRESS PUT US HERE (#389).
+      //
+      // The synthesis round trip below is the await that closes the user
+      // gesture, so the element is claimed and unlocked HERE, while the tap is
+      // still being handled. Moving this below the `await` — or into `playBlob`,
+      // where the rest of the audio handling lives — restores the silence
+      // exactly, and does it silently: every desktop browser and every test
+      // double plays fine either way.
+      //
+      // `fromGesture` is false for AUTOPLAY, deliberately: there is no tap to
+      // spend there, and the browser-voice fall-through is the design. See the
+      // file header.
+      //
+      // `usePremium` gates it too, because the browser voice needs no element
+      // and no unlock — `speechSynthesis` is not subject to any of this. On a
+      // deployment with `speak` unbound, which is every fresh install, pressing
+      // this button builds no `<audio>` at all.
+      // ---------------------------------------------------------------------
+      if (fromGesture && usePremium) primeGestureAudio(gestureSlotRef.current);
 
-        // BRANCHED ON, NOT CAUGHT (issue #277). `unavailable` and `failed` are
-        // ordinary HTTP 200 answers carrying a cause, so the fall-through to
-        // the browser voice below is now reached BY DECISION. It used to be
-        // reached because a JSON envelope was handed to an `<audio>` element
-        // and the resulting play error landed in the `catch` — the right
-        // outcome for the wrong reason, one refactor away from silence.
-        //
-        // NEITHER OUTCOME IS SHOWN TO ANYBODY, and that is unchanged. A
-        // `speak`-unbound deployment answers "not available" and a provider can
-        // simply fail; the browser voice below reads the same question, so from
-        // the learner's side nothing went wrong — and a warning about a premium
-        // upgrade they may not know exists would be noise about a feature that
-        // is working. `docs/specs/voice.md` §2.
-        if (result.status === 'ok') {
-          const played = await playBlob(result.audio, {
-            onStart: () => {
-              if (request !== requestRef.current) return;
-              setIsSpeaking(true);
-              onPlayed?.('premium');
-            },
-            onEnded: () => {
-              if (request !== requestRef.current) return;
-              setIsSpeaking(false);
-              revokeObjectUrl();
-              // THE GENUINE END of the premium path.
-              finish(request, { reason: 'ended', source: 'premium' });
-            },
-            onError: (started) => {
-              if (request !== requestRef.current) return;
-              setIsSpeaking(false);
-              revokeObjectUrl();
-              // THE SPLIT #311 EXISTS FOR — see `playBlob`. A clip that had
-              // already STARTED is the end of this play: `playBlob` resolved
-              // `true`, so the browser fall-through below is unreachable and
-              // silence here would hang a driver forever on an end that is not
-              // coming. A clip that never started is NOT reported: the browser
-              // voice is about to speak the same sentence and report its own
-              // end, and one play must fire `onFinished` once.
-              if (started) finish(request, { reason: 'failed', source: 'premium' });
-            },
-            audioRef,
-            objectUrlRef,
-          });
+      if (usePremium) {
+        setIsPreparing(true);
+        try {
+          // `voice` is the learner's stored preference, or absent — in which
+          // case the provider chooses, and the request omits the key entirely
+          // rather than sending an empty one (see `synthesizeSpeech`).
+          const result = await synthesizeSpeech(text, { voice });
+          if (request !== requestRef.current) return;
 
-          if (played) return;
+          // BRANCHED ON, NOT CAUGHT (issue #277). `unavailable` and `failed`
+          // are ordinary HTTP 200 answers carrying a cause, so the
+          // fall-through to the browser voice below is now reached BY
+          // DECISION. It used to be reached because a JSON envelope was handed
+          // to an `<audio>` element and the resulting play error landed in the
+          // `catch` — the right outcome for the wrong reason, one refactor
+          // away from silence.
+          //
+          // NEITHER OUTCOME IS SHOWN TO ANYBODY, and that is unchanged. A
+          // `speak`-unbound deployment answers "not available" and a provider
+          // can simply fail; the browser voice below reads the same question,
+          // so from the learner's side nothing went wrong — and a warning about
+          // a premium upgrade they may not know exists would be noise about a
+          // feature that is working. `docs/specs/voice.md` §2.
+          if (result.status === 'ok') {
+            const played = await playBlob(result.audio, {
+              onStart: () => {
+                if (request !== requestRef.current) return;
+                setIsSpeaking(true);
+                onPlayed?.('premium');
+              },
+              onEnded: () => {
+                if (request !== requestRef.current) return;
+                setIsSpeaking(false);
+                releaseSample();
+                // THE GENUINE END of the premium path.
+                finish(request, { reason: 'ended', source: 'premium' });
+              },
+              onError: (started) => {
+                if (request !== requestRef.current) return;
+                setIsSpeaking(false);
+                releaseSample();
+                // THE SPLIT #311 EXISTS FOR — see `playBlob`. A clip that had
+                // already STARTED is the end of this play: `playBlob` resolved
+                // `true`, so the browser fall-through below is unreachable and
+                // silence here would hang a driver forever on an end that is not
+                // coming. A clip that never started is NOT reported: the browser
+                // voice is about to speak the same sentence and report its own
+                // end, and one play must fire `onFinished` once.
+                if (started) finish(request, { reason: 'failed', source: 'premium' });
+              },
+              slot: gestureSlotRef.current,
+            });
+
+            if (played) return;
+          }
+        } catch {
+          // Kept for what this always really caught: a transport failure
+          // (`ApiError`, a dropped connection) or a `playBlob` that could not
+          // start. Same silence, for the same reason as above — the browser voice
+          // is next, and it reads the same question.
+        } finally {
+          if (request === requestRef.current) setIsPreparing(false);
         }
-      } catch {
-        // Kept for what this always really caught: a transport failure
-        // (`ApiError`, a dropped connection) or a `playBlob` that could not
-        // start. Same silence, for the same reason as above — the browser voice
-        // is next, and it reads the same question.
-      } finally {
-        if (request === requestRef.current) setIsPreparing(false);
       }
-    }
 
-    if (speakWithBrowser(request)) return;
+      if (speakWithBrowser(request)) return;
 
-    // Neither voice is available. Said plainly, once, in a live region — and
-    // the question text is still on the page, which is the actual content.
-    setMessage(unavailableMessage);
-    // `source: null` — nothing spoke, so naming a voice would be a claim about
-    // audio that never existed. Reported all the same, because a driver waiting
-    // on a play that could not happen is the one failure mode with no symptom.
-    finish(request, { reason: 'failed', source: null });
-  }, [
-    finish,
-    onPlayed,
-    revokeObjectUrl,
-    speakWithBrowser,
-    stop,
-    text,
-    unavailableMessage,
-    usePremium,
-    voice,
-  ]);
+      // Neither voice is available. Said plainly, once, in a live region — and
+      // the question text is still on the page, which is the actual content.
+      setMessage(unavailableMessage);
+      // `source: null` — nothing spoke, so naming a voice would be a claim about
+      // audio that never existed. Reported all the same, because a driver waiting
+      // on a play that could not happen is the one failure mode with no symptom.
+      finish(request, { reason: 'failed', source: null });
+    },
+    [
+      finish,
+      onPlayed,
+      releaseSample,
+      speakWithBrowser,
+      stop,
+      text,
+      unavailableMessage,
+      usePremium,
+      voice,
+    ],
+  );
 
   /**
    * The latest `play`, without making it an effect dependency.
@@ -713,7 +794,11 @@ export function QuestionAudio({
         size={size}
         variant="text"
         startIcon={isSpeaking ? <StopIcon /> : <VolumeUpIcon />}
-        onClick={isSpeaking ? stop : play}
+        // `play(true)` RATHER THAN `play` — and not merely to keep the click
+        // event out of the parameter. `true` is what says "a tap put us here",
+        // which is what licenses the priming call inside; the autoplay effect
+        // below calls `play()` and gets `false`. See the file header.
+        onClick={isSpeaking ? stop : () => void play(true)}
         disabled={isPreparing}
         // The button's own text IS its accessible name — no `aria-label`
         // duplicating it, and no icon-only control whose name a screen reader
@@ -765,9 +850,15 @@ export function QuestionAudio({
  * not harmless now that a caller advances a conversation on the difference: a
  * clip that died halfway through would have reported itself as a question the
  * learner heard to the end. `onError` also carries WHETHER PLAYBACK HAD
- * STARTED, which is the one fact only this function holds — its caller sees a
- * `false` return for "never started" but nothing at all for a mid-clip death,
- * because by then the promise it awaited has long resolved.
+ * STARTED, which is the one fact only the module below holds — this function's
+ * caller sees a `false` return for "never started" but nothing at all for a
+ * mid-clip death, because by then the promise it awaited has long resolved.
+ *
+ * IT NO LONGER BUILDS THE ELEMENT (#389). `new Audio(url)` here is exactly
+ * what put the construction after the synthesis `await` and lost the gesture
+ * on the press path, so the element comes from the slot — already primed when
+ * a press put us here, merely claimed when autoplay did — and this function's
+ * job is the source, the handlers and the ask.
  */
 async function playBlob(
   blob: Blob,
@@ -781,44 +872,35 @@ async function playBlob(
      * still ahead of it (`false`) or already out of reach (`true`).
      */
     onError: (started: boolean) => void;
-    audioRef: { current: HTMLAudioElement | null };
-    objectUrlRef: { current: string | null };
+    /** The component's one element, and the sample currently in it. */
+    slot: GestureAudioSlot;
   },
 ): Promise<boolean> {
-  if (
-    typeof URL === 'undefined' ||
-    typeof URL.createObjectURL !== 'function' ||
-    typeof Audio === 'undefined'
-  ) {
-    return false;
-  }
+  // NOT `primeGestureAudio`: by here the synthesis `await` has long closed any
+  // gesture, so a priming call would be theatre. The press path already primed
+  // this same element before that await; the autoplay path has nothing to
+  // prime from and does not pretend otherwise.
+  const audio = claimGestureAudio(ctx.slot);
+  if (!audio) return false;
 
-  const url = URL.createObjectURL(blob);
-  ctx.objectUrlRef.current = url;
+  const attempt = playPreparedSample(audio, blob, ctx.slot, {
+    onStarted: ctx.onStart,
+    onEnded: ctx.onEnded,
+    // BLOCKED AND UNDECODABLE BOTH REACH `onError` HERE, on purpose. The split
+    // this component needs is not "refused" versus "corrupt" — it is `started`,
+    // which both carry — and the caller's fall-through reads only that.
+    onBlocked: (started) => ctx.onError(started),
+    onDecodeError: (started) => ctx.onError(started),
+  });
 
-  // Tracked HERE because the element does not report it: `onerror` is the same
-  // event whether sound had begun or not, and the difference is what the caller
-  // needs. See this function's header.
-  let started = false;
+  // Nothing here could play at all — no `URL.createObjectURL`, or a `play()`
+  // that threw. The caller falls through to the browser voice.
+  if (!attempt) return false;
 
-  const audio = new Audio(url);
-  ctx.audioRef.current = audio;
-  audio.onplay = () => {
-    started = true;
-    ctx.onStart();
-  };
-  audio.onended = ctx.onEnded;
-  audio.onerror = () => ctx.onError(started);
-
-  try {
-    await audio.play();
-    return true;
-  } catch {
-    // NEVER STARTED — an autoplay policy, most often. The caller falls through
-    // to the browser voice, so this is a cleanup call, not the end of anything.
-    ctx.onError(started);
-    return false;
-  }
+  // `true` only once playback has actually BEGUN, which is what makes the
+  // caller's `if (played) return` a decision about sound rather than about a
+  // request having been made.
+  return attempt.started;
 }
 
 export default QuestionAudio;

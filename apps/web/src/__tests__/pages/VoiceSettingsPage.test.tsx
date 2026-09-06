@@ -196,15 +196,24 @@ async function findAutoSubmit(): Promise<HTMLInputElement> {
 /**
  * A fake `Audio` whose playback is observable — jsdom implements none.
  *
- * IT NOW TELLS THE TWO KINDS OF `play()` APART (#383), because the component
- * makes two and they mean opposite things. The first is the PRIMING call: a
- * muted `play()` on a sourceless element, made synchronously inside the click
- * so the mobile autoplay unlock is granted while the gesture is still open. It
- * produces no sound and a real browser rejects it. The second, after the bytes
- * arrive, is playback. A double that recorded both as "played" would pass
- * whether or not the fix were present — and the old double, which took its
- * source as a constructor argument, could not even express the sourceless
- * element the priming call needs.
+ * IT TELLS THE TWO KINDS OF `play()` APART (#383), because the component makes
+ * two and they mean opposite things. The first is the PRIMING call, made
+ * synchronously inside the click so the mobile autoplay unlock is granted while
+ * the gesture is still open. The second, after the bytes arrive, is playback. A
+ * double that recorded both as "played" would pass whether or not the fix were
+ * present — and the double this replaced, which took its source as a
+ * constructor argument, could not even express the element the priming call
+ * needs.
+ *
+ * THE DISCRIMINATOR IS `muted`, NOT "has no source" (#389). Priming a
+ * SOURCELESS element is enough on Android Chrome, which grants the unlock on
+ * the `play()` call itself, and useless on iOS Safari, which grants it only
+ * when playback actually begins — so `lib/gestureAudio.ts` primes against a
+ * two-millisecond silent clip instead, and the sourceless test no longer
+ * describes anything. `muted` is what the module's own contract says
+ * distinguishes the two calls ("keep it muted for the priming call
+ * regardless"), so it is what this double reads. Every assertion below is
+ * unchanged.
  *
  * `constructed` is the other half: the unlock is granted per ELEMENT, so
  * "exactly one element ever exists" is the invariant that keeps it, and a
@@ -212,9 +221,9 @@ async function findAutoSubmit(): Promise<HTMLInputElement> {
  * learner's phone.
  */
 function installAudio(options: { blockPlayback?: boolean } = {}) {
-  /** Every `play()` on an element that HAS a source — real playback. */
+  /** Every `play()` on an UNMUTED element — real playback. */
   const played: string[] = [];
-  /** Every `play()` on a sourceless element — the autoplay-unlock priming call. */
+  /** Every `play()` on a MUTED element — the autoplay-unlock priming call. */
   const primed: string[] = [];
   /** Every element ever constructed. One, for the life of the component. */
   const constructed: FakeAudio[] = [];
@@ -224,6 +233,7 @@ function installAudio(options: { blockPlayback?: boolean } = {}) {
     muted = false;
     preload = '';
     currentTime = 0;
+    onplay: (() => void) | null = null;
     onended: (() => void) | null = null;
     onerror: (() => void) | null = null;
 
@@ -233,11 +243,12 @@ function installAudio(options: { blockPlayback?: boolean } = {}) {
     }
 
     play(): Promise<void> {
-      if (!this.src) {
-        primed.push('prime');
-        // A real browser rejects a sourceless `play()`. The component swallows
-        // it on purpose — the call was never about making sound.
-        return Promise.reject(new Error('no supported source'));
+      if (this.muted) {
+        primed.push(this.src);
+        // Whether a real browser resolves this one varies by platform, which is
+        // exactly why the module swallows it: the call was never about making
+        // sound, and whether sound is coming is answered by the real `play()`.
+        return Promise.reject(new Error('priming'));
       }
       if (options.blockPlayback) {
         // What an autoplay policy actually does: a rejected promise, no sound,
@@ -250,9 +261,7 @@ function installAudio(options: { blockPlayback?: boolean } = {}) {
 
     pause() {}
     setAttribute() {}
-    // Clearing the source is what `removeAttribute('src')` really does, and
-    // this double has to model it: otherwise the NEXT press's priming call
-    // would look like playback.
+    // Clearing the source is what `removeAttribute('src')` really does.
     removeAttribute() {
       this.src = '';
     }

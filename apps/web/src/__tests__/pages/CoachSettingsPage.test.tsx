@@ -29,14 +29,23 @@
  *   5. A `failed`/`unavailable` synthesis is handled by switching on `status`
  *      rather than assumed away — issue #277, the shipped bug where a client
  *      read the `ok` member without checking.
+ *   6. A SAMPLE ACTUALLY MAKES SOUND ON A PHONE (#389), and says so where the
+ *      learner is looking when it cannot. Three facts, each of which shipped
+ *      broken and none of which a desktop browser notices: the audio element is
+ *      primed inside the click and reused across presses (the mobile autoplay
+ *      unlock is per-element and expires at the first `await`); a refused
+ *      `play()` reaches its own visible message instead of the callback that
+ *      means "the sample finished"; and every message renders in the card of
+ *      the button that was pressed rather than below all four.
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, afterEach, beforeEach } from 'vitest';
 import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 
 import { render } from '../utils/test-utils';
+import { SILENT_PRIMING_SOURCE } from '../../lib/gestureAudio';
 import { server } from '../mocks/server';
 import CoachSettingsPage from '../../pages/CoachSettingsPage';
 import type { UserSettings } from '../../types';
@@ -83,6 +92,88 @@ const PERSONAS = [
     sampleLine: 'That answer was a mess. The right one is on the screen.',
   },
 ];
+
+/**
+ * A fake `Audio` whose playback is observable — jsdom implements none.
+ *
+ * IT TELLS THE TWO KINDS OF `play()` APART (#389), because the component makes
+ * two and they mean opposite things. The first is the PRIMING call, made
+ * synchronously inside the click so the mobile autoplay unlock is granted while
+ * the gesture is still open; it is MUTED and its source is the module's
+ * two-millisecond silence. The second, after the bytes arrive, is playback. A
+ * double that recorded both as "played" would pass whether or not the fix were
+ * present.
+ *
+ * `constructed` is the other half: the unlock is granted per ELEMENT, so
+ * "exactly one element ever exists" is the invariant that keeps it, and a
+ * regression that builds a fresh `Audio` per press fails here rather than on a
+ * learner's phone.
+ */
+function installAudio(options: { blockPlayback?: boolean } = {}) {
+  /** Every `play()` on an UNMUTED element — real playback. */
+  const played: string[] = [];
+  /** Every `play()` on a MUTED element — the autoplay-unlock priming call. */
+  const primed: string[] = [];
+  /** Every element ever constructed. One, for the life of the component. */
+  const constructed: FakeAudio[] = [];
+
+  class FakeAudio {
+    src = '';
+    muted = false;
+    preload = '';
+    currentTime = 0;
+    onplay: (() => void) | null = null;
+    onended: (() => void) | null = null;
+    onerror: (() => void) | null = null;
+
+    constructor(src?: string) {
+      if (src) this.src = src;
+      constructed.push(this);
+    }
+
+    play(): Promise<void> {
+      if (this.muted) {
+        primed.push(this.src);
+        // Whether a real browser resolves this one varies by platform, which is
+        // exactly why the module swallows it: the call was never about making
+        // sound, and whether sound is coming is answered by the real `play()`.
+        return Promise.reject(new Error('priming'));
+      }
+      if (options.blockPlayback) {
+        // What an autoplay policy actually does: a rejected promise, no sound,
+        // and no error anywhere else.
+        return Promise.reject(new Error('NotAllowedError'));
+      }
+      played.push(this.src);
+      return Promise.resolve();
+    }
+
+    pause() {}
+    setAttribute() {}
+    removeAttribute() {
+      this.src = '';
+    }
+  }
+
+  (window as unknown as { Audio: unknown }).Audio = FakeAudio;
+  return { played, primed, constructed };
+}
+
+/**
+ * The card one persona owns — the wrapper holding its radio, its Hear button
+ * and, since #389, that persona's own feedback.
+ *
+ * The feedback is asserted to be IN HERE rather than merely on the page: the
+ * bug this pins is not that the message was missing, it is that the single
+ * message box sat below four cards, past the button the learner had just
+ * pressed.
+ */
+function cardFor(label: string): HTMLElement {
+  const button = screen.getByRole('button', { name: `Hear the ${label} sample` });
+  const card = button.closest('div')?.parentElement;
+  if (!card) throw new Error(`No card around the ${label} Hear button.`);
+  return card;
+}
 
 interface Options {
   /** Has an admin bound `speak`? Defaults to yes. */
@@ -402,6 +493,135 @@ describe('CoachSettingsPage', () => {
       await waitFor(() => {
         expect(status).toHaveTextContent(/couldn’t play the Playful sample/i);
       });
+    });
+  });
+
+  // =========================================================================
+  // Sound on a phone, and the card it belongs to (#389)
+  // =========================================================================
+
+  describe('playing a sample on a phone', () => {
+    const realAudio = (window as unknown as { Audio?: unknown }).Audio;
+
+    afterEach(() => {
+      (window as unknown as { Audio?: unknown }).Audio = realAudio;
+    });
+
+    it('primes the element inside the click and reuses it across presses', async () => {
+      const { played, primed, constructed } = installAudio();
+      const user = userEvent.setup();
+      mockApi();
+      renderPage();
+      await waitForPersonas();
+
+      await user.click(
+        screen.getByRole('button', { name: 'Hear the Playful sample' }),
+      );
+
+      // THE UNLOCK. The element was primed while the click was still being
+      // handled — before the synthesis round trip, which is the `await` that
+      // ends the gesture a phone grants sound on. A version of this component
+      // that primes after the await, or not at all, records no priming call
+      // here and plays nothing on a real phone.
+      expect(primed).toEqual([SILENT_PRIMING_SOURCE]);
+
+      // Audio was produced, not merely requested.
+      await waitFor(() => expect(played).toHaveLength(1));
+      expect(
+        within(cardFor('Playful')).getByText(/Playing the Playful sample/i),
+      ).toBeInTheDocument();
+
+      // A SECOND PRESS REUSES THE SAME ELEMENT. The unlock belongs to the
+      // element, so a fresh `Audio` per press throws away what the first press
+      // earned and every sample after the first is silent again.
+      await user.click(
+        screen.getByRole('button', { name: 'Hear the Academic sample' }),
+      );
+      await waitFor(() => expect(played).toHaveLength(2));
+      expect(constructed).toHaveLength(1);
+    });
+
+    it('says so, beside the button that was pressed, when the browser blocks playback', async () => {
+      installAudio({ blockPlayback: true });
+      const user = userEvent.setup();
+      mockApi();
+      renderPage();
+      await waitForPersonas();
+
+      await user.click(
+        screen.getByRole('button', { name: 'Hear the Playful sample' }),
+      );
+
+      // THE ASSERTION THIS TEST EXISTS FOR. A refused `play()` used to be
+      // routed into the same callback as a clip that finished, so the card
+      // simply went quiet — indistinguishable, to the learner, from a sample
+      // that played while their phone was on silent. It is its own message
+      // now, and it says what to do next.
+      const status = await screen.findByRole('status');
+      await waitFor(() =>
+        expect(status).toHaveTextContent(/blocked the sample from playing/i),
+      );
+      expect(status).toHaveTextContent(/Reading it above works either way/i);
+      expect(
+        within(cardFor('Playful')).getByText(/blocked the sample from playing/i),
+      ).toBeInTheDocument();
+
+      // STILL NOT AN ERROR. Nothing on the page has stopped working, and the
+      // written coach never needed any of this.
+      expect(screen.queryByRole('alert')).toBeNull();
+      expect(status).not.toHaveTextContent(/couldn’t play the Playful sample/i);
+    });
+
+    it('greys out only the card that was pressed while a sample is preparing', async () => {
+      installAudio();
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      mockApi();
+      server.use(
+        http.post(`${API_BASE}/ai/speech/synthesize`, async () => {
+          await held;
+          return HttpResponse.arrayBuffer(new ArrayBuffer(8), {
+            headers: { 'Content-Type': 'audio/mpeg' },
+          });
+        }),
+      );
+
+      const user = userEvent.setup();
+      renderPage();
+      await waitForPersonas();
+
+      await user.click(
+        screen.getByRole('button', { name: 'Hear the Playful sample' }),
+      );
+
+      await waitFor(() =>
+        expect(
+          screen.getByRole('button', { name: 'Hear the Playful sample' }),
+        ).toBeDisabled(),
+      );
+
+      // Every Hear button used to grey out for the length of the round trip,
+      // so the list looked broken and nothing said which persona was being
+      // fetched. What actually protects the learner's key from a second charge
+      // is `previewRef`, which covers every button and every way of pressing
+      // one — the blanket `disabled` was never the guard.
+      expect(
+        screen.getByRole('button', { name: 'Hear the Academic sample' }),
+      ).toBeEnabled();
+
+      // And the card that IS working says so, where it was pressed.
+      expect(
+        within(cardFor('Playful')).getByText('Preparing the sample…'),
+      ).toBeInTheDocument();
+
+      release();
+      await waitFor(() =>
+        expect(
+          screen.getByRole('button', { name: 'Hear the Playful sample' }),
+        ).toBeEnabled(),
+      );
     });
   });
 

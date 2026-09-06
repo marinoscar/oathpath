@@ -48,8 +48,47 @@
  * never fired by arrowing through the radio group. Each of those would spend
  * somebody's money on a gesture that is not a request for audio. This is
  * `VoiceSettings.tsx`'s rule, reused verbatim rather than re-derived, and its
- * machinery (`PreviewState`, the in-flight ref, `releaseAudio`, `playSample`,
- * the always-mounted live region) is reused with it.
+ * machinery (`PreviewState`, the in-flight ref, the stale-press token,
+ * `releaseAudio`, the always-mounted live region) is reused with it.
+ *
+ * =============================================================================
+ * D2. THE ELEMENT IS UNLOCKED INSIDE THE PRESS, BEFORE THE FIRST `await` (#389)
+ * =============================================================================
+ *
+ * This page shipped the bug #383 fixed on `/settings/voice`, unchanged and for
+ * the same reason: `new Audio(url)` was built in the continuation AFTER
+ * `await synthesizeSpeech(...)`, so `play()` ran long after the tap that
+ * justified it and every mobile autoplay policy correctly refused. Pressing
+ * Hear on a phone made no sound and said nothing about why — indistinguishable,
+ * to the learner, from a sample that played while the phone was on silent.
+ *
+ * `lib/gestureAudio.ts` holds the fix once, for all three call sites that had
+ * this shape. Its header is where the mechanics live — why the element is
+ * claimed and primed synchronously in the handler, why it is the SAME element
+ * every press, why the priming clip is silent and muted. What this file has to
+ * keep is the ORDER: `primeGestureAudio` is called before the `await` in
+ * `hearSample`, and moving it below restores the silence exactly while breaking
+ * nothing a desktop test would notice.
+ *
+ * AND A REFUSAL IS VISIBLE NOW. A rejected `play()` used to be routed into the
+ * same `onEnd` as a clip that finished, so a blocked sample and a heard one
+ * left this page in identical states. Finishing, being refused, and failing to
+ * decode are three messages now, and each says something a learner can act on.
+ *
+ * =============================================================================
+ * D3. THE FEEDBACK BELONGS TO THE PERSONA THAT WAS PRESSED
+ * =============================================================================
+ *
+ * Four cards, not eleven — but each carries a label, a description AND a quoted
+ * sample line, and `unfiltered` carries its warning on top of that, so the group
+ * is comfortably taller than a phone screen. A single status box after the whole
+ * `RadioGroup` is therefore the same defect #383 fixed on the voice page,
+ * reached one persona later rather than avoided: press Hear on Supportive and
+ * the answer renders three cards below, off screen. So each card shows its own
+ * message, the spinner and the inert treatment land on the pressed card alone
+ * (`previewRef` was always what protected the key from a second charge), and ONE
+ * always-mounted live region — visually hidden, since the words are now on
+ * screen beside the button — still announces it.
  *
  * =============================================================================
  * E. `unfiltered` IS OPT-IN, AND SAYS WHAT IT IS BEFORE IT IS CHOSEN
@@ -73,6 +112,7 @@ import {
   Button,
   Card,
   CardContent,
+  CircularProgress,
   FormControl,
   FormControlLabel,
   FormLabel,
@@ -83,8 +123,17 @@ import {
   Typography,
 } from '@mui/material';
 import VolumeUpIcon from '@mui/icons-material/VolumeUp';
+import visuallyHidden from '@mui/utils/visuallyHidden';
 import { Link as RouterLink } from 'react-router-dom';
 
+import {
+  createGestureAudioSlot,
+  playPreparedSample,
+  primeGestureAudio,
+  releaseGestureAudio,
+  releaseGestureSample,
+  type GestureAudioSlot,
+} from '../../lib/gestureAudio';
 import { synthesizeSpeech } from '../../services/api';
 import type {
   CoachPersona,
@@ -143,12 +192,23 @@ function writeFor<T>(next: T, builtInDefault: T): T | null {
   return next === builtInDefault ? null : next;
 }
 
-/** What the preview is currently saying, if anything. */
+/**
+ * What the preview is currently saying, if anything.
+ *
+ * EVERY NON-IDLE MEMBER CARRIES `persona`, INCLUDING `message` (#389). That is
+ * what lets the feedback render in the card of the button that was pressed
+ * rather than in one box below all four — see rule D3.
+ */
 type PreviewState =
   | { kind: 'idle' }
   | { kind: 'preparing'; persona: CoachPersona }
-  | { kind: 'playing'; label: string }
-  | { kind: 'message'; text: string; needsKey?: boolean };
+  | { kind: 'playing'; persona: CoachPersona; label: string }
+  | {
+      kind: 'message';
+      persona: CoachPersona;
+      text: string;
+      needsKey?: boolean;
+    };
 
 export interface CoachSettingsProps {
   /** THE RAW STORED NAMESPACE, `undefined` when untouched — see rule A. */
@@ -192,34 +252,71 @@ export function CoachSettings({
   const reactions = resolveReactions(coach);
 
   const [preview, setPreview] = useState<PreviewState>({ kind: 'idle' });
-  const audioRef = useRef<HTMLAudioElement | null>(null);
-  const objectUrlRef = useRef<string | null>(null);
+
+  /**
+   * THE ONE `<audio>` ELEMENT, for the life of the component.
+   *
+   * Never nulled between presses — see rule D2 and `lib/gestureAudio.ts`. The
+   * autoplay unlock a tap earns belongs to this element, so replacing it is
+   * how the fix undoes itself.
+   */
+  const gestureSlotRef = useRef<GestureAudioSlot>(createGestureAudioSlot());
+
   /** Guards a double press: a second press mid-request must not spend twice. */
   const previewRef = useRef(false);
 
+  /**
+   * WHICH PRESS THE CURRENTLY INTERESTING ONE IS.
+   *
+   * `play()`'s rejection and the element's `onerror` both arrive later than the
+   * press that caused them, and a learner comparing personas presses Hear again
+   * long before either. Without this, a refusal belonging to the sample they
+   * abandoned would overwrite the state of the one they are listening to now.
+   */
+  const previewSeqRef = useRef(0);
+
+  /**
+   * Drop the SAMPLE — the bytes, the source and the handlers. **Keeps the
+   * element**, which is the whole point (rule D2).
+   */
   const releaseAudio = useCallback(() => {
-    const audio = audioRef.current;
-    if (audio) {
-      audio.onended = null;
-      audio.onerror = null;
-      audio.pause();
-      audioRef.current = null;
-    }
-    if (objectUrlRef.current) {
-      URL.revokeObjectURL(objectUrlRef.current);
-      objectUrlRef.current = null;
-    }
+    releaseGestureSample(gestureSlotRef.current);
     previewRef.current = false;
   }, []);
 
-  // Nothing should still be playing after this page unmounts.
-  useEffect(() => releaseAudio, [releaseAudio]);
+  // Nothing should still be playing after this page unmounts — and the ELEMENT
+  // is released here and nowhere else: between presses it is the thing being
+  // kept, not the thing being cleaned up.
+  useEffect(
+    () => () => {
+      releaseGestureAudio(gestureSlotRef.current);
+      previewRef.current = false;
+    },
+    [],
+  );
 
   const hearSample = useCallback(
     async (option: CoachPersonaOption) => {
       if (previewRef.current) return;
       releaseAudio();
+
+      // ---------------------------------------------------------------------
+      // BEFORE THE FIRST `await`, AND THAT IS NOT AN ACCIDENT OF ORDERING.
+      //
+      // The synthesis round trip below is the await that closes the user
+      // gesture. Anything this function does after it is, to a mobile browser,
+      // something the page decided to do on its own — which is exactly why
+      // this page made no sound on a phone until #389. So the element is
+      // claimed and unlocked HERE, while the tap is still being handled, and
+      // the bytes are poured into that already-permitted element when they
+      // arrive. See rule D2 and `lib/gestureAudio.ts`.
+      // ---------------------------------------------------------------------
+      const audio = primeGestureAudio(gestureSlotRef.current);
+
       previewRef.current = true;
+      const token = ++previewSeqRef.current;
+      /** Has this press since been superseded by a newer one? */
+      const isCurrent = () => previewSeqRef.current === token;
       setPreview({ kind: 'preparing', persona: option.key });
 
       let result;
@@ -231,6 +328,7 @@ export function CoachSettings({
         previewRef.current = false;
         setPreview({
           kind: 'message',
+          persona: option.key,
           text: 'We couldn\u2019t play that sample just now. Everything else on this page still works.',
         });
         return;
@@ -246,11 +344,13 @@ export function CoachSettings({
           result.cause === 'no_user_key'
             ? {
                 kind: 'message',
+                persona: option.key,
                 needsKey: true,
                 text: 'Hearing a sample uses your own AI key, and there is no key saved on your account yet. You can still read every sample above.',
               }
             : {
                 kind: 'message',
+                persona: option.key,
                 text: 'Spoken samples are not available here, so there is nothing to play. Every sample above is still readable, and your coach still writes to you.',
               },
         );
@@ -260,25 +360,70 @@ export function CoachSettings({
       if (result.status === 'failed') {
         setPreview({
           kind: 'message',
+          persona: option.key,
           text: `We couldn\u2019t play the ${option.label} sample just now. Reading it above works either way.`,
         });
         return;
       }
 
-      const played = playSample(result.audio, {
-        audioRef,
-        objectUrlRef,
-        onEnd: () => {
-          releaseAudio();
-          setPreview({ kind: 'idle' });
+      // No `Audio` in this environment at all, so the priming call never had an
+      // element to make. Nothing was ever going to play, and saying so is more
+      // use than a card that goes quiet as though it had worked.
+      if (!audio) {
+        setPreview({
+          kind: 'message',
+          persona: option.key,
+          text: `We couldn\u2019t play the ${option.label} sample just now. Reading it above works either way.`,
+        });
+        return;
+      }
+
+      const attempt = playPreparedSample(
+        audio,
+        result.audio,
+        gestureSlotRef.current,
+        {
+          onEnded: () => {
+            if (!isCurrent()) return;
+            releaseAudio();
+            setPreview({ kind: 'idle' });
+          },
+          // BLOCKED IS NOT FINISHED (#389). Until this branch existed both
+          // landed in the same callback, so a learner whose browser refused the
+          // sample saw precisely what a learner who heard it saw: the card
+          // going quiet. The remedy is theirs, so it is offered — and the
+          // reassurance is this page's standing one, because it is true.
+          onBlocked: () => {
+            if (!isCurrent()) return;
+            releaseAudio();
+            setPreview({
+              kind: 'message',
+              persona: option.key,
+              text: 'Your browser blocked the sample from playing. Press Hear again, or check that the phone is not muted. Reading it above works either way.',
+            });
+          },
+          // A DIFFERENT FAILURE, SO A DIFFERENT SENTENCE. The bytes arrived and
+          // the element could not make sense of them — telling this learner to
+          // press the button again, as the blocked message does, would send
+          // them round a loop that cannot end.
+          onDecodeError: () => {
+            if (!isCurrent()) return;
+            releaseAudio();
+            setPreview({
+              kind: 'message',
+              persona: option.key,
+              text: `The ${option.label} sample arrived, but your browser could not play it. Reading it above works either way.`,
+            });
+          },
         },
-      });
+      );
 
       setPreview(
-        played
-          ? { kind: 'playing', label: option.label }
+        attempt
+          ? { kind: 'playing', persona: option.key, label: option.label }
           : {
               kind: 'message',
+              persona: option.key,
               text: `We couldn\u2019t play the ${option.label} sample just now. Reading it above works either way.`,
             },
       );
@@ -294,6 +439,19 @@ export function CoachSettings({
         : preview.kind === 'message'
           ? preview.text
           : '';
+
+  /**
+   * The current preview state, flattened to the three things the list needs.
+   *
+   * Read out here rather than narrowed inside the `.map()` below: the card is
+   * rendered in a callback, and a discriminated union narrowed in the enclosing
+   * scope is not something to make a closure depend on.
+   */
+  const previewPersona = preview.kind === 'idle' ? null : preview.persona;
+  const preparingPersona =
+    preview.kind === 'preparing' ? preview.persona : null;
+  const previewNeedsKey =
+    preview.kind === 'message' && preview.needsKey === true;
 
   return (
     <>
@@ -330,93 +488,153 @@ export function CoachSettings({
                 onChange({ persona: writeFor(next, DEFAULT_COACH_PERSONA) });
               }}
             >
-              {personas.map((option) => (
-                <Box
-                  key={option.key}
-                  sx={{
-                    display: 'flex',
-                    alignItems: 'flex-start',
-                    gap: 1,
-                    py: 1.5,
-                    borderTop: 1,
-                    borderColor: 'divider',
-                  }}
-                >
-                  <FormControlLabel
-                    value={option.key}
-                    control={<Radio disabled={isSaving} sx={{ mt: -1 }} />}
-                    label={
-                      <Box>
-                        <Typography variant="subtitle2" component="span">
-                          {option.label}
-                        </Typography>
+              {personas.map((option) => {
+                // THE FEEDBACK BELONGS TO A CARD, NOT TO THE LIST (#389). See
+                // rule D3: four cards each carrying a description, a quoted
+                // sample line and (for `unfiltered`) a warning are taller than
+                // a phone screen, so a single box under the last of them is a
+                // box the learner who pressed the first button never reaches.
+                const isPreparing = preparingPersona === option.key;
+                const rowText =
+                  previewPersona === option.key ? previewStatusText : '';
+
+                return (
+                  <Box
+                    key={option.key}
+                    sx={{
+                      py: 1.5,
+                      borderTop: 1,
+                      borderColor: 'divider',
+                    }}
+                  >
+                    <Box
+                      sx={{
+                        display: 'flex',
+                        alignItems: 'flex-start',
+                        gap: 1,
+                      }}
+                    >
+                      <FormControlLabel
+                        value={option.key}
+                        control={<Radio disabled={isSaving} sx={{ mt: -1 }} />}
+                        label={
+                          <Box>
+                            <Typography variant="subtitle2" component="span">
+                              {option.label}
+                            </Typography>
+                            <Typography
+                              variant="body2"
+                              color="text.secondary"
+                              sx={{ mt: 0.5 }}
+                            >
+                              {option.description}
+                            </Typography>
+                            {/* ALWAYS VISIBLE, no press required. Reading what you
+                                are about to choose should not cost anything, and
+                                for `unfiltered` in particular it is the difference
+                                between choosing a blunt coach and discovering one
+                                mid-session. Quoted and italic so it reads as the
+                                coach speaking rather than as more description. */}
+                            <Typography
+                              variant="body2"
+                              component="p"
+                              sx={{ mt: 1, fontStyle: 'italic' }}
+                            >
+                              &ldquo;{option.sampleLine}&rdquo;
+                            </Typography>
+                          </Box>
+                        }
+                        sx={{ mr: 0, flexGrow: 1, alignItems: 'flex-start' }}
+                      />
+
+                      {/* Absent entirely when `speak` is unbound — a disabled
+                          button a learner cannot act on is worse than no button,
+                          and the page is complete without it. */}
+                      {speakBound && (
+                        <Button
+                          size="small"
+                          variant="text"
+                          // The spinner replaces the speaker icon on THE PRESSED
+                          // CARD ONLY, so "something is happening" and "here is
+                          // where it is happening" are one piece of information.
+                          startIcon={
+                            isPreparing ? (
+                              <CircularProgress size={16} color="inherit" />
+                            ) : (
+                              <VolumeUpIcon />
+                            )
+                          }
+                          // ONLY `onClick`. See rule D — focus, hover and arrowing
+                          // through the group must never spend the learner's key.
+                          onClick={() => {
+                            void hearSample(option);
+                          }}
+                          // ONLY THE PRESSED CARD GOES INERT. What actually
+                          // protects the key from a second charge is `previewRef`,
+                          // which covers every button and every way of pressing
+                          // one; greying out the other three only made the list
+                          // look broken for the length of a round trip, and hid
+                          // which of them the learner had asked for.
+                          disabled={isSaving || isPreparing}
+                          // NAMES THE PERSONA: "Hear" alone is four identical
+                          // buttons to somebody listening to the page.
+                          aria-label={`Hear the ${option.label} sample`}
+                        >
+                          Hear
+                        </Button>
+                      )}
+                    </Box>
+
+                    {/* `aria-hidden`, because this is the VISIBLE copy of what
+                        the live region below already announces — without it
+                        every message is read twice. The link is deliberately
+                        OUTSIDE that hidden text: focusable content inside an
+                        `aria-hidden` subtree is a focus stop assistive
+                        technology cannot name, and this is the one remedy on
+                        the page a learner can act on, so it stays reachable. */}
+                    {rowText && (
+                      <Box sx={{ pl: { xs: 0, sm: 4 }, pt: 0.5 }}>
                         <Typography
                           variant="body2"
                           color="text.secondary"
-                          sx={{ mt: 0.5 }}
+                          sx={{ maxWidth: '62ch' }}
+                          aria-hidden="true"
                         >
-                          {option.description}
+                          {rowText}
                         </Typography>
-                        {/* ALWAYS VISIBLE, no press required. Reading what you
-                            are about to choose should not cost anything, and
-                            for `unfiltered` in particular it is the difference
-                            between choosing a blunt coach and discovering one
-                            mid-session. Quoted and italic so it reads as the
-                            coach speaking rather than as more description. */}
-                        <Typography
-                          variant="body2"
-                          component="p"
-                          sx={{ mt: 1, fontStyle: 'italic' }}
-                        >
-                          &ldquo;{option.sampleLine}&rdquo;
-                        </Typography>
+                        {previewNeedsKey && (
+                          <Link
+                            component={RouterLink}
+                            to="/settings/ai"
+                            variant="body2"
+                          >
+                            Add a key
+                          </Link>
+                        )}
                       </Box>
-                    }
-                    sx={{ mr: 0, flexGrow: 1, alignItems: 'flex-start' }}
-                  />
-
-                  {/* Absent entirely when `speak` is unbound — a disabled
-                      button a learner cannot act on is worse than no button,
-                      and the page is complete without it. */}
-                  {speakBound && (
-                    <Button
-                      size="small"
-                      variant="text"
-                      startIcon={<VolumeUpIcon />}
-                      // ONLY `onClick`. See rule D — focus, hover and arrowing
-                      // through the group must never spend the learner's key.
-                      onClick={() => {
-                        void hearSample(option);
-                      }}
-                      disabled={isSaving || preview.kind === 'preparing'}
-                      // NAMES THE PERSONA: "Hear" alone is four identical
-                      // buttons to somebody listening to the page.
-                      aria-label={`Hear the ${option.label} sample`}
-                    >
-                      Hear
-                    </Button>
-                  )}
-                </Box>
-              ))}
+                    )}
+                  </Box>
+                );
+              })}
             </RadioGroup>
 
-            {/* Always mounted, empty when idle: a live region inserted at the
-                same moment as its text is frequently never announced at all. */}
-            <Box role="status" aria-live="polite" sx={{ mt: 1 }}>
-              {previewStatusText && (
-                <Typography
-                  variant="body2"
-                  color="text.secondary"
-                  sx={{ maxWidth: '62ch' }}
-                >
-                  {previewStatusText}{' '}
-                  {preview.kind === 'message' && preview.needsKey && (
-                    <Link component={RouterLink} to="/settings/ai">
-                      Add a key
-                    </Link>
-                  )}
-                </Typography>
-              )}
+            {/* ONE live region for the whole group, always mounted and empty
+                when idle: a live region inserted at the same moment as its text
+                is frequently never announced at all — and four of them, one per
+                card, is a page that announces nothing reliably and everything
+                twice.
+
+                VISUALLY HIDDEN SINCE #389, because the same words are now on
+                screen beside the button that was pressed. Sighted learners read
+                them there; everyone else hears them from here. The remedy is a
+                SENTENCE rather than the link, since the link itself lives in the
+                card and a second copy here would be a second focus stop saying
+                exactly what the first one says. */}
+            <Box role="status" aria-live="polite" sx={visuallyHidden}>
+              {previewStatusText}
+              {previewNeedsKey
+                ? ' You can add a key on the AI settings page.'
+                : ''}
             </Box>
           </FormControl>
         </CardContent>
@@ -463,52 +681,6 @@ export function CoachSettings({
       </Card>
     </>
   );
-}
-
-/**
- * Play synthesized bytes, returning whether playback was started.
- *
- * Deliberately NOT awaited. `HTMLAudioElement.play()` resolves when playback
- * BEGINS, which in jsdom (and behind an autoplay policy) may be never — so
- * this reports "the element accepted the source and we asked it to play", and
- * `onEnd` reports what actually happened. Same shape, same reasoning, as
- * `VoiceSettings.tsx`'s own.
- */
-function playSample(
-  blob: Blob,
-  ctx: {
-    audioRef: { current: HTMLAudioElement | null };
-    objectUrlRef: { current: string | null };
-    onEnd: () => void;
-  },
-): boolean {
-  if (
-    typeof URL === 'undefined' ||
-    typeof URL.createObjectURL !== 'function' ||
-    typeof Audio === 'undefined'
-  ) {
-    return false;
-  }
-
-  const url = URL.createObjectURL(blob);
-  ctx.objectUrlRef.current = url;
-
-  const audio = new Audio(url);
-  ctx.audioRef.current = audio;
-  audio.onended = ctx.onEnd;
-  audio.onerror = ctx.onEnd;
-
-  try {
-    // Handled rather than dropped: an autoplay policy blocking sound the
-    // learner explicitly asked for is not an error state, it just means no
-    // sample is coming.
-    void Promise.resolve(audio.play()).catch(() => ctx.onEnd());
-  } catch {
-    ctx.onEnd();
-    return false;
-  }
-
-  return true;
 }
 
 export default CoachSettings;
