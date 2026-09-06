@@ -186,6 +186,15 @@
  * what the counter reads — were never in the browser at all. See the branch
  * itself for the full argument.
  *
+ * THIS PAGE ALSO HOLDS THE SCREEN WAKE LOCK, for the same reason it decides
+ * the swap: it is the only place that can see both transports (#388). The lock
+ * is requested for exactly the condition that opens the surface — a voice
+ * session is under way, on either transport — and this is the ONLY
+ * `useWakeLock` call in the application, which is what makes "exactly one
+ * lock, including across a mid-session fallback" structural rather than
+ * careful. See the call site, and `useWakeLock`'s own header for the platform
+ * limit the copy is careful not to over-promise past.
+ *
  * =============================================================================
  * RELOADING MID-SESSION RESUMES FROM THE SERVER
  * =============================================================================
@@ -331,6 +340,7 @@ import type {
   RealtimePracticeMicrophonePort,
   RealtimePracticeStage,
 } from '../hooks/useRealtimePractice';
+import { useWakeLock } from '../hooks/useWakeLock';
 import {
   ApiError,
   completePracticeSession,
@@ -1906,6 +1916,61 @@ export default function PracticeSessionPage() {
   }, [conversationIsRunning]);
 
   /**
+   * IS A SPOKEN SESSION UNDER WAY? One question, asked of both transports.
+   *
+   * ISSUE #388. This is the gate for two different things that must never
+   * disagree — the full-screen voice surface below, and the screen wake lock
+   * on the next line — so it is computed once, here, from the two drivers'
+   * own answers. `conversation.isRunning` is E13's request/response loop;
+   * `realtimeSessionIsUnderWay` is the live transport's (see its own header
+   * for why `connecting` counts and why `voiceTransport` deliberately does
+   * not).
+   */
+  const realtimeUnderWay = realtimeSessionIsUnderWay(realtimeStage);
+  const voiceSessionIsUnderWay = conversationIsRunning || realtimeUnderWay;
+
+  /**
+   * THE SCREEN STAYS AWAKE FOR THE SESSION, NOT FOR ONE DRIVER'S PHASE (#388).
+   *
+   * -----------------------------------------------------------------------
+   * WHY THIS IS THE PAGE'S AND NOT A HOOK'S
+   * -----------------------------------------------------------------------
+   *
+   * `useWakeLock` (#310, E13) used to be called inside
+   * `useConversationSession`, gated on THAT driver's phase, and it was the
+   * only call site in the application. On the realtime transport E13's loop is
+   * mounted but never runs, so its phase stayed `idle` for the whole session
+   * and no lock was ever requested: a learner talking to the live coach on a
+   * phone watched the screen go dark after the display timeout and the session
+   * suspend — which, per `useWakeLock`'s own header, is not a dimmed session
+   * but a stopped one, mid-question, with no warning. Worse on this transport
+   * than on E13's, because the suspended tab is holding a metered WebRTC
+   * connection on the learner's own AI key.
+   *
+   * The condition was never "a driver is in a phase". It is "a voice session
+   * is under way", which is a fact about the SESSION and therefore belongs to
+   * whoever can see both transports — this page, the same place
+   * `conversationStartedAt` above is held, and for the same reason.
+   *
+   * -----------------------------------------------------------------------
+   * EXACTLY ONE LOCK, INCLUDING ACROSS A MID-SESSION FALLBACK
+   * -----------------------------------------------------------------------
+   *
+   * Guaranteed structurally rather than by care: THIS IS THE ONLY
+   * `useWakeLock` CALL IN THE APPLICATION (`useWakeLock.test.ts` reads the
+   * source tree and fails on a second one), and it is one hook instance held
+   * across every transport change. A realtime session that drops, re-mints,
+   * gives up and lands on E13's loop never crosses a moment where two
+   * sentinels exist, because there is only ever one requester: the flag flips
+   * true → (false, while nothing is running) → true on the same hook, which is
+   * a release and a re-acquire in that order, never an overlap.
+   *
+   * `voiceSessionIsUnderWay` is also exactly the surface's gate below, so the
+   * lock is held for precisely as long as the spoken screen is up.
+   */
+  const wakeLock = useWakeLock(voiceSessionIsUnderWay);
+
+  /**
    * Land on the mode the learner asked for, once.
    *
    * TWO SOURCES, AND THE TAP OUTRANKS THE PREFERENCE (#350, epic #345):
@@ -2468,12 +2533,15 @@ export default function PracticeSessionPage() {
    * byte-identical for it.
    *
    * The running transport's player goes in as `children` (hidden — see
-   * `VoiceSurface`'s own header) and, for E13, the wake-lock nudge as
-   * `footnote`: both are the host's, and neither is the surface's business to
-   * know about. The realtime transport has no wake lock of its own, so it
-   * passes nothing rather than borrowing a caption about a hook it never calls.
+   * `VoiceSurface`'s own header) and the wake-lock nudge as `footnote`: both
+   * are the host's, and neither is the surface's business to know about. The
+   * footnote is per-SESSION rather than per-transport (#388) — see the lock
+   * itself, which is one hook above both drivers.
+   *
+   * `voiceSessionIsUnderWay` and `realtimeUnderWay` are computed above, beside
+   * the wake lock, so that the screen the learner sees and the lock that keeps
+   * it lit are the same boolean and cannot drift apart.
    */
-  const realtimeUnderWay = realtimeSessionIsUnderWay(realtime.stage);
   /**
    * Which transport the surface is rendering for.
    *
@@ -2501,7 +2569,7 @@ export default function PracticeSessionPage() {
     />
   );
 
-  if (conversation.isRunning || realtimeUnderWay) {
+  if (voiceSessionIsUnderWay) {
     return (
       <VoiceSurface
         phase={
@@ -2574,8 +2642,31 @@ export default function PracticeSessionPage() {
         // Unchanged, and already correct for both: it stops BOTH transports
         // by name, for the reason its own comment gives.
         onTypeInstead={handleTypeInstead}
+        // THE REAL STATE OF THE LOCK THIS SESSION ACTUALLY HOLDS (#388).
+        //
+        // This read used to be `!surfaceIsRealtime && !conversation.wakeLock
+        // .isSupported`, which suppressed the warning on the one transport
+        // where the screen genuinely would not stay awake — the learner least
+        // able to guess was the only one not told. There is one lock now, held
+        // for the session rather than by a driver, so there is one state to
+        // report and no transport to exclude.
+        //
+        // `isSupported`, NOT `isHeld`. A held sentinel is dropped by the
+        // browser on every tab switch and every notification, and re-requested
+        // on the way back (`useWakeLock`'s header) — rendering that as a
+        // warning would flash a sentence at a learner about a state that has
+        // already repaired itself. `isSupported` is the durable fact: this
+        // browser cannot do it at all, so here is the one thing you can do.
+        //
+        // THE COPY PROMISES NOTHING IT CANNOT KEEP. Even where the lock IS
+        // held it only holds while the document is visible: it keeps the
+        // display on for someone looking at the page, and cannot make practice
+        // continue with the phone locked or the browser backgrounded, the way
+        // a phone call does. So the supported case says nothing at all rather
+        // than implying otherwise, and the unsupported case asks for the one
+        // thing that actually helps.
         footnote={
-          !surfaceIsRealtime && !conversation.wakeLock.isSupported ? (
+          !wakeLock.isSupported ? (
             <Typography
               variant="caption"
               color="text.secondary"
