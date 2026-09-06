@@ -4,8 +4,8 @@
  * Issue #312, epic #304 / E13 ("Conversation mode"). This is the driver
  * `docs/specs/conversation-mode.md` §4 names: the thing that reads a question
  * aloud, hears the answer, sends it to be transcribed and graded, speaks the
- * accepted answer, and moves on — so a learner practising on a walk taps once
- * at the start and not again.
+ * coach's composed turn about it (#375), and moves on — so a learner
+ * practising on a walk taps once at the start and not again.
  *
  * ```
  * idle
@@ -17,7 +17,7 @@
  *  └─ end of turn ──────────────────────────► processing
  * processing             transcribe → submit → grade; the soft "working" pulse
  *  └─ graded ───────────────────────────────► speakingAnswer
- * speakingAnswer         TTS reads the accepted answer
+ * speakingAnswer         TTS reads the composed turn (verdict, reason, answer)
  *  ├─ correct ──────────────────────────────► advancing
  *  └─ missed AND no retry used ─► "say that again" ──► listening (retry)
  * advancing              a short pause, then advance()
@@ -190,7 +190,7 @@ import { useWakeLock, type UseWakeLockState } from './useWakeLock';
 // ---------------------------------------------------------------------------
 
 /**
- * The beat between the accepted answer being read and the next question
+ * The beat between the coach's turn being read and the next question
  * starting. Long enough to be a breath rather than a cut; short enough that a
  * learner does not wonder whether it stopped.
  */
@@ -366,12 +366,41 @@ export interface ConversationGrade {
   /** The recorded outcome. Anything but `correct` is a miss. */
   outcome: PracticeOutcome;
   /**
-   * The accepted answer to read aloud, or `null` to say nothing.
+   * The whole turn the coach says about this attempt, in order — the
+   * attempt's own `spokenTurn` (#351), passed through VERBATIM.
    *
-   * `null` is ordinary, not an error: a question whose answer resolution needs
-   * a state the learner has not set has nothing to read.
+   * THE SERVER COMPOSES; THIS CLIENT ONLY SPEAKS. `composeSpokenTurn`
+   * (`apps/api/src/practice/spoken-turn.ts`) decides the selection and the
+   * order once, where both transports read it, precisely so the browser never
+   * words a verdict itself. A second wording assembled here would be free to
+   * disagree with the first — the screen saying one thing about an answer and
+   * the voice saying another — and the one a learner trusts is whichever they
+   * noticed second. So there is no `spokenAnswer` beside this: two
+   * representations of one turn is how they drift, and the single-string one
+   * is the field whose byte-identical audio on a right and a wrong answer
+   * epic #345 exists to fix.
+   *
+   * Empty is ordinary and not an error: it is silence, and the loop still
+   * advances — exactly as a `null` accepted answer used to be.
    */
-  spokenAnswer: string | null;
+  spokenTurn: string[];
+  /**
+   * Index into {@link spokenTurn} at which the retry-deferred tail begins, or
+   * `null` when the server has no retry of this attempt to offer.
+   *
+   * Mirrors the attempt's own `retryBoundary` field name for name, meaning and
+   * value. `null` → speak the whole array. A number `k` → speak
+   * `spokenTurn.slice(0, k)`, then, IF this driver offers its one retry, go
+   * back to listening without speaking the tail; `spokenTurn.slice(k)` is
+   * spoken only once retrying is off the table. Reading the accepted answer
+   * aloud and then inviting another go is not a retry — it is a
+   * repeat-after-me, and the `correct` it records proves nothing about recall.
+   *
+   * AN OPPORTUNITY, NOT AN INSTRUCTION: whether a retry actually happens stays
+   * this hook's own call, because the per-question budget
+   * (`CONVERSATION_RETRY_BUDGET`) is the client's and the server cannot see it.
+   */
+  retryBoundary: number | null;
   /**
    * The recogniser was not trusted (`failureCause: 'misheard'`).
    *
@@ -782,7 +811,19 @@ export function useConversationSession(
     [finish, isCurrent, say, toAdvancing, toListening],
   );
 
-  /** Grade the transcript, read the accepted answer, then retry or move on. */
+  /**
+   * Grade the transcript, SPEAK THE COMPOSED TURN, then retry or move on.
+   *
+   * The turn arrives whole from the server (`ConversationGrade.spokenTurn`) and
+   * is spoken in order, one utterance per element so the loop can be
+   * interrupted between them and so `isCurrent(turn)` is rechecked after every
+   * one — a stale turn must stop talking mid-turn, not finish its script into a
+   * screen that has moved on.
+   *
+   * `retryBoundary` is what makes a retry a retry: everything before it is safe
+   * to say BEFORE another go, and the tail — the accepted answer, when there is
+   * one — is spoken only when retrying is off the table.
+   */
   const gradeTranscript = useCallback(
     async (heard: string, confidence: number | null, turn: number) => {
       const opts = optionsRef.current;
@@ -811,18 +852,38 @@ export function useConversationSession(
       // the machine as the start of an answer.
       optionsRef.current.voiceActivity.disarm();
 
-      if (grade.spokenAnswer) {
-        await say(grade.spokenAnswer, 'answer');
+      // THE COMPOSED TURN, SPOKEN AS COMPOSED. No re-derivation from
+      // `outcome`: what a learner hears about an answer is decided in
+      // `composeSpokenTurn` and nowhere else.
+      const lines = grade.spokenTurn;
+      // A boundary the server did not set means "speak all of it"; a negative
+      // one cannot arise from `composeSpokenTurn` and is clamped rather than
+      // handed to `slice`, where it would silently count from the end.
+      const boundary =
+        grade.retryBoundary === null ? lines.length : Math.max(0, grade.retryBoundary);
+
+      for (const line of lines.slice(0, boundary)) {
+        await say(line, 'answer');
         if (!isCurrent(turn)) return;
       }
 
       const missed = grade.outcome !== 'correct' || grade.misheard === true;
       if (missed && !retryUsedRef.current) {
         retryUsedRef.current = true;
+        // THE TAIL IS NOT SPOKEN HERE — that is the whole point of the
+        // boundary. The learner goes back to answering without having been
+        // told the answer first.
         await say(CONVERSATION_NUDGE_RETRY);
         if (!isCurrent(turn)) return;
         toListening();
         return;
+      }
+
+      // Retrying is off the table — spent, declined, or never offered — so the
+      // deferred tail is owed. Empty whenever `retryBoundary` was `null`.
+      for (const line of lines.slice(boundary)) {
+        await say(line, 'answer');
+        if (!isCurrent(turn)) return;
       }
 
       toAdvancing(turn);
