@@ -31,7 +31,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { fireEvent, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 
@@ -39,7 +39,10 @@ import { render } from '../utils/test-utils';
 import { server } from '../mocks/server';
 import { AiStatusProvider } from '../../contexts/AiStatusContext';
 import VoiceSettingsPage from '../../pages/VoiceSettingsPage';
-import { VOICE_PREVIEW_SENTENCE } from '../../components/settings/VoiceSettings';
+import {
+  PLAYBACK_BLOCKED_MESSAGE,
+  VOICE_PREVIEW_SENTENCE,
+} from '../../components/settings/VoiceSettings';
 import type { AiStatus, UserSettings } from '../../types';
 
 const API_BASE = '*/api';
@@ -655,6 +658,81 @@ describe('VoiceSettingsPage (#288)', () => {
     // ONE element, both times. A fresh element per preview is a fresh lock per
     // preview, and the second one was never touched by a gesture.
     expect(audio.constructed).toHaveLength(1);
+  });
+
+  it('says so when the browser BLOCKS playback, instead of returning quietly to idle (#383)', async () => {
+    // A `play()` that rejects for the sample and resolves for the silent
+    // unlock — which is exactly what a muted phone or an autoplay policy does.
+    const audio = installAudio({
+      play: (src) =>
+        src.startsWith('data:')
+          ? Promise.resolve()
+          : Promise.reject(new Error('NotAllowedError')),
+    });
+    const user = userEvent.setup();
+    renderPage();
+
+    await screen.findByRole('radiogroup', { name: 'Voice' });
+    await user.click(screen.getByRole('button', { name: 'Preview the Nova voice' }));
+
+    await waitFor(() => expect(audio.played).toHaveLength(1));
+
+    // THE ASSERTION THIS TEST EXISTS FOR. Before #383 this state ran the same
+    // handler a finished sample runs, so "your phone would not play this" and
+    // "you have just heard it" were the same empty region — and the one
+    // outcome the learner could actually act on was the one nothing said.
+    const status = await screen.findByRole('status');
+    await waitFor(() => expect(status).toHaveTextContent(PLAYBACK_BLOCKED_MESSAGE));
+
+    // Named, and named honestly: a remedy, no alert, and the standing promise
+    // that the browser voice is still reading everything.
+    expect(PLAYBACK_BLOCKED_MESSAGE).toMatch(/press Preview again/i);
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(document.querySelector('.MuiAlert-root')).toBeNull();
+
+    // And the page is still standing — every control still responds.
+    await user.click(await findAutoSubmit());
+    await waitFor(() => expect(patchBodies).toHaveLength(1));
+  });
+
+  it('states an element error too, rather than looking like a sample that ended', async () => {
+    const audio = installAudio();
+    const user = userEvent.setup();
+    renderPage();
+
+    await screen.findByRole('radiogroup', { name: 'Voice' });
+    await user.click(screen.getByRole('button', { name: 'Preview the Alloy voice' }));
+    await waitFor(() => expect(audio.played).toHaveLength(1));
+
+    // The element fails on the bytes it was handed.
+    act(() => {
+      audio.last()?.onerror?.();
+    });
+
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      /couldn't play the Alloy sample/i,
+    );
+  });
+
+  it('goes back to idle — and says nothing — when a sample simply ends', async () => {
+    const audio = installAudio();
+    const user = userEvent.setup();
+    renderPage();
+
+    await screen.findByRole('radiogroup', { name: 'Voice' });
+    await user.click(screen.getByRole('button', { name: 'Preview the Nova voice' }));
+    await waitFor(() => expect(audio.played).toHaveLength(1));
+
+    const ended = audio.last()?.onended;
+    act(() => {
+      ended?.();
+    });
+
+    // The other half of the distinction above: an ordinary ending stays
+    // wordless. A message here would make every finished sample look failed.
+    await waitFor(() =>
+      expect(screen.getByRole('status').textContent?.trim()).toBe(''),
+    );
   });
 
   it('handles a `failed` synthesis without crashing — the #277 lesson', async () => {

@@ -89,6 +89,26 @@
  * drop the `src`, revoke the blob URL — and never the element, because the
  * element is what carries the activation. Discarding the element is an
  * unmount-only act.
+ *
+ * =============================================================================
+ * BLOCKED PLAYBACK IS NAMED. IT IS NEVER RETURNED TO `idle` IN SILENCE
+ * =============================================================================
+ *
+ * Also #383. A rejected `play()` used to run the same `onEnd` a finished
+ * sample runs, which set the state back to `idle` — so "your phone would not
+ * play this" and "you have just heard it" looked identical on screen. Blocked
+ * playback is the ONE outcome a learner most needs named, because it is the
+ * one they can act on: unmute the phone, press Preview again.
+ *
+ * So `playSample` takes three separate callbacks and they mean three separate
+ * things — `onEnd` (the sample finished, go back to `idle`), `onBlocked` (the
+ * `play()` promise rejected), and `onError` (the element itself failed on the
+ * bytes). Collapsing any of them back into a shared handler restores the
+ * silence this fixed.
+ *
+ * IT IS STILL NOT AN ERROR, and the copy must never say the product is
+ * broken — see the `speak` section above. The browser's own voice is reading
+ * every question either way; what failed is one optional sample.
  */
 
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
@@ -142,6 +162,20 @@ import type {
  */
 export const VOICE_PREVIEW_SENTENCE =
   'Who is in charge of the executive branch?';
+
+/**
+ * What a blocked `play()` says.
+ *
+ * EXPORTED SO A TEST CAN PIN IT (#383). It names the one thing that actually
+ * happened and the one thing the learner can do about it, and it stops — no
+ * "something went wrong", no alert, and no suggestion that the page is
+ * broken, because it is not: the browser's own voice reads every question
+ * regardless, which is the sentence that closes it.
+ */
+export const PLAYBACK_BLOCKED_MESSAGE =
+  'Your browser blocked the sample from playing. Check that your phone is not ' +
+  'muted, then press Preview again. Everything is still read aloud by your ' +
+  "browser's own voice.";
 
 /** The value the radio group uses for "no stored preference". */
 const PROVIDER_DEFAULT = '__provider_default__';
@@ -384,9 +418,30 @@ export function VoiceSettings({
       const played = playSample(result.audio, {
         audioRef,
         objectUrlRef,
+        // Finished. Nothing to say — the learner just heard it.
         onEnd: () => {
           releaseSample();
           setPreview({ kind: 'idle' });
+        },
+        // BLOCKED, which is a different thing from finished and says so. The
+        // remedy is the learner's own and it is one sentence long.
+        onBlocked: () => {
+          releaseSample();
+          setPreview({
+            kind: 'message',
+            voiceId,
+            text: PLAYBACK_BLOCKED_MESSAGE,
+          });
+        },
+        // The element rejected the bytes. Also stated, for the same reason:
+        // returning quietly to `idle` reads as "that was the sample".
+        onError: () => {
+          releaseSample();
+          setPreview({
+            kind: 'message',
+            voiceId,
+            text: `We couldn't play the ${label} sample just now. Your browser still reads everything aloud.`,
+          });
         },
       });
 
@@ -1015,7 +1070,12 @@ function playSample(
   ctx: {
     audioRef: { current: HTMLAudioElement | null };
     objectUrlRef: { current: string | null };
+    /** The sample played through to its end. */
     onEnd: () => void;
+    /** `play()` was rejected — most often an autoplay policy or a mute. */
+    onBlocked: () => void;
+    /** The element could not play the bytes it was given. */
+    onError: () => void;
   },
 ): boolean {
   const audio = ctx.audioRef.current;
@@ -1031,16 +1091,16 @@ function playSample(
   ctx.objectUrlRef.current = url;
 
   audio.onended = ctx.onEnd;
-  audio.onerror = ctx.onEnd;
+  audio.onerror = ctx.onError;
   audio.src = url;
 
   try {
-    // The rejection is handled rather than dropped: an autoplay policy blocking
-    // sound the learner explicitly asked for is not an error state, it just
-    // means no sample is coming.
-    void Promise.resolve(audio.play()).catch(() => ctx.onEnd());
+    // `onBlocked`, NOT `onEnd`. A rejection here is a browser refusing to make
+    // a sound the learner explicitly asked for, and reporting it as an ordinary
+    // ending is what made #383 invisible from the learner's side.
+    void Promise.resolve(audio.play()).catch(() => ctx.onBlocked());
   } catch {
-    ctx.onEnd();
+    ctx.onBlocked();
     return false;
   }
 
