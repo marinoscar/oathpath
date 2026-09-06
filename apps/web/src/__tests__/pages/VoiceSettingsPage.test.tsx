@@ -253,6 +253,18 @@ function installAudio(
   };
 }
 
+/**
+ * The row a voice's radio, its Preview button and its own status share.
+ *
+ * #383: the status used to render once, after the whole radio group, several
+ * screens below the button that was pressed on a phone. Asserting "there is a
+ * status somewhere on the page" cannot tell that apart from the fix, so the
+ * tests below scope to the row instead.
+ */
+function voiceRow(voiceId: string): HTMLElement {
+  return screen.getByTestId(`voice-row-${voiceId}`);
+}
+
 describe('VoiceSettingsPage (#288)', () => {
   const realAudio = (window as unknown as { Audio?: unknown }).Audio;
 
@@ -756,6 +768,98 @@ describe('VoiceSettingsPage (#288)', () => {
   });
 
   // ===========================================================================
+  // The status belongs to one voice, and so does the busy treatment (#383)
+  // ===========================================================================
+
+  it("renders the status in the pressed voice's own row, not only below the list", async () => {
+    const audio = installAudio();
+    const user = userEvent.setup();
+    renderPage();
+
+    await screen.findByRole('radiogroup', { name: 'Voice' });
+    await user.click(screen.getByRole('button', { name: 'Preview the Nova voice' }));
+    await waitFor(() => expect(audio.played).toHaveLength(1));
+
+    // Where the learner is actually looking: under the button they pressed.
+    await waitFor(() =>
+      expect(voiceRow('nova')).toHaveTextContent(
+        'Playing a sample in the Nova voice.',
+      ),
+    );
+    // …and NOT in somebody else's row.
+    expect(voiceRow('alloy')).not.toHaveTextContent(/Playing a sample/);
+  });
+
+  it('keeps exactly ONE always-mounted live region, whatever the preview is doing', async () => {
+    const audio = installAudio();
+    const user = userEvent.setup();
+    renderPage();
+
+    await screen.findByRole('radiogroup', { name: 'Voice' });
+
+    // Mounted and empty BEFORE anything happens. A live region inserted at the
+    // same moment as its text is frequently never announced at all, so this
+    // absence-of-text-but-presence-of-region is the load-bearing part.
+    expect(screen.getAllByRole('status')).toHaveLength(1);
+    expect(screen.getByRole('status').textContent?.trim()).toBe('');
+
+    await user.click(screen.getByRole('button', { name: 'Preview the Nova voice' }));
+    await waitFor(() => expect(audio.played).toHaveLength(1));
+
+    // Still exactly one — eleven rows must not mean eleven regions.
+    expect(screen.getAllByRole('status')).toHaveLength(1);
+    expect(screen.getByRole('status')).toHaveTextContent(
+      'Playing a sample in the Nova voice.',
+    );
+  });
+
+  it("disables ONLY the pressed voice's Preview button while its request is in flight", async () => {
+    installAudio();
+
+    // A synthesis that stays in flight, so the `preparing` state can be
+    // inspected rather than raced against.
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    server.use(
+      http.post(`${API_BASE}/ai/speech/synthesize`, async () => {
+        await gate;
+        return HttpResponse.arrayBuffer(new ArrayBuffer(8), {
+          headers: { 'Content-Type': 'audio/mpeg' },
+        });
+      }),
+    );
+
+    renderPage();
+    await screen.findByRole('radiogroup', { name: 'Voice' });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Preview the Nova voice' }));
+
+    const nova = screen.getByRole('button', { name: 'Preview the Nova voice' });
+    await waitFor(() => expect(nova).toBeDisabled());
+
+    // THE ASSERTION THIS TEST EXISTS FOR. Greying out all eleven buttons is
+    // feedback that points at no voice at all; pressing a different one is a
+    // legitimate "no, that one", and `previewRef` — not this attribute — is
+    // what stops a second charge on the learner's key.
+    expect(
+      screen.getByRole('button', { name: 'Preview the Alloy voice' }),
+    ).toBeEnabled();
+    expect(
+      screen.getByRole('button', { name: 'Preview the Standard voice' }),
+    ).toBeEnabled();
+
+    // And the pressed one says it is busy, visibly, so the learner can see
+    // WHICH voice is being prepared.
+    expect(within(voiceRow('nova')).getByRole('progressbar')).toBeInTheDocument();
+    expect(voiceRow('nova')).toHaveTextContent('Preparing the sample…');
+
+    release();
+    await waitFor(() => expect(nova).toBeEnabled());
+  });
+
+  // ===========================================================================
   // `speak` unbound is NOT a degraded state
   // ===========================================================================
 
@@ -827,10 +931,16 @@ describe('VoiceSettingsPage (#288)', () => {
     await waitFor(() =>
       expect(status).toHaveTextContent(/no key saved on your account yet/i),
     );
-    expect(within(status).getByRole('link', { name: 'Add a key' })).toHaveAttribute(
+
+    // THE REMEDY IS IN THE ROW (#383), beside the button that was pressed, and
+    // it is reachable — the live region carries the sentence for assistive
+    // technology, the row carries the link a learner has to be able to click.
+    const row = voiceRow('alloy');
+    expect(within(row).getByRole('link', { name: 'Add a key' })).toHaveAttribute(
       'href',
       '/settings/ai',
     );
+    expect(row).toHaveTextContent(/no key saved on your account yet/i);
   });
 
   it('says nothing remediable for an `unavailable` cause the learner cannot fix', async () => {

@@ -109,6 +109,41 @@
  * IT IS STILL NOT AN ERROR, and the copy must never say the product is
  * broken — see the `speak` section above. The browser's own voice is reading
  * every question either way; what failed is one optional sample.
+ *
+ * =============================================================================
+ * THE STATUS BELONGS TO ONE VOICE, AND SO DOES THE BUSY TREATMENT
+ * =============================================================================
+ *
+ * Also #383. Both halves of this used to be page-wide:
+ *
+ *   - The status was one box AFTER the whole radio group. On a phone that is
+ *     several screens below the button that was just pressed, so feedback for a
+ *     press arrived somewhere the learner was not looking. It is now rendered
+ *     IN THE ROW of the voice it concerns, under that voice's own button.
+ *   - `preview.kind === 'preparing'` disabled ALL of the Preview buttons, which
+ *     is feedback pointing at no particular voice. `preparing` has always
+ *     carried its `voiceId`; only that one goes inert (and shows a spinner)
+ *     now. The others stay pressable, because pressing another one is a
+ *     legitimate "no, that one" — and `previewRef` is what actually stops a
+ *     second charge, not the disabled attribute.
+ *
+ * THERE IS STILL EXACTLY ONE `role="status"` REGION, IT IS ALWAYS MOUNTED, AND
+ * IT NEVER MOVES. That is not decoration: a live region inserted into the DOM
+ * at the same moment as its text is frequently never announced at all, and a
+ * region that moves between parents is inserted afresh every time it moves. So
+ * the announcement and the visible copy are deliberately separated —
+ *
+ *   - the live region holds the sentence, visually hidden, at a fixed place;
+ *   - the row holds the visible sentence, `aria-hidden`, so the same words are
+ *     not read twice;
+ *   - the "Add a key" link lives in the row and is NOT hidden, because a
+ *     remedy has to be reachable;
+ *   - and if the current preview names a voice that is no longer in the
+ *     catalog, the live region renders the sentence VISIBLY instead, so a
+ *     message with no row to live in is still on screen.
+ *
+ * ELEVEN LIVE REGIONS AND ZERO LIVE REGIONS ARE BOTH WRONG. If a later edit
+ * needs the text somewhere else, move the visible copy, never the region.
  */
 
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
@@ -130,6 +165,7 @@ import {
   Typography,
 } from '@mui/material';
 import VolumeUpIcon from '@mui/icons-material/VolumeUp';
+import visuallyHidden from '@mui/utils/visuallyHidden';
 
 import { synthesizeSpeech } from '../../services/api';
 import {
@@ -491,6 +527,22 @@ export function VoiceSettings({
         : preview.kind === 'message'
           ? preview.text
           : '';
+
+  /** The voice the current status is ABOUT, if it is about one. */
+  const previewVoiceId = preview.kind === 'idle' ? null : (preview.voiceId ?? null);
+
+  /**
+   * Is there a row on screen for that voice?
+   *
+   * Normally yes — every preview starts from a press on one of these rows. It
+   * is `false` only if the catalog changed under a preview that was already in
+   * flight, and that is exactly the case the visible fallback in the live
+   * region exists for: a message with nowhere to live must still be readable.
+   */
+  const previewHasRow =
+    previewVoiceId !== null &&
+    (previewVoiceId === PROVIDER_DEFAULT ||
+      voices.some((option) => option.id === previewVoiceId));
 
   return (
     <>
@@ -889,88 +941,146 @@ export function VoiceSettings({
                         'Whichever voice this deployment uses by default.',
                     },
                     ...voices,
-                  ].map((option) => (
-                    <Box
-                      key={option.id}
-                      sx={{
-                        display: 'flex',
-                        flexDirection: { xs: 'column', sm: 'row' },
-                        alignItems: { xs: 'flex-start', sm: 'center' },
-                        gap: { xs: 0.5, sm: 2 },
-                        py: 0.5,
-                      }}
-                    >
-                      <FormControlLabel
-                        value={option.id}
-                        disabled={isSaving}
-                        control={<Radio />}
-                        label={
-                          <Box>
-                            <Typography variant="body1" component="span">
-                              {option.label}
-                            </Typography>
-                            {option.description && (
-                              <Typography
-                                variant="body2"
-                                color="text.secondary"
-                              >
-                                {option.description}
-                              </Typography>
-                            )}
-                          </Box>
-                        }
-                        sx={{ mr: 0, flexGrow: 1 }}
-                      />
-                      <Button
-                        size="small"
-                        variant="text"
-                        startIcon={<VolumeUpIcon />}
-                        // ONLY `onClick`. No `onFocus`, no `onMouseEnter`, no
-                        // key handler — each of those would spend the learner's
-                        // key on a gesture that is not a request for audio.
-                        // `beginPreview`, NOT `void previewVoice(...)`: the
-                        // handler has to prime the audio element while the
-                        // press is still the current user activation. See the
-                        // file header (#383).
-                        onClick={() => {
-                          beginPreview(option.id, option.label);
-                        }}
-                        // Inert only while a REQUEST is in flight — that is
-                        // the window a second press would spend the key twice
-                        // in. Once audio is playing, pressing another Preview
-                        // is a legitimate "no, that one" and stops the first.
-                        disabled={isSaving || preview.kind === 'preparing'}
-                        // The accessible name NAMES THE VOICE. "Preview" alone
-                        // is six identical buttons to anyone listening to the
-                        // page rather than looking at it. The visible word is
-                        // contained in the accessible name, so a speech-input
-                        // user saying "Preview" still matches.
-                        aria-label={`Preview the ${option.label} voice`}
+                  ].map((option) => {
+                    // THIS voice's request, not any request. See the file
+                    // header: a page-wide busy state points at no voice.
+                    const isPreparingThis =
+                      preview.kind === 'preparing' &&
+                      preview.voiceId === option.id;
+                    const showsStatusHere =
+                      previewStatusText !== '' && previewVoiceId === option.id;
+
+                    return (
+                      // The handle a test uses to prove the status really is IN
+                      // THIS ROW rather than merely somewhere on the page — the
+                      // whole point of #383's third defect, and not a claim
+                      // "there is a status somewhere" could ever make.
+                      <Box
+                        key={option.id}
+                        data-testid={`voice-row-${option.id}`}
+                        sx={{ py: 0.5 }}
                       >
-                        Preview
-                      </Button>
-                    </Box>
-                  ))}
+                      <Box
+                        sx={{
+                          display: 'flex',
+                          flexDirection: { xs: 'column', sm: 'row' },
+                          alignItems: { xs: 'flex-start', sm: 'center' },
+                          gap: { xs: 0.5, sm: 2 },
+                        }}
+                      >
+                        <FormControlLabel
+                          value={option.id}
+                          disabled={isSaving}
+                          control={<Radio />}
+                          label={
+                            <Box>
+                              <Typography variant="body1" component="span">
+                                {option.label}
+                              </Typography>
+                              {option.description && (
+                                <Typography
+                                  variant="body2"
+                                  color="text.secondary"
+                                >
+                                  {option.description}
+                                </Typography>
+                              )}
+                            </Box>
+                          }
+                          sx={{ mr: 0, flexGrow: 1 }}
+                        />
+                        <Button
+                          size="small"
+                          variant="text"
+                          startIcon={<VolumeUpIcon />}
+                          // ONLY `onClick`. No `onFocus`, no `onMouseEnter`, no
+                          // key handler — each of those would spend the learner's
+                          // key on a gesture that is not a request for audio.
+                          // `beginPreview`, NOT `void previewVoice(...)`: the
+                          // handler has to prime the audio element while the
+                          // press is still the current user activation. See the
+                          // file header (#383).
+                          onClick={() => {
+                            beginPreview(option.id, option.label);
+                          }}
+                          // A VISIBLE BUSY AFFORDANCE ON THE PRESSED BUTTON, so
+                          // the learner can see which voice is being prepared.
+                          // MUI's `loading` also makes this one button inert.
+                          loading={isPreparingThis}
+                          loadingPosition="start"
+                          // Inert only while THIS voice's request is in flight.
+                          // Not while any request is: the other rows stay
+                          // pressable, because pressing another Preview is a
+                          // legitimate "no, that one" — and `previewRef`, not
+                          // this attribute, is what stops a second charge.
+                          disabled={isSaving}
+                          // The accessible name NAMES THE VOICE. "Preview" alone
+                          // is six identical buttons to anyone listening to the
+                          // page rather than looking at it. The visible word is
+                          // contained in the accessible name, so a speech-input
+                          // user saying "Preview" still matches.
+                          aria-label={`Preview the ${option.label} voice`}
+                        >
+                          Preview
+                        </Button>
+                      </Box>
+
+                      {/* THE STATUS, IN THE ROW IT BELONGS TO — under the button
+                          that was pressed, rather than several screens below it.
+                          `aria-hidden` on the sentence because the live region
+                          below already announces it; the link is outside that,
+                          because a remedy has to be reachable. See the file
+                          header. */}
+                      {showsStatusHere && (
+                        <Typography
+                          variant="body2"
+                          color="text.secondary"
+                          sx={{ mt: 0.5, ml: { sm: 4 }, maxWidth: '62ch' }}
+                        >
+                          <Box component="span" aria-hidden="true">
+                            {previewStatusText}
+                          </Box>{' '}
+                          {preview.kind === 'message' && preview.needsKey && (
+                            <Link component={RouterLink} to="/settings/ai">
+                              Add a key
+                            </Link>
+                          )}
+                        </Typography>
+                      )}
+                      </Box>
+                    );
+                  })}
                 </RadioGroup>
               </FormControl>
 
-              {/* Always mounted, empty when idle: a live region inserted at the
-                  same moment as its text is frequently never announced at all. */}
+              {/* THE ONE LIVE REGION. Always mounted, empty when idle, and it
+                  never moves: a live region inserted at the same moment as its
+                  text is frequently never announced at all, and one that
+                  changes parents is inserted afresh every time. The visible
+                  copy is in the row instead — see the file header. */}
               <Box role="status" aria-live="polite" sx={{ mt: 1 }}>
-                {previewStatusText && (
-                  <Typography
-                    variant="body2"
-                    color="text.secondary"
-                    sx={{ maxWidth: '62ch' }}
-                  >
-                    {previewStatusText}{' '}
-                    {preview.kind === 'message' && preview.needsKey && (
-                      <Link component={RouterLink} to="/settings/ai">
-                        Add a key
-                      </Link>
-                    )}
-                  </Typography>
-                )}
+                {previewStatusText &&
+                  (previewHasRow ? (
+                    // Announced here, read on screen in the row above.
+                    <Box component="span" sx={visuallyHidden}>
+                      {previewStatusText}
+                    </Box>
+                  ) : (
+                    // No row to live in — so it is visible here instead, rather
+                    // than being a message nobody can see.
+                    <Typography
+                      variant="body2"
+                      color="text.secondary"
+                      sx={{ maxWidth: '62ch' }}
+                    >
+                      {previewStatusText}{' '}
+                      {preview.kind === 'message' && preview.needsKey && (
+                        <Link component={RouterLink} to="/settings/ai">
+                          Add a key
+                        </Link>
+                      )}
+                    </Typography>
+                  ))}
               </Box>
             </Box>
           )}
