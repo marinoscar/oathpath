@@ -274,6 +274,49 @@ speakingAnswer      the accepted answer (with E14, the reaction line first)
 advancing           short pause, then handleNext()
 ```
 
+> **Amended by E15 (epic #345, issue #349).** The diagram above is SIX
+> states, reproduced from epic #304 verbatim as this section's own text
+> says — it is not amended in place because it is a historical quotation,
+> not a living contract. There are **SEVEN** `ConversationPhase` values
+> today (`apps/web/src/hooks/useConversationSession.ts`'s own type
+> comment says so explicitly: "SEVEN, NOT THE SIX of
+> `docs/specs/conversation-mode.md` §4"): `preparing` sits between the tap
+> and `speakingQuestion`,
+>
+> ```
+> idle
+>  └─ Start tapped ──► arms autoplay, takes the wake lock
+> preparing           opens the stream; NOTHING is asked or played yet
+>  └─ stream resolves ─────────────────► speakingQuestion
+> ```
+>
+> and every transition after it is exactly as the six-state diagram already
+> describes. `preparing` exists because `start()` used to
+> `setPhase('speakingQuestion')` one line before calling `acquireStream()`,
+> so for as long as a first-use permission dialogue stood open the screen
+> said "Asking you the question." while nothing was playing and the
+> microphone was not yet open — a learner who believed it started
+> answering into a device that did not exist yet. `idle` is unaffected:
+> `start()` still refuses a second tap from any non-`idle` phase, and the
+> wake lock and `isRunning` are still keyed on `phase !== 'idle'`.
+>
+> **A second gap, found rather than fixed, while issue #360 (epic #345)
+> extended this file's own test coverage:** the `speakingAnswer` row's own
+> parenthetical above — "with E14, the reaction line first" — describes
+> the INTENDED behaviour, and it is not what `useConversationSession.ts`'s
+> `gradeTranscript` actually does. That function still speaks only
+> `ConversationGrade.spokenAnswer`, built in
+> `apps/web/src/pages/PracticeSessionPage.tsx`'s `conversationSubmit` as
+> `graded.acceptedAnswers[0]?.text ?? null` — the exact pre-#351 line
+> `apps/api/src/practice/spoken-turn.ts`'s own header names as the defect
+> that module exists to fix. `attempt.spokenTurn` (#351) IS read on this
+> screen, but only by `VoiceSurface`'s visual live region, which reaches a
+> screen-reader user, not the app's own `speechSynthesis` voice a walking
+> learner relies on. Tracked as
+> [issue #375](https://github.com/marinoscar/oathpath/issues/375); not
+> fixed here per #360's own Exclusions clause ("does not change product
+> code").
+
 **Any tap — Stop, Type instead, Next — exits or pauses the loop
 immediately.** The loop never holds the learner hostage: every state above
 has a manual escape that does not wait for the state machine's own timers
@@ -322,6 +365,42 @@ that call is normal, and, hands-free with the phone in a pocket or a hand
 at one's side, indistinguishable from a crash without an audible signal
 that something is still happening.
 
+### 5.1 The cue table, and `voice.soundCues` (issue #357, epic #345 / E15)
+
+The three cues above were E13's own, placed by hand at the three call
+sites somebody noticed. E15 added five more — the tap that starts a
+session (before the device is even open), the top of a question, the
+pause before the next one, and the two ways a session can end — and,
+rather than placing those by hand too, moved EVERY cue decision into one
+table: `apps/web/src/lib/conversationCues.ts`'s
+`CONVERSATION_TRANSITION_CUES`, a `Record<ConversationPhase,
+Record<ConversationPhase, ConversationCueDecision>>` covering every
+ordered pair of the SEVEN `ConversationPhase` values (§4's amendment),
+each cell carrying a `reason` string a test asserts is non-empty even
+where the decision is silence. Adding a phase to the type does not
+compile until every cell that phase touches has been decided — the same
+"a new value cannot be added silently" discipline `AI_MODEL_ROLES` and
+`NOTIFICATION_EVENTS` already use for their own registries (`CLAUDE.md`'s
+"Adding a New AI Model Role" / "Adding a Notification"). A second table,
+`CONVERSATION_EXIT_CUES`, is exhaustive over `ConversationStopReason` for
+the identical reason — a `<phase> → idle` pair cannot by itself tell a
+learner's own Stop apart from a microphone that was taken away, and the
+remedies differ.
+
+`apps/web/src/lib/earcons.ts` still owns every actual sound (the eight
+`EarconDescriptor`s, the shared `AudioContext`, the one
+`setEarconsEnabled` switch) and still knows nothing about phases or
+transitions; `conversationCues.ts` knows nothing about oscillators. The
+learner-facing control is `voice.soundCues` (the eighth field on the
+`voice` namespace, default `true`, §6's own amendment) — `useVoicePrefs.ts`
+is the only caller of `setEarconsEnabled`, reading the raw stored value
+directly rather than a resolved boolean, so a cue can never sound between
+the settings read landing and a session starting. Cross-referenced in
+[`docs/specs/voice.md`](docs/specs/voice.md) §1 and
+[`docs/specs/voice-hands-free.md`](docs/specs/voice-hands-free.md) §4,
+neither of which restates the table itself — this section is its one
+description.
+
 ## 6. The `voice.conversationMode` preference
 
 **One field on the existing `voice` namespace — no new namespace, no
@@ -352,6 +431,17 @@ the real code rather than assumed from the epic text:
    to `VoiceSettings` (line 99); `VoiceSettingsPatch` (line 125) needs no
    separate edit, because it is already a mapped type over every key of
    `VoiceSettings` — the seventh field is picked up automatically.
+
+> **Amended by E15 (epic #345, issue #357).** The `voice` namespace has
+> **eight** fields today, not the seven this section made it by adding
+> `conversationMode` — `soundCues` (whether the hands-free loop's earcons
+> sound at all) was added after this section was written, on the
+> identical four-file pattern above, with its own `DEFAULT_VOICE_SOUND_CUES`
+> constant and its own `mergeVoice` block. See §5.1 below for what it
+> controls and `apps/api/src/common/schemas/user-settings-namespaces.schema.ts`'s
+> own header for the up-to-date field list — this section's "seventh
+> field"/"six blocks" language above is left as it was written, a record
+> of what issue #307 added, not a count to keep current by hand.
 
 **Default `false`.** Unlike `autoSubmitSpoken` (which defaults `true`,
 because the confirm step it replaces was optional friction most learners

@@ -709,6 +709,17 @@ recording this section rules out.
 > `docs/specs/conversation-mode.md` §7 and this document's own `Decisions
 > locked` #6 amendment note (§11).
 
+> **Amended by E15 (epic #345, issue #357).** Conversation mode's short
+> earcons — the tap acknowledged, the microphone opening, a turn captured,
+> the pause before the next question, and both ways a session can end —
+> are governed by one phase-keyed table,
+> `apps/web/src/lib/conversationCues.ts`, and one learner-facing switch,
+> `voice.soundCues` (the eighth field on the `voice` namespace, default
+> `true`). Neither is restated here: see
+> `docs/specs/conversation-mode.md` §5.1 for the table and the switch, and
+> `docs/specs/voice-hands-free.md` §4's own cross-link for the same reason
+> that section states it.
+
 Every voice surface has a text path, unconditionally:
 
 - Reading a question aloud is an addition to the existing read-the-question

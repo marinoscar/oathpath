@@ -13,9 +13,11 @@ therefore the one place a person compiling that entry cannot miss it.
 
 **Before any release whose diff touches voice or realtime code** —
 `apps/api/src/ai/providers/`'s `transcribe`/`synthesize`/`createRealtimeSession`
-paths, anything under `apps/api/src/interviews/realtime/`, or
-`apps/web/src/services/realtimeConnection.ts` — run the manual verification
-checklist in
+paths, anything under `apps/api/src/interviews/realtime/` **or
+`apps/api/src/practice/realtime/`** (added by E15, epic #345), or
+`apps/web/src/services/realtimeConnection.ts` **or
+`apps/web/src/hooks/useRealtimePractice.ts`/`useConversationSession.ts`**
+— run the manual verification checklist in
 [`docs/specs/realtime-interview.md`](docs/specs/realtime-interview.md) §11:
 eight numbered items (barge-in in both directions, end-to-end latency, the
 end control under load, mid-session device switching, microphone denial,
@@ -24,6 +26,11 @@ person against a real deployment, a real browser, and a real microphone. No
 suite in this codebase automates it, by design — §10 of that same document
 states why honestly rather than pretending otherwise — so this checklist is
 the only thing standing between a barge-in regression and a shipped release.
+`docs/specs/realtime-practice.md` §12 confirms this is the identical
+physical checklist for practice's own realtime transport, reused rather than
+duplicated, plus one practice-specific addition: confirming the
+**mid-session fallback** actually speaks its notice and resumes on the same
+session id with no lost progress.
 
 **Record the result as a line in that release's own entry below**: pass/fail
 per item, who ran it, and when. A release note that changes realtime or
@@ -142,6 +149,141 @@ production build eliminates it.
   computed and served since #320 and rendered by nothing: a completed
   session's `coachReaction` is now shown on the practice summary and, in
   Voice mode, spoken as the session's closing turn.
+
+- **Live, full-duplex voice practice, and a spoken turn that finally says
+  whether you were right (E15, epic #345).** The epic's own acceptance
+  sentence: a learner completes a practice session by voice, on a phone or
+  a laptop, hearing whether each answer counted and why, in their chosen
+  coach's voice.
+
+  - **The spoken turn (issues #351, #352).** `composeSpokenTurn`
+    (`apps/api/src/practice/spoken-turn.ts`) replaces the single line the
+    hands-free loop used to speak after grading — `acceptedAnswers[0].text`
+    and nothing else, which made a right answer and a wrong answer
+    byte-identical audio — with an ordered sequence: what was heard (on a
+    miss only), the verdict, the grader's reason (only when one ran), the
+    accepted answer (on a miss or a skip, never a correct answer), and the
+    coach's persona line, with the accepted answer deferred past an armed
+    retry so the retry is never a repeat-after-me. Reaches the wire as
+    `spokenTurn: string[]` / `retryBoundary: number | null` on an attempt
+    and on a completed session's summary. `composeSessionClosingTurn`
+    speaks the three `session.complete_*` reaction cells E14 lit up but
+    nothing rendered.
+  - **A live voice transport (issues #353, #354, #355, #356), alongside
+    E13's request/response loop rather than replacing it.** `realtime`
+    joins `tutor`/`grader`/`transcribe`/`speak` as a sixth AI model role,
+    `wired: true`, capability `'realtime'` — optional, and, like
+    `transcribe`/`speak`, never affecting `systemReady`. Bound, the
+    session-wide `Voice` control opens a full-duplex conversation over
+    `POST /api/practice/sessions/{id}/realtime-session` (a short-lived
+    client secret) and `POST /api/practice/sessions/{id}/realtime/tool-calls`
+    (`next_question` / `grade_answer` / `repeat_question` /
+    `skip_question` / `end_session`); `grade_answer` records the identical
+    `practice_attempts` row, column for column, that the ordinary attempt
+    route would, verified by an equivalence test that drives both
+    transports against one pinned clock and compares the two writes as
+    whole objects. Unbound, or a live connection failed or dropped past its
+    bounded reconnect attempts, `Voice` falls back to E13's loop instead —
+    spoken aloud, with no attempt or progress lost, because none of it was
+    ever held in the browser. `VoiceSurface` (#356) replaces roughly 300
+    lines of bespoke per-transport markup on `PracticeSessionPage.tsx`
+    with one full-screen component shared by both loops: one `h1`, one
+    live region, and the two controls a learner must always be able to
+    reach (Stop, Type instead) never scrolled off a small viewport.
+    `resolveVoiceTransport` is the one function that decides the ladder;
+    `useRealtimePractice` is the one hook that opens exactly one
+    `getUserMedia` stream for the live transport.
+  - **A learner starting Voice from `/practice` no longer has to find
+    "Start hands-free" a second time (issue #350).** A fresh start carries
+    a one-shot intent across the navigation and arms whichever transport
+    the ladder resolves to the moment the session is ready — a genuinely
+    zero-tap session from the picker's own tap forward. A **resumed**
+    session (Recent sessions, or a reload) still requires the explicit
+    Start tap, deliberately: a stored preference is not a fresh gesture.
+  - **A preflight before the learner commits, not only a failure after
+    (issue #349).** `useMediaReadiness` reads `navigator.permissions` and
+    `enumerateDevices()` on mount — observationally, never prompting — so a
+    microphone already blocked is shown on the session screen before Start
+    is ever tapped, not discovered mid-walk. The honest new `preparing`
+    phase (between the tap and the question) replaces a screen that used
+    to claim "Asking you the question." while the permission dialogue was
+    still open.
+  - **Eight earcons on one phase-keyed table, and a learner's own switch
+    to turn them off (issue #357).** `apps/web/src/lib/conversationCues.ts`
+    derives every cue from the state machine's own transitions — adding a
+    phase does not compile until every cell touching it has a decision,
+    silence included — replacing three hand-placed calls that had left
+    five edges (the tap, the question, the pause, both exits) silent.
+    `voice.soundCues` (default `true`) is the eighth field on the `voice`
+    namespace.
+  - **No permission string, no migration.** Every route E15 adds is
+    `@Auth()` with no permissions, for the identical reason every other
+    practice route is; every settings field added (`soundCues`) follows
+    the existing no-`.default()` namespace pattern. See
+    [`docs/specs/realtime-practice.md`](docs/specs/realtime-practice.md),
+    [`docs/specs/conversation-mode.md`](docs/specs/conversation-mode.md),
+    and [`docs/runbooks/configuring-voice.md`](docs/runbooks/configuring-voice.md).
+
+  **A real, live gap this epic's own closing test pass (issue #360) found
+  rather than fixed, tracked as
+  [issue #375](https://github.com/marinoscar/oathpath/issues/375):**
+  `useConversationSession.ts`'s hands-free loop never adopted
+  `attempt.spokenTurn` — it still speaks only the bare accepted answer, on
+  every outcome, via the exact pre-#351 line `spoken-turn.ts`'s own header
+  names as the original defect. `VoiceSurface`'s visual live region does
+  render the full composed turn correctly (so a screen-reader user hears
+  it), but the app's own `speechSynthesis` voice — what a learner walking
+  with the phone in a pocket actually relies on — does not yet. Filed
+  rather than fixed here, per issue #360's own scope (tests and docs only,
+  no product code).
+
+**Manual real-microphone checklist (E15, epic #345): not run, on the
+identical basis E12's and E13's own footnotes above already state, restated
+here rather than newly discovered.** This environment has no microphone, no
+Docker daemon, and no compose stack — the same three absences that kept
+`tests/e2e` from executing for the past two epics keep it from executing for
+this one. Per the release-checklist note at the top of this file and
+`docs/specs/realtime-practice.md` §12, what a person must still run against
+a real deployment, a real browser, and a real microphone before this epic
+ships to production:
+
+1. Live voice's own barge-in and end-to-end latency, and the six other
+   items on `docs/specs/realtime-interview.md` §11's checklist, reused
+   verbatim (`realtime-practice.md` §12 states why this is the identical
+   physical phenomenon, not a second checklist to write) — **not run.**
+2. The mid-session fallback (§8 of that document) actually speaking its
+   notice, on a real dropped connection, and actually resuming on the same
+   session id with no lost progress — the one item that checklist has no
+   analogue for — **not run.**
+3. Conversation mode's own acoustic checklist (`docs/specs/conversation-mode.md`
+   §16, the four items E12/E13's own footnote above already lists:
+   ambient-floor calibration, deliberate barge-in versus ambient noise, the
+   onset timeout and its spoken nudge, and a full one-tap session on a real
+   device) — **still not run**, for the identical reason it was not run for
+   E12 or E13; this epic changed no product code that would newly verify
+   any of the four.
+4. `voice.soundCues`'s eight earcons, actually audible and actually
+   distinguishable from each other on a real speaker — **not run.**
+
+**What *was* run for this epic:** the full API suite (`npm test`,
+`--maxWorkers=2`) — 207 suites, 5,184 tests passed, 74 skipped, zero
+failures — and the full web suite (`vitest run`, sharded) — 174 files,
+3,478 tests passed, 3 skipped, zero failures — both against the baseline
+this repository already carried, plus `tsc --noEmit` clean on both
+workspaces. Issue #360 added: a property test asserting no two outcomes
+(including a retry-armed miss) produce the same composed spoken turn; a
+test asserting all four coach personas produce four different spoken turns
+from an identical verdict; a test asserting the shared `AudioContext`
+survives a switch to realtime voice and back as the same single instance;
+and five Playwright scenarios extending `voice.spec.ts` — a one-tap
+fresh-start journey, "Type instead" reachable from `preparing` (the sixth
+of the now-seven `ConversationPhase` values), a microphone already blocked
+shown before Start is ever tapped, the voice surface fitting 360×640 with
+no document scroll, and (marked `test.fixme`, pending issue #375) a
+correct answer and a spent-retry wrong answer NOT being byte-identical
+audio. Like every Playwright spec in this repository, none of the five was
+executed here — `tsc --noEmit -p tests/e2e/tsconfig.json` is clean, which
+is the one thing about them this environment could actually confirm.
 
 ### Changed
 

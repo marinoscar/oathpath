@@ -744,6 +744,15 @@ in this epic's acceptance criteria requires. A learner who wants a slower
 premium voice is unaffected by this preference; that is a real, named gap,
 not an oversight — see §11.
 
+> **Amended by E15 (epic #345, issue #357).** The `voice` namespace this
+> section describes gained an eighth field after this epic shipped:
+> `soundCues` (default `true`), the one switch for the hands-free loop's
+> short earcons. It governs no synthesis path this section discusses —
+> earcons are synthesised tones (`apps/web/src/lib/earcons.ts`), not
+> `speechSynthesis` output — so it is documented in full in
+> `docs/specs/conversation-mode.md` §5.1 (the phase-keyed cue table,
+> `apps/web/src/lib/conversationCues.ts`) rather than restated here.
+
 ## 6. Browser speechSynthesis remains the unconditional fallback
 
 `voice.md` §2 is unweakened by any of the above: an unbound `speak` role, a
