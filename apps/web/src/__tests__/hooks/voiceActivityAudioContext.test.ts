@@ -28,6 +28,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   closeSharedAudioContext,
+  peekSharedAudioContextState,
   playCapturedEarcon,
   playListeningEarcon,
   setEarconsEnabled,
@@ -205,5 +206,57 @@ describe('one AudioContext across a whole conversation session', () => {
     // reports `unavailable` and the loop falls back to a button.
     expect(createAnalyserLevelSource(STREAM)).toBeNull();
     expect(contexts()).toHaveLength(0);
+  });
+
+  // ===========================================================================
+  // ACROSS A MODE SWITCH — issue #360, epic #345 (E15)
+  // ===========================================================================
+  //
+  // `PracticeSessionPage.realtime.test.tsx` proves exactly one live
+  // `getUserMedia` stream across a switch between the realtime transport and
+  // text. It cannot also prove the `AudioContext` half of that claim, because
+  // the realtime transport never touches this module at all: it has no VAD, no
+  // earcons, and no `processing` pulse to synthesise
+  // (`no-cues-on-the-realtime-path.test.ts` proves that structurally, by
+  // import). The one thing a realtime session DOES read from this module is
+  // `peekSharedAudioContextState()` — `useMediaReadiness.ts`'s preflight, which
+  // is deliberately NON-CREATING (see that hook's own header) so that asking
+  // "is audio ready?" before a realtime session starts cannot itself be the
+  // second `new AudioContext()`.
+  //
+  // So the genuine cross-transport claim is: a learner who runs a conversation
+  // turn (which legitimately builds the one shared context), then switches to
+  // realtime voice (whose own preflight only PEEKS), then switches back to
+  // conversation mode and keeps going, ends the whole sequence still on the
+  // SAME single context — never a second one built on the way back.
+  it('stays on the SAME shared context across a switch to realtime voice and back', () => {
+    // Turn 1, in conversation mode: the one real context gets built.
+    playListeningEarcon();
+    const first = createAnalyserLevelSource(STREAM);
+    expect(first).not.toBeNull();
+    first!.close?.();
+    expect(contexts()).toHaveLength(1);
+    const contextBeforeSwitch = contexts()[0];
+
+    // The learner switches to realtime voice. `useMediaReadiness`'s preflight
+    // reads the context's state on every render while that screen is mounted —
+    // repeatedly, non-creating — and the realtime session itself never once
+    // reaches this module (no cue, no VAD, no pulse).
+    for (let i = 0; i < 5; i += 1) {
+      expect(peekSharedAudioContextState()).toBe('running');
+    }
+    expect(contexts()).toHaveLength(1);
+
+    // Back to conversation mode. The next turn REUSES the existing context —
+    // this is the assertion that actually closes the loop: a caller who forgot
+    // to check `sharedContext` for staleness would build a second one right
+    // here, on the way back in.
+    playListeningEarcon();
+    const second = createAnalyserLevelSource(STREAM);
+    expect(second).not.toBeNull();
+    second!.close?.();
+
+    expect(contexts()).toHaveLength(1);
+    expect(contexts()[0]).toBe(contextBeforeSwitch);
   });
 });

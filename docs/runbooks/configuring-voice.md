@@ -282,7 +282,94 @@ every learner after them, walking or not, hears the cached bytes. See
 [`docs/specs/conversation-mode.md`](../specs/conversation-mode.md) §11 for
 the full reasoning.
 
-## 7. Summary checklist
+## 7. Live (realtime) voice practice adds one more OPTIONAL role: `realtime`
+
+E15 (epic #345) adds a live, full-duplex alternative to conversation mode's
+own request/response loop — the coach and the learner talk over one open
+connection, with no separate transcribe-then-grade round trip per turn.
+`resolveVoiceTransport` (`apps/web/src/pages/PracticeSessionPage.tsx`) is
+the **one** place this application decides which of the three rungs a
+learner's session actually gets, and it is a strict ladder, checked in this
+order:
+
+1. **`realtime` bound, and the mint/connection healthy** → the session-wide
+   `Voice` control opens the **live** transport: the learner sees "Start
+   live voice", a full-duplex conversation with no push-to-talk control at
+   all (the microphone is open for the whole session precisely so the
+   learner can interrupt the coach mid-sentence), and the two sentences
+   below on the panel before they start it.
+2. **`realtime` unbound, missing, or a live connection just failed** (a
+   mint error, or a dropped connection past its bounded re-mint attempts —
+   `docs/specs/realtime-practice.md` §10) → the identical `Voice` control
+   falls back to §6's own request/response hands-free loop instead. A
+   mid-session fallback is **spoken aloud**, not merely rendered — the
+   learner hears one sentence ("Voice connection stopped. Continuing with
+   voice, one question at a time.") and the question, the attempt count and
+   the session's progress are unaffected, because every attempt is a
+   committed server-side row and the browser held none of it.
+3. **Neither `realtime` nor `transcribe` is bound** → `Voice` is not
+   offered at all, exactly as §6 already states for conversation mode on
+   its own — absent, never a disabled control.
+
+**`realtime` is OPTIONAL and, like `transcribe`/`speak`, never affects
+`systemReady`.** Its `AI_MODEL_ROLES` capability is `'realtime'`, not
+`'text'`, so `textModelRoles()` (§1's own mechanism) never counts it — a
+fresh install that never touches this role reports itself ready exactly as
+it did before E15 shipped, and a Viewer can practise fully without it: the
+live transport is an upgrade over rung 2, never a requirement rung 2 or
+rung 3 depend on. **You do not need to bind `realtime` for spoken practice
+to work** — the identical "you do not need to touch either setting" framing
+§1 gives `transcribe`/`speak`, extended to a third role.
+
+**What each rung costs the learner, and on whose key:**
+
+- **Live voice (`realtime` bound) runs on the learner's own AI key and
+  bills by the minute for as long as the connection is open** — not per
+  call, per question, or per word, unlike every other voice surface this
+  runbook describes. This is the exact sentence the panel shows the learner
+  before they start a live session, and it is worth repeating to a learner
+  or a support request asking "why did this cost more than typing": an
+  open connection accrues cost while it is open, including any silence
+  between turns, which is why the application closes it outright (never
+  merely pauses it) the moment a tab is backgrounded — see below.
+- **The request/response fallback (rung 2) costs exactly what §6 already
+  describes** — per-transcription-call, uncached, up to two calls per
+  question when a retry is used.
+- Binding `realtime` does not change what `speak`/`transcribe` cost or how
+  they are billed; the three roles are independent line items on the
+  learner's own OpenAI dashboard.
+
+**The foreground-only limit is STRICTER for live voice than for
+conversation mode, and it fails differently — worth knowing before a
+learner reports it.** §6 already covers conversation mode's wake lock,
+which keeps the *screen* on but cannot survive a *locked* device — the
+session there suspends and can, mid-session, only be resumed by the
+learner. **Live voice does not request a wake lock at all**, and
+deliberately **closes the connection outright** (never merely pauses it)
+the instant the tab is backgrounded (`visibilitychange` → hidden) or an
+idle interval passes with no speech or tool activity
+(`docs/specs/realtime-practice.md` §10): a suspended-but-open realtime
+connection would keep billing the learner's own key for audio nobody is
+listening to, which this application treats as a cost liability rather
+than a session worth trying to preserve. The practical consequence: a
+learner who locks their phone mid-live-session loses that connection for
+good (rung 2's fallback, §6, picks up from the same question — no progress
+is lost, only the live connection itself) rather than resuming where a
+wake lock might have held the screen open. If a learner reports a live
+session "just ending," the first question is the identical one §6 already
+tells you to ask: was the screen turned off or the tab backgrounded.
+
+**Testing locally needs no real OpenAI account for this role either** —
+`AI_PROVIDER_FAKE=true` covers the realtime mint the same way it covers
+`transcribe`/`speak` (§7's own checklist item), and is equally inert under
+`NODE_ENV=production`.
+
+See [`docs/specs/realtime-practice.md`](../specs/realtime-practice.md) for
+the full design record — the tool contract, the equivalence guarantee with
+the ordinary attempt route, and the reconnect bound — none of it restated
+here.
+
+## 8. Summary checklist
 
 - [ ] Decide whether spoken practice (voice **input**) is something you want
       to offer — if yes, bind a `transcribe`-capable model
@@ -310,3 +397,17 @@ the full reasoning.
       fake provider — no real OpenAI account needed to exercise either flow;
       inert under `NODE_ENV=production` (`CLAUDE.md`, "AI (development/test
       only)")
+- [ ] `realtime` is a THIRD, OPTIONAL role (epic #345 / E15) for a live,
+      full-duplex voice session — bound, `Voice` opens it; unbound, or a
+      live connection just failed, `Voice` falls back to conversation
+      mode's request/response loop instead; with neither `realtime` nor
+      `transcribe` bound, `Voice` is not offered at all (§7)
+- [ ] `realtime` never affects `systemReady` either — same "optional,
+      never blocking" posture as `transcribe`/`speak` (§7)
+- [ ] Live voice bills the learner's own key **by the minute the connection
+      is open**, not per call — different from every other rate in this
+      runbook, and worth saying to a learner before they ask (§7)
+- [ ] Live voice has NO wake lock and closes outright (never pauses) the
+      instant the tab is backgrounded — stricter than conversation mode's
+      own foreground limit, and it fails by ending the connection rather
+      than merely suspending it (§7)

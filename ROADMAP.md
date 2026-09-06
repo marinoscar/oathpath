@@ -89,7 +89,7 @@ a v2.
 | E12 | Hands-free voice practice | Auto-submit replaces confirm-before-grade as the default (with a zero-cost correction via `recomputeMasteryForQuestion`), a shared content-addressed cache for civics question/answer audio, and a learner-chosen premium voice | E9, E5 | done<sup>‡‡</sup> | [#280](https://github.com/marinoscar/oathpath/issues/280) |
 | E13 | Conversation mode | A session-wide, one-tap `Text \| Voice` control: a persistent microphone stream, a calibrated voice-activity detector with barge-in, a `speakingQuestion → listening → processing → speakingAnswer → advancing` state machine, synthesised earcons, a foreground-only wake lock, and the `voice.conversationMode` preference — no API change | E9, E12 | done<sup>§§</sup> | [#304](https://github.com/marinoscar/oathpath/issues/304) |
 | E14 | The Coach's personality | A learner-chosen coach delivery style (`supportive`/`academic`/`playful`/`unfiltered`, defaulting to today's voice) delivered through two mechanisms — a curated, no-AI-call reaction-line bank covering the deterministically-graded majority of attempts, and a persona prompt fragment appended to calls that already run (the grader's feedback sentence, the civics explanation stream) — both bounded by one invariant floor enforced twice, in the prompt and by a lint over the shipped reaction bank; the mock-interview officer, the debrief, and notifications are permanently excluded | E4, E12 (for the audio cache) | in progress | [#305](https://github.com/marinoscar/oathpath/issues/305) |
-| E15 | Realtime practice sessions | A second, realtime-backed hands-free mode for ordinary practice sessions (not only mock interviews): the five-tool contract (`next_question`/`grade_answer`/`repeat_question`/`skip_question`/`end_session`) driving the identical `PracticeService.recordAttempt` ladder over a live, tool-mediated conversation, the spoken-turn composer that fixes the request/response loop's identical-audio-on-right-or-wrong defect on both transports at once, a persona-as-curated-line coach voice bounded by `COACH_INVARIANT_FLOOR`, and the degradation ladder between realtime, request/response, and text | E9, E11, E13, E14 | in progress | [#345](https://github.com/marinoscar/oathpath/issues/345) |
+| E15 | Realtime practice sessions | A second, realtime-backed hands-free mode for ordinary practice sessions (not only mock interviews): the five-tool contract (`next_question`/`grade_answer`/`repeat_question`/`skip_question`/`end_session`) driving the identical `PracticeService.recordAttempt` ladder over a live, tool-mediated conversation, the spoken-turn composer that fixes the request/response loop's identical-audio-on-right-or-wrong defect on both transports at once, a persona-as-curated-line coach voice bounded by `COACH_INVARIANT_FLOOR`, and the degradation ladder between realtime, request/response, and text | E9, E11, E13, E14 | done<sup>¶¶</sup> | [#345](https://github.com/marinoscar/oathpath/issues/345) |
 
 **E12 is the first epic filed after the MVP boundary.** E1–E11 closed
 Milestone A and Milestone B — the whole MVP, per [§2](#2-what-the-mvp-is) —
@@ -428,6 +428,63 @@ What *was* verified: the state machine against synthetic level sequences
 `useWakeLock.test.ts`, `PracticeSessionPage.conversation.test.tsx`) — a real
 test of the logic and, deliberately, not a claim about real rooms;
 `docs/specs/conversation-mode.md` §16 says as much of itself.
+
+<sup>¶¶</sup> **E15 is marked `done`, on the same convention this table has
+used since E6/E7/E8, with the identical class of human check knowingly
+outstanding rather than silently assumed.** All fifteen child issues
+(#346–#360) have their product code on `main`'s branch line and CI is
+green — #360 itself (this test-and-docs pass) is the child issue this
+entry's own PR closes; "done" here means what it
+has meant for every voice-adjacent epic on this table (E9, E12, E13): the
+product code, the API+DB+RBAC integration coverage, and the Vitest/Jest
+suites are complete and passing, **not** that a person has sat with a real
+microphone and a real deployment and worked the acceptance journey by
+voice. What follows is not a defect list but a record of what a later
+reader should not assume was verified:
+
+1. **The five Playwright scenarios issue #360 added to
+   `tests/e2e/specs/voice.spec.ts` have never been executed** — the one-tap
+   fresh-start journey with an instrumented tap count; "Type instead"
+   reachable from `preparing` (the sixth of the now-seven
+   `ConversationPhase` values); a microphone already blocked shown before
+   Start is ever tapped; the voice surface fitting 360×640 with no document
+   scroll; and, marked `test.fixme` pending the issue below, a correct
+   answer and a spent-retry wrong answer NOT being byte-identical audio.
+   `tsc --noEmit -p tests/e2e/tsconfig.json` is clean; nobody ran the
+   walk, for the identical reason E13's own footnote above already gives
+   (no Docker daemon, no compose stack, no microphone in this
+   environment).
+2. **The manual real-microphone checklist has not been run for E15
+   either** — `docs/specs/realtime-interview.md` §11's eight items, reused
+   verbatim for the live practice transport per
+   `docs/specs/realtime-practice.md` §12, plus the one practice-specific
+   addition (the mid-session fallback resuming on the same session id with
+   no lost progress), plus `voice.soundCues`'s eight earcons actually
+   sounding distinguishable on a real speaker. `CHANGELOG.md` carries the
+   same record in its E15 entry, so the two agree rather than contradict.
+3. **A real, live gap was found rather than fixed while extending this
+   epic's own test coverage, tracked as
+   [issue #375](https://github.com/marinoscar/oathpath/issues/375) rather
+   than silently left for a future reader to rediscover:**
+   `useConversationSession.ts`'s hands-free loop never adopted
+   `attempt.spokenTurn` (issue #351's own fix) — it still speaks only the
+   bare accepted answer via `speechSynthesis`, on every outcome, so a
+   learner relying on the app's own voice (rather than a screen reader,
+   which does hear the correct composed turn through `VoiceSurface`'s live
+   region) still cannot tell a correct answer from a wrong one by ear once
+   a retry is spent. This is the epic's own headline acceptance property,
+   unmet on this one transport; #360's own test suite documents it as a
+   `test.fixme` rather than a passing claim.
+
+What *was* verified for E15: the full API suite (5,184 tests, 74 skipped,
+zero failures) and the full web suite (3,478 tests, 3 skipped, zero
+failures), both against the pre-existing baseline; `tsc --noEmit` clean on
+both workspaces; the equivalence test proving one grading path across both
+transports; the source-reading purity tests proving the realtime handler
+never re-implements a verdict; and the degradation-ladder tests proving all
+three rungs and the mid-session fallback, including its spoken notice and
+that no progress is lost — see `CHANGELOG.md`'s own E15 entry for the exact
+counts.
 
 ## 4. Why this order
 

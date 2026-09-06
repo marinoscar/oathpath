@@ -655,17 +655,40 @@ for the operator-facing walkthrough. See
 **Conversation mode (E13, epic #304) adds no route of its own — it is a
 client-only driver built entirely on the four routes above plus
 `POST /api/practice/sessions/{id}/attempts`.** `voice.conversationMode`
-(the seventh field on the `voice` namespace, issue #307, `false` by
-default) only decides what a practice session *loads* with: on, the
-session-wide `Text | Voice` control starts on Voice; off, it starts on
-Text, exactly as before this epic. Either way, choosing Voice by itself
-does not arm the hands-free loop — that is a separate **Start hands-free**
-tap (`PracticeSessionPage.tsx`), and Voice with the loop idle is still
-E9/E12's ordinary hand-driven push-to-talk flow. So the preference buys a
-learner one tap instead of two, not a zero-tap session. See
+(one of eight fields on the `voice` namespace, issue #307, `false` by
+default — see the `voice` namespace paragraph under "Adding a New
+Setting" below) only decides what a practice session *loads* with: on,
+the session-wide `Text | Voice` control starts on Voice; off, it starts
+on Text, exactly as before this epic.
+
+**Whether choosing Voice by itself arms the hands-free loop now depends on
+*how* the session was reached (issue #350, epic #345 / E15) — it is no
+longer a single answer.** On a **fresh start** from `/practice` (tapping
+"Start a Quick 5" with Voice already chosen), the tap
+carries a one-shot `{ handsFree: true }` flag across the navigation
+(`apps/web/src/components/practice/handsFreeStart.ts`), and the session
+screen consumes it once to arm the loop itself the moment the first
+question and the voice transport are both ready — `resolveVoiceTransport`
+picks WHICHEVER transport the ladder resolves to (the realtime live
+session or E13's request/response loop), so this is genuinely a **zero-tap
+session** from the picker's own tap forward. On a **resumed** session
+(from Recent sessions, or a reload of the session URL — `wantsHandsFreeStart`
+returns `false` for either, and `handsFreeStart.ts`'s own header states
+why a stored preference alone must never be treated as a fresh gesture),
+the flag is absent and the explicit **Start hands-free** /
+**Start live voice** tap on `PracticeSessionPage.tsx` is still required —
+Voice with the loop idle there is still E9/E12's ordinary hand-driven
+push-to-talk flow. So the preference buys a learner either zero extra taps
+(fresh start) or one instead of two (a resumed session), never a promise
+that is a single count either way. See
 [`docs/specs/conversation-mode.md`](docs/specs/conversation-mode.md) for
 the persistent-stream voice-activity detector, the barge-in and earcon
-design, and the wake lock.
+design, and the wake lock, and
+[`docs/specs/realtime-practice.md`](docs/specs/realtime-practice.md) for
+the realtime transport and its degradation ladder. **E15 (epic #345) adds
+no permission string and no migration** — see the Practice paragraph
+under RBAC below, and "Adding a New Setting" below for why widening an
+existing namespace by a field needs no migration either.
 
 ### AI Coach (Per User)
 - `GET /api/ai/coach/personas` - The four voices a learner may ask their coach to speak in (`supportive`, the default, first), each with its `key`, `label`, `description`, and one readable `sampleLine` — never the `promptFragment` and never the reaction bank (issue #320, epic #305, E14 "The Coach's personality")
@@ -1022,15 +1045,19 @@ migration either. `study` (epic #56 / E7 "Habit") — `reminderHour` and
 `reminderEnabled`, read by the hourly `PracticeReminderTask` — is the
 newest worked example, alongside the pre-existing `dataTables` and
 `navigation`. `voice` (E12, epic #280, issue #282) is the next one after
-it — seven independent scalar preferences (`autoSubmitSpoken`,
+it — **eight** independent scalar preferences today (`autoSubmitSpoken`,
 `preferPremiumVoice`, `preferredVoice`, `speechRate`, `readQuestionsAloud`,
-`readAnswersAloud`, and, since E13/epic #304/issue #307,
-`conversationMode`) governing how a learner experiences spoken questions
-and answers, on the identical no-`.default()` pattern. Adding
-`conversationMode` to the *existing* `voice` namespace was narrower still —
-a four-file change, walked through in full in
+`readAnswersAloud`; then, since E13/epic #304/issue #307,
+`conversationMode`; then, since E15/epic #345/issue #357, `soundCues`)
+governing how a learner experiences spoken questions and answers, on the
+identical no-`.default()` pattern. Adding `conversationMode` to the
+*existing* `voice` namespace was narrower still — a four-file change,
+walked through in full in
 [`docs/specs/conversation-mode.md`](docs/specs/conversation-mode.md) §6.
-`coach` (E14, epic #305, issue #317) is the namespace after that — two
+`soundCues` (whether the hands-free loop's short earcons sound at all,
+`apps/web/src/lib/earcons.ts` / `apps/web/src/lib/conversationCues.ts`) is
+the field after that, on the identical pattern once more. `coach` (E14,
+epic #305, issue #317) is the namespace after that — two
 fields, `persona` (built-in default `'supportive'`) and `reactions`
 (built-in default `true`), governing how the companion frames an answer
 rather than how spoken practice sounds; see "Adding a coach persona" below
