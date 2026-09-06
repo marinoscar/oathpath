@@ -395,9 +395,20 @@ describe('Quick 5', () => {
 
 describe('the queue band', () => {
   it('shows a loading state, then the real summary once the queue resolves', async () => {
+    // The queue response is held open by a promise THIS TEST releases, never by
+    // a real timer. A wall-clock `delay(50)` here races Testing Library's own
+    // polling interval: on a loaded machine the loading state can come and go
+    // between two polls, and `findByRole('status')` then fails for a reason
+    // that has nothing to do with the component. The gate makes the loading
+    // state's presence a fact rather than a bet — the response CANNOT have
+    // arrived before `release()`, and the band cannot settle until it does.
+    let release!: () => void;
+    const queueGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
     server.use(
       http.get(`${API_BASE}/practice/queue`, async () => {
-        await delay(50);
+        await queueGate;
         return HttpResponse.json({ data: DEFAULT_QUEUE });
       }),
       ...practiceHandlers({ sessions: [] }),
@@ -407,6 +418,8 @@ describe('the queue band', () => {
     expect(
       await screen.findByRole('status', { name: /loading your queue/i }),
     ).toBeInTheDocument();
+
+    release();
 
     expect(
       await screen.findByText(`${DEFAULT_QUEUE.new.total} questions you haven't seen yet.`),
