@@ -568,6 +568,20 @@ const BARGE_IN_HOLD_MS = 550;
 const CONVERSATION_NUDGE_RETRY = 'Say that again.';
 
 /**
+ * Two lines from `SPOKEN_VERDICT_LINES` (`apps/api/src/practice/
+ * spoken-turn.ts`), copied rather than imported for the same reason as the
+ * nudge above.
+ *
+ * They are the two strings issue #375 is judged by: before it, the hands-free
+ * loop spoke the accepted answer and NOTHING ELSE on every outcome, so a right
+ * and a wrong answer were byte-identical audio. Asserting on the verdicts is
+ * asserting that the two turns differ in the one element that says which
+ * happened.
+ */
+const SPOKEN_VERDICT_CORRECT = 'That’s right.';
+const SPOKEN_VERDICT_INCORRECT = 'That one didn’t match.';
+
+/**
  * Speak, and drive the synthetic VAD through one full "the learner answered"
  * turn: calibration settles, the level rises past onset and holds, then falls
  * and stays down through the hangover. Ends with `endOfTurn` fired inside the
@@ -1527,13 +1541,20 @@ test.describe('Voice foundation (issue #114), epic #58 (E9)', () => {
       await expect(page.getByText('Telling you the answer.', { exact: true })).toBeVisible({
         timeout: VERDICT_REGION_TIMEOUT,
       });
-      // The accepted answer really was READ ALOUD, not merely graded —
-      // `gradeTranscript`'s `say(grade.spokenAnswer, 'answer')` lands a beat
-      // after the phase text itself (a further React commit), so this is
-      // polled rather than asserted the instant the phase text appears.
+      // The coach's composed turn really was READ ALOUD, not merely graded.
+      // On a CORRECT answer that turn is the verdict and (unless the learner
+      // turned reactions off) a coach line — never the bare accepted answer,
+      // which `composeSpokenTurn` deliberately withholds on a correct outcome
+      // and which reading aloud was the whole of issue #375's defect. The
+      // first utterance lands a beat after the phase text itself (a further
+      // React commit), so this is polled rather than asserted the instant the
+      // phase text appears.
       await expect
         .poll(async () => spokenTexts(page))
-        .toEqual(expect.arrayContaining([acceptedAnswer]));
+        .toEqual(expect.arrayContaining([SPOKEN_VERDICT_CORRECT]));
+      expect(await spokenTexts(page)).not.toEqual(
+        expect.arrayContaining([acceptedAnswer]),
+      );
 
       if (isLast) {
         await expect(
@@ -1681,7 +1702,11 @@ test.describe('Voice foundation (issue #114), epic #58 (E9)', () => {
     await patchConversationMode(page, accessToken, true);
 
     const sessionId = await startHandsFree(page);
-    const { questionId } = await currentQuestionAndAnswer(page, headers, sessionId);
+    const { questionId, acceptedAnswer } = await currentQuestionAndAnswer(
+      page,
+      headers,
+      sessionId,
+    );
 
     // FIRST MISS. `answer-matching.ts`'s exact-only rung 1 (this file's own
     // header) means this cannot accidentally match any accepted answer, for
@@ -1690,13 +1715,24 @@ test.describe('Voice foundation (issue #114), epic #58 (E9)', () => {
     await expect(page.getByText('Telling you the answer.', { exact: true })).toBeVisible({
       timeout: VERDICT_REGION_TIMEOUT,
     });
-    // THE WRONG ANSWER IS "SPOKEN BACK": the accepted answer is read aloud
-    // even though the attempt missed — `gradeTranscript` reads
-    // `grade.spokenAnswer` regardless of `outcome` — followed by the ONE
-    // retry nudge.
+    // THE MISS IS SPOKEN AS A MISS (#375): `gradeTranscript` speaks the
+    // composed turn's HEAD — what was heard, and the verdict — and then the
+    // ONE retry nudge. The accepted answer sits behind `retryBoundary` and is
+    // NOT read here: a retry offered after the answer has been spoken is a
+    // repeat-after-me, not a retry.
     await expect
       .poll(async () => spokenTexts(page))
       .toEqual(expect.arrayContaining([CONVERSATION_NUDGE_RETRY]));
+    // AND THE ANSWER WAS HELD BACK (#375's `retryBoundary`): the verdict was
+    // spoken, the answer was not — a learner offered another go has not just
+    // been told what to say.
+    const afterFirstMissSpoken = await spokenTexts(page);
+    expect(afterFirstMissSpoken).toEqual(
+      expect.arrayContaining([SPOKEN_VERDICT_INCORRECT]),
+    );
+    expect(afterFirstMissSpoken).not.toEqual(
+      expect.arrayContaining([acceptedAnswer]),
+    );
 
     // RE-LISTENED TO: the loop returns to `listening` for the SAME question,
     // not the next one.
@@ -2138,25 +2174,27 @@ test.describe('Voice foundation (issue #114), epic #58 (E9)', () => {
   // outcomes produce the same spoken turn") and here, once, at the level a
   // learner actually experiences: what `speechSynthesis` says out loud.
   //
-  // MARKED `test.fixme` — NOT DELETED, NOT WEAKENED — because writing it
-  // surfaced that `useConversationSession.ts`'s `gradeTranscript` never
-  // adopted `attempt.spokenTurn`: `PracticeSessionPage.tsx`'s
-  // `conversationSubmit` still builds `ConversationGrade.spokenAnswer` as
-  // `graded.acceptedAnswers[0]?.text ?? null` — the EXACT pre-#351 line
-  // `spoken-turn.ts`'s own header quotes as "the defect" — and speaks only
-  // that string, on every outcome, via `say(grade.spokenAnswer, 'answer')`.
-  // `VoiceSurface`'s VISUAL live region does render the full composed turn
-  // (so a screen-reader user hears it correctly), but the app's own spoken
-  // voice — the one a learner walking with the phone in a pocket actually
-  // relies on — still says only the accepted answer, on a correct answer AND
-  // on a spent-retry miss alike. Filed as
-  // https://github.com/marinoscar/oathpath/issues/375, per this issue's own
-  // Exclusions clause ("if a test cannot pass without a product change, that
-  // change is filed as its own issue rather than smuggled in here") — this
-  // spec asserts the CORRECT, desired behaviour and is expected to fail until
-  // #375 lands.
-  test.fixme(
-    'conversation mode: a correct answer and a spent-retry wrong answer are NOT byte-identical audio (see issue #375)',
+  // WAS `test.fixme` UNTIL ISSUE #375 LANDED. It is a live test now, and the
+  // assertions below are unchanged in substance — they described the DESIRED
+  // behaviour all along, per this file's own Exclusions clause ("if a test
+  // cannot pass without a product change, that change is filed as its own
+  // issue rather than smuggled in here").
+  //
+  // Writing it is what surfaced the defect: `useConversationSession.ts`'s
+  // `gradeTranscript` had never adopted `attempt.spokenTurn`, because
+  // `PracticeSessionPage.tsx`'s `conversationSubmit` still built
+  // `ConversationGrade.spokenAnswer` as `graded.acceptedAnswers[0]?.text ??
+  // null` — the EXACT pre-#351 line `spoken-turn.ts`'s own header quotes as
+  // "the defect" — and spoke only that string, on every outcome, via
+  // `say(grade.spokenAnswer, 'answer')`. `VoiceSurface`'s VISUAL live region
+  // already rendered the full composed turn (so a screen-reader user got it
+  // right), but the app's own spoken voice — the one a learner walking with
+  // the phone in a pocket actually relies on — said only the accepted answer,
+  // on a correct answer AND on a spent-retry miss alike. #375 replaced
+  // `spokenAnswer` with `spokenTurn` + `retryBoundary` end to end, and this is
+  // the browser-level claim that it did.
+  test(
+    'conversation mode: a correct answer and a spent-retry wrong answer are NOT byte-identical audio (issue #375)',
     async ({ page }) => {
       await page.addInitScript(installConversationTestSeam);
       await page.addInitScript(installFakeMediaRecorder);
@@ -2183,10 +2221,12 @@ test.describe('Voice foundation (issue #114), epic #58 (E9)', () => {
         timeout: VERDICT_REGION_TIMEOUT,
       });
       const spokenAfterCorrect = await spokenTexts(page);
-      // THE DESIRED BEHAVIOUR: the verdict is spoken, and the bare accepted
+      // THE SHIPPED BEHAVIOUR: the verdict is spoken, and the bare accepted
       // answer text is NOT (composeSpokenTurn never speaks the answer on a
       // correct outcome).
-      expect(spokenAfterCorrect).toEqual(expect.arrayContaining(["That’s right."]));
+      expect(spokenAfterCorrect).toEqual(
+        expect.arrayContaining([SPOKEN_VERDICT_CORRECT]),
+      );
       expect(spokenAfterCorrect).not.toEqual(expect.arrayContaining([acceptedAnswer]));
 
       await expect(
@@ -2210,12 +2250,18 @@ test.describe('Voice foundation (issue #114), epic #58 (E9)', () => {
       });
       const spokenAfterSecondMiss = await spokenTexts(page);
 
-      // THE DESIRED BEHAVIOUR, AND THE ONE THIS FILE CANNOT MAKE PASS TODAY:
-      // the wrong-answer turn must not be the identical sequence a correct
-      // answer produces.
+      // THE EPIC'S HEADLINE PROPERTY, on the transport a walking learner is
+      // most likely to be on: the wrong-answer turn is not the identical
+      // sequence a correct answer produces.
       expect(spokenAfterSecondMiss).not.toEqual(spokenAfterCorrect);
       expect(spokenAfterSecondMiss).toEqual(
-        expect.arrayContaining(['That one didn’t match.']),
+        expect.arrayContaining([SPOKEN_VERDICT_INCORRECT]),
+      );
+      // AND THE SPENT RETRY IS PAID OUT: the second miss is where the tail
+      // `retryBoundary` deferred — the accepted answer, framed — is finally
+      // read, so a learner who used their one retry still hears it.
+      expect(spokenAfterSecondMiss).toEqual(
+        expect.arrayContaining([`The answer is: ${acceptedAnswer}.`]),
       );
 
       expect(await countStorageObjectsUploadedBy([userId])).toBe(0);

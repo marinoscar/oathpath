@@ -316,6 +316,34 @@ advancing           short pause, then handleNext()
 > [issue #375](https://github.com/marinoscar/oathpath/issues/375); not
 > fixed here per #360's own Exclusions clause ("does not change product
 > code").
+>
+> **Closed by issue #375.** `ConversationGrade.spokenAnswer` is gone from
+> `useConversationSession.ts`'s own type entirely — the interface now
+> declares `spokenTurn: string[]` and `retryBoundary: number | null`, the
+> API's own field names and meanings (#351), passed through verbatim rather
+> than re-derived. `conversationSubmit`
+> (`apps/web/src/pages/PracticeSessionPage.tsx`) sets `spokenTurn:
+> attempt.spokenTurn` and `retryBoundary: attempt.retryBoundary`; the
+> `graded.acceptedAnswers[0]?.text ?? null` line quoted above is deleted,
+> not merely unused.
+>
+> The new speaking order, in `gradeTranscript`
+> (`useConversationSession.ts`): it speaks `spokenTurn.slice(0, boundary)`
+> one utterance per element — `boundary` is `spokenTurn.length` when
+> `retryBoundary` is `null`, otherwise `retryBoundary` itself, clamped to
+> zero — rechecking `isCurrent(turn)` after every element so a stale turn
+> stops talking mid-turn rather than finishing its script into a screen
+> that has moved on. Then: if the attempt missed (`outcome !== 'correct'`
+> or `misheard`) and the one-per-question retry budget is unspent, it
+> speaks `CONVERSATION_NUDGE_RETRY` ("Say that again.") and returns to
+> `listening` **without ever speaking `spokenTurn.slice(boundary)`** — the
+> deferred tail, typically the accepted answer — so a learner who still has
+> a retry is never told the answer first. Otherwise (a correct answer, or a
+> miss with the retry already spent or never offered), it speaks the
+> deferred tail and advances. So the `speakingAnswer` row's own
+> parenthetical above ("with E14, the reaction line first") is accurate
+> again: the composed turn is what a learner actually hears, not only what
+> `VoiceSurface`'s visual live region showed.
 
 **Any tap — Stop, Type instead, Next — exits or pauses the loop
 immediately.** The loop never holds the learner hostage: every state above

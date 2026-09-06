@@ -24,7 +24,12 @@ assumed from an issue's prose:
   "spokenAnswer\|CONVERSATION_NUDGE_RETRY"
   apps/web/src/pages/PracticeSessionPage.tsx
   apps/web/src/hooks/useConversationSession.ts` returns the four cited
-  lines, unchanged).
+  lines, unchanged). **Since fixed by
+  [issue #375](https://github.com/marinoscar/oathpath/issues/375) — see the
+  amendment in §6 below.** (The grep above still matches — a comment
+  documenting the old field's removal, and `CONVERSATION_NUDGE_RETRY`'s own
+  declaration and call site — but `spokenAnswer` is no longer a field on
+  `ConversationGrade`, which is the fact this citation exists to verify.)
 - [Issue #353](https://github.com/marinoscar/oathpath/issues/353) — the
   five-tool contract and the mint route's HTTP contract.
 - [Issue #354](https://github.com/marinoscar/oathpath/issues/354) — the
@@ -143,6 +148,20 @@ free to find a better answer to a specific sub-problem as long as it keeps
 the contracts this document promises to the pieces around it: the
 single-`recordAttempt` rule (§5), the never-throw provider (inherited
 unchanged from `realtime-interview.md` §2), and the degradation rule (§7).
+
+> **Historical snapshot, since overtaken — the `ConversationGrade` claim
+> specifically closed by [issue #375](https://github.com/marinoscar/oathpath/issues/375).**
+> The paragraph above is this document's own pre-implementation checkpoint,
+> not a claim about the code today: epic #345's child issues have since
+> landed the routes, services and files it says do not exist yet (`grep -rn
+> "practice-realtime\|PracticeRealtimeService\|composeSpokenTurn"
+> apps/api/src apps/web/src` now matches throughout
+> `apps/api/src/practice/realtime/` and `apps/api/src/practice/spoken-turn.ts`).
+> Narrowly, on the sentence this amendment exists for: `useConversationSession.ts`'s
+> `ConversationGrade` no longer carries `spokenAnswer` at all — it declares
+> `spokenTurn: string[]` and `retryBoundary: number | null` instead (the
+> API's own field names, from #351, finally read end to end by the
+> request/response loop). See §6 below for the fix as shipped.
 
 ---
 
@@ -423,6 +442,12 @@ text/typed transport.
 
 ## 6. The spoken turn
 
+*(This section is kept as originally written — a pre-implementation
+description of a defect and its planned fix — because the record that the
+defect existed is worth keeping. It reads as present tense below because
+that was true when it was written; the amendment after the table states
+what actually shipped, when, and under which issue.)*
+
 The request/response loop's own defect, verified rather than assumed: after
 a spoken answer is graded, `PracticeSessionPage.tsx:1238` sets
 
@@ -472,11 +497,36 @@ pattern: pure data, no interpolation of learner text, reviewable in a diff,
 and covered by the identical banned-topic lint E14's reaction bank already
 runs over (§7).
 
-**`ConversationGrade.spokenAnswer: string | null` becomes
-`spokenTurn: string[]`** in the web's own type, once the API response
-carries it — an additive field on the wire, but a real (non-additive)
-change to the hook's own port, since the old field is what the current
-defect lives on.
+**`ConversationGrade.spokenAnswer: string | null` became
+`spokenTurn: string[]` and `retryBoundary: number | null`** in the web's
+own type, once the API response carried both — additive fields on the
+wire, but a real (non-additive) change to the hook's own port, since the
+old field is what the defect lived on. Landed by issue #375, not by #351
+itself — see the amendment immediately below.
+
+> **Amended: the "defect" and "fix" above were closed by two separate
+> issues, not one, and both have since landed.** [Issue #351](https://github.com/marinoscar/oathpath/issues/351)
+> shipped `composeSpokenTurn` and the `spokenTurn: string[]` /
+> `retryBoundary: number | null` fields on
+> `POST /api/practice/sessions/{id}/attempts`'s attempt response, exactly
+> as this section describes — at `apps/api/src/practice/spoken-turn.ts`,
+> not `apps/api/src/practice/realtime/spoken-turn.ts` as proposed above
+> (the function stayed transport-agnostic and was never moved into
+> `practice/realtime/`). But shipping the field on the wire is not the same
+> as the request/response loop actually speaking it, and for a while it did
+> not: `useConversationSession.ts`'s `ConversationGrade` kept its own
+> `spokenAnswer: string | null` field, and `gradeTranscript` kept speaking
+> only that — `docs/specs/conversation-mode.md`'s own amendment records
+> this as "a second gap, found rather than fixed" while issue #360 extended
+> that file's test coverage. [Issue #375](https://github.com/marinoscar/oathpath/issues/375)
+> is what closed it: `ConversationGrade.spokenAnswer` is gone, replaced by
+> `spokenTurn: string[]` and `retryBoundary: number | null` (mirroring the
+> attempt's own field names), and `gradeTranscript` now speaks
+> `spokenTurn.slice(0, boundary)` one utterance per element, then either
+> nudges a retry and returns to listening without ever speaking the
+> deferred tail (`spokenTurn.slice(boundary)`), or speaks that tail and
+> advances. See `docs/specs/conversation-mode.md` §4's own amendment for
+> the full mechanism, restated there rather than here.
 
 ## 7. Persona as a curated line, not a licence
 

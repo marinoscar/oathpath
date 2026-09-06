@@ -1598,10 +1598,16 @@ export default function PracticeSessionPage() {
 
       return {
         outcome: attempt.outcome,
-        // The FIRST accepted answer, which is what the hand-driven verdict
-        // reads aloud too. `null` — a question whose answers need a state this
-        // learner has not set — is ordinary, and the driver says nothing.
-        spokenAnswer: graded.acceptedAnswers[0]?.text ?? null,
+        // THE SERVER'S OWN COMPOSED TURN, PASSED THROUGH VERBATIM (#375).
+        // Never re-derived from `outcome` or `acceptedAnswers` — the previous
+        // line here read `graded.acceptedAnswers[0]?.text ?? null`, which is
+        // the exact line `apps/api/src/practice/spoken-turn.ts`'s own header
+        // names as the defect: a right answer and a wrong one produced
+        // byte-identical audio, because the bare accepted answer is the one
+        // string that says nothing about which had happened. `VoiceSurface`
+        // renders these same two fields, so screen and voice cannot disagree.
+        spokenTurn: attempt.spokenTurn,
+        retryBoundary: attempt.retryBoundary,
         // The server's own verdict about the recogniser, never this page's.
         misheard: attempt.failureCause === 'misheard',
       };

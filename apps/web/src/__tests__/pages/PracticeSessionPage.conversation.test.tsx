@@ -361,13 +361,30 @@ function installMediaEnvironment({
   });
 }
 
-/** Let whatever is speaking finish, the way a real engine eventually does. */
+/**
+ * Let whatever is speaking finish, the way a real engine eventually does.
+ *
+ * DRAINS UNTIL QUIET, not once (#375). A turn used to be a single utterance —
+ * the accepted answer — so ending the live one ended the turn. It is now the
+ * composed `spokenTurn`, spoken one utterance per line with the driver
+ * awaiting each before queueing the next, so ending line 1 merely makes line 2
+ * live. Draining once would leave the loop mid-turn and every phase this
+ * helper is used to reach would time out.
+ *
+ * The bound is a safety net against a driver that queues forever, not an
+ * expected count: a real engine does eventually go quiet, and a helper that
+ * span here would hang the suite instead of failing it.
+ */
 async function finishSpeaking() {
-  await act(async () => {
-    const live = speech.live;
-    speech.live = [];
-    for (const utterance of live) utterance.onend?.();
-  });
+  for (let pass = 0; pass < 20; pass += 1) {
+    if (speech.live.length === 0) return;
+    await act(async () => {
+      const live = speech.live;
+      speech.live = [];
+      for (const utterance of live) utterance.onend?.();
+    });
+  }
+  throw new Error('finishSpeaking: still speaking after 20 passes');
 }
 
 // -----------------------------------------------------------------------------
@@ -409,7 +426,29 @@ const SESSION_BASE: PracticeSession = {
   spokenTurn: [],
 };
 
+/**
+ * The composed spoken turn the server sends with an attempt (#351), as this
+ * fixture's own server would compose it (#375).
+ *
+ * The page passes these two fields to the hands-free loop VERBATIM — it does
+ * not re-derive a sentence from `outcome` or `acceptedAnswers`, which is the
+ * defect issue #375 fixes — so a fixture that omitted them would be testing a
+ * loop with nothing to say.
+ */
+const SPOKEN_TURN_CORRECT = ['That’s right.'];
+const SPOKEN_TURN_MISS = [
+  'I heard: the Constitution.',
+  'That one didn’t match.',
+  'The answer is: the Constitution.',
+];
+/** The accepted answer is the tail: held back until a retry is off the table. */
+const SPOKEN_TURN_MISS_BOUNDARY = 2;
+
 function makeAttempt(overrides: Partial<PracticeAttempt> = {}): PracticeAttempt {
+  // The turn follows the outcome the server recorded, exactly as
+  // `composeSpokenTurn` does — a fixture whose verdict and outcome disagreed
+  // would be a coach saying the opposite of what was graded.
+  const outcome = overrides.outcome ?? 'correct';
   return {
     id: 'attempt-1',
     sessionId: SESSION_ID,
@@ -445,6 +484,8 @@ function makeAttempt(overrides: Partial<PracticeAttempt> = {}): PracticeAttempt 
         },
       ],
     },
+    spokenTurn: outcome === 'correct' ? [...SPOKEN_TURN_CORRECT] : [...SPOKEN_TURN_MISS],
+    retryBoundary: outcome === 'correct' ? null : SPOKEN_TURN_MISS_BOUNDARY,
     ...overrides,
   };
 }
@@ -823,9 +864,13 @@ describe('the hands-free loop', () => {
     expect(posted[0].transcript).toBe('the Constitution');
     expect(posted[0].promptMode).toBe('heard');
 
-    // The accepted answer is read back, and then the loop moves on by itself.
+    // The coach's composed turn is read back — the VERDICT on a correct answer,
+    // never the bare accepted answer this line used to assert (#375: that
+    // string is what made a right and a wrong answer sound identical) — and
+    // then the loop moves on by itself.
     await screen.findByText('Telling you the answer.');
-    await waitFor(() => expect(speech.spoken).toContain('the Constitution'));
+    await waitFor(() => expect(speech.spoken).toContain(SPOKEN_TURN_CORRECT[0]));
+    expect(speech.spoken).not.toContain('the Constitution');
     await finishSpeaking();
 
     await screen.findByRole('heading', { level: 2, name: QUESTION_2.prompt });
