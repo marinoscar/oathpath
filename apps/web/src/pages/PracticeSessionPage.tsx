@@ -159,11 +159,15 @@
  * A RUNNING VOICE SESSION IS A DIFFERENT SCREEN (#356, epic #345)
  * =============================================================================
  *
- * This file renders TWO screens, and the branch is `conversation.isRunning`.
+ * This file renders TWO screens, and the branch is "a spoken session is under
+ * way" — `conversation.isRunning` for E13's request/response loop, OR
+ * `realtime.stage` being `connecting`/`live` for the realtime transport
+ * (#381). Two drivers, two independent answers, one screen: neither knows the
+ * other exists, and the gate asks both rather than picking one.
  *
  * Everything described above — the form, the correction card, the feedback
- * stack, the explain panel — is the TEXT path, unchanged. The moment the
- * hands-free loop is actually driving, this component returns
+ * stack, the explain panel — is the TEXT path, unchanged. The moment either
+ * spoken transport is actually driving, this component returns
  * `components/voice/VoiceSurface` instead: one viewport, no document scroll, a
  * state visual large enough to read at arm's length, exactly one live region,
  * and Stop and "Type instead" anchored outside every scrolling region.
@@ -714,6 +718,69 @@ const REALTIME_STAGE_TEXT: Record<RealtimePracticeStage, string> = {
   fallback: '',
   ended: '',
 };
+
+/**
+ * Is the LIVE transport actually conducting a session right now? (#381)
+ *
+ * The realtime transport's own answer to the question `conversation.isRunning`
+ * answers for E13's loop, and the second half of the voice surface's gate. Two
+ * stages, and only two: `connecting` is already a session — the microphone is
+ * open, the mint is on the learner's key, and the learner is waiting on a voice
+ * rather than on a control — and `live` is the conversation itself.
+ *
+ * DELIBERATELY NOT `voiceTransport === 'realtime'` AS WELL. A live connection
+ * outranks the ladder that chose it: if `realtimeBound` flipped underneath a
+ * running session (an `/api/ai/status` re-read, an admin unbinding the role),
+ * the ladder would move to another rung while the connection stayed open and
+ * billing — and a gate that also consulted it would take the surface, and with
+ * it the Stop button, off the screen at that exact moment.
+ */
+export function realtimeSessionIsUnderWay(stage: RealtimePracticeStage): boolean {
+  return stage === 'connecting' || stage === 'live';
+}
+
+/**
+ * The realtime transport's stage, as the picture the voice surface draws.
+ *
+ * `VoiceSurface` takes a `ConversationPhase` because E13's driver is what it
+ * was written against, and the phase decides ONE thing there: which of
+ * `voiceVisualState`'s four pictures is drawn. The sentence under the picture
+ * is `phaseText`, which every transport passes from its OWN table — see that
+ * prop's doc comment — so this mapping is never asked to produce words.
+ *
+ * The two stages that matter map to the two phases that describe them:
+ *
+ *   * `connecting` → `preparing`, the phase #349 added for exactly this span —
+ *     the microphone dialogue and the round trip before the first word. It
+ *     draws "Thinking", which is what a learner needs from the picture while
+ *     the application is busy and it is not yet their turn.
+ *   * `live` → `listening`. A full-duplex session's microphone is open for the
+ *     whole of it: it is ALWAYS the learner's turn, which is precisely what
+ *     `listening` says. There is no realtime stage for "the coach is speaking"
+ *     — barge-in means the learner may talk over it — so collapsing to one
+ *     picture is the honest rendering rather than a lossy one.
+ *
+ * THE OTHER THREE ARE THE STAGES THE SURFACE MUST NOT BE SHOWING AT ALL, and
+ * `realtimeSessionIsUnderWay` is what keeps it off the screen for them. They
+ * map to `idle` so that the mapping is TOTAL — a `switch` with no `default`,
+ * so a sixth stage is a compile error here rather than a silent picture — and
+ * the value is deliberately not load-bearing: correctness for `idle`,
+ * `fallback` and `ended` comes from the gate excluding them, never from what
+ * this function returns for them. `idle` is the right last resort even so: it
+ * draws "Paused", and none of the three is a session in progress.
+ */
+export function realtimeStageAsPhase(stage: RealtimePracticeStage): ConversationPhase {
+  switch (stage) {
+    case 'connecting':
+      return 'preparing';
+    case 'live':
+      return 'listening';
+    case 'idle':
+    case 'fallback':
+    case 'ended':
+      return 'idle';
+  }
+}
 
 /** `/practice/sessions/:id/summary` for one id, spelled once. */
 export function practiceSummaryPath(sessionId: string): string {
@@ -1744,11 +1811,23 @@ export default function PracticeSessionPage() {
    * over the audio. A blocked autoplay is swallowed: the tap on Start normally
    * satisfies the gesture requirement, and an alert about an autoplay policy is
    * not something a learner can act on.
+   *
+   * A CALLBACK REF HELD IN STATE, NOT A `useRef` (#381). The element moves
+   * between two trees now: while the live session is under way it is the voice
+   * surface's hidden `children`, and at every other stage it is the inline
+   * panel's. Those are two different returns of this component, so the node is
+   * unmounted and a new one mounted on the swap — and a `useRef` would leave
+   * this effect with no reason to re-run, because `realtime.remoteStream` did
+   * not change. The result would be a fresh `<audio>` with no `srcObject`: a
+   * coach that is connected, billing, and silent. Storing the node in state
+   * makes its identity a dependency, so attaching the stream happens on
+   * whichever element is currently mounted.
    */
-  const realtimeAudioRef = useRef<HTMLAudioElement | null>(null);
+  const [realtimeAudioElement, setRealtimeAudioElement] =
+    useState<HTMLAudioElement | null>(null);
   const realtimeStream = realtime.remoteStream;
   useEffect(() => {
-    const element = realtimeAudioRef.current;
+    const element = realtimeAudioElement;
     if (!element) return;
     try {
       element.srcObject = realtimeStream;
@@ -1756,7 +1835,7 @@ export default function PracticeSessionPage() {
       return;
     }
     if (realtimeStream) void element.play?.().catch(() => undefined);
-  }, [realtimeStream]);
+  }, [realtimeAudioElement, realtimeStream]);
 
   /**
    * The conversation moved, so re-read the session from the server.
@@ -2304,23 +2383,89 @@ export default function PracticeSessionPage() {
    * (`GET /api/practice/sessions/:id`). Leaving voice mode therefore returns
    * to the identical page, mid-session, with the identical counter.
    *
-   * THE GATE IS `conversation.isRunning`, NOT `answerMode`. A learner sitting
-   * in Voice with the loop unarmed is on the ordinary page, with the Start
+   * THE GATE IS "A SPOKEN SESSION IS UNDER WAY", NOT `answerMode`. A learner
+   * sitting in Voice with nothing armed is on the ordinary page, with the Start
    * control, the preflight notice and the microphone all where #313, #349 and
    * #350 put them — the surface is for a session that is actually under way,
    * which is the only state in which a learner is not looking at the screen.
    *
-   * The loop's player goes in as `children` (hidden — see `VoiceSurface`'s own
-   * header) and the wake-lock nudge as `footnote`: both are the host's, and
-   * neither is the surface's business to know about.
+   * AND "UNDER WAY" IS TWO TRANSPORTS, NOT ONE (#381). `conversation.isRunning`
+   * belongs to E13's request/response driver and is `false` for the entire life
+   * of a realtime session, which reports through `realtime.stage` instead. So
+   * on any deployment with a `realtime` model bound — where
+   * `resolveVoiceTransport` returns `'realtime'`, which is the FIRST rung of
+   * the ladder and therefore the common case — this branch could never be
+   * taken: a learner who asked to talk got the typing layout, the "Your answer"
+   * field and the keyboard, with a status line above it. Worse, this surface is
+   * the only renderer of `heard` and of #351's composed turn, so the coach's
+   * verdict was invisible on the transport that has no feedback stack of its
+   * own. `realtimeSessionIsUnderWay` is that transport's own answer to the same
+   * question, and the two are ORed rather than merged: neither driver knows the
+   * other exists, and neither should.
+   *
+   * WHICH ONE IS DRIVING DECIDES FOUR PROPS, and E13 wins a tie. The two
+   * transports cannot both be running — they share one microphone and the
+   * ladder mounts one panel at a time — but the branch is written to be total
+   * rather than to rely on that, and taking E13 first is what keeps this path
+   * byte-identical for it.
+   *
+   * The running transport's player goes in as `children` (hidden — see
+   * `VoiceSurface`'s own header) and, for E13, the wake-lock nudge as
+   * `footnote`: both are the host's, and neither is the surface's business to
+   * know about. The realtime transport has no wake lock of its own, so it
+   * passes nothing rather than borrowing a caption about a hook it never calls.
    */
-  if (conversation.isRunning) {
+  const realtimeUnderWay = realtimeSessionIsUnderWay(realtime.stage);
+  /**
+   * Which transport the surface is rendering for.
+   *
+   * `false` means E13's loop — including the impossible case of both being
+   * live, where E13's existing behaviour is what survives.
+   */
+  const surfaceIsRealtime = !conversation.isRunning && realtimeUnderWay;
+
+  /**
+   * The coach's voice, declared once and mounted in exactly one of two places.
+   *
+   * While the live session is under way it belongs to the surface (as hidden
+   * `children`); at every other stage it belongs to the inline panel below.
+   * It is the same element in both, so a learner who stops and starts again is
+   * not depending on two copies staying in step. See
+   * `realtimeAudioElement`'s effect for what re-attaches the stream across the
+   * remount that the move costs.
+   */
+  const realtimeCoachAudio = (
+    <audio
+      ref={setRealtimeAudioElement}
+      autoPlay
+      hidden
+      data-testid="realtime-coach-audio"
+    />
+  );
+
+  if (conversation.isRunning || realtimeUnderWay) {
     return (
       <VoiceSurface
-        phase={conversation.phase}
-        // The SAME table the driver speaks from. Two renderings of one fact.
-        phaseText={CONVERSATION_PHASE_TEXT[conversation.phase]}
-        notice={conversation.notice?.message ?? null}
+        phase={
+          surfaceIsRealtime
+            ? realtimeStageAsPhase(realtime.stage)
+            : conversation.phase
+        }
+        // THE SAME TABLE THE RUNNING DRIVER SPEAKS FROM — its own, never the
+        // other's. Two renderings of one fact, per transport: that is why this
+        // is a prop rather than a lookup inside `VoiceSurface` (its own doc
+        // comment says so), and `REALTIME_STAGE_TEXT` is what the realtime
+        // panel's status region already renders below.
+        phaseText={
+          surfaceIsRealtime
+            ? REALTIME_STAGE_TEXT[realtime.stage]
+            : CONVERSATION_PHASE_TEXT[conversation.phase]
+        }
+        notice={
+          surfaceIsRealtime
+            ? (realtime.notice?.message ?? null)
+            : (conversation.notice?.message ?? null)
+        }
         questionNumber={question?.number ?? null}
         questionPrompt={question?.prompt ?? null}
         position={position}
@@ -2330,20 +2475,43 @@ export default function PracticeSessionPage() {
         // What was actually graded, and only for an answer that was SPOKEN: a
         // typed attempt was not "heard" by anything, and saying it was would
         // be this screen inventing a recognition step that never ran.
+        //
+        // THE RUNNING TRANSPORT'S OWN, because the two do not write the same
+        // field (#381). E13's loop submits through this page, so `result` is
+        // where its transcript lands; a realtime attempt is recorded by the
+        // engine inside the tool-call route and never sets `result` at all —
+        // `realtime.heard` is the provider's own transcript, and it is what
+        // the inline panel renders as "Heard: …" today. Reading `result` on
+        // that transport would render nothing, every time.
         heard={
-          result && result.attempt.inputMode === 'spoken'
-            ? (result.attempt.transcript ?? result.attempt.responseText)
-            : null
+          surfaceIsRealtime
+            ? realtime.heard
+            : result && result.attempt.inputMode === 'spoken'
+              ? (result.attempt.transcript ?? result.attempt.responseText)
+              : null
         }
         // #351's composed turn, rendered rather than re-derived — see
         // `VoiceSurface`'s header for why a second description of one verdict
         // is worse than none.
+        //
+        // E13'S, AND EMPTY ON THE REALTIME TRANSPORT — where it is `result`
+        // that is empty, because that transport's coach SAYS its own verdict
+        // over the live connection and the engine records the row without this
+        // page ever holding one. There is no realtime field to read here, and
+        // inventing a second wording for a verdict the learner is currently
+        // being spoken is the exact thing #351 removed.
         spokenTurn={result?.attempt.spokenTurn ?? []}
         retryBoundary={result?.attempt.retryBoundary ?? null}
-        onStop={() => conversation.stop()}
+        // STOP THE TRANSPORT THAT IS ACTUALLY RUNNING. Stopping E13's driver
+        // while a live session is up would return a learner to the ordinary
+        // page with the connection still open and still billing by the minute
+        // — the one failure `REALTIME_BILLING_SENTENCE` promises against.
+        onStop={surfaceIsRealtime ? realtime.stop : () => conversation.stop()}
+        // Unchanged, and already correct for both: it stops BOTH transports
+        // by name, for the reason its own comment gives.
         onTypeInstead={handleTypeInstead}
         footnote={
-          !conversation.wakeLock.isSupported ? (
+          !surfaceIsRealtime && !conversation.wakeLock.isSupported ? (
             <Typography
               variant="caption"
               color="text.secondary"
@@ -2356,23 +2524,25 @@ export default function PracticeSessionPage() {
           ) : null
         }
       >
-        {speechRequest && (
-          <QuestionAudio
-            key={speechRequest.id}
-            ref={speechPlayerRef}
-            text={speechRequest.text}
-            autoPlay
-            premiumVoice={voicePrefs.preferPremiumVoice}
-            voice={voicePrefs.preferredVoice}
-            rate={voicePrefs.speechRate}
-            onPlayed={() => {
-              if (speechRequest.kind === 'question') setPromptWasHeard(true);
-            }}
-            onFinished={(event) =>
-              settleSpeech(event.reason === 'ended' ? 'ended' : 'failed')
-            }
-          />
-        )}
+        {surfaceIsRealtime
+          ? realtimeCoachAudio
+          : speechRequest && (
+              <QuestionAudio
+                key={speechRequest.id}
+                ref={speechPlayerRef}
+                text={speechRequest.text}
+                autoPlay
+                premiumVoice={voicePrefs.preferPremiumVoice}
+                voice={voicePrefs.preferredVoice}
+                rate={voicePrefs.speechRate}
+                onPlayed={() => {
+                  if (speechRequest.kind === 'question') setPromptWasHeard(true);
+                }}
+                onFinished={(event) =>
+                  settleSpeech(event.reason === 'ended' ? 'ended' : 'failed')
+                }
+              />
+            )}
       </VoiceSurface>
     );
   }
@@ -2706,13 +2876,14 @@ export default function PracticeSessionPage() {
 
                 {/* THE COACH'S VOICE. `hidden` because there is no control to
                     offer — pausing a conversation is not a thing this transport
-                    does, and the control that matters is Stop, above. */}
-                <audio
-                  ref={realtimeAudioRef}
-                  autoPlay
-                  hidden
-                  data-testid="realtime-coach-audio"
-                />
+                    does, and the control that matters is Stop, above.
+
+                    THE SAME ELEMENT THE SURFACE MOUNTS (#381), declared once
+                    above the branch. This copy is the one on screen at `idle`,
+                    `fallback` and `ended`; the surface holds it for
+                    `connecting` and `live`, and only ever one of the two is in
+                    the tree. */}
+                {realtimeCoachAudio}
               </Paper>
             )}
           </Box>
