@@ -174,6 +174,41 @@ function removeWakeLock(): void {
 const QUESTION_ONE = { id: 'q1', text: 'What is the supreme law of the land?' };
 const QUESTION_TWO = { id: 'q2', text: 'What does the Constitution do?' };
 
+// ---------------------------------------------------------------------------
+// THE COMPOSED TURNS THE FAKE SERVER HANDS BACK (issue #375, epic #345).
+//
+// These are the SHAPES `composeSpokenTurn` (`apps/api/src/practice/
+// spoken-turn.ts`) actually produces — a verdict on every outcome, the
+// learner's own words echoed on a miss only, and the accepted answer held
+// behind `retryBoundary` when a retry is armed. They are written out here
+// rather than imported because the web deliberately holds no copy of the
+// server's composer: what this suite asserts is that the driver SPEAKS
+// whatever it is handed, in order, never that it can reproduce the API's
+// wording.
+// ---------------------------------------------------------------------------
+
+/** A right answer: a verdict and nothing else — the answer is never read back. */
+const TURN_CORRECT = ['That’s right.'];
+
+/**
+ * A miss, with a retry armed: what was heard, the verdict, then the accepted
+ * answer as the DEFERRED TAIL at index 2.
+ */
+const TURN_MISS = [
+  'I heard: not it.',
+  'That one didn’t match.',
+  'The answer is: the Constitution.',
+];
+/** Everything from here on is spoken only once retrying is off the table. */
+const TURN_MISS_BOUNDARY = 2;
+
+/**
+ * A `correct` the recogniser was not trusted on. No accepted answer to defer,
+ * so the boundary is the array's own length — legitimate, and the case
+ * `SpokenTurn.retryBoundary`'s own doc comment names.
+ */
+const TURN_MISHEARD = ['I’m not sure I caught that.'];
+
 interface HeldSpeech {
   text: string;
   kind: ConversationSpeechKind;
@@ -270,7 +305,8 @@ function makeHarness() {
   >(() =>
     Promise.resolve<ConversationGrade>({
       outcome: 'correct',
-      spokenAnswer: 'the Constitution',
+      spokenTurn: [...TURN_CORRECT],
+      retryBoundary: null,
     }),
   );
 
@@ -517,9 +553,13 @@ describe('useConversationSession — the happy loop, transition by transition', 
 
     expect(harness.transcribe).toHaveBeenCalledTimes(1);
     expect(harness.submit).toHaveBeenCalledWith('the constitution', 0.9);
-    // The accepted answer was read aloud before moving on.
+    // The composed turn was read aloud before moving on — the VERDICT, which
+    // on a correct answer is the whole of it. The bare accepted answer, which
+    // is what this line used to assert, is deliberately never spoken here
+    // (#375): it is the string that made a right and a wrong answer sound
+    // identical.
     expect(harness.speech.calls).toContainEqual({
-      text: 'the Constitution',
+      text: TURN_CORRECT[0],
       kind: 'answer',
     });
     expect(phaseOf(view)).toBe('advancing');
@@ -639,7 +679,8 @@ describe('useConversationSession — one composed chain: end of turn → recorde
     const harness = makeHarness();
     harness.submit.mockResolvedValueOnce({
       outcome: 'incorrect',
-      spokenAnswer: 'the Constitution',
+      spokenTurn: [...TURN_MISS],
+      retryBoundary: TURN_MISS_BOUNDARY,
     });
     const view = mount(harness);
     await startToListening(harness, view);
@@ -944,7 +985,8 @@ describe('useConversationSession — the retry budget is exactly one', () => {
     const harness = makeHarness();
     harness.submit.mockResolvedValue({
       outcome: 'incorrect',
-      spokenAnswer: 'the Constitution',
+      spokenTurn: [...TURN_MISS],
+      retryBoundary: TURN_MISS_BOUNDARY,
     });
     const view = mount(harness);
     await startToListening(harness, view);
@@ -963,7 +1005,8 @@ describe('useConversationSession — the retry budget is exactly one', () => {
     const harness = makeHarness();
     harness.submit.mockResolvedValue({
       outcome: 'correct',
-      spokenAnswer: 'the Constitution',
+      spokenTurn: [...TURN_MISHEARD],
+      retryBoundary: TURN_MISHEARD.length,
       misheard: true,
     });
     const view = mount(harness);
@@ -983,7 +1026,8 @@ describe('useConversationSession — the retry budget is exactly one', () => {
     });
     harness.submit.mockResolvedValue({
       outcome: 'incorrect',
-      spokenAnswer: 'the Constitution',
+      spokenTurn: [...TURN_MISS],
+      retryBoundary: TURN_MISS_BOUNDARY,
     });
     const view = mount(harness);
     await startToListening(harness, view);
@@ -1021,7 +1065,8 @@ describe('useConversationSession — the retry budget is exactly one', () => {
     const harness = makeHarness();
     harness.submit.mockResolvedValue({
       outcome: 'incorrect',
-      spokenAnswer: 'the Constitution',
+      spokenTurn: [...TURN_MISS],
+      retryBoundary: TURN_MISS_BOUNDARY,
     });
     const view = mount(harness);
     await startToListening(harness, view);
@@ -1121,7 +1166,8 @@ async function driveOneMiss(
       });
       harness.submit.mockResolvedValueOnce({
         outcome: 'incorrect',
-        spokenAnswer: 'the Constitution',
+        spokenTurn: [...TURN_MISS],
+        retryBoundary: TURN_MISS_BOUNDARY,
       });
       await speakAnswer(harness, view);
       return;
@@ -1133,7 +1179,8 @@ async function driveOneMiss(
       });
       harness.submit.mockResolvedValueOnce({
         outcome: 'correct',
-        spokenAnswer: 'the Constitution',
+        spokenTurn: [...TURN_MISHEARD],
+        retryBoundary: TURN_MISHEARD.length,
         misheard: true,
       });
       await speakAnswer(harness, view);
@@ -1183,6 +1230,232 @@ describe('useConversationSession — the retry budget as a PROPERTY over a range
       }
     },
   );
+});
+
+
+// ---------------------------------------------------------------------------
+//
+// WHAT THE COACH SAYS ABOUT ONE ANSWER (issue #375, epic #345 / E15)
+//
+// The epic's headline acceptance property, on the transport a walking learner
+// is most likely to be on. Before this issue the loop said exactly one thing
+// after grading — `graded.acceptedAnswers[0]?.text` — so a learner who was
+// RIGHT and a learner who was WRONG heard byte-identical audio ("the
+// Constitution" either way) and had to guess which had happened. Nothing threw;
+// nothing rendered wrong; `VoiceSurface` even showed the correct composed turn
+// on screen. Only the voice was wrong, and only for someone not looking at it.
+//
+// So these tests assert the ACTUAL SPOKEN STRINGS, in order, not that something
+// was spoken. "Something was spoken" was true of the defect too.
+// ---------------------------------------------------------------------------
+
+/** Everything the app said this turn except the question itself, in order. */
+function spokenLines(harness: Harness): string[] {
+  return harness.speech.calls
+    .filter((entry) => entry.kind !== 'question')
+    .map((entry) => entry.text);
+}
+
+describe('useConversationSession — the composed turn is what gets spoken (#375)', () => {
+  it('a correct answer and an incorrect answer for the SAME question do not sound alike', async () => {
+    // Two runs of the identical first question, differing only in how the
+    // server graded them.
+    const right = makeHarness();
+    const rightView = mount(right);
+    await startToListening(right, rightView);
+    await speakAnswer(right, rightView);
+
+    const wrong = makeHarness();
+    wrong.submit.mockResolvedValue({
+      outcome: 'incorrect',
+      spokenTurn: [...TURN_MISS],
+      retryBoundary: TURN_MISS_BOUNDARY,
+    });
+    const wrongView = mount(wrong);
+    await startToListening(wrong, wrongView);
+    await speakAnswer(wrong, wrongView);
+
+    // THE EXACT SEQUENCES, asserted as sequences — a verdict and nothing else
+    // on the right answer; what was heard, then a different verdict, then the
+    // one retry offer on the wrong one.
+    expect(spokenLines(right)).toEqual([TURN_CORRECT[0]]);
+    expect(spokenLines(wrong)).toEqual([
+      TURN_MISS[0],
+      TURN_MISS[1],
+      CONVERSATION_NUDGE_RETRY,
+    ]);
+
+    // AND THE PROPERTY ITSELF, stated once as the thing that must never
+    // regress, whatever the two banks above are edited to say.
+    expect(spokenLines(wrong)).not.toEqual(spokenLines(right));
+  });
+
+  it('speaks the turn IN ORDER, one utterance per element', async () => {
+    const harness = makeHarness();
+    harness.submit.mockResolvedValue({
+      outcome: 'incorrect',
+      spokenTurn: ['first.', 'second.', 'third.'],
+      // No retry deferred: the whole array is owed in one go.
+      retryBoundary: null,
+    });
+    const view = mount(harness);
+    await startToListening(harness, view);
+    await speakAnswer(harness, view);
+
+    // One `speak` per element — not one joined string — so the loop can be
+    // interrupted between them.
+    expect(spokenLines(harness)).toEqual([
+      'first.',
+      'second.',
+      'third.',
+      CONVERSATION_NUDGE_RETRY,
+    ]);
+  });
+
+  it('does NOT read the accepted answer before offering the retry, and DOES once the budget is spent', async () => {
+    const harness = makeHarness();
+    harness.submit.mockResolvedValue({
+      outcome: 'incorrect',
+      spokenTurn: [...TURN_MISS],
+      retryBoundary: TURN_MISS_BOUNDARY,
+    });
+    const view = mount(harness);
+    await startToListening(harness, view);
+
+    // FIRST MISS: the head of the turn, then the retry — and the tail withheld.
+    // A retry offered after the answer has been read aloud is a
+    // repeat-after-me, and the `correct` it records proves nothing about
+    // recall (`apps/api/src/practice/spoken-turn.ts`).
+    await speakAnswer(harness, view);
+    expect(spokenLines(harness)).toEqual([
+      TURN_MISS[0],
+      TURN_MISS[1],
+      CONVERSATION_NUDGE_RETRY,
+    ]);
+    expect(spokenLines(harness)).not.toContain(TURN_MISS[2]);
+    expect(phaseOf(view)).toBe('listening');
+
+    // SECOND MISS: the budget is spent, retrying is off the table, and the
+    // answer is now owed — the learner must not be left never hearing it.
+    await speakAnswer(harness, view);
+    expect(spokenLines(harness).slice(3)).toEqual([
+      TURN_MISS[0],
+      TURN_MISS[1],
+      TURN_MISS[2],
+    ]);
+    expect(phaseOf(view)).toBe('advancing');
+  });
+
+  it('reads the deferred tail on the FIRST graded miss when the budget was already spent elsewhere', async () => {
+    // The retry was spent by an empty transcript, so this graded miss offers
+    // none — which is exactly the "retrying is off the table" case, reached
+    // without a second grade.
+    const harness = makeHarness();
+    harness.transcribe.mockResolvedValueOnce({
+      status: 'ok',
+      text: '',
+      confidence: null,
+    });
+    harness.submit.mockResolvedValue({
+      outcome: 'incorrect',
+      spokenTurn: [...TURN_MISS],
+      retryBoundary: TURN_MISS_BOUNDARY,
+    });
+    const view = mount(harness);
+    await startToListening(harness, view);
+
+    await speakAnswer(harness, view); // empty: the one nudge is spent here
+    expect(harness.submit).not.toHaveBeenCalled();
+
+    await speakAnswer(harness, view);
+    expect(spokenLines(harness)).toEqual([
+      CONVERSATION_NUDGE_EMPTY,
+      TURN_MISS[0],
+      TURN_MISS[1],
+      TURN_MISS[2],
+    ]);
+    expect(phaseOf(view)).toBe('advancing');
+  });
+
+  it('a boundary at the array’s own length defers nothing and still offers the retry', async () => {
+    // `k === spokenTurn.length` is legitimate — a retry is armed with no
+    // accepted answer to hold back (the `state_required` case, and the
+    // misheard-`correct` one below).
+    const harness = makeHarness();
+    harness.submit.mockResolvedValue({
+      outcome: 'correct',
+      spokenTurn: [...TURN_MISHEARD],
+      retryBoundary: TURN_MISHEARD.length,
+      misheard: true,
+    });
+    const view = mount(harness);
+    await startToListening(harness, view);
+    await speakAnswer(harness, view);
+
+    expect(spokenLines(harness)).toEqual([
+      TURN_MISHEARD[0],
+      CONVERSATION_NUDGE_RETRY,
+    ]);
+    expect(phaseOf(view)).toBe('listening');
+  });
+
+  it('an EMPTY turn is silent and still advances', async () => {
+    // Ordinary, not an error — the same way `spokenAnswer: null` was before
+    // this issue. A silent turn must not strand the loop in `speakingAnswer`.
+    const harness = makeHarness();
+    harness.submit.mockResolvedValue({
+      outcome: 'correct',
+      spokenTurn: [],
+      retryBoundary: null,
+    });
+    const view = mount(harness);
+    await startToListening(harness, view);
+    await speakAnswer(harness, view);
+
+    expect(spokenLines(harness)).toEqual([]);
+    expect(phaseOf(view)).toBe('advancing');
+    await settle(CONVERSATION_ADVANCE_PAUSE_MS);
+    expect(harness.advance).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops speaking a turn the moment its own turn is stale', async () => {
+    // The `isCurrent(turn)` check after every utterance: a learner who taps
+    // Stop between two lines does not get the rest of the script read at them.
+    const harness = makeHarness();
+    harness.submit.mockResolvedValue({
+      outcome: 'incorrect',
+      spokenTurn: ['first.', 'second.', 'third.'],
+      retryBoundary: null,
+    });
+    const view = mount(harness);
+    await startToListening(harness, view);
+
+    harness.speech.hold = true;
+    fire(view, ONSET);
+    fire(view, END_OF_TURN);
+    await act(async () => {
+      harness.deliverRecording();
+      view.rerender(harness.props());
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    await settle();
+    expect(phaseOf(view)).toBe('speakingAnswer');
+    expect(spokenLines(harness)).toEqual(['first.']);
+
+    // The learner's own Stop, mid-turn, then the held utterance settles.
+    act(() => {
+      view.result.current.stop();
+    });
+    harness.speech.hold = false;
+    await act(async () => {
+      harness.speech.settle('cancelled');
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    await settle();
+
+    expect(spokenLines(harness)).toEqual(['first.']);
+    expect(phaseOf(view)).toBe('idle');
+  });
 });
 
 // ---------------------------------------------------------------------------
