@@ -26,10 +26,12 @@ import { http, HttpResponse } from 'msw';
 import { server } from '../mocks/server';
 import {
   DEFAULT_VOICE_CONVERSATION_MODE,
+  DEFAULT_VOICE_SOUND_CUES,
   DEFAULT_VOICE_SPEECH_RATE,
   resolveVoicePreferences,
   useVoicePrefs,
 } from '../../hooks/useVoicePrefs';
+import { areEarconsEnabled, setEarconsEnabled } from '../../lib/earcons';
 import type { UserSettings } from '../../types';
 
 const API_BASE = '*/api';
@@ -58,6 +60,8 @@ function mockSettings(voice?: UserSettings['voice']) {
 describe('useVoicePrefs (#288)', () => {
   beforeEach(() => {
     mockSettings();
+    // The earcon switch is module state shared by every test in this file.
+    setEarconsEnabled(true);
   });
 
   it('resolves the built-in defaults for an untouched account, and writes nothing', async () => {
@@ -77,6 +81,7 @@ describe('useVoicePrefs (#288)', () => {
       readQuestionsAloud: false,
       readAnswersAloud: false,
       conversationMode: false,
+      soundCues: true,
     });
     expect(DEFAULT_VOICE_SPEECH_RATE).toBe(0.95);
     // Hands-free Voice mode is opt-in (#307, epic #304), exactly as autoplay
@@ -176,5 +181,67 @@ describe('resolveVoicePreferences — values this build will not honour', () => 
     );
     expect(resolveVoicePreferences(undefined).preferredVoice).toBeUndefined();
     expect(resolveVoicePreferences(undefined).conversationMode).toBe(false);
+  });
+});
+
+// ===========================================================================
+// The cue switch (#357, epic #345)
+// ===========================================================================
+//
+// `soundCues` is the one field on this namespace that is PUSHED rather than
+// only read: the cues are played by a state machine with no settings of its
+// own, through a module-level flag in `lib/earcons.ts`. So "the preference
+// resolved correctly" is not the claim that matters here — "the module was
+// actually told" is, and nothing else in the application calls
+// `setEarconsEnabled`.
+describe('useVoicePrefs — the cue switch (#357)', () => {
+  it('turns the module off for a learner who stored `false`', async () => {
+    mockSettings({ soundCues: false });
+
+    const { result } = renderHook(() => useVoicePrefs());
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    await waitFor(() => expect(areEarconsEnabled()).toBe(false));
+
+    expect(result.current.voice.soundCues).toBe(false);
+    // Still nothing written: a preference that is APPLIED is not a preference
+    // that is re-saved. The sparse contract holds for this field too.
+    expect(patchCount).toBe(0);
+  });
+
+  it('leaves the module on for an untouched account', async () => {
+    const { result } = renderHook(() => useVoicePrefs());
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    expect(DEFAULT_VOICE_SOUND_CUES).toBe(true);
+    expect(result.current.voice.soundCues).toBe(true);
+    expect(areEarconsEnabled()).toBe(true);
+    expect(patchCount).toBe(0);
+  });
+
+  it('does not un-silence the cues while the first read is in flight', async () => {
+    // The learner has cues off. Until their document lands, `soundCues`
+    // resolves to the built-in `true` — and pushing THAT would make every page
+    // load a moment of audible cues for the one person who asked for silence.
+    setEarconsEnabled(false);
+    mockSettings({ soundCues: false });
+
+    const { result } = renderHook(() => useVoicePrefs());
+    expect(result.current.isLoading).toBe(true);
+    expect(areEarconsEnabled()).toBe(false);
+
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    expect(areEarconsEnabled()).toBe(false);
+  });
+
+  it('re-applies the switch when the stored value changes', async () => {
+    mockSettings({ soundCues: false });
+    const first = renderHook(() => useVoicePrefs());
+    await waitFor(() => expect(areEarconsEnabled()).toBe(false));
+    first.unmount();
+
+    mockSettings({ soundCues: true });
+    const second = renderHook(() => useVoicePrefs());
+    await waitFor(() => expect(second.result.current.isLoading).toBe(false));
+    await waitFor(() => expect(areEarconsEnabled()).toBe(true));
   });
 });

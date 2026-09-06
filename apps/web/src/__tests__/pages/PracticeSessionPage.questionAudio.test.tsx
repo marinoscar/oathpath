@@ -126,6 +126,10 @@ const SESSION_BASE: PracticeSession = {
   startedAt: '2026-03-01T12:00:00.000Z',
   completedAt: null,
   summary: null,
+  // #352: an `in_progress` session has nothing to summarise and so nothing
+  // to react to — the same null and empty turn the server sends.
+  coachReaction: null,
+  spokenTurn: [],
 };
 
 function makeAttempt(overrides: Partial<PracticeAttempt> = {}): PracticeAttempt {
@@ -186,7 +190,11 @@ function renderSession(options: Options = {}) {
     systemReady: true,
     enabled: true,
     providerConfigured: true,
-    unboundRoles: ['speak'],
+    // `realtime` unbound alongside `speak` (#355, epic #345 / E15): the
+    // ladder in `PracticeSessionPage.tsx` resolves Voice to the LIVE transport
+    // whenever a `realtime` model is bound, and this file is about how the
+    // QUESTION is read aloud on the request/response one.
+    unboundRoles: ['speak', 'realtime'],
   };
 
   server.use(

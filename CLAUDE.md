@@ -540,12 +540,25 @@ evidence of a reading skill — it is none. See
 - `POST /api/practice/sessions/{id}/attempts/{attemptId}/self-mark` - Flip a recorded `incorrect`/`skipped` attempt to `correct` after revealing the accepted answer
 - `POST /api/practice/sessions/{id}/complete` - Finish a session and compute its summary
 - `GET /api/practice/queue` - Picker counts (due/weak/new-by-category/learning/mastered) from `mastery/selector.ts`'s own bucket rule, so they can never disagree with what starting a session right now would select
+- `POST /api/practice/sessions/{id}/realtime-session` - Mint a short-lived, session-scoped client secret for a spoken practice session (E15, epic #345); the browser opens its own realtime connection directly to the provider, and the audio never passes through this API
+- `POST /api/practice/sessions/{id}/realtime/tool-calls` - Handle one `next_question`/`grade_answer`/`repeat_question`/`skip_question`/`end_session` tool call the realtime model makes; the engine decides the question, the grade and the stop, and an honoured `grade_answer` records exactly the `practice_attempts` row the ordinary attempt route would have
 
-All seven are `@Auth()` with no permissions, and another learner's session
+All nine are `@Auth()` with no permissions, and another learner's session
 (or an attempt inside it) is a **404, not a 403**. See
-[`docs/specs/practice-sessions.md`](docs/specs/practice-sessions.md) §10 and
+[`docs/specs/practice-sessions.md`](docs/specs/practice-sessions.md) §10,
 [`docs/specs/memory-model.md`](docs/specs/memory-model.md) §5 (the queue
-endpoint).
+endpoint) and [`docs/specs/realtime-practice.md`](docs/specs/realtime-practice.md)
+for the two realtime routes.
+
+**The spoken practice session is an addition, never a requirement**, exactly
+as the spoken mock interview is: an unbound `realtime` role leaves
+`systemReady` untouched (its capability is `'realtime'`, not `'text'`), and
+`PracticeSessionPage.tsx`'s `resolveVoiceTransport` — the **one** site where
+the degradation ladder is decided — resolves the session-wide `Text | Voice`
+picker to E13's request/response loop instead, or to typing when neither
+`realtime` nor `transcribe` is bound. The picker stays two-valued and an
+unbound `realtime` renders **nothing**, not a disabled control. See
+[`docs/specs/realtime-practice.md`](docs/specs/realtime-practice.md) §8.
 
 ### Progress (Per User)
 - `GET /api/progress/mastery` - Coverage and mastery by category, for the caller's own resolved test version
@@ -754,12 +767,17 @@ learner's profile" permission to add in the first place. See
 [`docs/specs/journey-shell.md`](docs/specs/journey-shell.md) §4.1 and §5.
 
 **Practice adds no permission strings either, for the same reason.** All
-seven `/api/practice/*` routes (including `GET /api/practice/queue`, E5) are
-`@Auth()` with no permissions: every authenticated learner owns their own
-practice attempts, exactly as they own their own learner profile and their
-own AI key, and no route accepts a user id. See
-[`docs/specs/practice-sessions.md`](docs/specs/practice-sessions.md) §10 and
-[`docs/specs/memory-model.md`](docs/specs/memory-model.md) §5.
+nine `/api/practice/*` routes — including `GET /api/practice/queue` (E5) and
+the two realtime routes E15 (epic #345) added — are `@Auth()` with no
+permissions: every authenticated learner owns their own practice attempts,
+exactly as they own their own learner profile and their own AI key, and no
+route accepts a user id. Gating the realtime mint specifically would leave a
+Viewer, the default role, unable to practise aloud at all — the identical
+posture the Mock interview and Voice paragraphs already take, and there is
+no "use realtime" privilege in this product's authorization model. See
+[`docs/specs/practice-sessions.md`](docs/specs/practice-sessions.md) §10,
+[`docs/specs/memory-model.md`](docs/specs/memory-model.md) §5 and
+[`docs/specs/realtime-practice.md`](docs/specs/realtime-practice.md) §2.
 
 **Progress adds no permission strings either, for the same reason.** The one
 `/api/progress/*` route, `GET /api/progress/mastery`, is `@Auth()` with no

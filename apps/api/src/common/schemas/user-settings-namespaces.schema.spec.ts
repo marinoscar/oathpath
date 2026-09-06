@@ -28,6 +28,7 @@ describe('voiceSchema (issue #282, epic #280 "Spoken Civics Audio")', () => {
       readQuestionsAloud: true,
       readAnswersAloud: true,
       conversationMode: true,
+      soundCues: false,
     };
 
     expect(voiceSchema.parse(value)).toEqual(value);
@@ -87,6 +88,7 @@ describe('voiceSchema (issue #282, epic #280 "Spoken Civics Audio")', () => {
       'readQuestionsAloud',
       'readAnswersAloud',
       'conversationMode',
+      'soundCues',
     ])('rejects a non-boolean %s', (field) => {
       expect(() => voiceSchema.parse({ [field]: 'yes' })).toThrow();
     });
@@ -97,6 +99,7 @@ describe('voiceSchema (issue #282, epic #280 "Spoken Civics Audio")', () => {
       'readQuestionsAloud',
       'readAnswersAloud',
       'conversationMode',
+      'soundCues',
     ])('accepts either boolean for %s', (field) => {
       expect(voiceSchema.parse({ [field]: true })).toEqual({ [field]: true });
       expect(voiceSchema.parse({ [field]: false })).toEqual({ [field]: false });
@@ -123,6 +126,43 @@ describe('voiceSchema (issue #282, epic #280 "Spoken Civics Audio")', () => {
     });
   });
 
+  // `soundCues` (issue #357, epic #345 "Hands-free practice") is the eighth
+  // field, added as a FIELD for the same reason `conversationMode` was — with
+  // one difference worth asserting on its own: it is the first field on this
+  // namespace whose built-in default is `true`, so the value a learner most
+  // needs never written back for them is the one they are moving AWAY from.
+  describe('soundCues (issue #357, epic #345)', () => {
+    it('is rejected when misspelled, like every other key (`.strict()`)', () => {
+      expect(() => voiceSchema.parse({ soundcues: true })).toThrow();
+      expect(() => voiceSchema.parse({ sound_cues: true })).toThrow();
+      expect(() => voicePatchSchema.parse({ soundCue: null })).toThrow();
+    });
+
+    it('accepts null on the patch schema only', () => {
+      expect(voicePatchSchema.parse({ soundCues: null })).toEqual({
+        soundCues: null,
+      });
+      expect(() => voiceSchema.parse({ soundCues: null })).toThrow();
+    });
+
+    it('has no `.default()`, so an absent field stays absent', () => {
+      // The namespace-wide rule, asserted for this field because its default
+      // is `true`: a `.default(true)` here would look harmless and would
+      // materialise the value into every document that touched any other voice
+      // preference.
+      expect(voiceSchema.parse({ speechRate: 1.1 })).not.toHaveProperty(
+        'soundCues',
+      );
+      expect(voiceSchema.parse({})).toEqual({});
+    });
+
+    it('keeps a stored `false`, which is a real opinion and not an absence', () => {
+      expect(voiceSchema.parse({ soundCues: false })).toEqual({
+        soundCues: false,
+      });
+    });
+  });
+
   describe('voicePatchSchema: every field also accepts null (restore the default)', () => {
     it('accepts every field set to null in the same request', () => {
       const patch = {
@@ -133,6 +173,7 @@ describe('voiceSchema (issue #282, epic #280 "Spoken Civics Audio")', () => {
         readQuestionsAloud: null,
         readAnswersAloud: null,
         conversationMode: null,
+        soundCues: null,
       };
 
       expect(voicePatchSchema.parse(patch)).toEqual(patch);

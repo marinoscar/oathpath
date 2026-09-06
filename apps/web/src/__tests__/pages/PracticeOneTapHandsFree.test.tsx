@@ -264,7 +264,13 @@ function installHandlers() {
     providerConfigured: true,
     // `speak` unbound — the ordinary fresh install — so every utterance takes
     // the browser path and this file's fake is the only voice in play.
-    unboundRoles: ['speak'],
+    //
+    // `realtime` PINNED UNBOUND (#355, epic #345 / E15): this file exercises
+    // the one-tap hand-off onto E13's request/response loop, and the ladder in
+    // `PracticeSessionPage.tsx` resolves Voice to the LIVE transport whenever a
+    // `realtime` model is bound. The realtime rungs are
+    // `PracticeSessionPage.realtime.test.tsx`'s.
+    unboundRoles: ['speak', 'realtime'],
   };
 
   server.use(

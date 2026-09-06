@@ -25,7 +25,7 @@ import { UserSettingsService } from '../settings/user-settings/user-settings.ser
 import { AttemptGradingService } from './attempt-grading.service';
 import { excludeUnanswerable } from './question-selection';
 import { type GradingVerdict } from './grading';
-import { composeSpokenTurn } from './spoken-turn';
+import { composeSessionClosingTurn, composeSpokenTurn } from './spoken-turn';
 import { isMisheardAttempt } from './mastery/mastery-skip';
 import { toAttemptOutcome } from './mastery/outcome-mapping';
 import { recomputeMasteryForQuestion } from './mastery/recompute';
@@ -1773,6 +1773,13 @@ function toSessionResponse(
 ): PracticeSessionResponse {
   const summary = (session.summary as PracticeSessionSummary | null) ?? null;
 
+  // Selected ONCE, and read twice below — by the wire field a screen renders
+  // and by the closing turn a voice speaks.
+  const coachReaction =
+    summary === null
+      ? null
+      : toCoachReaction(coach, coachEventForSessionSummary(summary), session.id);
+
   return {
     id: session.id,
     kind: session.kind,
@@ -1793,14 +1800,17 @@ function toSessionResponse(
     //
     // Seeded by the SESSION id, so the response to `POST .../complete` and
     // every later read of that session say the same thing.
-    coachReaction:
-      summary === null
-        ? null
-        : toCoachReaction(
-            coach,
-            coachEventForSessionSummary(summary),
-            session.id,
-          ),
+    coachReaction,
+    // THE SPOKEN HALF OF THE SAME LINE (issue #352, epic #345), composed from
+    // the reaction ALREADY SELECTED above rather than from a second selection
+    // — the identical rule `toAttemptResponse` follows for an attempt's turn,
+    // and for the identical reason: the line on the summary screen and the
+    // line in the speaker are the same string by construction, not by two
+    // computations that happen to agree.
+    //
+    // `coach.reactions: false` needs no branch here either. It became `null`
+    // once, in `toCoachReaction`, and an empty turn is what falls out of that.
+    spokenTurn: composeSessionClosingTurn({ coachReaction }),
   };
 }
 
