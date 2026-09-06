@@ -339,25 +339,41 @@ to work** — the identical "you do not need to touch either setting" framing
   they are billed; the three roles are independent line items on the
   learner's own OpenAI dashboard.
 
-**The foreground-only limit is STRICTER for live voice than for
-conversation mode, and it fails differently — worth knowing before a
-learner reports it.** §6 already covers conversation mode's wake lock,
-which keeps the *screen* on but cannot survive a *locked* device — the
-session there suspends and can, mid-session, only be resumed by the
-learner. **Live voice does not request a wake lock at all**, and
-deliberately **closes the connection outright** (never merely pauses it)
-the instant the tab is backgrounded (`visibilitychange` → hidden) or an
-idle interval passes with no speech or tool activity
+**The foreground-only limit was STRICTER for live voice than for
+conversation mode — until issue #388 closed the gap that made it so.**
+Before that fix, live voice requested no wake lock of its own at all, so a
+learner's screen could time out and suspend a metered, still-billing
+WebRTC connection even while the tab stayed foregrounded and untouched —
+exactly the shipped bug #388 fixes. **Both transports now hold the
+identical screen wake lock**: one `useWakeLock` call, in
+`PracticeSessionPage.tsx`, gated on either transport being under way. A
+screen that only dims or times out on its own no longer treats live voice
+worse than conversation mode.
+
+**What still genuinely differs is how each transport responds to an
+EXPLICIT backgrounding, and that difference is real and unrelated to the
+wake lock.** §6 already covers conversation mode's own limit: even with
+the screen held on, locking the device or switching away from the tab
+suspends its loop outright (timers and `MediaRecorder` stop regardless of
+any wake lock, which only ever prevented the screen from timing out on its
+own), and the learner can resume it by returning to the tab before the
+browser tears the suspended page down. **Live voice does not suspend and
+resume — it deliberately closes the connection outright** the instant the
+tab is backgrounded (`visibilitychange` → hidden) or an idle interval
+passes with no speech or tool activity
 (`docs/specs/realtime-practice.md` §10): a suspended-but-open realtime
 connection would keep billing the learner's own key for audio nobody is
 listening to, which this application treats as a cost liability rather
 than a session worth trying to preserve. The practical consequence: a
-learner who locks their phone mid-live-session loses that connection for
-good (rung 2's fallback, §6, picks up from the same question — no progress
-is lost, only the live connection itself) rather than resuming where a
-wake lock might have held the screen open. If a learner reports a live
-session "just ending," the first question is the identical one §6 already
-tells you to ask: was the screen turned off or the tab backgrounded.
+learner who switches away from the tab mid-live-session loses that
+connection for good (rung 2's fallback, §6, picks up from the same
+question — no progress is lost, only the live connection itself), while
+the identical action on conversation mode's own loop is merely suspended
+and can be resumed. If a learner reports a live session "just ending," the
+first question is still the one §6 already tells you to ask — was the
+screen turned off (now equally mitigated on both transports) or was the
+tab switched away from (which still ends a live session outright, by
+design, on either transport's screen state).
 
 **Testing locally needs no real OpenAI account for this role either** —
 `AI_PROVIDER_FAKE=true` covers the realtime mint the same way it covers
@@ -407,7 +423,9 @@ here.
 - [ ] Live voice bills the learner's own key **by the minute the connection
       is open**, not per call — different from every other rate in this
       runbook, and worth saying to a learner before they ask (§7)
-- [ ] Live voice has NO wake lock and closes outright (never pauses) the
-      instant the tab is backgrounded — stricter than conversation mode's
-      own foreground limit, and it fails by ending the connection rather
-      than merely suspending it (§7)
+- [ ] Live voice now holds the identical screen wake lock as conversation
+      mode (issue #388) — a screen dimming or timing out on its own no
+      longer treats live voice worse; live voice still CLOSES outright
+      (never pauses) the instant the tab itself is backgrounded, falling
+      back to conversation mode's loop rather than resuming, while
+      conversation mode's own loop merely suspends and can be resumed (§7)

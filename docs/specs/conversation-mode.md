@@ -344,6 +344,23 @@ advancing           short pause, then handleNext()
 > parenthetical above ("with E14, the reaction line first") is accurate
 > again: the composed turn is what a learner actually hears, not only what
 > `VoiceSurface`'s visual live region showed.
+>
+> **Re-homed by issue #388.** The wake lock this diagram credits to
+> `start()` ("arms autoplay, takes the wake lock") and the sentence above
+> about `idle` ("the wake lock and `isRunning` are still keyed on `phase
+> !== 'idle'`") both describe a call site that no longer exists.
+> `useConversationSession.ts` no longer imports or calls `useWakeLock` at
+> all — its `UseConversationSessionReturn` interface documents the removal
+> in place of the `wakeLock` field it used to publish. The lock is now
+> requested by `PracticeSessionPage.tsx` itself, gated on
+> `voiceSessionIsUnderWay` (`conversation.isRunning ||
+> realtimeSessionIsUnderWay(realtimeStage)`) rather than on this hook's own
+> `phase`, because a realtime session never runs this state machine at
+> all — its `phase` sits at `idle` for the whole session, so a lock keyed
+> on `phase !== 'idle'` was never requested on that transport and a
+> learner's phone could go dark mid-interview with no warning. `isRunning`
+> itself is unaffected — it is still `phase !== 'idle'`; only the wake
+> lock moved. See §8 for the fuller account.
 
 **Any tap — Stop, Type instead, Next — exits or pauses the loop
 immediately.** The loop never holds the learner hostage: every state above
@@ -524,6 +541,30 @@ suspension never triggers in the first place, not to make the loop survive
 a locked screen it was never going to survive. `docs/runbooks/` should
 state this plainly to an operator or a learner reading a "why did my
 session stop" report, rather than let it be discovered as a bug.
+
+> **Re-homed by issue #388.** `navigator.wakeLock` is no longer acquired
+> "on entering Voice mode" inside `useConversationSession.ts` — that call
+> site is gone, along with the `wakeLock` field this hook used to publish
+> (`UseConversationSessionReturn`'s own doc comment records the removal
+> rather than leaving it to be discovered). The lock now lives in
+> `PracticeSessionPage.tsx`, requested through the same `useWakeLock(enabled)`
+> hook but gated on `voiceSessionIsUnderWay` — "a spoken session is under
+> way", asked once of BOTH transports (`conversation.isRunning` for this
+> mode's own loop, `realtimeSessionIsUnderWay(realtimeStage)` for E15's
+> live transport) — rather than on this hook's own `phase`. The platform
+> constraint stated above is unchanged; what changed is only who asks for
+> the mitigation. The reason: on the realtime transport this state machine
+> sits at `phase: 'idle'` for the whole session, so a lock keyed on that
+> phase was never requested at all, and the "this browser can't keep the
+> screen awake" footnote was rendered only on the OTHER transport — the one
+> transport where the screen genuinely would not stay awake said nothing.
+> `useWakeLock.test.ts` now reads the source tree and fails the build on a
+> second `useWakeLock` call site, which is what makes "exactly one lock,
+> across every transport" structural rather than a claim to keep
+> re-verifying by hand. `useWakeLock.ts`'s own header also now records, in
+> full, why the long-standing `<video>`-element fallback for a browser with
+> no Wake Lock API was considered and rejected — five reasons, not
+> summarised here.
 
 **The two live bugs this epic fixes as a side effect**, both real on
 `main` today and verified above rather than assumed from the epic text:
