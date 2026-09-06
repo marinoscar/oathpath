@@ -43,6 +43,11 @@ import {
   PLAYBACK_BLOCKED_MESSAGE,
   VOICE_PREVIEW_SENTENCE,
 } from '../../components/settings/VoiceSettings';
+import {
+  installFakeAudio,
+  type FakeAudioHandle,
+  type FakeAudioOptions,
+} from '../utils/fake-audio';
 import type { AiStatus, UserSettings } from '../../types';
 
 const API_BASE = '*/api';
@@ -189,68 +194,19 @@ async function findAutoSubmit(): Promise<HTMLInputElement> {
 }
 
 /**
- * A fake `Audio` whose construction and playback are observable — jsdom
- * implements neither.
+ * The fake `Audio`, and the restore that must follow it.
  *
- * SPLIT INTO `primed` AND `played` (#383). The autoplay unlock plays a silent
- * data URI inside the click and the real sample a round trip later, and the
- * entire point of the fix is that the first happens BEFORE the synthesis
- * promise resolves — so a fake that lumps both into one list cannot see the
- * bug it exists to catch. `constructed` is the other half of that: one element
- * for the life of the component, reused, because an element only carries the
- * user activation of the press that unlocked it.
+ * LIFTED INTO `../utils/fake-audio` BY #389, when `CoachSettings` and
+ * `QuestionAudio` needed the identical `primed`/`played` split this suite
+ * introduced for #383. Its header carries the argument for the split; this
+ * wrapper only remembers the handle so `afterEach` can put the real
+ * constructor back.
  */
-interface FakeAudioHandle {
-  /** Every `play()` of the silent unlock source, in order. */
-  primed: string[];
-  /** Every `play()` of a real sample, in order. */
-  played: string[];
-  /** Every element ever constructed. Should stay at one. */
-  constructed: unknown[];
-  /** The most recent element, for firing `ended`/`error` at it. */
-  last: () => {
-    onended: (() => void) | null;
-    onerror: (() => void) | null;
-  } | null;
-}
+let installedAudio: FakeAudioHandle | null = null;
 
-function installAudio(
-  options: { play?: (src: string) => Promise<void> } = {},
-): FakeAudioHandle {
-  const primed: string[] = [];
-  const played: string[] = [];
-  const constructed: FakeAudio[] = [];
-
-  class FakeAudio {
-    src = '';
-    onended: (() => void) | null = null;
-    onerror: (() => void) | null = null;
-    constructor(src?: string) {
-      if (src) this.src = src;
-      constructed.push(this);
-    }
-    play() {
-      // The unlock source is a `data:` URI, a sample is a blob URL. That is
-      // the only thing that tells the two apart from out here, and it is the
-      // same thing the component itself checks before pausing.
-      (this.src.startsWith('data:') ? primed : played).push(this.src);
-      return options.play
-        ? options.play(this.src)
-        : Promise.resolve();
-    }
-    pause() {}
-    removeAttribute() {
-      this.src = '';
-    }
-  }
-
-  (window as unknown as { Audio: unknown }).Audio = FakeAudio;
-  return {
-    primed,
-    played,
-    constructed,
-    last: () => constructed[constructed.length - 1] ?? null,
-  };
+function installAudio(options: FakeAudioOptions = {}): FakeAudioHandle {
+  installedAudio = installFakeAudio(options);
+  return installedAudio;
 }
 
 /**
@@ -266,15 +222,14 @@ function voiceRow(voiceId: string): HTMLElement {
 }
 
 describe('VoiceSettingsPage (#288)', () => {
-  const realAudio = (window as unknown as { Audio?: unknown }).Audio;
-
   beforeEach(() => {
     vi.clearAllMocks();
     mockApi();
   });
 
   afterEach(() => {
-    (window as unknown as { Audio?: unknown }).Audio = realAudio;
+    installedAudio?.restore();
+    installedAudio = null;
   });
 
   // ===========================================================================
@@ -640,7 +595,7 @@ describe('VoiceSettingsPage (#288)', () => {
     // or `play()` back into the continuation after `synthesizeSpeech` — which
     // is precisely #383 — and both of these are empty here, while every other
     // test in this file still passes.
-    expect(audio.constructed).toHaveLength(1);
+    expect(audio.elements).toHaveLength(1);
     expect(audio.primed).toHaveLength(1);
     expect(audio.primed[0].startsWith('data:audio/')).toBe(true);
 
@@ -669,7 +624,7 @@ describe('VoiceSettingsPage (#288)', () => {
 
     // ONE element, both times. A fresh element per preview is a fresh lock per
     // preview, and the second one was never touched by a gesture.
-    expect(audio.constructed).toHaveLength(1);
+    expect(audio.elements).toHaveLength(1);
   });
 
   it('says so when the browser BLOCKS playback, instead of returning quietly to idle (#383)', async () => {
