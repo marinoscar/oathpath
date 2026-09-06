@@ -42,6 +42,25 @@ undocumented — the identical standard `docs/specs/realtime-interview.md`
 
 ### Added
 
+- **A place to see what this device will actually allow (issue #384).**
+  `/settings/device` — "Device & permissions" — is a new per-user settings
+  destination with three rows, each stating what is true right now and
+  offering the one action that can change it: the **microphone**
+  (observed, and worded with `describeCaptureProblem`'s existing
+  seven-remedy table verbatim, so it says the same sentence the practice
+  screen would), **notifications** (observed, and requested through the
+  same shared `requestBrowserNotificationPermission` the notification
+  preferences page already calls), and **sound** (a "Play a test tone"
+  button, so a learner can tell a muted phone from a broken feature).
+  Nothing on the screen prompts on mount, on navigation, or on app start:
+  every permission request sits behind a real click, because browsers
+  penalise gestureless prompts and a denial is effectively permanent — the
+  app cannot re-prompt or undo one. A blocked state therefore renders an
+  explanation and **no button**, because there is no action this
+  application can honestly offer. Adds no API route, no permission string,
+  no migration and no setting; the page makes no authenticated API call at
+  all. See [`docs/specs/voice.md`](docs/specs/voice.md) §5.1.
+
 - **Conversation mode — hands-free spoken practice (E13, epic #304).** A
   session-wide `Text | Voice` control on a practice session: with `Voice`
   selected, tapping **Start hands-free** arms a persistent microphone

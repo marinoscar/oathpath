@@ -761,6 +761,59 @@ Every voice surface has a text path, unconditionally:
   runs entirely in text — this is the ordinary optional-voice case, not a
   special one, because voice was never mandatory to begin with.
 
+### 5.1 Where a learner sees what the device itself will allow (issue #384)
+
+Everything above is about what this *application* will do without voice.
+It says nothing about the other half of the same question — what the
+**browser and the device** will permit — and until issue #384 there was
+nowhere a learner could go to find out. Every permission was discovered at
+the point of use, mid-session, and every remedy for one already refused
+lives in a browser menu nobody had been pointed at.
+
+`/settings/device` ("Device & permissions",
+`apps/web/src/pages/UserDevicePage.tsx` over
+`apps/web/src/components/settings/DevicePermissions.tsx`) is that place: a
+per-user settings destination — a registry card plus a route in
+`config/userSettingsSections.tsx`, never a tab on `/settings/voice`, per
+`CLAUDE.md`'s Settings UI Pattern — with three rows, each stating what is
+true now and offering the one action that can change it:
+
+1. **Microphone**, observed with `useMediaReadiness` and worded with
+   `describeCaptureProblem`'s own table, verbatim (§3's seven remedies —
+   this screen writes none of its own). `'unknown'` is rendered as an
+   unknown and never as a denial, per that hook's own header.
+2. **Notifications**, observed with `useBrowserNotificationPermission` and
+   requested through `services/browserNotifications.ts`'s shared
+   `requestBrowserNotificationPermission` — the same function
+   `/settings/notifications` calls, never a second call site.
+3. **Sound**, a "Play a test tone" button over `lib/earcons.ts`'s
+   `playTestTone`. It is the module's ONE deliberate exception to
+   `voice.soundCues` (see `docs/specs/conversation-mode.md` §5.1 for the
+   switch itself): a learner pressing a button to find out whether their
+   device is audible must not be answered with silence because of a
+   preference about practice cues.
+
+**Two invariants that are the point of the screen rather than details of
+it**, both documented at length in `DevicePermissions.tsx`'s own header:
+
+- **Nothing prompts on mount, on navigation, or on app start.** Every
+  request sits behind a real click. Browsers penalise gestureless prompts
+  (Chrome's quieter UI can auto-block them, Firefox requires the gesture,
+  Safari has required one for `Notification.requestPermission()` since
+  16.4, and `getUserMedia` on load simply fails on iOS Safari), and a
+  denial is effectively permanent — this application cannot re-prompt or
+  undo it. Spending the one-shot prompt on somebody who has not been given
+  a reason to say yes kills the feature for them for good.
+- **A blocked state offers no button**, on either permission row, because
+  this application genuinely has no action to offer: the copy names the
+  remedy and says who owns it. A control that can only fail reads as the
+  product being broken on top of the permission being off.
+
+The page adds **no API route, no permission string and no setting** — it
+reads the browser, live, and makes no authenticated API call at all, which
+is why its registry card declares no `permission` and its route carries no
+gate.
+
 ## 6. All inference through the dispatcher, on the caller's key
 
 Every speech call — transcription and synthesis alike — is dispatched
