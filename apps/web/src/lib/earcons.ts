@@ -505,6 +505,48 @@ function scheduleTone(
  */
 export function playEarcon(descriptor: EarconDescriptor): void {
   if (!enabled) return;
+  scheduleCue(descriptor);
+}
+
+/**
+ * Play one cue even when the learner has turned cues OFF.
+ *
+ * Issue #384. THE ONLY BYPASS OF {@link setEarconsEnabled}, and it exists for
+ * exactly one caller: the "Play a test tone" button on
+ * `/settings/device` (`components/settings/DevicePermissionsSettings.tsx`).
+ *
+ * This does not weaken the one-switch rule in the file header, because the
+ * switch and this button are answering different questions:
+ *
+ *   * `voice.soundCues` is about UNREQUESTED sound. It says whether the app may
+ *     interrupt a learner with a chime they did not ask for, mid-session, while
+ *     they are walking. Off means "do not make noise at me".
+ *   * A press of "Play a test tone" IS the request. The learner has navigated
+ *     to a screen about their device, read a sentence saying the button makes a
+ *     sound, and pressed it to find out whether this phone can make one at all
+ *     — which is most often the question of somebody whose speaker is muted, or
+ *     who is trying to work out why they heard nothing last time. Silently
+ *     doing nothing there is indistinguishable from the very fault they came to
+ *     diagnose, and it would be caused by a preference about a different thing.
+ *
+ * The preference is not overridden anywhere it governs: nothing in a session
+ * reaches this function, and the settings screen says out loud that the test
+ * tone sounds regardless of the cue switch, so the learner is never surprised
+ * by it.
+ *
+ * SAME GUARANTEES AS {@link playEarcon} OTHERWISE — it never throws, and it is
+ * a silent no-op where the platform has no usable audio.
+ */
+export function playEarconIgnoringPreference(descriptor: EarconDescriptor): void {
+  scheduleCue(descriptor);
+}
+
+/**
+ * Build and schedule every tone of one cue. The single place an oscillator is
+ * ever constructed, shared by the two entry points above so that the ONLY
+ * difference between them is whether the preference is consulted.
+ */
+function scheduleCue(descriptor: EarconDescriptor): void {
   const context = getSharedAudioContext();
   if (!context) return;
 

@@ -22,6 +22,7 @@
 import PersonIcon from '@mui/icons-material/Person';
 import FlagIcon from '@mui/icons-material/Flag';
 import PaletteIcon from '@mui/icons-material/Palette';
+import DevicesIcon from '@mui/icons-material/Devices';
 import RecordVoiceOverIcon from '@mui/icons-material/RecordVoiceOver';
 import PsychologyIcon from '@mui/icons-material/Psychology';
 import NotificationsIcon from '@mui/icons-material/Notifications';
@@ -93,6 +94,46 @@ export const USER_SETTINGS_SECTIONS: SettingsSectionDef[] = [
         description: 'Choose a light, dark, or system-matched theme for this account.',
         Icon: PaletteIcon,
         path: '/settings/appearance',
+      },
+      {
+        // Issue #384. Where a learner grants the microphone and browser
+        // notifications, and confirms this device actually makes a sound —
+        // BEFORE a spoken session asks for any of it in the middle of a
+        // question. Nothing on the page prompts on mount; every request is
+        // behind a deliberate press, for the reason
+        // `hooks/useBrowserNotificationPermission.ts` and
+        // `hooks/useMediaReadiness.ts` both give in their own headers: a
+        // denial is effectively permanent and this application can never
+        // re-ask.
+        //
+        // A REGISTRY CARD PLUS A ROUTE, never a tab on Voice (CLAUDE.md's
+        // Settings UI Pattern, rules 1 and 2). A destination gate is about
+        // REACHABILITY and a tab gate is about CONTENT, and these are not two
+        // views of one question: Voice is a set of stored PREFERENCES about
+        // how spoken practice should sound, this is the state of the BROWSER
+        // and the DEVICE, which no preference can change and which is not
+        // stored anywhere. A learner whose microphone is blocked needs this
+        // page precisely when the voice preferences below it are moot.
+        //
+        // IMMEDIATELY BEFORE Voice, not between Voice and Coach. It reads as
+        // the prerequisite it is — can this device do it at all, then how
+        // should it sound, then how should it talk to me — and it leaves the
+        // Voice/Coach adjacency that the Coach card's own note depends on
+        // intact.
+        //
+        // NO `permission`, like every card in this file — and here the reason
+        // is stronger than the usual one, because there is not even an API
+        // call to mirror: this page reads browser state only. There is no
+        // "may use a microphone" privilege in this product's authorization
+        // model, exactly as there is no "use voice" one
+        // (`docs/specs/voice.md` §10), and inventing one would leave a
+        // Viewer — the DEFAULT role — unable to grant the microphone they
+        // need in order to practise aloud at all.
+        title: 'Device & permissions',
+        description:
+          'Grant the microphone and notifications, and check that sound works, before a session needs them.',
+        Icon: DevicesIcon,
+        path: '/settings/device',
       },
       {
         // Issue #288, epic #280. Every voice preference in that epic — the

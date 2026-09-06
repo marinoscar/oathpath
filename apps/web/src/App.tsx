@@ -85,6 +85,11 @@ const UserNotificationsPage = lazy(
 // voice picker. `VoiceSettingsPage` rather than `UserVoicePage`: there is no
 // admin counterpart to disambiguate it from, unlike Appearance.
 const VoiceSettingsPage = lazy(() => import("./pages/VoiceSettingsPage"));
+// Issue #384. `/settings/device` — the microphone, notification and sound
+// grants, in one place a learner reaches BEFORE a session needs them. Named
+// for the destination rather than `UserDevicePage`, like `VoiceSettingsPage`
+// above it.
+const DeviceSettingsPage = lazy(() => import("./pages/DeviceSettingsPage"));
 // Issue #322, epic #305. Lazy like its siblings — a settings destination a
 // learner reaches deliberately, never on the critical path to practising.
 const CoachSettingsPage = lazy(() => import("./pages/CoachSettingsPage"));
@@ -467,6 +472,24 @@ function AppRoutes() {
                         <Route
                           path="/settings/voice"
                           element={<VoiceSettingsPage />}
+                        />
+                        {/* Issue #384. Ungated like every other `/settings/*`
+                        route in this block, and here there is not even an
+                        endpoint whose gate could be mirrored: the page reads
+                        BROWSER state only — the Permissions API, the device
+                        list, and the shared `AudioContext` — and its two
+                        actions ask the browser, not this API, for a grant.
+                        There is no "may use a microphone" privilege in this
+                        product's authorization model, and a gate here would
+                        leave a Viewer, the default role, unable to grant the
+                        microphone they need to practise aloud.
+
+                        Nothing on the page prompts on mount: every request
+                        lives in a click handler, per the issue and per both
+                        permission hooks' own headers. */}
+                        <Route
+                          path="/settings/device"
+                          element={<DeviceSettingsPage />}
                         />
                         {/* Issue #322, epic #305. Ungated like every other
                         `/settings/*` route in this block: it edits the

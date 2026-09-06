@@ -280,3 +280,81 @@ describe('USER_SETTINGS_SECTIONS - Voice card (issue #288)', () => {
     expect(new Set(paths).size).toBe(paths.length);
   });
 });
+
+/**
+ * Issue #384. `/settings/device` — the microphone, notification and sound
+ * grants, in one place a learner reaches BEFORE a session needs them.
+ *
+ * Same three claims every card above makes (declared, unpermissioned, its own
+ * destination) plus the one this card is unusual for: the route it points at
+ * has no API endpoint behind it at all, so there is not even a permission
+ * string that a gate could have mirrored. The route half is asserted against
+ * the LIVE `App.tsx`, as the `Your plan` block above does, because a card whose
+ * `path` has no route is a hub tile that lands the learner on Home — which
+ * looks like nothing happened.
+ */
+describe('USER_SETTINGS_SECTIONS - Device & permissions card (issue #384)', () => {
+  const APP_SOURCE = resolve(dirname(fileURLToPath(import.meta.url)), '../../App.tsx');
+
+  function findDeviceCard() {
+    for (const section of USER_SETTINGS_SECTIONS) {
+      const card = section.cards.find((c) => c.path === '/settings/device');
+      if (card) return card;
+    }
+    return undefined;
+  }
+
+  it('is present in the registry, with a real title and description', () => {
+    const card = findDeviceCard();
+    expect(card).toBeDefined();
+    expect(card?.title).toBe('Device & permissions');
+    // User-facing copy naming all three things the screen actually does.
+    expect(card?.description).toMatch(/microphone/i);
+    expect(card?.description).toMatch(/notifications/i);
+    expect(card?.description).toMatch(/sound/i);
+  });
+
+  it('declares no permission - there is no API gate to mirror, and no privilege to invent', () => {
+    // The page reads BROWSER state only: the Permissions API, the device list,
+    // and the shared `AudioContext`. There is no "may use a microphone"
+    // privilege in this product's authorization model, exactly as there is no
+    // "use voice" one, and a gate would leave a Viewer - the default role -
+    // unable to grant the microphone they need to practise aloud.
+    const card = findDeviceCard();
+    expect(card).toBeDefined();
+    expect('permission' in (card as object)).toBe(false);
+    expect(card?.permission).toBeUndefined();
+  });
+
+  it('is grouped under Account, immediately before Voice', () => {
+    const accountSection = USER_SETTINGS_SECTIONS.find((s) => s.label === 'Account');
+    const paths = accountSection?.cards.map((c) => c.path) ?? [];
+    const device = paths.indexOf('/settings/device');
+    const voice = paths.indexOf('/settings/voice');
+    expect(device).toBeGreaterThanOrEqual(0);
+    // Beside Voice because a learner looking for one will look where the other
+    // is - and BEFORE it, because it is the prerequisite: can this device do
+    // it at all, then how should it sound. Placing it between Voice and Coach
+    // would have broken the adjacency the Coach card's own note depends on.
+    expect(voice).toBe(device + 1);
+  });
+
+  it('is a destination of its own, not a tab on Voice', () => {
+    // CLAUDE.md Settings UI Pattern rule 2 in its checkable form. Voice is a
+    // set of stored PREFERENCES about how spoken practice should sound; this
+    // is the state of the browser and the device, which no preference can
+    // change. Two questions, two destinations.
+    const paths = USER_SETTINGS_SECTIONS.flatMap((s) => s.cards.map((c) => c.path));
+    expect(paths).toEqual(expect.arrayContaining(['/settings/device', '/settings/voice']));
+    expect(new Set(paths).size).toBe(paths.length);
+  });
+
+  it('has a route in App.tsx, and that route is ungated', () => {
+    const source = readFileSync(APP_SOURCE, 'utf8');
+    const chunk = source
+      .split('<Route')
+      .find((part) => /^\s*path="\/settings\/device"/.test(part));
+    expect(chunk).toBeDefined();
+    expect(chunk).not.toMatch(/permission="/);
+  });
+});
