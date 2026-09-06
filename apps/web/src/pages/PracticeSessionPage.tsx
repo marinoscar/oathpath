@@ -156,6 +156,33 @@
  * the same message as the app-wide `AiNotReady`, and the two are never merged.
  *
  * =============================================================================
+ * A RUNNING VOICE SESSION IS A DIFFERENT SCREEN (#356, epic #345)
+ * =============================================================================
+ *
+ * This file renders TWO screens, and the branch is `conversation.isRunning`.
+ *
+ * Everything described above — the form, the correction card, the feedback
+ * stack, the explain panel — is the TEXT path, unchanged. The moment the
+ * hands-free loop is actually driving, this component returns
+ * `components/voice/VoiceSurface` instead: one viewport, no document scroll, a
+ * state visual large enough to read at arm's length, exactly one live region,
+ * and Stop and "Type instead" anchored outside every scrolling region.
+ *
+ * The reason it is a separate screen rather than a restyle is the shape of the
+ * two jobs. A learner typing wants everything at once and is happy to scroll
+ * for it; a learner talking is not looking at the phone, and when they do
+ * glance at it they are asking exactly one question — "is it my turn?" — that
+ * a 2,600-line page answered with one grey sentence somewhere in the middle of
+ * roughly 1,500px of content. Restyling would have made one screen worse at
+ * both jobs.
+ *
+ * NOTHING IS LOST BY THE SWAP, and that is structural rather than careful:
+ * it is a `return` inside the same component instance, so every piece of state
+ * here survives it, and the facts that matter — which questions are answered,
+ * what the counter reads — were never in the browser at all. See the branch
+ * itself for the full argument.
+ *
+ * =============================================================================
  * RELOADING MID-SESSION RESUMES FROM THE SERVER
  * =============================================================================
  *
@@ -192,7 +219,10 @@
  * =============================================================================
  *
  * One `h1` (the destination), the question prompt as the `h2` under it, and the
- * feedback's "Accepted answer" label as the `h3` under that. The answer field
+ * feedback's "Accepted answer" label as the `h3` under that. The voice surface
+ * has its own outline of the same shape — its title as the `h1`, the question
+ * as the `h2` — and only one of the two screens is ever mounted, so the
+ * document has exactly one `h1` either way. The answer field
  * has a real `<label>` (MUI's `TextField label`), and it takes focus on every
  * new question so a keyboard or screen-reader user is never hunting for where
  * to type. The verdict lands inside a `role="status"` region that is MOUNTED
@@ -265,6 +295,7 @@ import { PushToTalkButton } from '../components/voice/PushToTalkButton';
 import { QuestionAudio } from '../components/voice/QuestionAudio';
 import type { QuestionAudioHandle } from '../components/voice/QuestionAudio';
 import { MicrophoneReadinessNotice } from '../components/voice/MicrophoneReadinessNotice';
+import { VoiceSurface } from '../components/voice/VoiceSurface';
 import { VoiceUnavailableNotice } from '../components/voice/VoiceUnavailableNotice';
 import { spokenDoubt } from '../components/voice/confidence';
 import { useOptionalAiStatus } from '../contexts/AiStatusContext';
@@ -1183,6 +1214,42 @@ export default function PracticeSessionPage() {
   }, [spokenDraft]);
 
   /**
+   * "Type instead" asked for the answer field, whenever it next exists.
+   *
+   * Deliberately an effect with NO dependency array: what it waits for is a
+   * COMMIT IN WHICH `inputRef.current` is non-null, and that is not any one
+   * value it could depend on — it is the render in which the voice surface
+   * came down and this page's own form went up.
+   *
+   * THE REQUEST OUTLIVES A REMOUNT, and that is why the flag is not cleared by
+   * the first successful `focus()`. Leaving the surface settles over more than
+   * one commit — the loop stops, the other transport is told to stop, the form
+   * goes up — and a `<TextField>` that is REMOUNTED rather than re-rendered
+   * brings a fresh DOM node with it. jsdom and browsers alike then reset
+   * `activeElement` to `<body>` with NO `focusout` event to react to, so a
+   * one-shot request focuses a node that is about to be thrown away and the
+   * learner is left on `<body>` with nothing coming.
+   *
+   * So the flag clears only once the node that HAS focus is the same node this
+   * effect focused on the previous commit — i.e. it survived a commit. Until
+   * then every commit re-applies it. If no further commit arrives, the field is
+   * focused anyway and the stale flag costs one `===` per commit.
+   */
+  const focusAnswerFieldRef = useRef(false);
+  const lastFocusedAnswerFieldRef = useRef<HTMLInputElement | null>(null);
+  useEffect(() => {
+    if (!focusAnswerFieldRef.current) return;
+    const field = inputRef.current;
+    if (!field) return;
+    if (document.activeElement === field && lastFocusedAnswerFieldRef.current === field) {
+      focusAnswerFieldRef.current = false;
+      return;
+    }
+    lastFocusedAnswerFieldRef.current = field;
+    field.focus();
+  });
+
+  /**
    * Record one attempt, and HAND BACK WHAT WAS GRADED.
    *
    * The return value is #313's one addition: every hand-driven caller ignores
@@ -1413,7 +1480,15 @@ export default function PracticeSessionPage() {
     setVoiceUnavailable(null);
     releaseRecording();
     setAnswerMode('text');
-    inputRef.current?.focus();
+    // A REQUEST, NOT A CALL (#356). Pressed from the voice surface, the answer
+    // field is not in the tree yet — the surface IS the page for as long as the
+    // loop runs — so `inputRef.current` is null and a direct `focus()` here
+    // would silently do nothing, leaving a keyboard user on a detached node.
+    // The effect below performs it on the commit that actually mounts the
+    // field. Pressed from the panel, where the field is already mounted, the
+    // same effect runs on the very next commit, so nothing about the old
+    // behaviour changed.
+    focusAnswerFieldRef.current = true;
   };
 
   // ---------------------------------------------------------------------------
@@ -2204,6 +2279,98 @@ export default function PracticeSessionPage() {
   const isLastQuestion = result ? result.nextQuestion === null : false;
   const finished = !question && !result;
 
+  /**
+   * =============================================================================
+   * THE VOICE SURFACE (#356, epic #345)
+   * =============================================================================
+   *
+   * ENTERED WHEN A VOICE SESSION IS RUNNING, LEFT WHEN IT STOPS. It is a
+   * DIFFERENT SCREEN, not this one restyled: everything below this branch —
+   * the answer field, the correction card, the feedback stack, the explain
+   * panel — belongs to the text path and stays exactly as it was for it.
+   *
+   * NOTHING IS LOST BY THE SWAP, and that is structural rather than careful.
+   * This is a `return` inside the same component instance, so every piece of
+   * state on this page (`result`, `progress`, `question`, `promptWasHeard`,
+   * `hasUserGesture`, the retry refs) survives untouched; and the facts that
+   * matter — which questions are answered and what the counter reads — were
+   * never in the browser to begin with, they are the server's
+   * (`GET /api/practice/sessions/:id`). Leaving voice mode therefore returns
+   * to the identical page, mid-session, with the identical counter.
+   *
+   * THE GATE IS `conversation.isRunning`, NOT `answerMode`. A learner sitting
+   * in Voice with the loop unarmed is on the ordinary page, with the Start
+   * control, the preflight notice and the microphone all where #313, #349 and
+   * #350 put them — the surface is for a session that is actually under way,
+   * which is the only state in which a learner is not looking at the screen.
+   *
+   * The loop's player goes in as `children` (hidden — see `VoiceSurface`'s own
+   * header) and the wake-lock nudge as `footnote`: both are the host's, and
+   * neither is the surface's business to know about.
+   */
+  if (conversation.isRunning) {
+    return (
+      <VoiceSurface
+        phase={conversation.phase}
+        // The SAME table the driver speaks from. Two renderings of one fact.
+        phaseText={CONVERSATION_PHASE_TEXT[conversation.phase]}
+        notice={conversation.notice?.message ?? null}
+        questionNumber={question?.number ?? null}
+        questionPrompt={question?.prompt ?? null}
+        position={position}
+        planned={planned}
+        // #347's RMS publisher, finally consumed. See `VoiceStateVisual`.
+        getLevel={voiceActivity.getLevel}
+        // What was actually graded, and only for an answer that was SPOKEN: a
+        // typed attempt was not "heard" by anything, and saying it was would
+        // be this screen inventing a recognition step that never ran.
+        heard={
+          result && result.attempt.inputMode === 'spoken'
+            ? (result.attempt.transcript ?? result.attempt.responseText)
+            : null
+        }
+        // #351's composed turn, rendered rather than re-derived — see
+        // `VoiceSurface`'s header for why a second description of one verdict
+        // is worse than none.
+        spokenTurn={result?.attempt.spokenTurn ?? []}
+        retryBoundary={result?.attempt.retryBoundary ?? null}
+        onStop={() => conversation.stop()}
+        onTypeInstead={handleTypeInstead}
+        footnote={
+          !conversation.wakeLock.isSupported ? (
+            <Typography
+              variant="caption"
+              color="text.secondary"
+              component="p"
+              sx={{ mt: 1, textAlign: 'center' }}
+            >
+              This browser can&rsquo;t keep the screen awake, so keep the page
+              open while you practise.
+            </Typography>
+          ) : null
+        }
+      >
+        {speechRequest && (
+          <QuestionAudio
+            key={speechRequest.id}
+            ref={speechPlayerRef}
+            text={speechRequest.text}
+            autoPlay
+            premiumVoice={voicePrefs.preferPremiumVoice}
+            voice={voicePrefs.preferredVoice}
+            rate={voicePrefs.speechRate}
+            onPlayed={() => {
+              if (speechRequest.kind === 'question') setPromptWasHeard(true);
+            }}
+            onFinished={(event) =>
+              settleSpeech(event.reason === 'ended' ? 'ended' : 'failed')
+            }
+          />
+        )}
+      </VoiceSurface>
+    );
+  }
+
   return (
     <Container maxWidth="md" disableGutters>
       <Box sx={{ py: { xs: 1, sm: 2 } }}>
@@ -2354,47 +2521,45 @@ export default function PracticeSessionPage() {
                       moment ago. The re-check wins when it has an answer,
                       because it is the newer read of the two.
 
-                      It is NOT rendered while the loop is running: a session
-                      that is under way has a live microphone by definition, and
-                      a stale warning above it would contradict the phase line
-                      right underneath. A device lost MID-session arrives as a
-                      capture failure and exits the loop with the same copy —
-                      see `useConversationSession`'s own failure effect. */}
-                  {!conversation.isRunning && (
-                    <MicrophoneReadinessNotice
-                      problem={startBlockedBy ?? mediaReadiness.problem}
-                      audioSuspended={mediaReadiness.isAudioOutputSuspended}
-                      sx={{ mt: 2 }}
-                    />
-                  )}
+                      IT IS UNCONDITIONAL SINCE #356. It used to be gated on
+                      `!conversation.isRunning`, because a stale warning over a
+                      live microphone would contradict the phase line right
+                      underneath it. That state no longer exists: a running
+                      loop is on the voice surface, which this whole panel is
+                      unreachable from. A device lost MID-session still arrives
+                      as a capture failure and exits the loop with the same
+                      copy — see `useConversationSession`'s own failure
+                      effect. */}
+                  <MicrophoneReadinessNotice
+                    problem={startBlockedBy ?? mediaReadiness.problem}
+                    audioSuspended={mediaReadiness.isAudioOutputSuspended}
+                    sx={{ mt: 2 }}
+                  />
 
                   <Stack
                     direction={{ xs: 'column', sm: 'row' }}
                     spacing={1}
                     sx={{ mt: 2, alignItems: { xs: 'stretch', sm: 'center' } }}
                   >
-                    {conversation.isRunning ? (
-                      <Button
-                        variant="outlined"
-                        startIcon={<StopIcon />}
-                        onClick={() => conversation.stop()}
-                      >
-                        Stop
-                      </Button>
-                    ) : (
-                      <Button
-                        variant="contained"
-                        startIcon={<MicIcon />}
-                        onClick={handleStartConversation}
-                        disabled={pending !== null}
-                      >
-                        Start hands-free
-                      </Button>
-                    )}
-                    {/* REACHABLE AT EVERY PHASE — rendered from this branch
-                        rather than from any state of the loop, so there is no
-                        moment in `speakingQuestion → listening → processing →
-                        speakingAnswer → advancing` where it is missing. */}
+                    {/* START ONLY. Stop lives on the voice surface (#356),
+                        which is the whole screen for as long as the loop is
+                        running — this branch is unreachable then, and a second
+                        Stop here would be a control the learner can never see
+                        beside a state it can never describe. */}
+                    <Button
+                      variant="contained"
+                      startIcon={<MicIcon />}
+                      onClick={handleStartConversation}
+                      disabled={pending !== null}
+                    >
+                      Start hands-free
+                    </Button>
+                    {/* REACHABLE AT EVERY PHASE. This copy covers `idle` —
+                        Voice chosen, loop unarmed — which is the phase the
+                        control is easiest to lose, because it belongs to no
+                        state of the driver. The other six are on the voice
+                        surface, where the same control is anchored outside
+                        every scrolling region (#356). */}
                     <Button variant="text" onClick={handleTypeInstead}>
                       Type instead
                     </Button>
@@ -2402,12 +2567,12 @@ export default function PracticeSessionPage() {
                   </>
                 )}
 
+                {/* THE PHASE SENTENCE IS NOT HERE ANY MORE (#356). Every
+                    phase but `idle` is on the voice surface, and
+                    `CONVERSATION_PHASE_TEXT.idle` is the empty string by
+                    design — so this region's only content was, and now
+                    visibly is, the loop's last word. */}
                 <Box role="status" aria-live="polite" sx={{ mt: 1 }}>
-                  {CONVERSATION_PHASE_TEXT[conversation.phase] && (
-                    <Typography variant="body2" color="text.secondary">
-                      {CONVERSATION_PHASE_TEXT[conversation.phase]}
-                    </Typography>
-                  )}
                   {conversation.notice && (
                     <Typography variant="body2" color="text.secondary">
                       {conversation.notice.message}
@@ -2425,49 +2590,6 @@ export default function PracticeSessionPage() {
                   </Button>
                 )}
 
-                {/* THE LOOP'S VOICE. One mount per utterance — see
-                    `speechRequest` — and unmounted with the loop, which is what
-                    silences it. `autoPlay` is the whole point: nobody is going
-                    to press play. */}
-                {conversation.isRunning && speechRequest && (
-                  <Box sx={{ mt: 1, ml: -1 }}>
-                    <QuestionAudio
-                      key={speechRequest.id}
-                      ref={speechPlayerRef}
-                      text={speechRequest.text}
-                      autoPlay
-                      premiumVoice={voicePrefs.preferPremiumVoice}
-                      voice={voicePrefs.preferredVoice}
-                      rate={voicePrefs.speechRate}
-                      // The QUESTION was actually spoken — `promptMode:
-                      // 'heard'`, exactly as the hand-driven player reports it.
-                      // An accepted answer read aloud says nothing about how
-                      // the question reached the learner.
-                      onPlayed={() => {
-                        if (speechRequest.kind === 'question') setPromptWasHeard(true);
-                      }}
-                      // `ended` / `failed` both mean "stop waiting" (#311). A
-                      // cancel is never reported here, by design — see
-                      // `conversationSpeech`.
-                      onFinished={(event) =>
-                        settleSpeech(event.reason === 'ended' ? 'ended' : 'failed')
-                      }
-                    />
-                  </Box>
-                )}
-
-                {/* A NUDGE, NEVER AN ERROR (`conversation-mode.md` §8). A
-                    browser with no wake lock is not broken and the loop runs
-                    exactly the same; what changes is that the phone may lock
-                    itself, which suspends timers and audio on every mobile
-                    browser this product runs on. Saying so beats letting it be
-                    reported as "my session stopped by itself". */}
-                {conversation.isRunning && !conversation.wakeLock.isSupported && (
-                  <Typography variant="caption" color="text.secondary" component="p" sx={{ mt: 1 }}>
-                    This browser can&rsquo;t keep the screen awake, so keep the
-                    page open while you practise.
-                  </Typography>
-                )}
               </Paper>
             )}
 
