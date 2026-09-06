@@ -53,6 +53,7 @@ import PracticeSessionPage, {
   resolveVoiceTransport,
 } from '../../pages/PracticeSessionPage';
 import { MAX_RECONNECTS } from '../../hooks/useRealtimePractice';
+import { VOICE_SURFACE_TITLE } from '../../components/voice/VoiceSurface';
 import { lightTheme } from '../../theme';
 import type {
   AiStatus,
@@ -709,5 +710,154 @@ describe('a mid-session fallback is spoken, and loses nothing', () => {
     // And the microphone did not leak across the handover: whatever streams
     // were opened, none of them is still live.
     expect(liveStreamCount()).toBe(0);
+  });
+});
+
+// -----------------------------------------------------------------------------
+// 7. What the picture says the COACH is doing — issue #386
+// -----------------------------------------------------------------------------
+
+/** Deliver one provider event over the live data channel. */
+async function emitProviderEvent(event: Record<string, unknown>) {
+  await act(async () => {
+    channel().onmessage?.({ data: JSON.stringify(event) } as MessageEvent);
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+}
+
+describe('the surface says whether the COACH is speaking', () => {
+  it('shows Speaking while the coach talks and Listening when it stops', async () => {
+    // MEASURED DEFECT: 38 of 38 sampled frames of a 77-second session read
+    // "Listening", including the seconds the coach was reading the question
+    // aloud. `useRealtimePractice` has published `isCoachSpeaking` since #355
+    // and this screen ignored it.
+    const user = userEvent.setup();
+    installHandlers({ realtimeBound: true, transcribeBound: true });
+    renderSession();
+    await chooseVoice(user);
+    await startLiveVoice(user);
+
+    // Nothing said yet: it is the learner's turn.
+    expect(await screen.findByText('Listening')).toBeInTheDocument();
+
+    // The coach's own words start arriving.
+    await emitProviderEvent({
+      type: 'response.output_audio_transcript.delta',
+      item_id: 'item-1',
+      delta: 'What is the supreme law ',
+    });
+    expect(await screen.findByText('Speaking')).toBeInTheDocument();
+    expect(screen.queryByText('Listening')).toBeNull();
+
+    // BARGE-IN IS UNCHANGED AND UNCONDITIONAL. The picture describes the
+    // coach, never a gate on the microphone — the sentence beside it still
+    // invites the learner to talk whenever they are ready, and the controls
+    // are where they were.
+    expect(
+      screen.getByText(/talk to the coach whenever you are ready/i),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^stop$/i })).toBeEnabled();
+
+    // And when the utterance finishes, it is the learner's turn again.
+    await emitProviderEvent({
+      type: 'response.output_audio_transcript.done',
+      item_id: 'item-1',
+      transcript: 'What is the supreme law of the land?',
+    });
+    expect(await screen.findByText('Listening')).toBeInTheDocument();
+    expect(screen.queryByText('Speaking')).toBeNull();
+  });
+});
+
+// -----------------------------------------------------------------------------
+// 8. One continuous clock, across a question change — issue #387
+// -----------------------------------------------------------------------------
+
+describe('the elapsed clock measures the session, not the last question', () => {
+  it('does not restart when the conversation moves to another question', async () => {
+    // MEASURED DEFECT: 0:09 at 12s, 0:04 at 29s (Q3), 0:11 at 68s (Q5). The
+    // page re-reads `GET /api/practice/sessions/:id` on every change of
+    // `realtime.questionId`, and `isLoading` used to replace the whole page
+    // with a spinner — unmounting the surface and remounting it, which reset a
+    // clock that started at mount. It is a COST figure (epic #345, decision
+    // 7): a reset systematically under-reports what a session is spending on
+    // the learner's own key.
+    const user = userEvent.setup();
+    installHandlers({ realtimeBound: true, transcribeBound: true });
+
+    // The engine hands out a DIFFERENT question id on the next call, which is
+    // the only signal this page treats as "the conversation moved".
+    let asked = 0;
+    server.use(
+      http.post(
+        `${API_BASE}/practice/sessions/${SESSION_ID}/realtime/tool-calls`,
+        async ({ request }) => {
+          const body = (await request.json()) as Record<string, unknown>;
+          toolCalls.push(body);
+          if (body.tool === 'repeat_question') {
+            return HttpResponse.json({
+              data: {
+                status: 'rejected',
+                tool: 'repeat_question',
+                reason: 'no_answer_outstanding',
+                error: 'Nothing is waiting to be answered.',
+                instruction: 'Call next_question and say what it returns.',
+              },
+            });
+          }
+          asked += 1;
+          return HttpResponse.json({
+            data: {
+              status: 'ok',
+              tool: 'next_question',
+              say: [QUESTION_1.prompt],
+              then: 'await_answer',
+              questionId: `question-${asked}`,
+            },
+          });
+        },
+      ),
+    );
+
+    renderSession();
+    await chooseVoice(user);
+    await startLiveVoice(user);
+    await waitFor(() => expect(toolCalls.length).toBeGreaterThanOrEqual(2));
+    expect(await screen.findByText('Elapsed 0:00')).toBeInTheDocument();
+
+    // The exact node, so "was it remounted" is a fact rather than an
+    // inference: React replaces this element if the surface is unmounted and
+    // mounted again.
+    const surfaceBefore = screen.getByRole('region', { name: VOICE_SURFACE_TITLE });
+
+    // Sixty-five seconds of conversation, without waiting for them. `Date.now`
+    // is moved forward rather than replaced, so it stays monotonic for
+    // everything else in the render.
+    const realNow = Date.now.bind(Date);
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => realNow() + 65_000);
+
+    try {
+      // The conversation moves on: a second question, a second re-read.
+      await emitProviderEvent({
+        type: 'response.function_call_arguments.done',
+        call_id: 'call-next',
+        name: 'next_question',
+        arguments: '{}',
+      });
+      await waitFor(() => expect(toolCalls.length).toBeGreaterThanOrEqual(3));
+
+      // THE SURFACE IS STILL THE ONE THAT WAS THERE, and the clock with it. A
+      // remount would read 0:00 again, which is exactly what a learner saw.
+      expect(
+        await screen.findByRole('region', { name: VOICE_SURFACE_TITLE }),
+      ).toBe(surfaceBefore);
+      await waitFor(() =>
+        expect(screen.getByText(/^Elapsed /)).toHaveTextContent('Elapsed 1:05'),
+      );
+      expect(screen.queryByText('Elapsed 0:00')).toBeNull();
+    } finally {
+      clock.mockRestore();
+    }
   });
 });
