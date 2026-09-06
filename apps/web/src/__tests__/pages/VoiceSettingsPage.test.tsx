@@ -185,22 +185,69 @@ async function findAutoSubmit(): Promise<HTMLInputElement> {
   )) as HTMLInputElement;
 }
 
-/** A fake `Audio` whose playback is observable — jsdom implements none. */
-function installAudio() {
+/**
+ * A fake `Audio` whose construction and playback are observable — jsdom
+ * implements neither.
+ *
+ * SPLIT INTO `primed` AND `played` (#383). The autoplay unlock plays a silent
+ * data URI inside the click and the real sample a round trip later, and the
+ * entire point of the fix is that the first happens BEFORE the synthesis
+ * promise resolves — so a fake that lumps both into one list cannot see the
+ * bug it exists to catch. `constructed` is the other half of that: one element
+ * for the life of the component, reused, because an element only carries the
+ * user activation of the press that unlocked it.
+ */
+interface FakeAudioHandle {
+  /** Every `play()` of the silent unlock source, in order. */
+  primed: string[];
+  /** Every `play()` of a real sample, in order. */
+  played: string[];
+  /** Every element ever constructed. Should stay at one. */
+  constructed: unknown[];
+  /** The most recent element, for firing `ended`/`error` at it. */
+  last: () => {
+    onended: (() => void) | null;
+    onerror: (() => void) | null;
+  } | null;
+}
+
+function installAudio(
+  options: { play?: (src: string) => Promise<void> } = {},
+): FakeAudioHandle {
+  const primed: string[] = [];
   const played: string[] = [];
+  const constructed: FakeAudio[] = [];
+
   class FakeAudio {
+    src = '';
     onended: (() => void) | null = null;
     onerror: (() => void) | null = null;
-    constructor(public src: string) {}
+    constructor(src?: string) {
+      if (src) this.src = src;
+      constructed.push(this);
+    }
     play() {
-      played.push(this.src);
-      return Promise.resolve();
+      // The unlock source is a `data:` URI, a sample is a blob URL. That is
+      // the only thing that tells the two apart from out here, and it is the
+      // same thing the component itself checks before pausing.
+      (this.src.startsWith('data:') ? primed : played).push(this.src);
+      return options.play
+        ? options.play(this.src)
+        : Promise.resolve();
     }
     pause() {}
-    removeAttribute() {}
+    removeAttribute() {
+      this.src = '';
+    }
   }
+
   (window as unknown as { Audio: unknown }).Audio = FakeAudio;
-  return played;
+  return {
+    primed,
+    played,
+    constructed,
+    last: () => constructed[constructed.length - 1] ?? null,
+  };
 }
 
 describe('VoiceSettingsPage (#288)', () => {
@@ -449,7 +496,7 @@ describe('VoiceSettingsPage (#288)', () => {
   });
 
   it('synthesizes on an explicit press, sending that voice id, and plays the result', async () => {
-    const played = installAudio();
+    const audio = installAudio();
     const user = userEvent.setup();
     renderPage();
 
@@ -468,7 +515,7 @@ describe('VoiceSettingsPage (#288)', () => {
     );
 
     // Audio was produced, not merely requested.
-    await waitFor(() => expect(played).toHaveLength(1));
+    await waitFor(() => expect(audio.played).toHaveLength(1));
     expect(await screen.findByRole('status')).toHaveTextContent(
       'Playing a sample in the Nova voice.',
     );
@@ -542,6 +589,72 @@ describe('VoiceSettingsPage (#288)', () => {
       text: VOICE_PREVIEW_SENTENCE,
       voice: 'alloy',
     });
+  });
+
+  // ===========================================================================
+  // The autoplay unlock (#383)
+  // ===========================================================================
+
+  it('primes the audio element INSIDE the click, before the synthesis resolves (#383)', async () => {
+    const audio = installAudio();
+
+    // A synthesis call that does not answer until this test says so. The whole
+    // question here is what has already happened while it is still in flight.
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    server.use(
+      http.post(`${API_BASE}/ai/speech/synthesize`, async ({ request }) => {
+        synthesizeBodies.push((await request.json()) as Record<string, unknown>);
+        await gate;
+        return HttpResponse.arrayBuffer(new ArrayBuffer(8), {
+          headers: { 'Content-Type': 'audio/mpeg' },
+        });
+      }),
+    );
+
+    renderPage();
+    await screen.findByRole('radiogroup', { name: 'Voice' });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Preview the Nova voice' }));
+
+    // THE ASSERTION THIS TEST EXISTS FOR, and it is deliberately made with NO
+    // `await` between it and the click: the element must have been built and
+    // played inside the activation window the press opened. Move `new Audio()`
+    // or `play()` back into the continuation after `synthesizeSpeech` — which
+    // is precisely #383 — and both of these are empty here, while every other
+    // test in this file still passes.
+    expect(audio.constructed).toHaveLength(1);
+    expect(audio.primed).toHaveLength(1);
+    expect(audio.primed[0].startsWith('data:audio/')).toBe(true);
+
+    // And priming is silent in the other sense too: no sample has played yet.
+    expect(audio.played).toEqual([]);
+
+    release();
+    await waitFor(() => expect(audio.played).toHaveLength(1));
+    expect(audio.played[0].startsWith('data:')).toBe(false);
+
+    // Priming spent nothing: still exactly ONE synthesis call for one press.
+    expect(synthesizeBodies).toHaveLength(1);
+  });
+
+  it('reuses the ONE unlocked element across presses rather than building a new one', async () => {
+    const audio = installAudio();
+    const user = userEvent.setup();
+    renderPage();
+
+    await screen.findByRole('radiogroup', { name: 'Voice' });
+    await user.click(screen.getByRole('button', { name: 'Preview the Alloy voice' }));
+    await waitFor(() => expect(audio.played).toHaveLength(1));
+
+    await user.click(screen.getByRole('button', { name: 'Preview the Nova voice' }));
+    await waitFor(() => expect(audio.played).toHaveLength(2));
+
+    // ONE element, both times. A fresh element per preview is a fresh lock per
+    // preview, and the second one was never touched by a gesture.
+    expect(audio.constructed).toHaveLength(1);
   });
 
   it('handles a `failed` synthesis without crashing — the #277 lesson', async () => {

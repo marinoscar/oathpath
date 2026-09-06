@@ -54,6 +54,41 @@
  * scrolling. Selecting a voice saves the preference and makes no audio at all.
  * `previewRef` additionally makes a double-press a no-op rather than a second
  * charge.
+ *
+ * =============================================================================
+ * THE AUDIO ELEMENT IS UNLOCKED INSIDE THE PRESS, BEFORE THE FIRST `await`
+ * =============================================================================
+ *
+ * Issue #383, and the reason `beginPreview` exists as a separate function from
+ * `requestPreview`. A mobile browser only plays audio through an element that
+ * was itself started during a user gesture. `synthesizeSpeech` is a network
+ * round trip, so an element constructed AFTER that `await` is an element the
+ * press never touched: Android Chrome and iOS Safari reject its `play()`, and
+ * they reject it silently — from the learner's side, Preview simply does
+ * nothing at all.
+ *
+ * So the click handler is SYNCHRONOUS, and everything that has to happen
+ * inside the activation window happens in it, in this order:
+ *
+ *   1. ONE `HTMLAudioElement`, acquired into `audioRef` and kept for the life
+ *      of this component — never one per press. An element only has to be
+ *      unlocked once; a fresh element per preview is a fresh lock every time.
+ *   2. IT IS PRIMED: a data-URI of silence is assigned and played, then paused.
+ *      That is no request, no synthesis call and no audible sound (the
+ *      one-call-per-press rule above is not negotiable), and it leaves the
+ *      element user-activated — so the `src` swap that happens later, in the
+ *      continuation, plays with no gesture of its own.
+ *   3. Only then is the async half started, with `void requestPreview(...)`.
+ *
+ * A LATER EDIT THAT MOVES `new Audio(...)` OR `play()` BACK AFTER AN `await`
+ * REINTRODUCES #383 EXACTLY — and does so invisibly on a desktop browser,
+ * where playback after any gesture in the page is permitted and the whole
+ * thing looks like it works.
+ *
+ * `releaseSample` is named for the same reason: it releases a SAMPLE — pause,
+ * drop the `src`, revoke the blob URL — and never the element, because the
+ * element is what carries the activation. Discarding the element is an
+ * unmount-only act.
  */
 
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
@@ -137,7 +172,7 @@ type PreviewState =
   | { kind: 'idle' }
   | { kind: 'preparing'; voiceId: string }
   | { kind: 'playing'; voiceId: string; label: string }
-  | { kind: 'message'; text: string; needsKey?: boolean };
+  | { kind: 'message'; text: string; voiceId?: string; needsKey?: boolean };
 
 export interface VoiceSettingsProps {
   /**
@@ -228,39 +263,70 @@ export function VoiceSettings({
    * "no, that one" and stops the first.
    */
   const previewRef = useRef(false);
+
+  /**
+   * THE ONE audio element, unlocked once and reused by every preview.
+   *
+   * Not one per press — see the file header (#383). An element that was played
+   * inside a user gesture stays user-activated, so swapping its `src` later
+   * plays without a second gesture, which is the entire fix.
+   */
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const objectUrlRef = useRef<string | null>(null);
 
-  const releaseAudio = useCallback(() => {
+  /**
+   * Let go of the SAMPLE — the playback and the bytes — and of nothing else.
+   *
+   * Deliberately not the old `releaseAudio`, which nulled `audioRef`: the
+   * element carries the user activation from the press that unlocked it, and a
+   * replacement would carry none. Discarding it is an unmount-only act, below.
+   */
+  const releaseSample = useCallback(() => {
     const audio = audioRef.current;
-    audioRef.current = null;
     if (audio) {
-      audio.pause();
+      // Off first: a handler still attached while we tear the source down
+      // would report an ending or an error that is ours, not the sample's.
+      audio.onended = null;
+      audio.onerror = null;
+      try {
+        audio.pause();
+      } catch {
+        // An element that will not pause is not worth failing a press over.
+      }
       audio.removeAttribute('src');
     }
     const url = objectUrlRef.current;
     objectUrlRef.current = null;
-    if (url && typeof URL.revokeObjectURL === 'function') {
+    if (
+      url &&
+      typeof URL !== 'undefined' &&
+      typeof URL.revokeObjectURL === 'function'
+    ) {
       URL.revokeObjectURL(url);
     }
-    previewRef.current = false;
   }, []);
 
-  // Leaving the page silences the sample and lets go of its bytes. A blob URL
-  // nobody revokes pins them for the lifetime of the document.
-  useEffect(() => releaseAudio, [releaseAudio]);
+  // Leaving the page silences the sample, lets go of its bytes, and is the ONE
+  // place the element itself is discarded. A blob URL nobody revokes pins those
+  // bytes for the lifetime of the document.
+  useEffect(
+    () => () => {
+      releaseSample();
+      audioRef.current = null;
+      previewRef.current = false;
+    },
+    [releaseSample],
+  );
 
   /**
-   * Speak the sample in one specific voice. **Called from a click handler and
-   * from nowhere else** — see the file header.
+   * The ASYNC half of a preview: one synthesis call, then the bytes.
+   *
+   * **Never wired to an event handler.** `beginPreview` below is the click
+   * handler, and it runs the gesture-time half first — see the file header on
+   * why that order is load-bearing rather than stylistic.
    */
-  const previewVoice = useCallback(
+  const requestPreview = useCallback(
     async (voiceId: string, label: string) => {
-      if (previewRef.current) return;
-      releaseAudio();
-      previewRef.current = true;
-      setPreview({ kind: 'preparing', voiceId });
-
       let result;
       try {
         result = await synthesizeSpeech(VOICE_PREVIEW_SENTENCE, {
@@ -274,6 +340,7 @@ export function VoiceSettings({
         previewRef.current = false;
         setPreview({
           kind: 'message',
+          voiceId,
           text: "We couldn't play that sample just now. Everything else on this page still works.",
         });
         return;
@@ -292,11 +359,13 @@ export function VoiceSettings({
           result.cause === 'no_user_key'
             ? {
                 kind: 'message',
+                voiceId,
                 needsKey: true,
                 text: 'Previews use your own AI key, and there is no key saved on your account yet.',
               }
             : {
                 kind: 'message',
+                voiceId,
                 text: 'The high-quality voice is not available here, so there is nothing to preview. Your browser still reads everything aloud.',
               },
         );
@@ -306,6 +375,7 @@ export function VoiceSettings({
       if (result.status === 'failed') {
         setPreview({
           kind: 'message',
+          voiceId,
           text: `We couldn't play the ${label} sample just now. Your browser still reads everything aloud.`,
         });
         return;
@@ -315,7 +385,7 @@ export function VoiceSettings({
         audioRef,
         objectUrlRef,
         onEnd: () => {
-          releaseAudio();
+          releaseSample();
           setPreview({ kind: 'idle' });
         },
       });
@@ -327,10 +397,35 @@ export function VoiceSettings({
 
       setPreview({
         kind: 'message',
+        voiceId,
         text: `We couldn't play the ${label} sample just now. Your browser still reads everything aloud.`,
       });
     },
-    [releaseAudio],
+    [releaseSample],
+  );
+
+  /**
+   * THE CLICK HANDLER, and the synchronous half of a preview.
+   *
+   * Everything the browser's autoplay policy measures happens here, inside the
+   * activation window the press opened: the element is acquired and primed
+   * before a single `await` has been reached. `requestPreview` is then started
+   * detached — see the file header for why splitting these two is the fix for
+   * #383 rather than a tidying-up.
+   */
+  const beginPreview = useCallback(
+    (voiceId: string, label: string) => {
+      if (previewRef.current) return;
+
+      // ─── GESTURE TIME. Nothing below this line may move after an `await`. ──
+      releaseSample();
+      acquireAndPrimeAudio(audioRef);
+
+      previewRef.current = true;
+      setPreview({ kind: 'preparing', voiceId });
+      void requestPreview(voiceId, label);
+    },
+    [releaseSample, requestPreview],
   );
 
   const previewStatusText =
@@ -778,8 +873,12 @@ export function VoiceSettings({
                         // ONLY `onClick`. No `onFocus`, no `onMouseEnter`, no
                         // key handler — each of those would spend the learner's
                         // key on a gesture that is not a request for audio.
+                        // `beginPreview`, NOT `void previewVoice(...)`: the
+                        // handler has to prime the audio element while the
+                        // press is still the current user activation. See the
+                        // file header (#383).
                         onClick={() => {
-                          void previewVoice(option.id, option.label);
+                          beginPreview(option.id, option.label);
                         }}
                         // Inert only while a REQUEST is in flight — that is
                         // the window a second press would spend the key twice
@@ -827,13 +926,89 @@ export function VoiceSettings({
 }
 
 /**
- * Play synthesized bytes, returning whether playback was started.
+ * A few milliseconds of silent WAV, inline.
+ *
+ * INLINE RATHER THAN A FILE so priming can never become a network request.
+ * A preview costs exactly one synthesis call and nothing else (file header),
+ * and an element primed from a URL would add a fetch to every press.
+ */
+const SILENT_AUDIO_DATA_URI =
+  'data:audio/wav;base64,UklGRjQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YRAAAAAAAAAAAAAAAAAAAAAAAAAA';
+
+/**
+ * Acquire the one audio element and unlock it — CALLED INSIDE THE CLICK.
+ *
+ * Playing silence and pausing it is the standard autoplay unlock: it makes the
+ * element user-activated for the rest of its life, so the `src` swap in
+ * `playSample` — which happens a network round trip later, long after the
+ * gesture has closed — plays instead of being rejected. See the file header
+ * (#383).
+ *
+ * It must never throw out of a click handler and never make a request. An
+ * environment with no `Audio` constructor at all (jsdom) returns `null`, and
+ * the preview goes on to say plainly that nothing could be played.
+ */
+function acquireAndPrimeAudio(audioRef: {
+  current: HTMLAudioElement | null;
+}): HTMLAudioElement | null {
+  if (typeof Audio === 'undefined') return null;
+
+  let element = audioRef.current;
+  if (!element) {
+    try {
+      element = new Audio();
+    } catch {
+      return null;
+    }
+    audioRef.current = element;
+  }
+  const audio = element;
+
+  try {
+    // Handlers off: priming is not a sample, and must not report itself as one
+    // that ended or failed.
+    audio.onended = null;
+    audio.onerror = null;
+    audio.src = SILENT_AUDIO_DATA_URI;
+    const primedSrc = audio.src;
+
+    const started: unknown = audio.play();
+    if (started && typeof (started as Promise<void>).then === 'function') {
+      void (started as Promise<void>)
+        .then(() => {
+          // Only while the silence is still what is loaded. This resolves on
+          // its own schedule, and pausing here after the real sample has been
+          // swapped in would stop the very audio the press asked for.
+          if (audio.src === primedSrc) audio.pause();
+        })
+        .catch(() => {
+          // A browser that refuses even silence tells us nothing actionable
+          // here; the real `play()` reports for real, and says so out loud.
+        });
+    } else {
+      audio.pause();
+    }
+  } catch {
+    // jsdom has no playback at all. Priming is an optimisation for mobile, not
+    // a precondition — the preview still runs.
+  }
+
+  return audio;
+}
+
+/**
+ * Point the ONE unlocked element at synthesized bytes, returning whether
+ * playback was started.
  *
  * Deliberately NOT awaited by the caller. `HTMLAudioElement.play()` resolves
  * when playback BEGINS, which in jsdom (and behind an autoplay policy) may be
  * never — so this reports "the element accepted the source and we asked it to
- * play", and the `onStart`/`onEnd` callbacks report what actually happened.
- * `false` means there was nothing here that could play at all.
+ * play", and the `onEnd` callback reports what actually happened. `false`
+ * means there was nothing here that could play at all.
+ *
+ * IT CONSTRUCTS NOTHING. The element was made and unlocked inside the click by
+ * `acquireAndPrimeAudio`; building one here would be building one after an
+ * `await`, which is #383.
  */
 function playSample(
   blob: Blob,
@@ -843,10 +1018,11 @@ function playSample(
     onEnd: () => void;
   },
 ): boolean {
+  const audio = ctx.audioRef.current;
   if (
+    !audio ||
     typeof URL === 'undefined' ||
-    typeof URL.createObjectURL !== 'function' ||
-    typeof Audio === 'undefined'
+    typeof URL.createObjectURL !== 'function'
   ) {
     return false;
   }
@@ -854,10 +1030,9 @@ function playSample(
   const url = URL.createObjectURL(blob);
   ctx.objectUrlRef.current = url;
 
-  const audio = new Audio(url);
-  ctx.audioRef.current = audio;
   audio.onended = ctx.onEnd;
   audio.onerror = ctx.onEnd;
+  audio.src = url;
 
   try {
     // The rejection is handled rather than dropped: an autoplay policy blocking
