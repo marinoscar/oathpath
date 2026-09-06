@@ -371,6 +371,29 @@ export interface QuestionAudioProps {
    * drift from them when they change.
    */
   copy?: Partial<QuestionAudioCopy>;
+
+  /**
+   * Own a live region for the playback state, or leave the announcing to the
+   * host.
+   *
+   * TRUE BY DEFAULT, so a component mounted on its own — the writing screen,
+   * an interview card, a test rendering it directly — keeps the region it has
+   * always had, and its "reading aloud" / "could not be read aloud" states are
+   * still announced.
+   *
+   * `false` is for ONE situation, and it is not a style preference: this
+   * player is being mounted INSIDE a live region the host already owns
+   * (#358, epic #345). `PracticeSessionPage` renders exactly one region for
+   * "what just happened", and the accepted answer's player sits inside it. A
+   * live region nested in a live region is how a screen-reader user is read
+   * the same sentence twice — once as this region's change, once as the
+   * containing region's — so the host says "not yours" and the text below is
+   * announced by the region that contains it.
+   *
+   * THE TEXT IS RENDERED EITHER WAY. This never hides anything; it changes
+   * which element claims the announcement.
+   */
+  announce?: boolean;
 }
 
 export function QuestionAudio({
@@ -384,6 +407,7 @@ export function QuestionAudio({
   autoPlay = false,
   size = 'small',
   copy,
+  announce = true,
 }: QuestionAudioProps) {
   const words = { ...DEFAULT_COPY, ...copy };
   // Pulled out as a PRIMITIVE because it is read inside two `useCallback`s and
@@ -699,8 +723,14 @@ export function QuestionAudio({
       </Button>
 
       {/* Always mounted, empty when idle: a live region inserted at the same
-          moment as its text is frequently never announced at all. */}
-      <Box role="status" aria-live="polite">
+          moment as its text is frequently never announced at all. That is the
+          justification for the emptiness (#358's rule for an always-mounted
+          empty element), and it is why this Box is not gated on `message`.
+
+          When `announce` is false it is a plain wrapper carrying the same
+          text: the host owns the region this sits inside, and two nested
+          regions announce the same sentence twice. See the prop's own note. */}
+      <Box {...(announce ? { role: 'status', 'aria-live': 'polite' } : {})}>
         {isSpeaking && (
           <Typography variant="body2" color="text.secondary">
             {words.speaking}

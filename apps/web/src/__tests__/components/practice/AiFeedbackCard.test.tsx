@@ -15,10 +15,25 @@
  *     matched" and "no AI opinion exists". Rendering a cause on either is the
  *     "manufactured diagnosis" §8 rejects by name — a confident story about a
  *     learner's own mind that no grader ever told.
+ *
+ * ADJUSTED BY #358 (epic #345) in three places, and only where this card
+ * DELIBERATELY changed:
+ *
+ *  * The verdict is now the chip alone. `outcomeDisplay`'s `detail` sentence
+ *    was deleted, so the assertions that read it are gone with it.
+ *  * The provenance note ("Graded by the assistant.") lives behind a "How this
+ *    was graded" disclosure, so the tests that read it open the disclosure
+ *    first — which is itself the assertion that it is no longer stacked on
+ *    every verdict.
+ *  * The coach's reaction no longer carries a `role="status"` of its own; on
+ *    the live screen it sits inside `PracticeSessionPage`'s one live region.
+ *    The tests that used `getByRole('status')` as a handle on the line now
+ *    address it by its text.
  */
 
 import { describe, it, expect } from 'vitest';
 import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 
 import { AiFeedbackCard } from '../../../components/practice/AiFeedbackCard';
 import { AttemptReview } from '../../../components/practice/AttemptReview';
@@ -37,6 +52,21 @@ import type {
 // -----------------------------------------------------------------------------
 // Fixtures
 // -----------------------------------------------------------------------------
+
+/**
+ * Open the "How this was graded" disclosure and hand back what it revealed.
+ *
+ * Every call is also an assertion that the disclosure EXISTS — which is the
+ * half of #358 that would otherwise decay quietly: the prose could drift back
+ * out from behind it and every text assertion below would still pass.
+ */
+async function openGradingDetails() {
+  const user = userEvent.setup();
+  const toggle = screen.getByRole('button', { name: /how this was graded/i });
+  expect(toggle).toHaveAttribute('aria-expanded', 'false');
+  await user.click(toggle);
+  expect(toggle).toHaveAttribute('aria-expanded', 'true');
+}
 
 function makeAttempt(overrides: Partial<PracticeAttempt> = {}): PracticeAttempt {
   return {
@@ -240,9 +270,10 @@ describe('AiFeedbackCard — a deterministic grade invents nothing', () => {
     render(<AiFeedbackCard attempt={makeAttempt()} />);
 
     expect(screen.getByText('Not a match')).toBeInTheDocument();
-    expect(
-      screen.getByText('That doesn’t match an accepted answer.'),
-    ).toBeInTheDocument();
+    // AND NOTHING RESTATES IT (#358). The chip is the verdict; the sentence
+    // that used to sit beside it said the same thing again in prose, with the
+    // coach's line sandwiched between the two.
+    expect(document.body.textContent).not.toMatch(/accepted answer\./i);
 
     // No diagnosis of any kind — not one of the six headlines is present.
     for (const key of FAILURE_CAUSE_KEYS) {
@@ -283,12 +314,19 @@ describe('AiFeedbackCard — a deterministic grade invents nothing', () => {
     },
   );
 
-  it('still names the self-mark, which is a fact about who decided', () => {
+  it('still names the self-mark, which is a fact about who decided', async () => {
     render(
       <AiFeedbackCard
         attempt={makeAttempt({ gradingMethod: 'self', outcome: 'correct' })}
       />,
     );
+
+    // NOT ON THE VERDICT ITSELF (#358) — available, when it is asked for.
+    expect(
+      screen.queryByText('You marked this one correct yourself.'),
+    ).not.toBeInTheDocument();
+
+    await openGradingDetails();
 
     expect(
       screen.getByText('You marked this one correct yourself.'),
@@ -301,7 +339,7 @@ describe('AiFeedbackCard — a deterministic grade invents nothing', () => {
 // -----------------------------------------------------------------------------
 
 describe('the summary review shows the judgement the learner saw live', () => {
-  it('renders the same cause and coaching on a review row', () => {
+  it('renders the same cause and coaching on a review row', async () => {
     const attempt = aiGraded('expression', 'Your meaning was right.');
 
     render(
@@ -310,10 +348,15 @@ describe('the summary review shows the judgement the learner saw live', () => {
       </ul>,
     );
 
+    // The DIAGNOSIS is not behind the disclosure and must not be: something
+    // actually ran on this attempt and produced it. Only the provenance note
+    // — who decided — moved (#358).
     expect(
       screen.getByText(failureCauseCopy.expression.headline),
     ).toBeInTheDocument();
     expect(screen.getByText('Your meaning was right.')).toBeInTheDocument();
+
+    await openGradingDetails();
     expect(screen.getByText('Graded by the assistant.')).toBeInTheDocument();
     expectNoRawEnumValues();
   });
@@ -410,14 +453,17 @@ describe('AiFeedbackCard — the coach reaction', () => {
     );
 
     expect(screen.queryByText(REACTION)).not.toBeInTheDocument();
-    expect(screen.queryByRole('status')).not.toBeInTheDocument();
     expect(container.textContent).not.toContain(REACTION);
   });
 
   it('renders nothing for a whitespace-only line', () => {
-    render(<AiFeedbackCard attempt={withReaction('supportive', '   ')} />);
+    const { container } = render(
+      <AiFeedbackCard attempt={withReaction('supportive', '   ')} />,
+    );
 
-    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    // No paragraph reserved for a line that never came: the only Typography in
+    // an exact-graded card with no reaction is nothing at all.
+    expect(container.querySelectorAll('.MuiTypography-root')).toHaveLength(0);
   });
 
   it('leaves the verdict chip byte-identical across every persona', () => {
@@ -435,12 +481,7 @@ describe('AiFeedbackCard — the coach reaction', () => {
         <AiFeedbackCard attempt={withReaction(persona, `line for ${persona}`)} />,
       );
       const chip = screen.getByText('Not a match');
-      const result = {
-        label: chip.textContent,
-        className: chip.className,
-        detail: screen.getByText('That doesn’t match an accepted answer.')
-          .textContent,
-      };
+      const result = { label: chip.textContent, className: chip.className };
       unmount();
       return result;
     });
@@ -450,23 +491,69 @@ describe('AiFeedbackCard — the coach reaction', () => {
     }
   });
 
-  it('is announced, and adds no heading to the outline', () => {
+  it('leaves the announcing to its host, and adds no heading to the outline', () => {
     render(<AiFeedbackCard attempt={withReaction()} />);
 
-    // Announced when it arrives with the grade — a learner using a screen
-    // reader has focus elsewhere at that moment.
-    expect(screen.getByRole('status')).toHaveTextContent(REACTION);
+    // NO REGION OF ITS OWN SINCE #358. On the live screen this card renders
+    // inside `PracticeSessionPage`'s one `role="status"` region, which is what
+    // announces the line when it arrives with the grade; a region here would
+    // be a live region nested in a live region, read twice. The page's own
+    // suite asserts the announcement end to end.
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    expect(screen.getByText(REACTION)).toBeInTheDocument();
 
     // The card's heading order belongs to the cause block. A coach's aside
-    // must not insert itself into the document outline.
+    // must not insert itself into the document outline — `h6` here is a SIZE,
+    // and the element is still a `<p>`.
     expect(screen.queryByRole('heading')).not.toBeInTheDocument();
+    expect(screen.getByText(REACTION).tagName).toBe('P');
+  });
+
+  it('is the most prominent sentence in the block', () => {
+    // MEASURED AGAINST ITS SIBLINGS, not asserted as a class name in
+    // isolation: what #358 asks for is that nothing in the feedback block
+    // outweighs the coach's line, and a rule that only checks the line itself
+    // would pass on the day something louder is added beside it.
+    const RANK: Record<string, number> = {
+      h1: 7, h2: 6, h3: 5, h4: 4, h5: 3, h6: 2,
+      subtitle1: 1, subtitle2: 1,
+      body1: 0, body2: -1, caption: -2, overline: -2,
+    };
+
+    const { container } = render(
+      <AiFeedbackCard
+        attempt={withReaction('academic', REACTION, {
+          gradingMethod: 'ai',
+          failureCause: 'expression',
+          aiFeedback: {
+            verdict: 'incorrect',
+            failureCause: 'expression',
+            feedback: 'A sentence from the grader.',
+          },
+        })}
+      />,
+    );
+
+    const reaction = screen.getByText(REACTION);
+    const rankOf = (el: Element) => {
+      const variant = Array.from(el.classList)
+        .map((name) => /^MuiTypography-(\w+)$/.exec(name)?.[1])
+        .find((v) => v && v in RANK);
+      return variant ? RANK[variant] : Number.NEGATIVE_INFINITY;
+    };
+
+    expect(rankOf(reaction)).toBe(RANK.h6);
+    for (const other of container.querySelectorAll('.MuiTypography-root')) {
+      if (other === reaction) continue;
+      expect(rankOf(other)).toBeLessThan(rankOf(reaction));
+    }
   });
 
   it('shows the same line live and on the summary review', () => {
     const attempt = withReaction('unfiltered', 'That answer was a mess.');
 
     const live = render(<AiFeedbackCard attempt={attempt} />);
-    const liveText = screen.getByRole('status').textContent;
+    const liveText = screen.getByText('That answer was a mess.').textContent;
     live.unmount();
 
     render(
@@ -475,7 +562,7 @@ describe('AiFeedbackCard — the coach reaction', () => {
       </ul>,
     );
 
-    expect(screen.getByRole('status').textContent).toBe(liveText);
+    expect(screen.getByText('That answer was a mess.').textContent).toBe(liveText);
   });
 
   it('renders on a review row that would otherwise have nothing to say', () => {
@@ -498,8 +585,8 @@ describe('AiFeedbackCard — the coach reaction', () => {
       />,
     );
 
-    const status = screen.getByRole('status');
-    expect(status.textContent).toBe('<em>not</em> markup & fine');
-    expect(status.querySelector('em')).toBeNull();
+    const line = screen.getByText('<em>not</em> markup & fine');
+    expect(line.textContent).toBe('<em>not</em> markup & fine');
+    expect(line.querySelector('em')).toBeNull();
   });
 });

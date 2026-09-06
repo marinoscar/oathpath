@@ -230,6 +230,30 @@
  * inserted at the same moment as its content is commonly missed entirely by
  * assistive technology.
  *
+ * THAT REGION IS THE ONLY ONE IN THE TEXT PATH (#358, epic #345). Four could be
+ * mounted at once before it — the hands-free loop's phase region, the voice
+ * region, the verdict's, and `QuestionAudio`'s own — which is four things
+ * competing to announce. The rule now:
+ *
+ *   * The verdict region carries BOTH outcomes of an action: a graded result
+ *     and an `actionError`. They are one event from the learner's side.
+ *   * Anything mounted inside it announces through it —
+ *     `role="presentation"` on the alerts, no `role="status"` on the coach's
+ *     reaction, `announce={false}` on the accepted answer's player.
+ *   * The question's own player passes `announce={false}` too: its states are
+ *     carried by the button the learner just pressed, and a second region for
+ *     them would compete with the verdict's for no gain.
+ *
+ * The voice branch keeps its own region while it is mounted, which is the one
+ * documented exception, along with `VoiceUnavailableNotice` — see
+ * `PracticeSessionPage.declutter.test.tsx`, which asserts the whole rule
+ * including both exceptions.
+ *
+ * AND AT MOST ONE `QuestionAudio` IS MOUNTED AT A TIME. The question's is
+ * unmounted while a verdict is up (the answer's is the one that matters then)
+ * and while the loop is driving (it reads through its own player), so three
+ * text buttons and three status lines for one sentence cannot recur.
+ *
  * Mobile-first, and every responsive value steps at `sm` (600px), never `md`.
  * None of `CLAUDE.md`'s five coupled gates is touched here; this page only
  * agrees with them.
@@ -2379,14 +2403,23 @@ export default function PracticeSessionPage() {
           sx={{ mt: 1, mb: 3, borderRadius: 1 }}
         />
 
-        {actionError && (
-          <Alert severity="error" sx={{ mb: 3 }}>
-            {actionError}
-          </Alert>
-        )}
+        {/* `actionError` USED TO RENDER HERE, and it moved into the page's one
+            live region below (#358, epic #345). It was a `role="alert"` of its
+            own — a second live region mounted beside the verdict's, competing
+            to announce — and it is about the button the learner just pressed,
+            which is what that region is for. Below the question card it also
+            lands beside the control that produced it instead of above the
+            progress bar, two screens away on a phone. */}
 
         {(question || conversationNotice || realtimeNotice) && (
-          <Box sx={{ mb: 3 }}>
+          // `&:empty` — this wrapper's children (the unbound-transcribe
+          // notice, the Text/Voice choice, the hands-free panel, the live
+          // voice panel) can all render null at once while the AI status is
+          // still loading, and an empty `div` with a 24px margin is 24px of
+          // nothing at the top of a screen #358 is trying to shorten. `:empty`
+          // matches only an element with no children at all, which is exactly
+          // that case.
+          <Box sx={{ mb: 3, '&:empty': { display: 'none', mb: 0 } }}>
             {/* MOUNTED UNCONDITIONALLY. It renders null unless `transcribe` is
                 KNOWN to be unbound, which is why it can sit here rather than
                 behind a condition this page would have to get right — and it
@@ -2697,10 +2730,41 @@ export default function PracticeSessionPage() {
                 question on every deployment — no model, no key, no admin, no
                 per-call cost (`voice.md` §2) — so hiding this behind a premium
                 binding would take listening practice away from every
-                installation that has not bought one. */}
+                installation that has not bought one.
+
+                MOUNTED ONLY WHILE THIS QUESTION IS STILL OPEN (#358, epic
+                #345). Two conditions, and each removes a player that is
+                redundant at that moment rather than one a learner might want:
+
+                  * `result === null` — once a verdict is up, the thing worth
+                    hearing is the ANSWER, and `AttemptFeedback` mounts a
+                    player for it. Both at once is two text buttons and two
+                    status lines for one sentence anybody would play. The
+                    question's player comes straight back on Next, and on a
+                    correction (which clears `result`).
+                  * `!conversation.isRunning` — the loop reads the question
+                    through its own player, whose end it is waiting on. A
+                    second control for the same sentence, beside a driver that
+                    is already speaking it, is the one press that makes the
+                    loop hear an end it did not cause.
+
+                Unmounting also STOPS whatever it was reading: `QuestionAudio`
+                cancels on unmount, which is what keeps a question from being
+                read over the answer that just replaced it. */}
+            {result === null && !conversation.isRunning && (
             <Box sx={{ mt: 1, ml: -1 }}>
               <QuestionAudio
                 text={question.prompt}
+                // THE PAGE OWNS THE ONE LIVE REGION (#358). This player's
+                // states are already carried by the control the learner just
+                // operated — the button's own accessible name is "Read the
+                // question aloud" / "Preparing the voice…" / "Stop reading" —
+                // and its one failure message points at the prompt rendered
+                // directly above it. A second region competing with the
+                // verdict's for the same announcement is worse for a
+                // screen-reader user than one region that says the right
+                // thing.
+                announce={false}
                 // THE LEARNER'S STORED PREFERENCE (#288), not the hard-coded
                 // `false` this used to pass. It is still only a WISH: the
                 // premium path is taken when this is true AND an admin has
@@ -2752,6 +2816,7 @@ export default function PracticeSessionPage() {
                 }
               />
             </Box>
+            )}
 
             {/* The form is a real `<form>` so Enter submits, which is what a
                 learner typing an answer expects. */}
@@ -2985,12 +3050,25 @@ export default function PracticeSessionPage() {
                 }
               />
 
+              {/* GONE ONCE A VERDICT IS UP (#358, epic #345). All three are
+                  `disabled` while `result !== null` — they were three dead
+                  controls between the learner's answer and the verdict about
+                  it, on the phone screen this issue is trying to shorten, and
+                  three more stops for anybody tabbing to the next action. What
+                  replaces them is `AttemptFeedback`'s own primary action,
+                  which is the only thing any of them could have done next.
+
+                  A WRAPPING ROW, NOT A COLUMN ON `xs`: full-width stacking
+                  turned three buttons into three rows. */}
+              {result === null && (
               <Stack
-                direction={{ xs: 'column', sm: 'row' }}
+                direction="row"
                 spacing={1}
                 sx={{
                   mt: 2,
-                  alignItems: { xs: 'stretch', sm: 'center' },
+                  alignItems: 'center',
+                  flexWrap: 'wrap',
+                  rowGap: 1,
                 }}
               >
                 {/* INERT WHILE THE LOOP IS DRIVING, all three of them. The
@@ -3035,16 +3113,44 @@ export default function PracticeSessionPage() {
                   {pending === 'skip' ? 'Skipping…' : 'Skip'}
                 </Button>
               </Stack>
+              )}
             </Box>
           </Paper>
         )}
 
-        {/* MOUNTED FROM THE FIRST RENDER AND EMPTY UNTIL THERE IS A VERDICT.
-            That ordering is what makes the announcement happen at all — see the
-            file header — and it is also, structurally, where the accepted
-            answers appear for the first time. Nothing renders into this region
-            except a graded `PracticeAttemptResult`. */}
-        <Box role="status" aria-live="polite" sx={{ mt: 3 }}>
+        {/* THE PAGE'S ONE LIVE REGION — "what just happened to the thing you
+            last pressed" (#358, epic #345).
+
+            MOUNTED FROM THE FIRST RENDER AND EMPTY UNTIL THERE IS SOMETHING TO
+            SAY. That ordering is what makes the announcement happen at all — a
+            live region inserted at the same moment as its content is commonly
+            missed entirely — and it is the justification for the one
+            always-mounted empty element this screen keeps.
+
+            IT CARRIES BOTH OUTCOMES OF AN ACTION, AND THAT IS THE POINT.
+            `actionError` (a submit, skip, reveal or finish that failed) used to
+            be its own `role="alert"` above the progress bar: a second live
+            region, mounted beside this one, competing to announce, and two
+            screens from the button that produced it on a phone. A verdict and a
+            failure are the same event from the learner's side — "I pressed
+            something; here is what came of it" — so they share the region and
+            never both need reading.
+
+            EVERYTHING NESTED INSIDE IS `role="presentation"` OR HAS NO REGION
+            OF ITS OWN: the self-mark error, the coach's reaction line, the
+            accepted answer's player. A live region inside a live region is how
+            the same sentence is read twice. */}
+        <Box role="status" aria-live="polite" sx={{ mt: 2 }}>
+          {actionError && (
+            <Alert
+              severity="error"
+              role="presentation"
+              sx={{ mb: result ? 2 : 0 }}
+            >
+              {actionError}
+            </Alert>
+          )}
+
           {result && (
             <Paper variant="outlined" sx={{ p: { xs: 2, sm: 3 } }}>
               <AttemptFeedback

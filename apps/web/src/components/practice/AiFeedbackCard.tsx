@@ -97,9 +97,38 @@
  * did. `VISION.md` Principle #11 — "Trust Before Delight. A beautiful wrong
  * answer is still wrong." The personality sits BESIDE the verdict; it never
  * wears it.
+ *
+ * =============================================================================
+ * #358: THE VERDICT IS STATED ONCE, AND THE COACH IS THE LINE YOU READ
+ * =============================================================================
+ *
+ * Epic #345. E14 put the coach's line on this card and it still lost, because
+ * of what surrounded it. A wrong answer read, top to bottom: the chip, then
+ * `outcomeDisplay`'s `detail` sentence saying the same thing in prose, then
+ * the persona line, then the provenance note, then the accepted answers, then
+ * the self-mark paragraph. ONE persona sentence inside five blocks of neutral
+ * system prose, with the two flattest lines immediately above and below it.
+ *
+ * Three changes, and none of them adds surface:
+ *
+ *  1. **`detail` is gone from `outcome.ts` entirely.** The chip already says
+ *     it. See that file for why deleting beat demoting.
+ *  2. **The reaction is `h6`** — the largest text in the block, larger than
+ *     the accepted answer itself, and still `component="p"` so the document
+ *     outline is untouched.
+ *  3. **The provenance note moved behind a disclosure**, together with
+ *     whatever fixed prose the host passes as `details`. One toggle, closed on
+ *     arrival, unmounting its contents when closed.
+ *
+ * What did NOT change: the cause block and the grader's coaching sentence.
+ * Those are a diagnosis produced by something that actually ran on this
+ * attempt, they appear on a minority of attempts, and they are the opposite of
+ * the fixed prose this issue was about.
  */
 
-import { Box, Chip, Stack, Typography } from '@mui/material';
+import { useId, useState, type ReactNode } from 'react';
+import { Box, Button, Chip, Collapse, Stack, Typography } from '@mui/material';
+import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 
 import type { PracticeAttempt } from '../../types';
 import { failureCauseDisplay } from './failureCause';
@@ -108,6 +137,20 @@ import { gradingMethodNote, outcomeDisplay } from './outcome';
 export interface AiFeedbackCardProps {
   /** The recorded attempt. The only source of everything rendered here. */
   attempt: PracticeAttempt;
+
+  /**
+   * Extra fixed prose the host wants folded into the SAME disclosure the
+   * provenance note lives behind — never a second toggle beside it.
+   *
+   * `AttemptFeedback` passes the self-mark explanation ("choose Show me the
+   * answer next time…"), which is the other sentence #358 found stacked on
+   * every verdict. Two disclosures would have cut the prose and added the
+   * surface back, which is precisely what that issue asked not to happen.
+   *
+   * Undefined on the summary's review rows, which have no such recourse to
+   * explain.
+   */
+  details?: ReactNode;
 
   /**
    * Render the verdict chip and its sentence.
@@ -124,9 +167,21 @@ export interface AiFeedbackCardProps {
 export function AiFeedbackCard({
   attempt,
   includeVerdict = true,
+  details,
 }: AiFeedbackCardProps) {
   const verdict = outcomeDisplay(attempt.outcome);
   const provenance = gradingMethodNote(attempt.gradingMethod);
+
+  /**
+   * The "How this was graded" disclosure — CLOSED on arrival, always.
+   *
+   * Not remembered between attempts and not stored in a preference: the point
+   * of #358 is that this prose is available when it is wanted, and a toggle
+   * that stayed open would put it back on every verdict by a different route.
+   */
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const detailsId = useId();
+  const hasDetails = Boolean(provenance) || Boolean(details);
 
   /**
    * Did a grader actually run on this attempt?
@@ -167,7 +222,7 @@ export function AiFeedbackCard({
    * the exact surface `AiFeedbackCard` is one component in order to keep in
    * step with the live screen.
    */
-  if (!includeVerdict && !provenance && !cause && !coaching && !reaction)
+  if (!includeVerdict && !hasDetails && !cause && !coaching && !reaction)
     return null;
 
   return (
@@ -178,50 +233,53 @@ export function AiFeedbackCard({
           spacing={1}
           sx={{ alignItems: 'center', flexWrap: 'wrap', rowGap: 1 }}
         >
-          {/* The chip is the verdict at a glance; the sentence beside it is the
-              verdict for anybody reading rather than scanning. Both are text,
-              so neither depends on colour alone — a red chip and a green chip
-              are the same chip to a learner who cannot distinguish them. */}
+          {/* THE VERDICT, STATED ONCE (#358). The chip is text as well as
+              colour — a red chip and a green chip are the same chip to a
+              learner who cannot distinguish them — and the sentence that used
+              to sit beside it said the same thing again in a second register.
+              See `outcome.ts` for why `detail` was deleted rather than made
+              smaller. */}
           <Chip label={verdict.label} color={verdict.color} size="small" />
-          <Typography variant="body2" color="text.secondary">
-            {verdict.detail}
-          </Typography>
         </Stack>
       )}
 
       {reaction && (
-        // DIRECTLY UNDER THE VERDICT, above the provenance note and well above
-        // the cause. Placement is the whole difference between reading as the
-        // coach's voice and reading as a second verdict:
+        // THE MOST PROMINENT SENTENCE IN THE BLOCK (#358), directly under the
+        // verdict chip. E14 shipped it as `body1` in the default colour, one
+        // step above the `body2` boilerplate it was competing with — and that
+        // was not enough: the persona line was indistinguishable from the
+        // fixed system prose above and below it, which is a large part of why
+        // the personality "did not feel implemented" even though it was.
         //
-        //   * `body1` in the default text colour, where the verdict's own
-        //     sentence beside the chip is `body2` in `text.secondary`. The
-        //     reaction is the line a learner actually reads; the verdict
-        //     sentence is the one they scan past once they have seen the chip.
+        //   * `variant="h6"` — the largest text in the feedback block, and
+        //     larger than the accepted answer's own `body1`. #358's rule is
+        //     that this is the line the learner is MEANT to read, so it must
+        //     look like it. The fixed prose it used to be sandwiched between
+        //     is gone (`outcome.ts`'s `detail`) or behind a disclosure (the
+        //     provenance note), so nothing flat frames it any more.
         //   * NO icon, NO chip, NO coloured surface. Anything that framed it
         //     would make a joke look like a system message, and would give the
         //     personality a visual weight the verdict deliberately keeps.
-        //   * `component="p"` — text, not a heading. The card's heading order
-        //     belongs to the cause block below, and a coach's aside must not
-        //     insert itself into the document outline a screen-reader user
+        //   * `component="p"` — text, not a heading, DESPITE the `h6` size.
+        //     The size is design; the level is semantics. The card's heading
+        //     order belongs to the cause block below, and a coach's aside must
+        //     not insert itself into the document outline a screen-reader user
         //     navigates by.
         //
-        // `role="status"` so assistive technology announces it when it
-        // appears: it arrives with the grade, at the moment focus is elsewhere,
-        // and a line nobody hears is a line that only sighted learners get.
+        // NO `role="status"` OF ITS OWN, SINCE #358, AND THAT IS NOT A LOST
+        // ANNOUNCEMENT. On the live session screen this card renders INSIDE
+        // `PracticeSessionPage`'s one live region, so the line is announced as
+        // that region's change; a live region nested in a live region is how
+        // the same sentence gets read twice, which is the hazard that page
+        // already documents for `ExplainPanel` and for its own nested alerts.
+        // On the summary review there is no arrival to announce — the rows are
+        // rendered with the page.
         <Typography
-          variant="body1"
+          variant="h6"
           component="p"
-          role="status"
-          sx={{ mt: 1.5 }}
+          sx={{ mt: 1.5, fontWeight: 500, lineHeight: 1.4 }}
         >
           {reaction}
-        </Typography>
-      )}
-
-      {provenance && (
-        <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-          {provenance}
         </Typography>
       )}
 
@@ -263,6 +321,64 @@ export function AiFeedbackCard({
         <Typography variant="body2" sx={{ mt: 2 }}>
           {coaching}
         </Typography>
+      )}
+
+      {/* THE LOW-VALUE FIXED PROSE, MADE PROGRESSIVE (#358, epic #345).
+
+          Who decided this outcome ("Graded by the assistant." / "You marked
+          this one correct yourself.") and, on the session screen, why the
+          self-mark is not on offer are both true, both occasionally wanted,
+          and neither is what a learner came to this screen to read. Stacked
+          under every verdict they were two more flat sentences competing with
+          the coach's one; behind a toggle they are one short control that
+          answers a question when it is asked.
+
+          `unmountOnExit`, so "collapsed" means ABSENT rather than present and
+          hidden. A hidden paragraph is still a paragraph a test can find, a
+          search can hit and — depending on how the collapse is implemented —
+          a screen reader can reach; the whole claim of this disclosure is that
+          the prose is not on the screen until somebody asks for it, and that
+          claim should be true in the DOM.
+
+          `aria-controls` only while open, for the same reason: a control that
+          points at an id nothing carries is worse than a control that points
+          at nothing at all. */}
+      {hasDetails && (
+        <Box sx={{ mt: 1.5 }}>
+          <Button
+            // Quiet by construction — text, small, inherited colour. It sits
+            // in the same block as the primary "move on" action and must not
+            // compete with it.
+            variant="text"
+            size="small"
+            color="inherit"
+            onClick={() => setDetailsOpen((open) => !open)}
+            aria-expanded={detailsOpen}
+            aria-controls={detailsOpen ? detailsId : undefined}
+            endIcon={
+              <ExpandMoreIcon
+                sx={{
+                  transition: 'transform 150ms',
+                  transform: detailsOpen ? 'rotate(180deg)' : 'none',
+                }}
+              />
+            }
+            sx={{ ml: -1 }}
+          >
+            How this was graded
+          </Button>
+
+          <Collapse in={detailsOpen} unmountOnExit>
+            <Box id={detailsId} sx={{ mt: 0.5 }}>
+              {provenance && (
+                <Typography variant="body2" color="text.secondary">
+                  {provenance}
+                </Typography>
+              )}
+              {details}
+            </Box>
+          </Collapse>
+        </Box>
       )}
     </Box>
   );

@@ -336,9 +336,19 @@ describe('submitting an answer', () => {
     expect(selfMark.className).not.toContain('MuiButton-contained');
 
     await user.click(selfMark);
-    await waitFor(() =>
-      expect(screen.getByText('You marked this one correct yourself.')).toBeInTheDocument(),
-    );
+
+    // The verdict itself is what changes — the chip, in the one live region.
+    await waitFor(() => expect(screen.getByText('Correct')).toBeInTheDocument());
+
+    // WHO decided is behind the "How this was graded" disclosure since #358:
+    // true, occasionally wanted, and not what the learner came here to read.
+    expect(
+      screen.queryByText('You marked this one correct yourself.'),
+    ).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /how this was graded/i }));
+    expect(
+      screen.getByText('You marked this one correct yourself.'),
+    ).toBeInTheDocument();
   });
 
   it('does not offer self-mark on a cold, unrevealed miss', async () => {
@@ -353,6 +363,14 @@ describe('submitting an answer', () => {
     expect(
       screen.queryByRole('button', { name: /i was right/i }),
     ).not.toBeInTheDocument();
+
+    // The explanation for that absence moved behind the same disclosure the
+    // provenance note lives behind (#358) — one toggle, not two, and not a
+    // fixed paragraph under every verdict.
+    expect(
+      screen.queryByText(/we can only count your own call/i),
+    ).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /how this was graded/i }));
     expect(screen.getByText(/we can only count your own call/i)).toBeInTheDocument();
   });
 });

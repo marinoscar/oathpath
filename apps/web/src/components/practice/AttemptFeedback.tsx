@@ -61,6 +61,13 @@
  * interview is spoken in both directions, and `VISION.md`'s "patient human
  * coach" is a coach who SAYS the answer back.
  *
+ * SINCE #358 (epic #345) IT IS ALSO THE ONLY `QuestionAudio` ON THE PAGE WHILE
+ * A VERDICT IS UP: `PracticeSessionPage` unmounts the question's player when a
+ * result arrives, so the answer's is the one player mounted. Three players —
+ * the question's, the answer's and the hands-free loop's — could previously be
+ * in the tree at once, each with a text button and a status line of its own,
+ * for what is at any moment one thing worth hearing.
+ *
  * It is the same `QuestionAudio` the question uses, with its `copy` prop
  * re-worded — not a second player. Everything that makes that component
  * trustworthy is therefore inherited rather than re-decided here: the browser's
@@ -213,9 +220,40 @@ export function AttemptFeedback({
           review rows render, so a learner revisiting this session reads the
           identical judgement they were given live. See `AiFeedbackCard` for
           why a deterministic grade shows the plain verdict and nothing else. */}
-      <AiFeedbackCard attempt={attempt} />
+      <AiFeedbackCard
+        attempt={attempt}
+        // THE RECOURSE, FOLDED INTO THE CARD'S OWN DISCLOSURE (#358, epic
+        // #345). It used to be a fixed paragraph below the accepted answers,
+        // on every cold, unrevealed miss. The sentence is unchanged and the
+        // case it renders on is unchanged; what changed is that it is now
+        // behind the same "How this was graded" toggle the provenance note
+        // sits behind, because it is the same kind of thing — a true, rarely
+        // wanted explanation of the grading record — and because a second
+        // toggle beside that one would have cut the prose and added the
+        // surface straight back.
+        //
+        // ONE QUIET SENTENCE, ON ONLY THE CASE IT EXPLAINS: never after a skip
+        // (nothing was claimed) and never after a correct answer (nothing to
+        // explain). A learner who answered cold and was told "not a match" has
+        // no self-mark control on this screen, and without this the reason
+        // looks like the product refusing to listen rather than the record
+        // refusing to accept an unchecked claim.
+        details={
+          !canSelfMark && attempt.outcome === 'incorrect' && !attempt.revealed ? (
+            <Typography variant="body2" color="text.secondary">
+              If you think your answer was right, choose &ldquo;Show me the
+              answer&rdquo; next time &mdash; we can only count your own call
+              once you&rsquo;ve seen what it was compared against.
+            </Typography>
+          ) : undefined
+        }
+      />
 
-      <Divider aria-hidden sx={{ my: 2 }} />
+      {/* `my: 1.5` rather than `2` since #358: on a 360x640 phone the verdict,
+          the accepted answers and the next action have to fit together, and
+          the rhythm between them is one of the few places to find the room
+          without deleting something a learner needs. */}
+      <Divider aria-hidden sx={{ my: 1.5 }} />
 
       {/* The answers, and the FIRST moment they exist anywhere on this page. */}
       <AcceptedAnswers
@@ -249,35 +287,37 @@ export function AttemptFeedback({
             // Only for a learner who asked, and only once the document has had
             // a gesture. Both halves are the host's to know.
             autoPlay={readAnswersAloud && hasUserGesture}
+            // THIS PLAYER IS INSIDE THE PAGE'S ONE LIVE REGION (#358). Its
+            // status line is still rendered and still announced — by the
+            // region that contains it, rather than by a second region nested
+            // inside that one. See `QuestionAudio`'s `announce` prop.
+            announce={false}
           />
         </Box>
       )}
 
-      {/* The recourse, named where its absence would otherwise be a mystery.
-          A learner who answered cold and was told "not a match" has no
-          self-mark control on this screen, and without this line the reason
-          looks like the product refusing to listen rather than the record
-          refusing to accept an unchecked claim. One quiet sentence, and only
-          on the case it explains: never after a skip (nothing was claimed) and
-          never after a correct answer (nothing to explain). */}
-      {!canSelfMark && attempt.outcome === 'incorrect' && !attempt.revealed && (
-        <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>
-          If you think your answer was right, choose &ldquo;Show me the
-          answer&rdquo; next time &mdash; we can only count your own call once
-          you&rsquo;ve seen what it was compared against.
-        </Typography>
-      )}
-
       {selfMarkError && (
-        <Alert severity="error" sx={{ mt: 2 }}>
+        // `role="presentation"` — the LOOK of an alert without a second live
+        // region (#358). This block renders inside `PracticeSessionPage`'s one
+        // `role="status"` region, so the failure is announced as that region's
+        // change; MUI's default `role="alert"` here would be a live region
+        // nested in a live region, read twice and interrupting the verdict it
+        // arrived beside. The same reasoning that page already applies to its
+        // own nested alerts.
+        <Alert severity="error" role="presentation" sx={{ mt: 2 }}>
           {selfMarkError}
         </Alert>
       )}
 
+      {/* A WRAPPING ROW ON EVERY WIDTH, NOT A COLUMN ON `xs` (#358). Stacking
+          full-width turned two controls into two rows on the phone the whole
+          screen has to fit in, and pushed the primary action further from the
+          verdict it belongs to. Wrapping keeps them side by side where they
+          fit and costs a row only where they genuinely do not. */}
       <Stack
-        direction={{ xs: 'column', sm: 'row' }}
+        direction="row"
         spacing={1}
-        sx={{ mt: 3, alignItems: { xs: 'stretch', sm: 'center' } }}
+        sx={{ mt: 2, alignItems: 'center', flexWrap: 'wrap', rowGap: 1 }}
       >
         <Button variant="contained" size="large" onClick={onNext}>
           {nextLabel}
