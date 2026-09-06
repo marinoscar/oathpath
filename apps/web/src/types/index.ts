@@ -123,6 +123,15 @@ export interface VoiceSettings {
    * at all is a separate fact the practice screen answers for itself.
    */
   conversationMode?: boolean;
+  /**
+   * Whether the hands-free loop's short tones sound at all (#357, epic #345).
+   *
+   * Unlike its neighbours this one is a CAPABILITY-FREE wish: there is nothing
+   * to bind and no key to spend — the cues are synthesised in the browser — so
+   * the only thing that can silence them other than this preference is a
+   * platform with no `AudioContext`.
+   */
+  soundCues?: boolean;
 }
 
 /**
@@ -2263,6 +2272,48 @@ export interface PracticeSession {
   completedAt: string | null;
   /** Null while `in_progress` — there is nothing to summarise yet. */
   summary: PracticeSessionSummary | null;
+
+  // ---------------------------------------------------------------------------
+  // The coach's closing word (#352, epic #345 "The conversation the coach has")
+  // ---------------------------------------------------------------------------
+
+  /**
+   * The coach's reaction to how the whole session went — or null.
+   *
+   * THE FIELD THIS TYPE WAS MISSING, and the reason about a quarter of the
+   * reaction bank was unreachable copy for two epics: the server has computed
+   * it since #320 and `practice-session.dto.ts` has declared it just as long,
+   * but this interface did not carry it, so nothing rendered it and nothing
+   * said it. The end of a session was silent.
+   *
+   * NULL WHENEVER {@link summary} IS NULL, and not by coincidence: the three
+   * `session.complete_*` events are a pure function of the summary's own
+   * `correct`/`answered`, so a session with nothing to summarise has nothing
+   * to react to. Also null when the learner has turned reactions off, which is
+   * a request for silence and must render as nothing at all — not a
+   * placeholder, not an empty region reserving space for a line that is never
+   * coming.
+   *
+   * COMPUTED SERVER-SIDE AT READ TIME AND NEVER PERSISTED, exactly as an
+   * attempt's is. It is seeded by the SESSION id, so the response to
+   * `POST .../complete` and every later read of the summary say the same thing
+   * without a column to hold it.
+   */
+  coachReaction: { text: string; persona: CoachPersona } | null;
+
+  /**
+   * What the coach SAYS when this session ends, in order — composed
+   * server-side, exactly as an attempt's `spokenTurn` is.
+   *
+   * `[]` IS ORDINARY, and is the answer whenever {@link coachReaction} is
+   * null. A client speaks an empty array as silence and never substitutes a
+   * line of its own.
+   *
+   * It carries no tally on purpose. The band is already in the line the coach
+   * says; the digits are on the summary screen, where they can be read at the
+   * learner's own pace rather than listened to.
+   */
+  spokenTurn: string[];
 }
 
 /**
@@ -3274,6 +3325,168 @@ export type RealtimeToolCallResponse =
   | RealtimeGradeAnswerResult
   | RealtimeEndPhaseResult
   | RealtimeToolCallRejected;
+
+// =============================================================================
+// Realtime practice — mint and relay (issues #353/#354/#355, epic #345 / E15)
+// =============================================================================
+//
+// Hand-written mirrors of `apps/api/src/practice/dto/practice-realtime-session.dto.ts`
+// and `practice-tool-call.dto.ts`, field for field against those Zod schemas.
+//
+// -----------------------------------------------------------------------------
+// FIVE TOOLS HERE, THREE IN THE INTERVIEW BLOCK ABOVE — AND NOT ONE SHARED TYPE
+// -----------------------------------------------------------------------------
+//
+// The two transports look alike and are not the same contract. A practice
+// session asks civics questions and nothing else, so it has `repeat_question`
+// and `skip_question` (a learner practising alone may ask to hear a question
+// again, or to move on) and no `end_phase` (there are no phases). Its
+// `grade_answer` carries NO `confidence` field at all, where the interview's
+// does — `docs/specs/realtime-practice.md` §3: on this transport the number
+// would be the model reporting its own certainty about its own hearing, not a
+// recogniser's calibrated measurement, and `isMisheardAttempt` would let it
+// suppress a mastery update on the strength of it.
+//
+// A shared `RealtimeToolName` union spanning both would be a type in which
+// `end_phase` is spellable in a practice session and `repeat_question` in an
+// interview, checked by nothing. The API keeps the two contracts in separate
+// files for the same reason; these mirrors follow it.
+//
+// -----------------------------------------------------------------------------
+// THERE IS NO `apiKey` ON ANY SHAPE IN THIS BLOCK EITHER
+// -----------------------------------------------------------------------------
+//
+// The identical closed list the interview mint's mirror above states, for the
+// identical reason: the API carries a compile-time proof that no long-lived
+// credential can travel on its mint response, and this is the reading side of
+// it. {@link PracticeRealtimeSessionOk.clientSecret} is not an exception — it
+// expires in about a minute, it is scoped to one practice session's own
+// instructions and tools, and it is useless outside the handshake it exists
+// for.
+// =============================================================================
+
+/** A practice session was minted. Three fields, and the list is closed. */
+export interface PracticeRealtimeSessionOk {
+  status: 'ok';
+  /**
+   * The ephemeral, single-session client secret.
+   *
+   * Handed straight to the provider's own handshake and NEVER stored: not in
+   * `localStorage`, not in `sessionStorage`, not in a cookie, not in a module
+   * variable that outlives the connection.
+   */
+  clientSecret: string;
+  /** When the secret stops being usable, as the PROVIDER reported it. */
+  expiresAt: string;
+  /** The realtime model the secret was minted against. Named on the handshake. */
+  modelId: string;
+}
+
+/**
+ * No mint was attempted, and why.
+ *
+ * NOT AN ERROR, and the client's response is the degradation ladder's next
+ * rung rather than a message about a broken deployment: E13's request/response
+ * loop when `transcribe` is bound, and typing when it is not
+ * (`docs/specs/realtime-practice.md` §8).
+ */
+export interface PracticeRealtimeSessionUnavailable {
+  status: 'unavailable';
+  cause: AiUnavailableCause;
+  /** Always `realtime` — the role that could not be served. */
+  role: 'realtime';
+}
+
+/** The mint was attempted and did not produce a usable session. */
+export interface PracticeRealtimeSessionFailed {
+  status: 'failed';
+  errorCode: string;
+  error: string;
+}
+
+export type PracticeRealtimeSessionResponse =
+  | PracticeRealtimeSessionOk
+  | PracticeRealtimeSessionUnavailable
+  | PracticeRealtimeSessionFailed;
+
+/** The five tools the realtime practice coach may call. */
+export type PracticeRealtimeToolName =
+  | 'next_question'
+  | 'grade_answer'
+  | 'repeat_question'
+  | 'skip_question'
+  | 'end_session';
+
+/** Why `end_session` was called. A report of what happened, never a verdict. */
+export type PracticeRealtimeEndReason = 'no_questions_left' | 'learner_asked';
+
+/**
+ * One tool call, as it goes on the wire to
+ * `POST /api/practice/sessions/:id/realtime/tool-calls`.
+ *
+ * NO `verdict`, NO `confidence`, NO `outcome`, and no user id. The API's own
+ * DTO carries a compile-time proof naming every one of those; this mirror
+ * keeps the browser from being the layer that reintroduces one. The model
+ * reports what it HEARD; the grading ladder decides whether it was right.
+ */
+export type PracticeRealtimeToolCallInput =
+  | { tool: 'next_question' }
+  | { tool: 'grade_answer'; questionId: string; transcript: string }
+  | { tool: 'repeat_question' }
+  | { tool: 'skip_question'; questionId: string }
+  | { tool: 'end_session'; reason: PracticeRealtimeEndReason };
+
+/**
+ * What the engine decided happens next.
+ *
+ * NAMES AN ACTION, NEVER AN OUTCOME — `ask_next_question` is what follows a
+ * right answer, a wrong answer, a skip and a mishearing alike. A client that
+ * read this as a verdict would be reading a field that deliberately cannot
+ * carry one.
+ */
+export type PracticeRealtimeThen =
+  | 'await_answer'
+  | 'ask_next_question'
+  | 'session_complete';
+
+/** Any of the five tools, honoured. */
+export interface PracticeRealtimeToolOk {
+  status: 'ok';
+  tool: PracticeRealtimeToolName;
+  /**
+   * The lines to speak, in order, EXACTLY as given.
+   *
+   * An array rather than one string because a turn legitimately has more than
+   * one line (an acknowledgement, then the next question), and a client that
+   * had to split a paragraph would be deciding where a sentence ends.
+   */
+  say: string[];
+  /** The action the engine chose. Never an outcome. */
+  then: PracticeRealtimeThen;
+  /** The question now outstanding, or `null`. A join key, never a verdict. */
+  questionId: string | null;
+}
+
+/**
+ * Any of the five tools, refused — and **HTTP 200**, never a 4xx.
+ *
+ * A refusal is an expected outcome of the contract: `instruction` is the field
+ * that gets the session moving again, and a relay that treated this as a
+ * failure would leave the coach waiting on a tool result that never arrives —
+ * a live, per-minute-billing connection that has silently stopped.
+ */
+export interface PracticeRealtimeToolRejected {
+  status: 'rejected';
+  tool: PracticeRealtimeToolName;
+  /** A stable, group-able code. Never a message. */
+  reason: string;
+  error: string;
+  instruction: string;
+}
+
+export type PracticeRealtimeToolCallResponse =
+  | PracticeRealtimeToolOk
+  | PracticeRealtimeToolRejected;
 
 // =============================================================================
 // English — `GET /api/english/next`, `POST /api/english/attempts`,

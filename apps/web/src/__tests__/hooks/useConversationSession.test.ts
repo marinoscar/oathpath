@@ -46,6 +46,17 @@
  *      (`../../lib/earcons`, now spied at the top of this file) was ever
  *      called at all.
  *
+ * Issue #357, epic #345 added a ninth, and it is the reason the cue module
+ * itself is left REAL here:
+ *
+ *   9. EVERY TRANSITION IS CUED, AND THE CUE IS DERIVED FROM THE PHASE. The
+ *      tap that starts a session is cued BEFORE the device is opened, a normal
+ *      end and a failure exit are different sounds, the advancing pause is no
+ *      longer silent, and `stopProcessingPulse()` is unreachable from a path
+ *      that never started one. All four failed silently on a phone in a
+ *      pocket, and the last of them was visible in the code as a stop call on
+ *      the `onsetTimeout` path where no pulse had ever run.
+ *
  * =============================================================================
  * WHAT THIS SUITE DOES NOT TEST — AND CANNOT
  * =============================================================================
@@ -96,12 +107,24 @@ import type { VoiceActivityEvent } from '../../hooks/useVoiceActivity';
 // before `vi.mock`'s factory runs, the same device
 // `PracticeSessionPage.conversation.test.tsx` uses for its own capture/VAD
 // mocks.
+//
+// ONLY THE SOUND-MAKING LEAVES ARE FAKED (issue #357, epic #345).
+// `lib/conversationCues.ts` — the table that decides WHICH cue a transition
+// plays — is left real and runs for every test in this file, so the assertions
+// below are about the machine's actual cue decisions rather than about a
+// second copy of them written here. Adding a phase to the hook therefore
+// breaks this suite too, not only the cue module's own.
 // ---------------------------------------------------------------------------
 
 const earconsSpies = vi.hoisted(() => ({
   closeSharedAudioContext: vi.fn(),
   playCapturedEarcon: vi.fn(),
   playListeningEarcon: vi.fn(),
+  playSessionStartEarcon: vi.fn(),
+  playQuestionEarcon: vi.fn(),
+  playAdvancingEarcon: vi.fn(),
+  playSessionEndEarcon: vi.fn(),
+  playSessionFailedEarcon: vi.fn(),
   startProcessingPulse: vi.fn(),
   stopProcessingPulse: vi.fn(),
 }));
@@ -1590,5 +1613,310 @@ describe('useConversationSession — unmount', () => {
     // that would have followed does not run.
     expect(harness.capture.release).toHaveBeenCalled();
     expect(harness.submit).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+//
+// EVERY TRANSITION IS CUED (issue #357, epic #345).
+//
+// E13 shipped three cues placed by hand at the three call sites somebody
+// noticed, which is why five edges were silent — including the tap that starts
+// a session, in front of a permission prompt a learner has to read. The cues
+// are now derived from the phase (`lib/conversationCues.ts`, left REAL for
+// this suite), and these are the claims that derivation exists to make true.
+//
+// What is asserted here is the MACHINE's behaviour: which cue fires on which
+// real transition, and in what order relative to the device. The table's own
+// exhaustiveness — every ordered pair decided, every silence explained — is
+// `conversationCues.test.ts`'s job and is not repeated here.
+// ---------------------------------------------------------------------------
+
+describe('useConversationSession — every transition is cued (#357)', () => {
+  it('cues the tap BEFORE the device is opened', async () => {
+    // The gap this closes: between Start and the first sound sit a permission
+    // prompt and a device open. Hands-free, that silence was indistinguishable
+    // from a tap that never registered — and the remedy for a tap that never
+    // registered is to tap again.
+    const harness = makeHarness();
+    harness.capture.holdAcquire = true;
+    const view = mount(harness);
+
+    await act(async () => {
+      view.result.current.start();
+    });
+
+    expect(phaseOf(view)).toBe('preparing');
+    expect(earconsSpies.playSessionStartEarcon).toHaveBeenCalledTimes(1);
+    // ORDER, not merely "both happened": a cue after `acquireStream()` would
+    // be a cue behind the modal it exists to explain.
+    expect(
+      earconsSpies.playSessionStartEarcon.mock.invocationCallOrder[0],
+    ).toBeLessThan(harness.capture.acquireStream.mock.invocationCallOrder[0]);
+
+    // And nothing has claimed a question is being asked yet, in sound any more
+    // than in phase (#349).
+    expect(earconsSpies.playQuestionEarcon).not.toHaveBeenCalled();
+    expect(earconsSpies.playListeningEarcon).not.toHaveBeenCalled();
+  });
+
+  it('marks the top of each question, including the next one', async () => {
+    const harness = makeHarness();
+    const view = mount(harness);
+    await startToListening(harness, view);
+
+    expect(earconsSpies.playQuestionEarcon).toHaveBeenCalledTimes(1);
+
+    // The host moves to the next question — the loop's only clock.
+    harness.question.current = QUESTION_TWO;
+    view.rerender(harness.props());
+    await settle();
+
+    expect(earconsSpies.playQuestionEarcon).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps E13’s three: open, captured, and the pulse over the wait', async () => {
+    const harness = makeHarness();
+    harness.submit.mockImplementation(() => new Promise(() => {}));
+    const view = mount(harness);
+    await startToListening(harness, view);
+
+    expect(earconsSpies.playListeningEarcon).toHaveBeenCalledTimes(1);
+    expect(earconsSpies.startProcessingPulse).not.toHaveBeenCalled();
+
+    fire(view, ONSET);
+    fire(view, END_OF_TURN);
+
+    expect(earconsSpies.playCapturedEarcon).toHaveBeenCalledTimes(1);
+    expect(earconsSpies.startProcessingPulse).toHaveBeenCalledTimes(1);
+    // "Got it" lands before the beat that covers the wait behind it starts.
+    expect(
+      earconsSpies.playCapturedEarcon.mock.invocationCallOrder[0],
+    ).toBeLessThan(earconsSpies.startProcessingPulse.mock.invocationCallOrder[0]);
+  });
+
+  it('cues the otherwise silent advancing pause, and stops the pulse first', async () => {
+    const harness = makeHarness();
+    const view = mount(harness);
+    await startToListening(harness, view);
+    await speakAnswer(harness, view);
+
+    expect(phaseOf(view)).toBe('advancing');
+    expect(earconsSpies.playAdvancingEarcon).toHaveBeenCalledTimes(1);
+    // Leaving `processing` is what stops the pulse — before the verdict is
+    // read, not after the pause.
+    expect(earconsSpies.stopProcessingPulse).toHaveBeenCalled();
+    expect(
+      earconsSpies.stopProcessingPulse.mock.invocationCallOrder[0],
+    ).toBeLessThan(earconsSpies.playAdvancingEarcon.mock.invocationCallOrder[0]);
+  });
+
+  it('says nothing over the verdict itself', async () => {
+    const harness = makeHarness();
+    const view = mount(harness);
+    await startToListening(harness, view);
+
+    // No cue is attached to entering `speakingAnswer`: the accepted answer is
+    // read aloud the instant it begins, and a tone there talks over it.
+    const before = {
+      question: earconsSpies.playQuestionEarcon.mock.calls.length,
+      listening: earconsSpies.playListeningEarcon.mock.calls.length,
+      captured: earconsSpies.playCapturedEarcon.mock.calls.length,
+      advancing: earconsSpies.playAdvancingEarcon.mock.calls.length,
+    };
+    await speakAnswer(harness, view);
+
+    // The only new edge cues across the whole grade are the captured one on
+    // the way in and the advancing one on the way out.
+    expect(earconsSpies.playCapturedEarcon.mock.calls.length).toBe(
+      before.captured + 1,
+    );
+    expect(earconsSpies.playAdvancingEarcon.mock.calls.length).toBe(
+      before.advancing + 1,
+    );
+    expect(earconsSpies.playQuestionEarcon.mock.calls.length).toBe(
+      before.question,
+    );
+    expect(earconsSpies.playListeningEarcon.mock.calls.length).toBe(
+      before.listening,
+    );
+  });
+
+  // -------------------------------------------------------------------------
+  // A NORMAL END AND A FAILURE ARE DIFFERENT SOUNDS.
+  //
+  // `finish()` speaks a sentence for every involuntary exit, and a learner on
+  // a walk may miss it — a bus, a conversation, a pocket. The cue is the part
+  // that survives being missed, and the two answers it must give are "you are
+  // done" and "look at the screen when you can".
+  // -------------------------------------------------------------------------
+
+  it('ends a finished session with the "ended" cue, and never the failure one', async () => {
+    const harness = makeHarness();
+    const view = mount(harness);
+    await startToListening(harness, view);
+
+    harness.question.current = null;
+    view.rerender(harness.props());
+    await settle();
+
+    expect(view.result.current.notice?.reason).toBe('session_complete');
+    expect(earconsSpies.playSessionEndEarcon).toHaveBeenCalledTimes(1);
+    expect(earconsSpies.playSessionFailedEarcon).not.toHaveBeenCalled();
+  });
+
+  it('ends a broken microphone with the failure cue instead', async () => {
+    const harness = makeHarness();
+    const view = mount(harness);
+    await startToListening(harness, view);
+
+    await act(async () => {
+      harness.failCapture('permission_denied');
+      view.rerender(harness.props());
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    expect(view.result.current.notice?.reason).toBe('capture_problem');
+    expect(earconsSpies.playSessionFailedEarcon).toHaveBeenCalledTimes(1);
+    expect(earconsSpies.playSessionEndEarcon).not.toHaveBeenCalled();
+  });
+
+  it('ends an unbound transcription with the failure cue', async () => {
+    const harness = makeHarness();
+    harness.transcribe.mockResolvedValue({
+      status: 'unavailable',
+      cause: 'role_unbound',
+      role: 'transcribe',
+    });
+    const view = mount(harness);
+    await startToListening(harness, view);
+    await speakAnswer(harness, view);
+
+    expect(view.result.current.notice?.reason).toBe('transcribe_unavailable');
+    expect(earconsSpies.playSessionFailedEarcon).toHaveBeenCalledTimes(1);
+    expect(earconsSpies.playSessionEndEarcon).not.toHaveBeenCalled();
+  });
+
+  it('ends an ungradeable answer with the failure cue', async () => {
+    const harness = makeHarness();
+    harness.submit.mockResolvedValue(null);
+    const view = mount(harness);
+    await startToListening(harness, view);
+    await speakAnswer(harness, view);
+
+    expect(view.result.current.notice?.reason).toBe('grade_failed');
+    expect(earconsSpies.playSessionFailedEarcon).toHaveBeenCalledTimes(1);
+    expect(earconsSpies.playSessionEndEarcon).not.toHaveBeenCalled();
+  });
+
+  it('ends a session that heard nothing at all with the failure cue', async () => {
+    const harness = makeHarness();
+    harness.transcribe.mockResolvedValue({
+      status: 'ok',
+      text: '',
+      confidence: null,
+    });
+    const view = mount(harness);
+    await startToListening(harness, view);
+
+    await speakAnswer(harness, view); // one nudge
+    await speakAnswer(harness, view); // budget spent, nothing ever graded
+
+    expect(view.result.current.notice?.reason).toBe('no_answer');
+    expect(earconsSpies.playSessionFailedEarcon).toHaveBeenCalledTimes(1);
+    expect(earconsSpies.playSessionEndEarcon).not.toHaveBeenCalled();
+  });
+
+  it.each(['learner', 'typing'] as const)(
+    'leaves the %s exit silent, exactly as it is unspoken',
+    async (reason) => {
+      const harness = makeHarness();
+      const view = mount(harness);
+      await startToListening(harness, view);
+
+      await act(async () => {
+        view.result.current.stop(reason);
+      });
+
+      // The learner just asked for this. Confirming an action somebody took is
+      // not information, in a tone any more than in a sentence.
+      expect(view.result.current.notice).toBeNull();
+      expect(earconsSpies.playSessionEndEarcon).not.toHaveBeenCalled();
+      expect(earconsSpies.playSessionFailedEarcon).not.toHaveBeenCalled();
+    },
+  );
+
+  // -------------------------------------------------------------------------
+  // THE PULSE IS NEVER STOPPED ON A PATH THAT NEVER STARTED ONE.
+  //
+  // The old `onsetTimeout` branch called `stopProcessingPulse()` from
+  // `listening`, where no pulse had ever run. Harmless — it is idempotent —
+  // but it was the visible symptom of the call sites having been placed by
+  // hand rather than derived, which is the whole subject of this issue.
+  // -------------------------------------------------------------------------
+
+  it('stops no pulse when nobody spoke inside the onset window', async () => {
+    const harness = makeHarness();
+    const view = mount(harness);
+    await startToListening(harness, view);
+
+    fire(view, { type: 'onsetTimeout', at: 5_000 });
+    await settle();
+
+    expect(harness.speech.said(CONVERSATION_NUDGE_SILENCE)).toBe(true);
+    expect(earconsSpies.startProcessingPulse).not.toHaveBeenCalled();
+    expect(earconsSpies.stopProcessingPulse).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['Stop', (view: Mounted) => view.result.current.stop()],
+    ['Next', (view: Mounted) => view.result.current.skip()],
+  ])('stops no pulse when %s is used from `listening`', async (_name, act_) => {
+    const harness = makeHarness();
+    const view = mount(harness);
+    await startToListening(harness, view);
+
+    await act(async () => {
+      act_(view);
+    });
+
+    expect(earconsSpies.stopProcessingPulse).not.toHaveBeenCalled();
+  });
+
+  it('stops no pulse when the hook unmounts from `listening`', async () => {
+    const harness = makeHarness();
+    const view = mount(harness);
+    await startToListening(harness, view);
+
+    view.unmount();
+
+    expect(earconsSpies.stopProcessingPulse).not.toHaveBeenCalled();
+    // The shared context still goes: it was borrowed, and it is not a pulse.
+    expect(earconsSpies.closeSharedAudioContext).toHaveBeenCalled();
+  });
+
+  it('DOES stop the pulse when Stop is tapped in the middle of the wait', async () => {
+    // The counterpart of the four above, and the reason none of them may be
+    // implemented by simply never calling it.
+    const harness = makeHarness();
+    harness.submit.mockImplementation(() => new Promise(() => {}));
+    const view = mount(harness);
+    await startToListening(harness, view);
+
+    fire(view, ONSET);
+    fire(view, END_OF_TURN);
+    await act(async () => {
+      harness.deliverRecording();
+      view.rerender(harness.props());
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(phaseOf(view)).toBe('processing');
+    expect(earconsSpies.startProcessingPulse).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      view.result.current.stop();
+    });
+
+    expect(earconsSpies.stopProcessingPulse).toHaveBeenCalled();
   });
 });

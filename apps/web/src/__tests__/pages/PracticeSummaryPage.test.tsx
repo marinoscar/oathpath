@@ -131,6 +131,11 @@ const COMPLETED_SESSION: PracticeSession = {
     totalDurationMs: 6000,
     timedAttempts: 2,
   },
+  // The coach's closing word (#352). NULL BY DEFAULT here so every other test
+  // in this file keeps asserting the page it already asserted; the two tests
+  // that care supply their own.
+  coachReaction: null,
+  spokenTurn: [],
 };
 
 const CATEGORY_SESSION: PracticeSession = {
@@ -198,6 +203,10 @@ function summaryHandlers(options: SummaryHandlerOptions) {
           startedAt: '2026-03-02T00:00:00.000Z',
           completedAt: null,
           summary: null,
+          // No summary, so nothing to react to and nothing to say — the same
+          // null the server sends for an `in_progress` session.
+          coachReaction: null,
+          spokenTurn: [],
         },
         nextQuestion: QUESTION_1,
         progress: { answered: 0, planned: 5 },
@@ -548,5 +557,101 @@ describe('at 360px and in both themes', () => {
       await screen.findByRole('heading', { level: 1, name: 'Practice summary' }),
     ).toBeInTheDocument();
     expect(screen.getByText('Correct')).toBeInTheDocument();
+  });
+});
+
+// =============================================================================
+// The coach's closing word (issue #352, epic #345)
+// =============================================================================
+//
+// About a quarter of the reaction bank was unreachable copy: the server has
+// computed a session's `coachReaction` since #320, and nothing on any client
+// carried the field, so the end of a session — the single most natural moment
+// for a coach to say something — was silent. These tests are the render half
+// of ending that, and the second one is the more important of the two: a
+// learner who turned reactions off must get NOTHING, not a placeholder.
+// =============================================================================
+
+describe('the coach’s closing word', () => {
+  const CLOSING_LINE = 'Mixed set — some of it landed, some needs another pass.';
+
+  function sessionWithReaction(text: string): PracticeSession {
+    return {
+      ...COMPLETED_SESSION,
+      coachReaction: { text, persona: 'supportive' },
+      spokenTurn: [text],
+    };
+  }
+
+  it('renders the line the server chose, exactly as sent', async () => {
+    renderSummary({ detail: detailFor({ session: sessionWithReaction(CLOSING_LINE) }) });
+
+    // Rendered as ordinary text — no chip, no icon, no heading. The whole
+    // string, verbatim: this page selects nothing and rewrites nothing.
+    expect(await screen.findByText(CLOSING_LINE)).toBeInTheDocument();
+  });
+
+  it('announces it, so a learner who is not looking still gets it', async () => {
+    renderSummary({ detail: detailFor({ session: sessionWithReaction(CLOSING_LINE) }) });
+
+    const line = await screen.findByText(CLOSING_LINE);
+    // `role="status"`: it is the one part of this page that is the coach
+    // speaking rather than the record reporting, and it arrives after the
+    // fetch resolves, when focus is elsewhere.
+    expect(line).toHaveAttribute('role', 'status');
+  });
+
+  it('renders nothing at all when the learner has turned reactions off', async () => {
+    // `null` is a request for silence — not a placeholder, not an empty region
+    // reserving space for a line that is never coming. The page owns no
+    // suppression branch; it renders what it was sent.
+    renderSummary({
+      detail: detailFor({
+        session: { ...COMPLETED_SESSION, coachReaction: null, spokenTurn: [] },
+      }),
+    });
+
+    expect(
+      await screen.findByRole('heading', { level: 1, name: 'Practice summary' }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(CLOSING_LINE)).not.toBeInTheDocument();
+    // The tally is still there — silence from the coach is not silence from
+    // the record.
+    expect(screen.getByText('Correct')).toBeInTheDocument();
+  });
+
+  it('renders nothing for an abandoned session, which has no summary to react to', async () => {
+    renderSummary({
+      detail: detailFor({
+        session: {
+          ...COMPLETED_SESSION,
+          status: 'abandoned',
+          summary: null,
+          coachReaction: null,
+          spokenTurn: [],
+        },
+      }),
+    });
+
+    expect(
+      await screen.findByRole('heading', { level: 1, name: 'Practice summary' }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(CLOSING_LINE)).not.toBeInTheDocument();
+  });
+
+  it('renders an all-whitespace line as nothing rather than an empty paragraph', async () => {
+    renderSummary({
+      detail: detailFor({ session: sessionWithReaction('   ') }),
+    });
+
+    expect(
+      await screen.findByRole('heading', { level: 1, name: 'Practice summary' }),
+    ).toBeInTheDocument();
+    // Nothing to assert the absence of by text, so assert the shape: no status
+    // region carrying only whitespace.
+    const whitespaceRegions = screen
+      .queryAllByRole('status')
+      .filter((node) => (node.textContent ?? '').trim() === '');
+    expect(whitespaceRegions).toEqual([]);
   });
 });

@@ -407,3 +407,85 @@ export function composeSpokenTurn(facts: SpokenTurnFacts): SpokenTurn {
 
   return { lines, retryBoundary: null };
 }
+
+// =============================================================================
+// THE CLOSING TURN (issue #352, epic #345)
+// =============================================================================
+//
+// The same job as {@link composeSpokenTurn}, one level up: what the coach says
+// when the SESSION ends rather than when an answer is graded.
+//
+// -----------------------------------------------------------------------------
+// THE DEFECT THIS EXISTS TO FIX
+// -----------------------------------------------------------------------------
+//
+// About a quarter of the reaction bank — the three `session.complete_*` cells —
+// was unreachable copy. The server has computed a session's `coachReaction`
+// since #320 (`toSessionResponse`), and `practice-session.dto.ts` has declared
+// it just as long; the web's own `PracticeSession` type did not carry the
+// field, so nothing rendered it and nothing said it. The end of a session — the
+// single most natural moment for a coach to say something — was silent on both
+// transports at once.
+//
+// -----------------------------------------------------------------------------
+// WHY A COMPOSER FOR WHAT IS, TODAY, ONE STRING
+// -----------------------------------------------------------------------------
+//
+// It returns `[]` or a one-element array, and that is not an argument for
+// inlining it at the call site. `composeSpokenTurn`'s header states the rule
+// this file exists to hold: the ORDER and SELECTION of what the coach says are
+// decided ONCE, on the server, where both transports read them. A closing line
+// assembled in the browser would be assembled again, differently, by the next
+// client — and E15's realtime transport is the next client.
+//
+// -----------------------------------------------------------------------------
+// WHY IT IS THE COACH'S LINE AND NOTHING ELSE
+// -----------------------------------------------------------------------------
+//
+// The obvious second element is the tally: "you got fourteen of twenty". It is
+// deliberately absent. `SPOKEN_VERDICT_LINES`' own rule — NO INTERPOLATION,
+// with exactly three named exceptions, none of which is a number — is what
+// keeps this bank auditable, and a spoken score would be a fourth exception
+// added for something the summary screen already shows in a place a learner
+// can read at their own pace. The coach's line is chosen FROM the tally
+// (`coachEventForSessionSummary` reads `correct`/`answered`), so the band is
+// already spoken; the digits are not.
+//
+// -----------------------------------------------------------------------------
+// `coach.reactions: false` NEEDS NO BRANCH HERE
+// -----------------------------------------------------------------------------
+//
+// `toCoachReaction` is the single place that preference becomes `null` on the
+// wire, and this function reads that same `null` — exactly as element 5 of
+// `composeSpokenTurn` does. A learner who asked for silence gets an empty
+// array, which is silence, without this module knowing the setting exists.
+// =============================================================================
+
+/** Everything {@link composeSessionClosingTurn} reads, and nothing else. */
+export interface SessionClosingTurnFacts {
+  /**
+   * The session's own coach reaction, or null.
+   *
+   * Null in three cases the caller has already collapsed into one: the session
+   * has no summary yet (nothing to react to), the learner has turned reactions
+   * off, or the persona's cell was somehow empty. All three mean the same
+   * thing to this function — say nothing — so none of them is a branch here.
+   */
+  readonly coachReaction: Pick<CoachReactionResponse, 'text'> | null;
+}
+
+/**
+ * The ordered list of strings the coach says when a session ends.
+ *
+ * PURE AND TOTAL, exactly as {@link composeSpokenTurn} is: no clock, no
+ * randomness, no I/O. Empty is a legitimate and common answer — unlike an
+ * attempt's turn, which always has a verdict to state, a finished session has
+ * nothing the coach MUST say, and a client that receives `[]` speaks nothing
+ * rather than substituting a line of its own.
+ */
+export function composeSessionClosingTurn(
+  facts: SessionClosingTurnFacts,
+): string[] {
+  const line = facts.coachReaction?.text?.trim() ?? '';
+  return line === '' ? [] : [line];
+}

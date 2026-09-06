@@ -11,6 +11,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { EngagementService } from '../engagement/engagement.service';
 import { ReadinessService } from '../readiness/readiness.service';
 import { COACH_INVARIANT_FLOOR } from '../ai/coach/invariants';
+import { COACH_REACTION_LINES } from '../ai/coach/reaction-lines';
 import {
   findCoachPersona,
   type CoachPersonaDef,
@@ -1315,6 +1316,127 @@ describe('PracticeService', () => {
         ConflictException,
       );
       expect(prisma.practiceSession.update).not.toHaveBeenCalled();
+    });
+  });
+
+  // ===========================================================================
+  // completeSession — the closing turn (issue #352, epic #345)
+  // ===========================================================================
+  //
+  // The three `session.complete_*` cells of the reaction bank were computed and
+  // served from #320 onward and read by nothing: the web's `PracticeSession`
+  // type did not carry `coachReaction`, so the end of a session — the single
+  // most natural moment for a coach to say something — was silent. These
+  // assertions cover the server half of ending that, including the two ways it
+  // must stay silent.
+  // ===========================================================================
+
+  describe('completeSession — coachReaction and the closing turn', () => {
+    const completedSummary = {
+      plannedCount: 5,
+      answered: 5,
+      correct: 5,
+      partial: 0,
+      incorrect: 0,
+      skipped: 0,
+      selfMarked: 0,
+      revealed: 0,
+      hintUsed: 0,
+      totalDurationMs: null,
+      timedAttempts: 0,
+    };
+
+    function completedSession(overrides: Record<string, unknown> = {}) {
+      return sessionRow({
+        status: 'completed',
+        completedAt: new Date('2026-01-02T00:00:00Z'),
+        summary: completedSummary,
+        ...overrides,
+      });
+    }
+
+    it('speaks the same line it renders — one selection, never two', async () => {
+      mockOwnedSession(completedSession());
+
+      const result = await service.completeSession(USER_A, SESSION_ID);
+
+      expect(result.coachReaction?.text).toEqual(expect.any(String));
+      // THE PROPERTY WORTH ASSERTING, and the reason the service selects once
+      // and reads the result twice: the summary screen and the speaker cannot
+      // disagree about what the coach said, by construction rather than by two
+      // computations that happen to agree.
+      expect(result.spokenTurn).toEqual([result.coachReaction?.text]);
+    });
+
+    it('draws the closing line from the curated bank, in the learner’s own persona', async () => {
+      userSettings.readCoachPreferences.mockResolvedValue({ persona: 'unfiltered' });
+      mockOwnedSession(completedSession());
+
+      const result = await service.completeSession(USER_A, SESSION_ID);
+
+      expect(result.coachReaction?.persona).toBe('unfiltered');
+      // Five of five is a strong set. The line is a CONSTANT from the bank,
+      // never composed here — so this is the real cell, not a shape check.
+      expect(COACH_REACTION_LINES.unfiltered['session.complete_strong']).toContain(
+        result.spokenTurn[0],
+      );
+    });
+
+    it('says nothing at all when the learner has turned reactions off — no line, no turn', async () => {
+      // `coach.reactions: false` is suppressed in ONE place (`toCoachReaction`)
+      // and the closing turn falls out of that same null. If this ever needs a
+      // second branch, the suppression has been duplicated and can drift.
+      userSettings.readCoachPreferences.mockResolvedValue({ reactions: false });
+      mockOwnedSession(completedSession());
+
+      const result = await service.completeSession(USER_A, SESSION_ID);
+
+      expect(result.coachReaction).toBeNull();
+      expect(result.spokenTurn).toEqual([]);
+    });
+
+    it('says nothing for a session with no summary — an unfinished session has nothing to react to', async () => {
+      mockOwnedSession(sessionRow({ status: 'in_progress' }));
+      prisma.practiceAttempt.findMany.mockResolvedValue([]);
+
+      const result = await service.getSession(USER_A, SESSION_ID);
+
+      expect(result.session.summary).toBeNull();
+      expect(result.session.coachReaction).toBeNull();
+      expect(result.session.spokenTurn).toEqual([]);
+    });
+
+    it('says the same thing on every later read of the session', async () => {
+      mockOwnedSession(completedSession());
+      const first = await service.completeSession(USER_A, SESSION_ID);
+
+      mockOwnedSession(completedSession());
+      prisma.practiceAttempt.findMany.mockResolvedValue([]);
+      const reread = await service.getSession(USER_A, SESSION_ID);
+
+      // Seeded by the SESSION id, so the completion response and the summary
+      // screen's own read say the same thing — nothing is stored to make it so.
+      expect(reread.session.coachReaction).toEqual(first.coachReaction);
+      expect(reread.session.spokenTurn).toEqual(first.spokenTurn);
+    });
+
+    it('stores neither the line nor the turn — the summary column stays the tally it was', async () => {
+      mockOwnedSession(sessionRow({ plannedCount: 1 }));
+      prisma.practiceAttempt.findMany.mockResolvedValue([
+        {
+          outcome: 'correct',
+          gradingMethod: 'exact',
+          revealed: false,
+          hintUsed: false,
+          durationMs: null,
+        },
+      ]);
+
+      await service.completeSession(USER_A, SESSION_ID);
+
+      const written = prisma.practiceSession.update.mock.calls[0][0].data.summary;
+      expect(written).not.toHaveProperty('coachReaction');
+      expect(written).not.toHaveProperty('spokenTurn');
     });
   });
 

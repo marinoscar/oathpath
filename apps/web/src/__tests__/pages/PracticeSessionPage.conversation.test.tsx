@@ -403,6 +403,10 @@ const SESSION_BASE: PracticeSession = {
   startedAt: '2026-09-01T12:00:00.000Z',
   completedAt: null,
   summary: null,
+  // #352: an `in_progress` session has nothing to summarise and so nothing
+  // to react to — the same null and empty turn the server sends.
+  coachReaction: null,
+  spokenTurn: [],
 };
 
 function makeAttempt(overrides: Partial<PracticeAttempt> = {}): PracticeAttempt {
@@ -488,8 +492,14 @@ function installHandlers(options: Options = {}) {
     // utterance below takes the browser path and this file's fake is the only
     // voice in play. The premium path is `QuestionAudio`'s own business and is
     // covered where it belongs.
+    // `realtime` PINNED UNBOUND (#355, epic #345 / E15): this file exercises
+    // E13's request/response loop, and the ladder in `PracticeSessionPage.tsx`
+    // resolves Voice to the LIVE transport whenever a `realtime` model is
+    // bound. The realtime rungs are `PracticeSessionPage.realtime.test.tsx`'s.
     unboundRoles:
-      options.transcribeBound === false ? ['transcribe', 'speak'] : ['speak'],
+      options.transcribeBound === false
+        ? ['transcribe', 'speak', 'realtime']
+        : ['speak', 'realtime'],
   };
 
   server.use(

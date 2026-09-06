@@ -1,5 +1,5 @@
 /**
- * `user_settings.voice` — the seven spoken-practice preferences, resolved.
+ * `user_settings.voice` — the eight spoken-practice preferences, resolved.
  *
  * Issue #288, epic #280. **No new endpoint and no new request pattern**: this
  * reads the same `GET`/`PATCH /api/user-settings` the rest of the app already
@@ -36,8 +36,9 @@
  * whatever `speechRate` the learner set, and nothing is missing.
  */
 
-import { useCallback, useMemo } from 'react';
+import { useCallback, useEffect, useMemo } from 'react';
 
+import { setEarconsEnabled } from '../lib/earcons';
 import { useUserSettings } from './useUserSettings';
 import type { VoiceSettings, VoiceSettingsPatch } from '../types';
 
@@ -89,6 +90,16 @@ export const DEFAULT_VOICE_READ_ANSWERS_ALOUD = false;
  */
 export const DEFAULT_VOICE_CONVERSATION_MODE = false;
 
+/**
+ * Mirrors `DEFAULT_VOICE_SOUND_CUES` (issue #357, epic #345), on the same
+ * terms as its neighbours above: a display/behaviour default only, never sent.
+ *
+ * `true` — the cues cover spans in which the app is deliberately silent for
+ * seconds at a time, and hands-free an uncued wait is indistinguishable from a
+ * crash. Turning them off is the learner's call, not the default.
+ */
+export const DEFAULT_VOICE_SOUND_CUES = true;
+
 /** Mirrors `VOICE_PREFERRED_VOICE_PATTERN`. Shape only — membership is the provider's. */
 export const VOICE_PREFERRED_VOICE_PATTERN = /^[A-Za-z0-9_-]+$/;
 
@@ -117,6 +128,16 @@ export interface VoicePreferences {
    * the speech-recognition support check at the point of use, never here.
    */
   conversationMode: boolean;
+  /**
+   * Whether the hands-free loop's short tones sound at all (#357, epic #345).
+   *
+   * Applied to `lib/earcons.ts`'s module switch by this hook — see
+   * {@link useVoicePrefs}. Every other field here is READ by a caller; this one
+   * is also PUSHED, because the thing it governs is a module-level flag rather
+   * than a prop, and a cue is played from a state machine that has no settings
+   * of its own.
+   */
+  soundCues: boolean;
 }
 
 /**
@@ -205,6 +226,7 @@ export function resolveVoicePreferences(
       voice?.conversationMode,
       DEFAULT_VOICE_CONVERSATION_MODE,
     ),
+    soundCues: resolveBoolean(voice?.soundCues, DEFAULT_VOICE_SOUND_CUES),
   };
 }
 
@@ -252,6 +274,29 @@ export function useVoicePrefs(): UseVoicePrefsResult {
     () => resolveVoicePreferences(settings?.voice),
     [settings],
   );
+
+  /**
+   * Apply the learner's cue preference to `lib/earcons.ts` — THE ONLY PLACE
+   * `setEarconsEnabled` is called in the application (issue #357, epic #345).
+   *
+   * The cues are played by a state machine (`useConversationSession`) that
+   * takes no settings, from a module with no React in it, so the preference has
+   * to be pushed to the module rather than read at the point of use. One
+   * pusher, here, beside the resolver that already owns what the value IS: a
+   * second caller elsewhere would be a second opinion about a global, and the
+   * loser of that race is a learner who turned cues off and still hears them.
+   *
+   * NOT APPLIED WHILE THE FIRST READ IS IN FLIGHT. `voice.soundCues` resolves
+   * to the built-in `true` until the document lands, and writing that through
+   * would un-silence the cues for a moment on every page load for exactly the
+   * learner who asked for silence. Waiting costs nothing: no cue plays before a
+   * session is started, and `PracticeSessionPage` will not start one until this
+   * same read has settled.
+   */
+  useEffect(() => {
+    if (isLoading) return;
+    setEarconsEnabled(voice.soundCues);
+  }, [isLoading, voice.soundCues]);
 
   const saveVoice = useCallback(
     async (patch: VoiceSettingsPatch) => {

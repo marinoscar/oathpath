@@ -1,10 +1,21 @@
 import {
+  COACH_MIN_LINES_PER_ANSWER_CELL,
+  COACH_MIN_LINES_PER_SESSION_CELL,
   COACH_REACTION_EVENTS,
   COACH_REACTION_LINES,
   NEUTRAL_REACTION_LINE,
 } from './reaction-lines';
+import type { CoachReactionEvent } from './reaction-lines';
 import { COACH_PERSONAS } from '../../common/schemas/user-settings-namespaces.schema';
 import { bannedFamilyHits, BANNED_TOPIC_FAMILIES } from './banned-topics';
+import { reactionLine } from './select-line';
+import {
+  coachCorrectRunLengths,
+  coachEventForAttempt,
+  type CoachAttemptFacts,
+} from './attempt-event';
+import { coachEventForSessionSummary } from './session-event';
+import { MAX_PLANNED_COUNT } from '../../practice/dto/create-practice-session.dto';
 
 // =============================================================================
 // reaction-lines.spec.ts (issue #318, epic #305 "The Coach's personality")
@@ -48,15 +59,62 @@ describe('COACH_REACTION_LINES — matrix coverage', () => {
     expect(missing).toEqual([]);
   });
 
-  it('gives every cell at least three lines', () => {
+  // ===========================================================================
+  // THE DEPTH FLOOR (issue #352) — A RULE, ENFORCED HERE, NOT A COMMENT
+  // ===========================================================================
+  //
+  // #318 shipped three lines per cell and a comment claiming three was the
+  // minimum. Three rotates visibly, which was defect 1 of #352. The floor is
+  // now derived from `MAX_PLANNED_COUNT`, and these two tests are the reason
+  // it cannot quietly stop being true: the first pins the number to the
+  // product's own session cap, the second pins every cell to the number.
+  // ===========================================================================
+
+  it('sets the answer-cell floor to the largest session this application can create', () => {
+    // `reaction-lines.ts` deliberately declares the floor as a literal rather
+    // than importing this constant — it is a content module that imports
+    // nothing at runtime. THIS is where the two are bound together: raising
+    // `MAX_PLANNED_COUNT` without deepening the bank fails here, rather than
+    // silently shortening the guarantee the bank's header claims.
+    expect(COACH_MIN_LINES_PER_ANSWER_CELL).toBe(MAX_PLANNED_COUNT);
+  });
+
+  it('gives every cell at least its floor: MAX_PLANNED_COUNT lines for an answer event, six for a session event', () => {
     const tooFew: string[] = [];
     for (const persona of COACH_PERSONAS) {
       for (const event of COACH_REACTION_EVENTS) {
         const cell = COACH_REACTION_LINES[persona][event];
-        if (cell.length < 3) tooFew.push(`${persona}["${event}"]: only ${cell.length} line(s)`);
+        const floor = event.startsWith('answer.')
+          ? COACH_MIN_LINES_PER_ANSWER_CELL
+          : COACH_MIN_LINES_PER_SESSION_CELL;
+        if (cell.length < floor) {
+          tooFew.push(
+            `${persona}["${event}"]: ${cell.length} line(s), floor is ${floor}`,
+          );
+        }
       }
     }
     expect(tooFew).toEqual([]);
+  });
+
+  it('repeats no line anywhere in the bank — not within a cell, not across cells, not across personas', () => {
+    // Stronger than the per-cell duplicate check below, and it has to be: a
+    // single session draws from SEVERAL cells (a correct answer, a run, a
+    // miss, a skip), so a line shared between two of them is a repeat a
+    // learner can hear inside one session — exactly what the depth floor
+    // exists to prevent, leaking in through the one gap depth cannot cover.
+    const seen = new Map<string, string>();
+    const collisions: string[] = [];
+    for (const { persona, event, line } of ALL_LINES) {
+      const where = `${persona}["${event}"]`;
+      const previous = seen.get(line);
+      if (previous !== undefined) {
+        collisions.push(`${JSON.stringify(line)} appears in ${previous} and ${where}`);
+      } else {
+        seen.set(line, where);
+      }
+    }
+    expect(collisions).toEqual([]);
   });
 
   it('has no empty (after trimming) or duplicate line within a cell', () => {
@@ -202,4 +260,251 @@ describe('COACH_REACTION_LINES — every wrong-answer line ends on a forward act
     }
     expect(violations).toEqual([]);
   });
+});
+
+// =============================================================================
+// A FULL SESSION AT `MAX_PLANNED_COUNT` (issue #352)
+// =============================================================================
+//
+// Defect 1 of #352 was that the bank repeats fast. These tests are the two
+// halves of the fix, and they are deliberately separate because they prove
+// different things and only one of them is a guarantee:
+//
+//   1. STRUCTURAL, AND TRUE FOR EVERY SESSION THAT CAN EXIST. No cell can be
+//      exhausted by one session: whatever the learner does, there are at least
+//      as many lines in the cell as there are draws from it, so a repeat is
+//      never FORCED. This is exactly what the depth floor buys and it is
+//      checked over the extreme outcome patterns — twenty misses, twenty
+//      skips, twenty of anything — not over a comfortable average.
+//
+//   2. CONCRETE, AND TRUE FOR ONE REAL SESSION. `select-line.ts` picks with
+//      `hash(seed) % lines.length`, and two attempt ids in one session can
+//      hash to the same index however deep the cell is — that is modular
+//      hashing, not a bank problem, and no depth removes it. So the second
+//      test walks ONE full twenty-question session end to end, through the
+//      real mappers, and asserts every line the learner reads is different.
+//      Its attempt ids are fixed by this test exactly as a real session's are
+//      fixed by the database; it is a regression guard over the shipped bank
+//      and hash, not a proof for all id sets, and this comment says so rather
+//      than letting a reader infer the stronger claim.
+// =============================================================================
+
+/** The narrow row shape the two mappers read. */
+interface SimulatedAttempt {
+  id: string;
+  outcome: CoachAttemptFacts['outcome'];
+  gradingMethod: CoachAttemptFacts['gradingMethod'];
+  failureCause: string | null;
+}
+
+/**
+ * The events a session of these attempts produces, in order.
+ *
+ * Goes through `coachCorrectRunLengths` and `coachEventForAttempt` — the same
+ * two functions `PracticeService` calls — rather than reimplementing the
+ * precedence here. A test that mapped outcomes to events itself would keep
+ * passing after the real precedence changed underneath it.
+ */
+function simulateEvents(attempts: SimulatedAttempt[]): CoachReactionEvent[] {
+  const runs = coachCorrectRunLengths(attempts);
+  return attempts.map((attempt) =>
+    coachEventForAttempt({
+      outcome: attempt.outcome,
+      gradingMethod: attempt.gradingMethod,
+      failureCause: attempt.failureCause,
+      correctRunLength: runs.get(attempt.id) ?? 0,
+    }),
+  );
+}
+
+/** `n` attempts that all reach the same outcome, with real-looking ids. */
+function uniformSession(
+  n: number,
+  shape: Omit<SimulatedAttempt, 'id'>,
+): SimulatedAttempt[] {
+  return Array.from({ length: n }, (_, i) => ({
+    ...shape,
+    id: `pattern-attempt-${String(i + 1).padStart(2, '0')}`,
+  }));
+}
+
+describe('COACH_REACTION_LINES — a full session can never exhaust a cell', () => {
+  // Every extreme a learner can actually reach in one session, including the
+  // pathological ones: twenty consecutive misses is a session somebody has,
+  // and the guarantee has to hold for them and not only for a good day.
+  const EXTREME_PATTERNS: { name: string; attempts: SimulatedAttempt[] }[] = [
+    {
+      name: 'every question correct',
+      attempts: uniformSession(MAX_PLANNED_COUNT, {
+        outcome: 'correct',
+        gradingMethod: 'exact',
+        failureCause: null,
+      }),
+    },
+    {
+      name: 'every question missed',
+      attempts: uniformSession(MAX_PLANNED_COUNT, {
+        outcome: 'incorrect',
+        gradingMethod: 'exact',
+        failureCause: null,
+      }),
+    },
+    {
+      name: 'every question skipped',
+      attempts: uniformSession(MAX_PLANNED_COUNT, {
+        outcome: 'skipped',
+        gradingMethod: 'exact',
+        failureCause: null,
+      }),
+    },
+    {
+      name: 'every question partially correct (the AI grader’s near-miss)',
+      attempts: uniformSession(MAX_PLANNED_COUNT, {
+        outcome: 'partial',
+        gradingMethod: 'ai',
+        failureCause: 'expression',
+      }),
+    },
+    {
+      name: 'every question self-marked',
+      attempts: uniformSession(MAX_PLANNED_COUNT, {
+        outcome: 'correct',
+        gradingMethod: 'self',
+        failureCause: null,
+      }),
+    },
+    {
+      name: 'every question misheard',
+      attempts: uniformSession(MAX_PLANNED_COUNT, {
+        outcome: 'incorrect',
+        gradingMethod: 'exact',
+        failureCause: 'misheard',
+      }),
+    },
+    {
+      // The pattern that maximises `answer.correct` specifically: a third
+      // consecutive correct answer becomes `answer.correct_run`, so two
+      // correct answers then a miss draws the plain cell as often as any
+      // session can.
+      name: 'correct, correct, missed, repeating',
+      attempts: Array.from({ length: MAX_PLANNED_COUNT }, (_, i) => ({
+        id: `alternating-attempt-${String(i + 1).padStart(2, '0')}`,
+        outcome: (i % 3 === 2 ? 'incorrect' : 'correct') as CoachAttemptFacts['outcome'],
+        gradingMethod: 'exact' as const,
+        failureCause: null,
+      })),
+    },
+  ];
+
+  for (const pattern of EXTREME_PATTERNS) {
+    it(`draws no cell deeper than it is: ${pattern.name}`, () => {
+      const events = simulateEvents(pattern.attempts);
+      expect(events).toHaveLength(MAX_PLANNED_COUNT);
+
+      const draws = new Map<CoachReactionEvent, number>();
+      for (const event of events) {
+        draws.set(event, (draws.get(event) ?? 0) + 1);
+      }
+
+      const overdrawn: string[] = [];
+      for (const persona of COACH_PERSONAS) {
+        for (const [event, count] of draws) {
+          const cell = COACH_REACTION_LINES[persona][event];
+          if (count > cell.length) {
+            overdrawn.push(
+              `${persona}["${event}"]: drawn ${count} times, only ${cell.length} line(s)`,
+            );
+          }
+        }
+      }
+      expect(overdrawn).toEqual([]);
+    });
+  }
+});
+
+describe('COACH_REACTION_LINES — one concrete full session repeats no line', () => {
+  /**
+   * A twenty-question session with the shape a real one has: mostly right,
+   * three misses, two skips, one self-mark, one mishearing.
+   *
+   * The self-marked row's `outcome` is `correct` (that is what the column
+   * says after `POST .../self-mark`) and its `gradingMethod` is `self`, so it
+   * both continues the run for the attempts after it AND reacts as
+   * `answer.self_marked` itself — the precedence `attempt-event.ts` states.
+   */
+  const SESSION_ID = 'session-0011';
+  const OUTCOMES: Omit<SimulatedAttempt, 'id'>[] = [
+    { outcome: 'correct', gradingMethod: 'exact', failureCause: null },
+    { outcome: 'correct', gradingMethod: 'exact', failureCause: null },
+    { outcome: 'incorrect', gradingMethod: 'exact', failureCause: null },
+    { outcome: 'correct', gradingMethod: 'exact', failureCause: null },
+    { outcome: 'correct', gradingMethod: 'exact', failureCause: null },
+    { outcome: 'correct', gradingMethod: 'exact', failureCause: null },
+    { outcome: 'skipped', gradingMethod: 'exact', failureCause: null },
+    { outcome: 'correct', gradingMethod: 'exact', failureCause: null },
+    { outcome: 'incorrect', gradingMethod: 'exact', failureCause: null },
+    { outcome: 'correct', gradingMethod: 'exact', failureCause: null },
+    { outcome: 'correct', gradingMethod: 'self', failureCause: null },
+    { outcome: 'correct', gradingMethod: 'exact', failureCause: null },
+    { outcome: 'correct', gradingMethod: 'exact', failureCause: null },
+    { outcome: 'correct', gradingMethod: 'exact', failureCause: null },
+    { outcome: 'incorrect', gradingMethod: 'exact', failureCause: null },
+    { outcome: 'skipped', gradingMethod: 'exact', failureCause: null },
+    { outcome: 'correct', gradingMethod: 'exact', failureCause: null },
+    { outcome: 'correct', gradingMethod: 'exact', failureCause: null },
+    { outcome: 'incorrect', gradingMethod: 'exact', failureCause: 'misheard' },
+    { outcome: 'correct', gradingMethod: 'exact', failureCause: null },
+  ];
+
+  const ATTEMPTS: SimulatedAttempt[] = OUTCOMES.map((shape, i) => ({
+    ...shape,
+    id: `${SESSION_ID}-attempt-${String(i + 1).padStart(2, '0')}`,
+  }));
+
+  /** Every line the learner reads in this session, closing line included. */
+  function sessionLines(persona: string): string[] {
+    const events = simulateEvents(ATTEMPTS);
+    const lines = ATTEMPTS.map((attempt, i) =>
+      reactionLine(persona, events[i], attempt.id),
+    );
+
+    // The closing line, from the same summary numbers the session's own
+    // response carries, seeded by the SESSION id — `toSessionResponse`'s rule.
+    const answered = ATTEMPTS.length;
+    const correct = ATTEMPTS.filter((a) => a.outcome === 'correct').length;
+    lines.push(
+      reactionLine(
+        persona,
+        coachEventForSessionSummary({ answered, correct }),
+        SESSION_ID,
+      ),
+    );
+
+    return lines;
+  }
+
+  it('is a full session at the maximum planned count', () => {
+    expect(ATTEMPTS).toHaveLength(MAX_PLANNED_COUNT);
+  });
+
+  for (const persona of COACH_PERSONAS) {
+    it(`says twenty-one different things to a ${persona} learner`, () => {
+      const lines = sessionLines(persona);
+      const repeated = lines.filter(
+        (line, i) => lines.indexOf(line) !== i,
+      );
+      expect(repeated).toEqual([]);
+      expect(new Set(lines).size).toBe(MAX_PLANNED_COUNT + 1);
+    });
+
+    it(`says the same twenty-one things when the session is re-read (${persona})`, () => {
+      // The determinism guarantee at session scale, and the reason nothing is
+      // stored: a learner who finishes a session and reopens its summary must
+      // read the same lines, and `reactionLine` being pure in (persona, event,
+      // seed) is the whole mechanism. See `select-line.ts`'s header for what
+      // this does NOT promise — a later edit to the bank re-maps the seeds,
+      // deliberately.
+      expect(sessionLines(persona)).toEqual(sessionLines(persona));
+    });
+  }
 });

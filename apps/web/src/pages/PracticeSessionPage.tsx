@@ -289,6 +289,13 @@ import type {
   ConversationSpeechPort,
   UseConversationSessionReturn,
 } from '../hooks/useConversationSession';
+import { useRealtimeAvailability } from '../hooks/useRealtimeAvailability';
+import { useRealtimePractice } from '../hooks/useRealtimePractice';
+import type {
+  RealtimePracticeFallbackCode,
+  RealtimePracticeMicrophonePort,
+  RealtimePracticeStage,
+} from '../hooks/useRealtimePractice';
 import {
   ApiError,
   completePracticeSession,
@@ -482,6 +489,56 @@ function speakNudge(text: string): Promise<ConversationSpeechOutcome> {
 }
 
 /**
+ * How long one closing line may hold the summary screen up.
+ *
+ * `speakNudge` resolves on `onend` or `onerror`, and a browser that fires
+ * NEITHER — the one real hazard of `speechSynthesis` — would otherwise leave a
+ * learner staring at "Finishing…" forever. Eight seconds is far longer than any
+ * line in the bank takes to say and far shorter than a learner will wait before
+ * deciding the app has hung.
+ */
+const CLOSING_TURN_LINE_TIMEOUT_MS = 8000;
+
+/**
+ * Say the session's closing turn, in order, and resolve when it is done
+ * (issue #352, epic #345).
+ *
+ * ============================================================================
+ * WHY THIS IS AWAITED BEFORE NAVIGATING, RATHER THAN FIRED AND FORGOTTEN
+ * ============================================================================
+ *
+ * `useConversationSession`'s unmount cleanup calls `speech.stop()`, which
+ * cancels whatever the page is saying. Leaving for the summary screen while the
+ * coach is still speaking therefore does not overlap the two — it CUTS THE
+ * COACH OFF mid-sentence, which is worse than the silence this issue exists to
+ * end. So the closing line is spoken first and the navigation waits for it,
+ * bounded by the timeout above.
+ *
+ * ============================================================================
+ * WHY THE BROWSER'S OWN VOICE, NOT `QuestionAudio`'s PREMIUM PATH
+ * ============================================================================
+ *
+ * The premium path is for CONTENT — a civics question or its accepted answer —
+ * and it is what the deployment-wide audio cache
+ * (`GET /api/ai/speech/audio`) is keyed for: `civics_question` and
+ * `civics_answer`, and nothing else. A coach's line is neither, so a premium
+ * synthesis of it would spend the learner's own key on every session ending,
+ * uncached, forever. The browser's voice costs nothing, needs no key and needs
+ * no `speak` binding — which also means the closing line still happens on a
+ * deployment with no AI voice configured at all.
+ */
+async function speakClosingTurn(lines: readonly string[]): Promise<void> {
+  for (const line of lines) {
+    await Promise.race([
+      speakNudge(line),
+      new Promise<void>((resolve) => {
+        setTimeout(resolve, CLOSING_TURN_LINE_TIMEOUT_MS);
+      }),
+    ]);
+  }
+}
+
+/**
  * =============================================================================
  * TEST-ONLY SEAM — issue #314, epic #304 / E13's own test coverage
  * =============================================================================
@@ -520,6 +577,112 @@ function getTestVoiceActivityLevelSource():
     }
   ).__oathpathTestVoiceLevelSource;
 }
+
+/**
+ * Which of the two spoken transports this session runs on, or neither.
+ *
+ * =============================================================================
+ * THE DEGRADATION LADDER, DECIDED AT EXACTLY ONE SITE
+ * =============================================================================
+ *
+ * `docs/specs/realtime-practice.md` §8. Six rungs, and every one of them lands
+ * here rather than in a condition beside a control:
+ *
+ * | condition                                   | result                        |
+ * |---------------------------------------------|-------------------------------|
+ * | `realtime` bound                            | realtime practice             |
+ * | `realtime` unbound, `transcribe` bound      | E13's request/response loop   |
+ * | neither bound                               | text only, no voice control   |
+ * | mint `unavailable`/`failed`                 | the request/response loop     |
+ * | microphone refused                          | text, before any mint         |
+ * | handshake failed, or dropped past the bound | the request/response loop, mid-session |
+ *
+ * A PURE FUNCTION, EXPORTED, because "one decision site" is a claim a test
+ * should be able to check directly rather than by rendering six pages. The
+ * picker above stays TWO-VALUED — `Text | Voice` — and which of the two voice
+ * mechanisms Voice resolves to is this function's answer, never a third button
+ * a learner has to understand.
+ *
+ * `realtime` unbound renders NOTHING, not a disabled control: `voice.md` §1's
+ * hidden-not-disabled posture, reused for a third role rather than reinvented.
+ *
+ * THE MICROPHONE RUNG IS THE ONE THAT LOOKS WRONG AND IS NOT. A refused
+ * microphone falls all the way to text rather than to the request/response
+ * loop, because that loop needs the identical device: offering it would be
+ * offering a second control that cannot work, to somebody who has just been
+ * told the first one could not open.
+ *
+ * Every other realtime failure falls to the request/response loop when
+ * `transcribe` is bound, and to text when it is not — and NOTHING IS LOST
+ * either way, structurally: every attempt is a committed `practice_attempts`
+ * row, and the question, the count and the progress bar are all re-read from
+ * the server (§8's "there is no client-held state a fallback could lose").
+ */
+export type VoiceTransport = 'realtime' | 'request_response' | null;
+
+export function resolveVoiceTransport(input: {
+  /** A model is bound to `realtime`. False while the AI status is unknown. */
+  realtimeBound: boolean;
+  /** A model is bound to `transcribe`. False while the AI status is unknown. */
+  transcribeBound: boolean;
+  /**
+   * Why the realtime transport gave up this session, or `null`.
+   *
+   * STICKY FOR THE SESSION on purpose: a transport that has just failed is not
+   * a transport to try again automatically two renders later, which is what a
+   * value derived from live connection state would do. `retry()` clears it,
+   * which is the learner asking.
+   */
+  realtimeFallback: RealtimePracticeFallbackCode | null;
+}): VoiceTransport {
+  // See the header: no spoken transport works without a microphone.
+  if (input.realtimeFallback === 'microphone') return null;
+  if (input.realtimeBound && input.realtimeFallback === null) return 'realtime';
+  if (input.transcribeBound) return 'request_response';
+  return null;
+}
+
+/**
+ * The one sentence about money, on the control that starts the mode.
+ *
+ * SAID ONCE, AND WITH NO PRICE IN IT. `realtime-practice.md` §10 requires the
+ * billing sentence to appear on the control that starts the mode and forbids
+ * an invented per-minute figure — this application does not know what any
+ * given provider charges any given learner, and a number here would be a
+ * confident guess about somebody else's bill.
+ */
+const REALTIME_BILLING_SENTENCE =
+  'A live voice session runs on your own AI key and is billed by the minute ' +
+  'for as long as the connection is open.';
+
+/**
+ * Headphones, and the honest reason for them.
+ *
+ * `realtime-practice.md` §11. E13's anti-echo guarantee was STRUCTURAL — the
+ * recorder is not running while the app talks — and this transport gives that
+ * up by design, because full duplex is the whole point: the coach must be
+ * interruptible mid-sentence. What replaces it is probabilistic
+ * (`echoCancellation`, requested on the page's own capture stream), and saying
+ * so plainly beats implying a guarantee that is not there.
+ *
+ * The second sentence is not reassurance for its own sake: it is §4's fourth
+ * mechanism. The attempt row is committed BEFORE the coach speaks, so a
+ * mishearing of its own echo costs a spoken turn and never a wrong row.
+ */
+const REALTIME_ECHO_SENTENCE =
+  'Headphones help: the microphone stays open while the coach speaks, so echo ' +
+  'cancellation reduces feedback but cannot rule it out. Your answer is ' +
+  'recorded before the coach replies, so an echo can cost a turn but never ' +
+  'changes what was saved.';
+
+/** What the spoken session is doing, in one sentence per stage. */
+const REALTIME_STAGE_TEXT: Record<RealtimePracticeStage, string> = {
+  idle: '',
+  connecting: 'Opening your microphone and connecting.',
+  live: 'Live. Talk to the coach whenever you are ready.',
+  fallback: '',
+  ended: '',
+};
 
 /** `/practice/sessions/:id/summary` for one id, spelled once. */
 export function practiceSummaryPath(sessionId: string): string {
@@ -611,6 +774,16 @@ export default function PracticeSessionPage() {
   // late rather than appear dead.
   const { transcribeBound, isLoading: voiceAvailabilityLoading } =
     useVoiceAvailability();
+  /**
+   * THE SECOND READER of a role binding, and deliberately a separate hook
+   * (#159's own header says why): `transcribe` decides whether a CONTROL
+   * appears on a screen that works without it, while `realtime` decides which
+   * TRANSPORT the Voice option resolves to. Both are false while the status is
+   * unknown, which is what keeps a control from appearing dead rather than
+   * appearing a beat late.
+   */
+  const { realtimeBound, isLoading: realtimeAvailabilityLoading } =
+    useRealtimeAvailability();
 
   // The learner's own voice preferences (#288, epic #280), read through the
   // SAME `useUserSettings` the rest of the app uses — see `useVoicePrefs`.
@@ -981,11 +1154,12 @@ export default function PracticeSessionPage() {
   /**
    * The server has just told us something the cached AI status disagrees with.
    *
-   * Re-read it. `transcribeBound` — and therefore the microphone, the
-   * Type/Speak toggle, and the page-level `VoiceUnavailableNotice` — all render
-   * from that cache, so without this the learner is left holding a control that
-   * has already been proven not to work, and the shared notice explaining why
-   * never appears. This is the same move `ExplainPanel` makes on its own
+   * Re-read it. `transcribeBound` and `realtimeBound` — and therefore which
+   * spoken transport the ladder resolves to, the microphone, the Text/Voice
+   * picker, and the page-level `VoiceUnavailableNotice` — all render from that
+   * one cache, so without this the learner is left holding a control that has
+   * already been proven not to work, and the shared notice explaining why never
+   * appears. This is the same move `ExplainPanel` makes on its own
    * `unavailable` frame, for the same reason and with the same shape: it fires
    * once per cause, never in a loop, because `refresh` does not change
    * `voiceUnavailable`.
@@ -1225,8 +1399,14 @@ export default function PracticeSessionPage() {
    * question on a noisy bus is not a statement about how this learner wants to
    * start their next session; only the mode control itself is.
    */
+  const realtimeStopRef = useRef<(() => void) | null>(null);
   const handleTypeInstead = () => {
     conversationRef.current?.stop('typing');
+    // The other transport's stop, through a ref for the same reason
+    // `conversationRef` is one: this handler is declared above the hook that
+    // owns it, and a live voice connection must end from every control that
+    // says it will — not only from the ones that happen to sit below it.
+    realtimeStopRef.current?.();
     setSpokenDraft(null);
     setResponse('');
     setVoiceError(null);
@@ -1390,6 +1570,136 @@ export default function PracticeSessionPage() {
   conversationRef.current = conversation;
   conversationRunningRef.current = conversation.isRunning;
 
+  // ---------------------------------------------------------------------------
+  // Realtime practice (issue #355, epic #345 / E15). See `useRealtimePractice`.
+  // ---------------------------------------------------------------------------
+  //
+  // THE SAME MICROPHONE, HANDED OVER — never a second `getUserMedia`. The
+  // hands-free loop above and the realtime transport below are two ways of
+  // conducting one session, chosen at runtime, so two hooks each opening their
+  // own device would mean two live streams on one page: a recorder possibly
+  // running on one while the other transmits, and on mobile Safari a second
+  // `getUserMedia` that steals the device or fails outright.
+  //
+  // `conversationCapture` is that one owner. It already asks for
+  // `echoCancellation` (`useAudioCapture`'s "THE APP MUST NOT HEAR ITSELF"),
+  // which is exactly what `realtime-practice.md` §11 requires on this path, and
+  // it is the ONLY thing on this page that stops a microphone track.
+  //
+  // ONE HONEST COST OF SHARING IT, named rather than left to be discovered:
+  // that hook's preflight refuses a browser with no `MediaRecorder`, which a
+  // realtime session does not actually need (it streams over WebRTC and records
+  // no blob). The refusal is still the right landing: a browser that cannot
+  // record also cannot run the request/response loop this transport falls back
+  // to, so the ladder's next rung for it is typing either way — and a second
+  // acquisition path written to avoid the check would be the second live stream
+  // this whole arrangement exists to prevent.
+  const realtimeMicrophone = useMemo<RealtimePracticeMicrophonePort>(
+    () => ({
+      acquire: () => conversationCapture.acquireStream(),
+      release: () => conversationCapture.releaseStream(),
+      // The six named problems and their six named remedies, unchanged. The
+      // two that no amount of trying again can fix are the two the realtime
+      // path must not offer a retry for.
+      problem:
+        conversationCapture.state.status === 'failed'
+          ? {
+              message: conversationCapture.state.problem.message,
+              remedy: conversationCapture.state.problem.remedy,
+              retryable:
+                conversationCapture.state.problem.code !== 'insecure_origin' &&
+                conversationCapture.state.problem.code !== 'unsupported',
+            }
+          : null,
+    }),
+    [conversationCapture],
+  );
+
+  /**
+   * The spoken transport's own voice for its own sentences.
+   *
+   * `speakNudge`, not `QuestionAudio`: these are five-word pieces of the app's
+   * own scaffolding — "the connection stopped" — not content, so they take the
+   * browser's free engine rather than the learner's key and the deployment-wide
+   * audio cache. The coach's actual words are spoken by the coach, over the
+   * live connection, and never pass through here.
+   */
+  const speakRealtimeLine = useCallback((text: string) => {
+    void speakNudge(text);
+  }, []);
+
+  const realtime = useRealtimePractice({
+    sessionId: id ?? null,
+    microphone: realtimeMicrophone,
+    speak: speakRealtimeLine,
+    // NEVER MINT FOR A SESSION WITH NOTHING LEFT TO ASK (§10). `question` is
+    // the server's own answer to that, re-read on every refresh.
+    hasQuestion: question !== null,
+  });
+
+  realtimeStopRef.current = realtime.stop;
+
+  /**
+   * WHICH SPOKEN TRANSPORT, DECIDED ONCE. See `resolveVoiceTransport`.
+   *
+   * Everything below reads this — the picker's visibility, which panel mounts,
+   * and what happens when the realtime transport gives up mid-session. No
+   * control anywhere on this page re-derives the answer from `realtimeBound`
+   * or `transcribeBound` on its own.
+   */
+  const voiceTransport = resolveVoiceTransport({
+    realtimeBound,
+    transcribeBound,
+    realtimeFallback: realtime.fallback?.code ?? null,
+  });
+
+  /**
+   * Attach the coach's voice.
+   *
+   * `srcObject` rather than a URL: the remote track is a live `MediaStream` and
+   * there is no file to point at. Guarded because a test's audio element and
+   * some older engines have no `srcObject` setter, and a screen that threw here
+   * would take the practice session down over the audio element rather than
+   * over the audio. A blocked autoplay is swallowed: the tap on Start normally
+   * satisfies the gesture requirement, and an alert about an autoplay policy is
+   * not something a learner can act on.
+   */
+  const realtimeAudioRef = useRef<HTMLAudioElement | null>(null);
+  const realtimeStream = realtime.remoteStream;
+  useEffect(() => {
+    const element = realtimeAudioRef.current;
+    if (!element) return;
+    try {
+      element.srcObject = realtimeStream;
+    } catch {
+      return;
+    }
+    if (realtimeStream) void element.play?.().catch(() => undefined);
+  }, [realtimeStream]);
+
+  /**
+   * The conversation moved, so re-read the session from the server.
+   *
+   * THE PAGE COUNTS NOTHING, HERE LEAST OF ALL. A realtime attempt is recorded
+   * by the engine, inside the tool-call route, and the browser is told only
+   * which question is outstanding now — a join key. So a change in it is the
+   * signal to ask the server what the truth is, exactly as a reload would;
+   * `answered`, `planned` and the next question all come back from
+   * `GET /api/practice/sessions/:id` and from nowhere else.
+   */
+  const realtimeQuestionId = realtime.questionId;
+  const realtimeStage = realtime.stage;
+  useEffect(() => {
+    // A finished or abandoned spoken session is the other moment the server
+    // knows something this screen does not — the last answer it recorded, and
+    // whether anything is left to ask. Re-reading here is what makes the
+    // handover to typing (or to E13's loop) land on the real state rather than
+    // on whatever was on screen when the conversation started.
+    const settled = realtimeStage === 'ended' || realtimeStage === 'fallback';
+    if (!realtimeQuestionId && !settled) return;
+    void refresh();
+  }, [realtimeQuestionId, realtimeStage, refresh]);
+
   /**
    * Land on the mode the learner asked for, once.
    *
@@ -1402,32 +1712,41 @@ export default function PracticeSessionPage() {
    *     is both newer and already here — see `handsFreeStart.ts`.
    *  2. **The stored preference**, for every other arrival — a resumed
    *     session, a reload, a link. That one DOES wait for both reads to
-   *     settle: `voice.conversationMode` says what the learner wants and
-   *     `transcribeBound` says whether this deployment can offer it, and
-   *     seeding before either lands would put a learner who chose Voice on
-   *     Text (or, worse, on a Voice mode this deployment cannot record in) and
-   *     then move the control under them.
+   *     settle: `voice.conversationMode` says what the learner wants and the
+   *     role bindings say whether this deployment can offer it, and seeding
+   *     before either lands would put a learner who chose Voice on Text (or,
+   *     worse, on a Voice mode this deployment cannot record in) and then move
+   *     the control under them.
    *
-   * `transcribeBound` gates both: with no `transcribe` model there is no Voice
-   * on this deployment, whatever anybody asked for.
+   * THE LADDER IS READ HERE, NOT RE-DERIVED (#355, epic #345 / E15). The
+   * question this effect asks is "can this deployment conduct a spoken session
+   * at all", and `voiceTransport` is the one place that is decided — for
+   * `realtime` and `transcribe` together. Gating on `transcribeBound` alone
+   * would leave a deployment that has bound `realtime` and not `transcribe`
+   * putting a learner who asked for hands-free practice on Text, beside a
+   * Voice button that would have worked. That is why the hand-off below waits
+   * on the availability reads even though it does not wait on the settings
+   * read: the tap says what the learner wants, and only the ladder knows
+   * whether this deployment can honour it.
    */
   useEffect(() => {
     if (modeSeededRef.current) return;
-    if (voiceAvailabilityLoading) return;
-    if (handsFreeRequested && transcribeBound) {
+    if (voiceAvailabilityLoading || realtimeAvailabilityLoading) return;
+    if (handsFreeRequested && voiceTransport !== null) {
       modeSeededRef.current = true;
       setAnswerMode('voice');
       return;
     }
     if (voicePrefsLoading) return;
     modeSeededRef.current = true;
-    if (voicePrefs.conversationMode && transcribeBound) setAnswerMode('voice');
+    if (voicePrefs.conversationMode && voiceTransport !== null) setAnswerMode('voice');
   }, [
     handsFreeRequested,
-    transcribeBound,
+    realtimeAvailabilityLoading,
     voiceAvailabilityLoading,
     voicePrefs.conversationMode,
     voicePrefsLoading,
+    voiceTransport,
   ]);
 
   /**
@@ -1451,8 +1770,15 @@ export default function PracticeSessionPage() {
     setHasUserGesture(true);
     if (next === answerMode) return;
     setAnswerMode(next);
-    // Leaving Voice ends the loop silently — the learner just asked for it.
-    if (next !== 'voice') conversationRef.current?.stop('typing');
+    // Leaving Voice ends whichever transport is running — silently, because
+    // the learner just asked for it. Both are named rather than only the one
+    // `voiceTransport` currently resolves to: a mid-session fallback changes
+    // that value underneath this handler, and the loop that is actually live
+    // at the moment of the tap is the one that has to stop.
+    if (next !== 'voice') {
+      conversationRef.current?.stop('typing');
+      realtime.stop();
+    }
     void saveVoice({
       conversationMode: writeFor(next === 'voice', DEFAULT_VOICE_CONVERSATION_MODE),
     });
@@ -1465,7 +1791,19 @@ export default function PracticeSessionPage() {
    * panel itself for why the notice outlives the question.
    */
   const conversationNotice =
-    answerMode === 'voice' && transcribeBound ? conversation.notice : null;
+    answerMode === 'voice' && voiceTransport === 'request_response'
+      ? conversation.notice
+      : null;
+
+  /**
+   * The realtime transport's last word, which OUTLIVES its own panel.
+   *
+   * A mid-session fallback unmounts the realtime panel by definition — that is
+   * what falling back means — so a notice rendered inside it would vanish at
+   * the exact moment it was needed. It is rendered above both panels instead,
+   * beside the picker, which is where the learner is now looking.
+   */
+  const realtimeNotice = answerMode === 'voice' ? realtime.notice : null;
 
   /**
    * The device preflight (issue #349, epic #345).
@@ -1532,6 +1870,30 @@ export default function PracticeSessionPage() {
   };
 
   /**
+   * One tap: the gesture that arms audio, and the live voice session.
+   *
+   * THE SAME FAST RE-CHECK (#349) the hands-free loop does, for the same
+   * reason: permission can be revoked between the picker and this tap, in
+   * another tab or from the browser's own site-settings panel. It is
+   * deliberately synchronous — this tap is the user gesture that lets the page
+   * play the coach's audio at all, and awaiting a device enumeration would
+   * spend it.
+   *
+   * A BLOCKED MICROPHONE STOPS HERE, before any mint. `realtime-practice.md`
+   * §10: a mint on the learner's own key, for a session they have no
+   * microphone to speak into, spends their money on nothing — and the hook
+   * itself makes the same check again from its own side, because a permission
+   * can also disappear between this tap and the `getUserMedia` it leads to.
+   */
+  const handleStartRealtime = () => {
+    const problem = mediaReadiness.recheck();
+    setStartBlockedBy(problem);
+    if (problem) return;
+    setHasUserGesture(true);
+    realtime.start();
+  };
+
+  /**
    * The other half of the one tap (#350, epic #345).
    *
    * The learner tapped "Start a Quick 5" on `/practice` with Voice chosen. That
@@ -1539,12 +1901,18 @@ export default function PracticeSessionPage() {
    * or "one tap" is two — choose Voice, then find Start again on a screen they
    * did not ask to stop on.
    *
-   * IT GOES THROUGH `handleStartConversation`, NOT `conversation.start()`, so
-   * the automatic path and the manual one are the same path: the same
-   * synchronous device re-check (#349), the same refusal copy in the same
-   * place, the same `hasUserGesture`. A blocked microphone therefore stops here
-   * exactly as it stops a tap, with the loop unarmed, the explicit Start
-   * control on screen and typing one control away.
+   * IT GOES THROUGH THE SAME HANDLERS A TAP DOES, never `conversation.start()`
+   * or `realtime.start()` directly, so the automatic path and the manual one
+   * are the same path: the same synchronous device re-check (#349), the same
+   * refusal copy in the same place, the same `hasUserGesture`. A blocked
+   * microphone therefore stops here exactly as it stops a tap, with the loop
+   * unarmed, the explicit Start control on screen and typing one control away.
+   *
+   * WHICH HANDLER IS THE LADDER'S DECISION, NOT THIS EFFECT'S (#355). It reads
+   * `voiceTransport`, the single decision site, rather than asking about
+   * bindings itself — otherwise a deployment with `realtime` bound and
+   * `transcribe` unbound would arm nothing at all for a learner who asked for
+   * hands-free practice.
    *
    * IT WAITS FOR THE QUESTION. `conversation.start()` returns silently with no
    * `questionText`, so arming before the session's first read lands would be a
@@ -1568,14 +1936,17 @@ export default function PracticeSessionPage() {
   const handsFreeConsumedRef = useRef(false);
   useEffect(() => {
     if (!handsFreeRequested || handsFreeConsumedRef.current) return;
-    if (!question || !transcribeBound || answerMode !== 'voice') return;
-    if (mediaReadiness.isChecking || conversation.isRunning) return;
+    if (!question || voiceTransport === null || answerMode !== 'voice') return;
+    if (mediaReadiness.isChecking || conversation.isRunning || realtime.stage !== 'idle') {
+      return;
+    }
     handsFreeConsumedRef.current = true;
     navigate(location.pathname, { replace: true, state: null });
-    handleStartConversation();
-    // `handleStartConversation` is re-created every render and deliberately not
-    // a dependency: this effect fires once, guarded by its own ref, and adding
-    // it would only re-run a body that returns immediately.
+    if (voiceTransport === 'realtime') handleStartRealtime();
+    else handleStartConversation();
+    // The two handlers are re-created every render and deliberately not
+    // dependencies: this effect fires once, guarded by its own ref, and adding
+    // them would only re-run a body that returns immediately.
   }, [
     answerMode,
     conversation.isRunning,
@@ -1584,7 +1955,8 @@ export default function PracticeSessionPage() {
     mediaReadiness.isChecking,
     navigate,
     question,
-    transcribeBound,
+    realtime.stage,
+    voiceTransport,
   ]);
 
   /**
@@ -1646,7 +2018,7 @@ export default function PracticeSessionPage() {
     setVoiceError(null);
     setVoiceUnavailable(null);
     setActionError(null);
-    if (transcribeBound) setAnswerMode('voice');
+    if (voiceTransport !== null) setAnswerMode('voice');
   };
 
   /**
@@ -1735,7 +2107,27 @@ export default function PracticeSessionPage() {
     setPending('complete');
     setActionError(null);
     try {
-      await completePracticeSession(id);
+      const completed = await completePracticeSession(id);
+
+      // THE CLOSING TURN (#352, epic #345), IN VOICE MODE ONLY.
+      //
+      // The server composed it — `spokenTurn` on the session, from the same
+      // `coachReaction` the summary screen is about to render, so the line
+      // heard here and the line read there are the same string by
+      // construction. This page picks nothing and rewrites nothing.
+      //
+      // `[]` is the ordinary answer for a learner who has turned
+      // `coach.reactions` off, and speaking an empty array is silence. THERE
+      // IS NO SUPPRESSION BRANCH HERE and there must not be one: the
+      // preference became `null` once, server-side, in `toCoachReaction`.
+      //
+      // The loop is stopped with `'learner'` first — the silent reason — so
+      // the driver does not narrate an exit over the top of the coach.
+      if (answerMode === 'voice' && completed.spokenTurn.length > 0) {
+        conversationRef.current?.stop('learner');
+        await speakClosingTurn(completed.spokenTurn);
+      }
+
       if (isMounted()) navigate(practiceSummaryPath(id), { replace: true });
     } catch (err) {
       if (isMounted()) {
@@ -1852,13 +2244,14 @@ export default function PracticeSessionPage() {
             lands beside the control that produced it instead of above the
             progress bar, two screens away on a phone. */}
 
-        {(question || conversationNotice) && (
-          // `&:empty` — this wrapper's three children (the unbound-transcribe
-          // notice, the Text/Voice choice, the hands-free panel) can all render
-          // null at once while the AI status is still loading, and an empty
-          // `div` with a 24px margin is 24px of nothing at the top of a screen
-          // #358 is trying to shorten. `:empty` matches only an element with no
-          // children at all, which is exactly that case.
+        {(question || conversationNotice || realtimeNotice) && (
+          // `&:empty` — this wrapper's children (the unbound-transcribe
+          // notice, the Text/Voice choice, the hands-free panel, the live
+          // voice panel) can all render null at once while the AI status is
+          // still loading, and an empty `div` with a 24px margin is 24px of
+          // nothing at the top of a screen #358 is trying to shorten. `:empty`
+          // matches only an element with no children at all, which is exactly
+          // that case.
           <Box sx={{ mb: 3, '&:empty': { display: 'none', mb: 0 } }}>
             {/* MOUNTED UNCONDITIONALLY. It renders null unless `transcribe` is
                 KNOWN to be unbound, which is why it can sit here rather than
@@ -1872,6 +2265,29 @@ export default function PracticeSessionPage() {
                 there is no Voice to choose, and "why not" belongs where the
                 choice would have been rather than further down the page. */}
             {question && <VoiceUnavailableNotice />}
+
+            {/* THE LIVE VOICE TRANSPORT'S LAST WORD, ABOVE BOTH PANELS.
+
+                It is rendered here rather than inside the realtime panel
+                because the event it most often describes — a mid-session
+                fallback — unmounts that panel by definition. The sentence is
+                the one that was SPOKEN, rendered verbatim rather than
+                rewritten: two renderings of one fact, never two facts.
+
+                `role="status"`, not `role="alert"`: the connection stopping is
+                not an error a learner has to act on. Their answers are already
+                recorded, and the control they need is the one right below
+                this. */}
+            {realtimeNotice && (
+              <Alert
+                severity="info"
+                role="status"
+                onClose={realtime.dismissNotice}
+                sx={{ mb: 2 }}
+              >
+                {realtimeNotice.message}
+              </Alert>
+            )}
 
             {/* THE SESSION-WIDE PICKER (#313, epic #304 / E13).
 
@@ -1897,8 +2313,12 @@ export default function PracticeSessionPage() {
                 second one built here: the choice is now made before a session
                 exists, and this is where it stays REVERSIBLE. One component,
                 so the two screens cannot drift in what they offer or in how
-                they are announced. */}
-            {question && transcribeBound && (
+                they are announced.
+
+                GATED ON `voiceTransport`, NOT ON `transcribeBound` (#355): the
+                ladder is decided in one place, so a deployment with `realtime`
+                bound and `transcribe` unbound still offers Voice here. */}
+            {question && voiceTransport !== null && (
               <AnswerModeChoice value={answerMode} onChange={chooseAnswerMode} />
             )}
 
@@ -1911,7 +2331,7 @@ export default function PracticeSessionPage() {
                 otherwise no way to tell listening from thinking from stopped.
                 One `role="status"` region, mounted from the first render of
                 this branch and empty until there is something to say. */}
-            {answerMode === 'voice' && transcribeBound && (
+            {answerMode === 'voice' && voiceTransport === 'request_response' && (
               <Paper variant="outlined" sx={{ mt: 2, p: { xs: 2, sm: 2.5 } }}>
                 {/* THE CONTROLS NEED A QUESTION; THE NOTICE DOES NOT. The loop
                     stopping BECAUSE the session ran out of questions is exactly
@@ -2050,6 +2470,123 @@ export default function PracticeSessionPage() {
                 )}
               </Paper>
             )}
+
+            {/* THE LIVE VOICE PANEL (#355, epic #345 / E15).
+
+                MOUNTED ONLY WHEN THE LADDER SAYS `realtime`, and unmounted the
+                moment it says anything else — which is what a mid-session
+                fallback IS. Nothing in here is a second copy of the loop above:
+                the two panels are two transports for one session, and only one
+                of them can be on screen at a time.
+
+                THERE IS NO PUSH-TO-TALK CONTROL HERE AND THERE MUST NEVER BE
+                ONE. The microphone is open for the whole session so the coach
+                can be interrupted mid-sentence; a hold-to-talk button would be
+                a half-duplex gate on a full-duplex transport
+                (`services/realtimeConnection.ts`'s own header). */}
+            {answerMode === 'voice' && voiceTransport === 'realtime' && (
+              <Paper variant="outlined" sx={{ mt: 2, p: { xs: 2, sm: 2.5 } }}>
+                <Typography variant="body2" color="text.secondary">
+                  Live voice practice is a conversation: the coach asks, you
+                  answer out loud, and you can interrupt at any time. You can
+                  stop, or go back to typing, whenever you like.
+                </Typography>
+
+                {/* THE PREFLIGHT, BESIDE THE CONTROL IT IS ABOUT (#349). Not
+                    rendered once the session is live: a live session has a live
+                    microphone by definition, and a stale warning above it would
+                    contradict the line right underneath. */}
+                {realtime.stage !== 'live' && (
+                  <MicrophoneReadinessNotice
+                    problem={startBlockedBy ?? mediaReadiness.problem}
+                    audioSuspended={mediaReadiness.isAudioOutputSuspended}
+                    sx={{ mt: 2 }}
+                  />
+                )}
+
+                {/* THE BILLING SENTENCE, ONCE, ON THE CONTROL THAT STARTS THE
+                    MODE — and the honest sentence about echo beside it. See
+                    `REALTIME_BILLING_SENTENCE` and `REALTIME_ECHO_SENTENCE`. */}
+                {realtime.stage !== 'live' && (
+                  <>
+                    <Typography
+                      variant="body2"
+                      color="text.secondary"
+                      sx={{ mt: 2 }}
+                    >
+                      {REALTIME_BILLING_SENTENCE}
+                    </Typography>
+                    <Typography
+                      variant="body2"
+                      color="text.secondary"
+                      sx={{ mt: 1 }}
+                    >
+                      {REALTIME_ECHO_SENTENCE}
+                    </Typography>
+                  </>
+                )}
+
+                <Stack
+                  direction={{ xs: 'column', sm: 'row' }}
+                  spacing={1}
+                  sx={{ mt: 2, alignItems: { xs: 'stretch', sm: 'center' } }}
+                >
+                  {realtime.stage === 'live' || realtime.stage === 'connecting' ? (
+                    <Button
+                      variant="outlined"
+                      startIcon={<StopIcon />}
+                      onClick={realtime.stop}
+                    >
+                      Stop
+                    </Button>
+                  ) : (
+                    <Button
+                      variant="contained"
+                      startIcon={<MicIcon />}
+                      onClick={handleStartRealtime}
+                      disabled={pending !== null || question === null}
+                    >
+                      Start live voice
+                    </Button>
+                  )}
+                  {/* REACHABLE AT EVERY STAGE, exactly as it is in the loop
+                      above: there is no moment in this transport where the way
+                      back to typing is missing. */}
+                  <Button variant="text" onClick={handleTypeInstead}>
+                    Type instead
+                  </Button>
+                </Stack>
+
+                {/* ONE STATUS REGION, MOUNTED FROM THE FIRST RENDER of this
+                    branch and empty until there is something to say. Everything
+                    the transport says out loud is also written down here — a
+                    learner who glances at the screen, has sound off, or is
+                    using a screen reader has otherwise no way to tell connected
+                    from connecting from stopped. */}
+                <Box role="status" aria-live="polite" sx={{ mt: 1 }}>
+                  {REALTIME_STAGE_TEXT[realtime.stage] && (
+                    <Typography variant="body2" color="text.secondary">
+                      {REALTIME_STAGE_TEXT[realtime.stage]}
+                    </Typography>
+                  )}
+                  {realtime.heard && (
+                    <Typography variant="body2" color="text.secondary">
+                      Heard: {realtime.heard}
+                    </Typography>
+                  )}
+                </Box>
+
+                {/* THE COACH'S VOICE. `hidden` because there is no control to
+                    offer — pausing a conversation is not a thing this transport
+                    does, and the control that matters is Stop, above. */}
+                <audio
+                  ref={realtimeAudioRef}
+                  autoPlay
+                  hidden
+                  data-testid="realtime-coach-audio"
+                />
+              </Paper>
+            )}
           </Box>
         )}
 
@@ -2178,7 +2715,9 @@ export default function PracticeSessionPage() {
                   E9/E12's per-question flow, unchanged in every particular —
                   `conversation-mode.md` §10's own degradation row keeps it as
                   the behaviour of Voice mode when the loop is not armed. */}
-              {answerMode === 'voice' && transcribeBound && !conversation.isRunning && (
+              {answerMode === 'voice' &&
+                voiceTransport === 'request_response' &&
+                !conversation.isRunning && (
                 <Box sx={{ mb: 2 }}>
                   <PushToTalkButton
                     capture={capture}
@@ -2212,8 +2751,10 @@ export default function PracticeSessionPage() {
                         `VoiceUnavailableNotice` covers "unbound when the page
                         loaded"; this covers "the call itself came back
                         unavailable". They cannot both render, structurally:
-                        this block only exists while `transcribeBound` is true,
-                        and that notice only renders while it is false. The
+                        this block only exists while the ladder has resolved
+                        Voice to the request/response transport — which it can
+                        only do while `transcribeBound` is true — and that
+                        notice only renders while it is false. The
                         effect above re-reads the status precisely so the page
                         moves from the second state to the first when the
                         server has just told us the role is gone.

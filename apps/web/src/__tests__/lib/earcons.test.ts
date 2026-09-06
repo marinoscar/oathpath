@@ -1,5 +1,5 @@
 /**
- * Earcons — the four promises the module makes that are invisible when broken.
+ * Earcons — the five promises the module makes that are invisible when broken.
  *
  * Issue #310, epic #304 / E13. Each of these fails silently in exactly the
  * situation it matters, which is why they are asserted rather than reviewed:
@@ -18,6 +18,16 @@
  *   4. THE SWITCH IS ONE SWITCH. `setEarconsEnabled(false)` silences the whole
  *      module, including a pulse already running — a learner who turned sounds
  *      off and still hears them is a bug nobody with sounds on can see.
+ *   5. THE TWO WAYS A SESSION CAN END DO NOT SOUND ALIKE (issue #357, epic
+ *      #345). A hands-free learner may miss the spoken sentence entirely, so
+ *      the cue is the part that has to carry "you finished" against "look at
+ *      the screen when you can" on its own. Two cues that differed only in a
+ *      frequency or two would pass every other test in this file and fail the
+ *      only listener who matters.
+ *
+ * WHICH cue a transition plays is not this file's subject — that is
+ * `conversationCues.test.ts`, over the phase table. This file is about the
+ * sounds themselves and the module that makes them.
  */
 
 import { readFileSync } from 'node:fs';
@@ -26,16 +36,26 @@ import { resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  ADVANCING_EARCON,
   CAPTURED_EARCON,
   LISTENING_EARCON,
   PROCESSING_PULSE_EARCON,
+  QUESTION_EARCON,
+  SESSION_END_EARCON,
+  SESSION_FAILED_EARCON,
+  SESSION_START_EARCON,
   areEarconsEnabled,
   closeSharedAudioContext,
   getSharedAudioContext,
   isProcessingPulseRunning,
+  playAdvancingEarcon,
   playCapturedEarcon,
   playEarcon,
   playListeningEarcon,
+  playQuestionEarcon,
+  playSessionEndEarcon,
+  playSessionFailedEarcon,
+  playSessionStartEarcon,
   setEarconsEnabled,
   startProcessingPulse,
   startPulse,
@@ -168,6 +188,95 @@ describe('earcons — the cue surface', () => {
     expect(captured[captured.length - 1]).toBeLessThan(captured[0]);
   });
 
+  it('exposes the five cues issue #357 added, on the same terms', () => {
+    for (const play of [
+      playSessionStartEarcon,
+      playQuestionEarcon,
+      playAdvancingEarcon,
+      playSessionEndEarcon,
+      playSessionFailedEarcon,
+    ]) {
+      expect(typeof play).toBe('function');
+    }
+
+    // Descriptors, like their three elders: a later swap to designed audio is
+    // a change to this module and to no call site.
+    for (const descriptor of [
+      SESSION_START_EARCON,
+      QUESTION_EARCON,
+      ADVANCING_EARCON,
+      SESSION_END_EARCON,
+      SESSION_FAILED_EARCON,
+    ]) {
+      expect(descriptor.tones.length).toBeGreaterThan(0);
+      expect(descriptor.name).toBeTruthy();
+    }
+  });
+
+  it('gives every cue a distinct name and a distinct shape', () => {
+    const cues = [
+      LISTENING_EARCON,
+      CAPTURED_EARCON,
+      PROCESSING_PULSE_EARCON.pulse,
+      SESSION_START_EARCON,
+      QUESTION_EARCON,
+      ADVANCING_EARCON,
+      SESSION_END_EARCON,
+      SESSION_FAILED_EARCON,
+    ];
+
+    expect(new Set(cues.map((cue) => cue.name)).size).toBe(cues.length);
+    // Two cues with identical tones are one cue with two names, and a learner
+    // would have no way to tell which had played.
+    const shapes = cues.map((cue) =>
+      JSON.stringify(
+        cue.tones.map((tone) => [tone.frequency, tone.durationMs, tone.atMs ?? 0]),
+      ),
+    );
+    expect(new Set(shapes).size).toBe(cues.length);
+  });
+
+  it('makes the finished session and the failure unmistakably different (claim 5)', () => {
+    const ended = SESSION_END_EARCON.tones;
+    const failed = SESSION_FAILED_EARCON.tones;
+
+    // They differ in all three of the ways somebody not listening carefully
+    // could tell apart — register, length, and shape — rather than in one.
+    expect(ended.length).not.toBe(failed.length);
+    expect(Math.min(...ended.map((tone) => tone.frequency))).toBeGreaterThan(
+      Math.max(...failed.map((tone) => tone.frequency)),
+    );
+    // Both fall (nothing here is an alarm), so the fall is not the difference.
+    expect(ended[ended.length - 1].frequency).toBeLessThan(ended[0].frequency);
+    expect(failed[failed.length - 1].frequency).toBeLessThan(failed[0].frequency);
+  });
+
+  it('cues the start with a flat double tap, not a third sweep', () => {
+    // The two sweeps already mean "microphone open" and "turn captured". A
+    // third sweep in the same register would be a third thing to learn.
+    const frequencies = SESSION_START_EARCON.tones.map((tone) => tone.frequency);
+    expect(frequencies).toHaveLength(2);
+    expect(frequencies[0]).toBe(frequencies[1]);
+  });
+
+  it('pairs the question and advancing cues as one low/high gesture', () => {
+    // Same length, same gain, opposite ends of the register: "that one is
+    // done" and "here is the next" across a 900 ms pause.
+    expect(QUESTION_EARCON.tones).toHaveLength(1);
+    expect(ADVANCING_EARCON.tones).toHaveLength(1);
+    expect(QUESTION_EARCON.tones[0].durationMs).toBe(
+      ADVANCING_EARCON.tones[0].durationMs,
+    );
+    expect(QUESTION_EARCON.tones[0].gain).toBe(ADVANCING_EARCON.tones[0].gain);
+    expect(QUESTION_EARCON.tones[0].frequency).toBeGreaterThan(
+      ADVANCING_EARCON.tones[0].frequency,
+    );
+    // Quieter than the edge cues: a voice follows immediately in both cases.
+    expect(QUESTION_EARCON.tones[0].gain).toBeLessThan(
+      LISTENING_EARCON.tones[0].gain,
+    );
+  });
+
   it('keeps the repeating pulse quieter than either edge cue', () => {
     // A cue that repeats a dozen times during a grader call at notification
     // volume stops being reassurance within about three ticks.
@@ -239,6 +348,11 @@ describe('earcons — no AudioContext is not an error', () => {
   it('no-ops every cue, without throwing', () => {
     expect(() => playListeningEarcon()).not.toThrow();
     expect(() => playCapturedEarcon()).not.toThrow();
+    expect(() => playSessionStartEarcon()).not.toThrow();
+    expect(() => playQuestionEarcon()).not.toThrow();
+    expect(() => playAdvancingEarcon()).not.toThrow();
+    expect(() => playSessionEndEarcon()).not.toThrow();
+    expect(() => playSessionFailedEarcon()).not.toThrow();
     expect(() => playEarcon(LISTENING_EARCON)).not.toThrow();
     expect(() => {
       const pulse = startProcessingPulse();
@@ -337,8 +451,17 @@ describe('earcons — playing and cleaning up', () => {
   });
 
   it('leaks nothing across a long run of cues', () => {
+    const everyCue = [
+      playListeningEarcon,
+      playCapturedEarcon,
+      playSessionStartEarcon,
+      playQuestionEarcon,
+      playAdvancingEarcon,
+      playSessionEndEarcon,
+      playSessionFailedEarcon,
+    ];
     for (let i = 0; i < 50; i += 1) {
-      playCapturedEarcon();
+      everyCue[i % everyCue.length]();
       currentFake().finishAll();
     }
 
@@ -419,6 +542,11 @@ describe('earcons — the single switch', () => {
 
     playListeningEarcon();
     playCapturedEarcon();
+    playSessionStartEarcon();
+    playQuestionEarcon();
+    playAdvancingEarcon();
+    playSessionEndEarcon();
+    playSessionFailedEarcon();
     playEarcon(CAPTURED_EARCON);
     startPulse(PROCESSING_PULSE_EARCON);
 

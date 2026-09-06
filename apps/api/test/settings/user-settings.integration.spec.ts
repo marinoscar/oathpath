@@ -1078,6 +1078,7 @@ describe('User Settings Integration', () => {
             readQuestionsAloud: true,
             readAnswersAloud: true,
             conversationMode: true,
+            soundCues: false,
           },
         })
         .expect(200);
@@ -1095,6 +1096,7 @@ describe('User Settings Integration', () => {
         readQuestionsAloud: true,
         readAnswersAloud: true,
         conversationMode: true,
+        soundCues: false,
       });
     });
 
@@ -1362,6 +1364,129 @@ describe('User Settings Integration', () => {
           .patch('/api/user-settings')
           .set(authHeader(user.accessToken))
           .send({ voice: { conversationMode: 'yes' } })
+          .expect(400);
+      });
+    });
+
+    // =========================================================================
+    // soundCues (issue #357, epic #345 "Hands-free practice")
+    // =========================================================================
+    //
+    // The eighth field, added to the EXISTING namespace for the same reasons
+    // the seventh was, and asserted against a real subsequent GET for the same
+    // reason: `userSettingsSchema.parse()` silently strips what it does not
+    // know, and a `mergeVoice` missing its block would drop the field with a
+    // 200 and an unchanged GET.
+    //
+    // IT IS THE FIRST FIELD ON THIS NAMESPACE WHOSE DEFAULT IS `true`, which
+    // makes the null-delete assertion the load-bearing one here: the learner
+    // who cares is the one turning cues OFF, and the value they must never
+    // have written back for them is the `true` they are moving away from.
+    describe('soundCues (issue #357, epic #345)', () => {
+      it('round-trips a false through PATCH and a subsequent GET', async () => {
+        const user = await createMockTestUser(context);
+        setupMockUserSettings(user.id, DEFAULT_USER_SETTINGS);
+
+        await request(context.app.getHttpServer())
+          .patch('/api/user-settings')
+          .set(authHeader(user.accessToken))
+          .send({ voice: { soundCues: false } })
+          .expect(200);
+
+        const response = await request(context.app.getHttpServer())
+          .get('/api/user-settings')
+          .set(authHeader(user.accessToken))
+          .expect(200);
+
+        // A stored `false` is real, not an absence — this is the whole point
+        // of the field, and `resolveVoicePreferences` reads it as such.
+        expect(response.body.data.voice).toEqual({ soundCues: false });
+      });
+
+      it('patching it to null deletes it, restoring the built-in default', async () => {
+        const user = await createMockTestUser(context);
+        setupMockUserSettings(user.id, DEFAULT_USER_SETTINGS);
+
+        await request(context.app.getHttpServer())
+          .patch('/api/user-settings')
+          .set(authHeader(user.accessToken))
+          .send({ voice: { soundCues: false, preferredVoice: 'nova' } })
+          .expect(200);
+
+        await request(context.app.getHttpServer())
+          .patch('/api/user-settings')
+          .set(authHeader(user.accessToken))
+          .send({ voice: { soundCues: null } })
+          .expect(200);
+
+        const response = await request(context.app.getHttpServer())
+          .get('/api/user-settings')
+          .set(authHeader(user.accessToken))
+          .expect(200);
+
+        // GONE, not stored as `true` — a stored `true` reads identically today
+        // and would pin this learner to it if the default ever moves.
+        expect(response.body.data.voice).toEqual({ preferredVoice: 'nova' });
+        expect(response.body.data.voice).not.toHaveProperty('soundCues');
+      });
+
+      it('setting an unrelated voice field does not materialise it', async () => {
+        const user = await createMockTestUser(context);
+        setupMockUserSettings(user.id, DEFAULT_USER_SETTINGS);
+
+        await request(context.app.getHttpServer())
+          .patch('/api/user-settings')
+          .set(authHeader(user.accessToken))
+          .send({ voice: { conversationMode: true } })
+          .expect(200);
+
+        const response = await request(context.app.getHttpServer())
+          .get('/api/user-settings')
+          .set(authHeader(user.accessToken))
+          .expect(200);
+
+        expect(response.body.data.voice).toEqual({ conversationMode: true });
+        expect(response.body.data.voice).not.toHaveProperty('soundCues');
+      });
+
+      it('survives a PATCH of a different voice field, and vice versa', async () => {
+        // The field-wise half of `mergeVoice` for this field: a learner who
+        // silenced the cues and later turns hands-free mode on must still have
+        // silence.
+        const user = await createMockTestUser(context);
+        setupMockUserSettings(user.id, DEFAULT_USER_SETTINGS);
+
+        await request(context.app.getHttpServer())
+          .patch('/api/user-settings')
+          .set(authHeader(user.accessToken))
+          .send({ voice: { soundCues: false } })
+          .expect(200);
+
+        await request(context.app.getHttpServer())
+          .patch('/api/user-settings')
+          .set(authHeader(user.accessToken))
+          .send({ voice: { conversationMode: true } })
+          .expect(200);
+
+        const response = await request(context.app.getHttpServer())
+          .get('/api/user-settings')
+          .set(authHeader(user.accessToken))
+          .expect(200);
+
+        expect(response.body.data.voice).toEqual({
+          soundCues: false,
+          conversationMode: true,
+        });
+      });
+
+      it('rejects a non-boolean soundCues with a 400', async () => {
+        const user = await createMockTestUser(context);
+        setupMockUserSettings(user.id, DEFAULT_USER_SETTINGS);
+
+        await request(context.app.getHttpServer())
+          .patch('/api/user-settings')
+          .set(authHeader(user.accessToken))
+          .send({ voice: { soundCues: 'off' } })
           .expect(400);
       });
     });

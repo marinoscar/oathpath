@@ -492,9 +492,10 @@ export class UserSettingsService {
 
   /**
    * Merge the `voice` namespace (issue #282, epic #280; `conversationMode`
-   * added by issue #307, epic #304) field-wise.
+   * added by issue #307, epic #304; `soundCues` by issue #357, epic #345)
+   * field-wise.
    *
-   * Seven independent scalar choices, none of them a nested map — the
+   * Eight independent scalar choices, none of them a nested map — the
    * identical shape `mergeStudy` already establishes, and merged the same
    * way for the same reason: a learner who PATCHes `{ voice: { speechRate:
    * 1.1 } }` must keep the voice and auto-submit preference they already
@@ -572,6 +573,12 @@ export class UserSettingsService {
       delete merged.conversationMode;
     } else if (patch.conversationMode !== undefined) {
       merged.conversationMode = patch.conversationMode;
+    }
+
+    if (patch.soundCues === null) {
+      delete merged.soundCues;
+    } else if (patch.soundCues !== undefined) {
+      merged.soundCues = patch.soundCues;
     }
 
     return Object.keys(merged).length > 0 ? merged : undefined;

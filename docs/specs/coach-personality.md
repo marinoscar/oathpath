@@ -529,6 +529,20 @@ the reaction-selection module's own implementation, not to the epic's
 locked contract — moving it later is a tuning change, not a design change,
 and should not require reopening this document.
 
+**`answer.partial` is live, and this is where that was settled (issue
+#352).** It was written as reachable-in-principle when E3's exact matcher
+was the only grading path — binary by construction — and
+`apps/web/src/components/practice/outcome.ts` said as much in its own
+comment. E4 changed it: `GRADING_VERDICTS` (`apps/api/src/practice/grading.ts`)
+offers the grader `partial`, `PracticeService.grade` persists
+`aiGrading?.outcome ?? outcome`, and `coachEventForAttempt` maps such a row
+straight to this cell. So the cell is **lit on any deployment with a
+`grader` model bound**, and dark only where no AI is configured at all —
+where every other AI-coloured surface is dark too. Its lines are held to
+the same depth floor (§7.2) as every other cell for that reason, and
+`outcome.ts`'s stale comment was corrected rather than left to mislead the
+next reader.
+
 **Every event resolves to exactly one persona/event cell in the bank**;
 there is no event this document leaves without a corresponding cell in the
 four persona tables, and a seventh reaction event added later needs the
@@ -581,6 +595,60 @@ dependency-free, stable across Node versions by construction (it is source,
 not a library whose hashing algorithm could change under a version bump),
 and obviously deterministic to a reader with no need to trust a digest
 function's own contract.
+
+### 7.1 What determinism does **not** promise: editing the bank (issue #352)
+
+The index is `hash(seed) % lines.length`, so **the cell's length is part of
+the selection**. Adding a line to a cell re-maps every seed in it, and a
+learner re-reading a session from before the edit may find a different
+line — still in voice, still linted — beside an attempt than the one they
+saw live.
+
+**That is expected, and it is the direct consequence of §9.** The promise
+this section makes is stability for a *fixed bank and a fixed persona*: the
+same attempt, read twice, in one build, says the same thing. §9 already
+accepts the same shape of change on the other axis — switching persona
+re-voices past attempts — and for the identical reason: the reaction is
+computed at read time precisely so that improving the bank improves what
+every learner reads, including on attempts already recorded. A stored line
+would survive a bank edit and become copy no improvement could ever reach,
+which is the trade §9 refuses. Nobody should "fix" this by persisting the
+selection.
+
+### 7.2 The depth floor, and what it does and does not buy (issue #352)
+
+E14 shipped three lines per cell. Three rotates visibly — the epic's own
+stated failure was "five identical flat sentences", and three sentences on
+rotation is a smaller version of it. The floor is now **derived from
+`MAX_PLANNED_COUNT`** rather than from taste:
+
+* **Every `answer.*` cell holds at least `MAX_PLANNED_COUNT` (20) lines.**
+  Twenty questions is the largest session this application creates, so
+  twenty is the largest number of reactions one session can produce, and
+  therefore the largest number of times a single cell can be drawn before
+  the learner leaves the screen. At this depth **a full session can never
+  be *forced* to repeat a line**.
+* **Every `session.complete_*` cell holds at least six.** A session draws
+  one of these exactly once, so depth there is variety *between* sessions,
+  not within one.
+* **No line appears twice anywhere in the bank**, across cells and across
+  personas — a session draws from several cells at once, so a shared line
+  would be a repeat inside one session that depth cannot prevent.
+
+**What it does not buy, stated so nobody reads more into it.** Modular
+hashing can still land two different attempt ids in one session on the same
+index, however deep the cell. Depth removes the *pigeonhole* repeat; it
+cannot remove the *coincidental* one, and no bank depth ever could without
+changing the selection function itself.
+`apps/api/src/ai/coach/reaction-lines.spec.ts` asserts the two halves
+separately and labels which is a guarantee and which is a concrete
+regression check over the shipped bank.
+
+`COACH_MIN_LINES_PER_ANSWER_CELL` is declared in `reaction-lines.ts` as a
+literal — that module imports nothing at runtime — and the **test** imports
+both it and `MAX_PLANNED_COUNT` and asserts they agree, so raising the
+session cap fails the bank's own suite rather than silently shortening the
+guarantee above.
 
 ---
 
