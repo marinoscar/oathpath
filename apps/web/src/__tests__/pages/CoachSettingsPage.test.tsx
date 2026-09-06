@@ -31,14 +31,20 @@
  *      read the `ok` member without checking.
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
-import { screen, waitFor, within } from '@testing-library/react';
+import { describe, it, expect, afterEach, beforeEach } from 'vitest';
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 
 import { render } from '../utils/test-utils';
 import { server } from '../mocks/server';
 import CoachSettingsPage from '../../pages/CoachSettingsPage';
+import { COACH_PLAYBACK_BLOCKED_MESSAGE } from '../../components/settings/CoachSettings';
+import {
+  installFakeAudio,
+  type FakeAudioHandle,
+  type FakeAudioOptions,
+} from '../utils/fake-audio';
 import type { UserSettings } from '../../types';
 
 const API_BASE = '*/api';
@@ -215,9 +221,28 @@ async function waitForPersonas() {
   });
 }
 
+/**
+ * The fake `Audio`, and the restore that must follow it.
+ *
+ * SHARED WITH `VoiceSettingsPage.test.tsx` since #389 — see
+ * `../utils/fake-audio` for why `primed` and `played` are separate lists, and
+ * why that split is what makes gesture-time ordering assertable at all.
+ */
+let installedAudio: FakeAudioHandle | null = null;
+
+function installAudio(options: FakeAudioOptions = {}): FakeAudioHandle {
+  installedAudio = installFakeAudio(options);
+  return installedAudio;
+}
+
 describe('CoachSettingsPage', () => {
   beforeEach(() => {
     mockApi();
+  });
+
+  afterEach(() => {
+    installedAudio?.restore();
+    installedAudio = null;
   });
 
   describe('the persona picker', () => {
@@ -402,6 +427,162 @@ describe('CoachSettingsPage', () => {
       await waitFor(() => {
         expect(status).toHaveTextContent(/couldn’t play the Playful sample/i);
       });
+    });
+  });
+
+  // ===========================================================================
+  // The autoplay unlock (#389)
+  // ===========================================================================
+
+  describe('unlocking the element inside the press', () => {
+    it('primes the audio element INSIDE the click, before the synthesis resolves', async () => {
+      const audio = installAudio();
+
+      // A synthesis call that does not answer until this test says so. The
+      // whole question here is what has already happened while it is in flight.
+      let release: () => void = () => {};
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      server.use(
+        http.post(`${API_BASE}/ai/speech/synthesize`, async ({ request }) => {
+          synthesizeBodies.push((await request.json()) as Record<string, unknown>);
+          await gate;
+          return HttpResponse.arrayBuffer(new ArrayBuffer(8), {
+            headers: { 'Content-Type': 'audio/mpeg' },
+          });
+        }),
+      );
+
+      renderPage();
+      await waitForPersonas();
+
+      fireEvent.click(
+        screen.getByRole('button', { name: 'Hear the Playful sample' }),
+      );
+
+      // THE ASSERTION THIS TEST EXISTS FOR, and it is deliberately made with NO
+      // `await` between it and the click: the element must have been built and
+      // played inside the activation window the press opened. Move
+      // `acquireAndPrimeAudio` back into the continuation after
+      // `synthesizeSpeech` — which is precisely #389 — and both of these are
+      // empty here, while every other test in this file still passes.
+      expect(audio.elements).toHaveLength(1);
+      expect(audio.primed).toHaveLength(1);
+      expect(audio.primed[0].startsWith('data:audio/')).toBe(true);
+
+      // And priming is silent in the other sense too: no sample has played yet.
+      expect(audio.played).toEqual([]);
+
+      release();
+      await waitFor(() => expect(audio.played).toHaveLength(1));
+      expect(audio.played[0].startsWith('data:')).toBe(false);
+
+      // Priming spent nothing: still exactly ONE synthesis call for one press.
+      expect(synthesizeBodies).toHaveLength(1);
+    });
+
+    it('reuses the ONE unlocked element across presses rather than building a new one', async () => {
+      const audio = installAudio();
+      const user = userEvent.setup();
+      renderPage();
+      await waitForPersonas();
+
+      await user.click(
+        screen.getByRole('button', { name: 'Hear the Supportive sample' }),
+      );
+      await waitFor(() => expect(audio.played).toHaveLength(1));
+
+      await user.click(
+        screen.getByRole('button', { name: 'Hear the Academic sample' }),
+      );
+      await waitFor(() => expect(audio.played).toHaveLength(2));
+
+      // ONE element, both times. A fresh element per sample is a fresh lock per
+      // sample, and the second one was never touched by a gesture.
+      expect(audio.elements).toHaveLength(1);
+    });
+
+    it('says so when the browser BLOCKS playback, instead of returning quietly to idle', async () => {
+      // A `play()` that rejects for the sample and resolves for the silent
+      // unlock — which is exactly what a muted phone or an autoplay policy does.
+      const audio = installAudio({
+        play: (src) =>
+          src.startsWith('data:')
+            ? Promise.resolve()
+            : Promise.reject(new Error('NotAllowedError')),
+      });
+      const user = userEvent.setup();
+      renderPage();
+      await waitForPersonas();
+
+      await user.click(
+        screen.getByRole('button', { name: 'Hear the Playful sample' }),
+      );
+      await waitFor(() => expect(audio.played).toHaveLength(1));
+
+      // THE ASSERTION THIS TEST EXISTS FOR. Before #389 this state ran the same
+      // handler a finished sample runs, so "your phone would not play this" and
+      // "you have just heard it" were the same empty region — and the one
+      // outcome the learner could actually act on was the one nothing said.
+      const status = await screen.findByRole('status');
+      await waitFor(() =>
+        expect(status).toHaveTextContent(COACH_PLAYBACK_BLOCKED_MESSAGE),
+      );
+
+      // Named, and named honestly: a remedy, no alert, and the standing truth
+      // that every sample on this page is readable without any sound at all.
+      expect(COACH_PLAYBACK_BLOCKED_MESSAGE).toMatch(/press Hear again/i);
+      expect(screen.queryByRole('alert')).toBeNull();
+      expect(document.querySelector('.MuiAlert-root')).toBeNull();
+
+      // And the page is still standing — every control still responds.
+      await user.click(await findReactionsToggle());
+      await waitFor(() => expect(patchBodies).toHaveLength(1));
+    });
+
+    it('states an element error too, rather than looking like a sample that ended', async () => {
+      const audio = installAudio();
+      const user = userEvent.setup();
+      renderPage();
+      await waitForPersonas();
+
+      await user.click(
+        screen.getByRole('button', { name: 'Hear the Academic sample' }),
+      );
+      await waitFor(() => expect(audio.played).toHaveLength(1));
+
+      // The element fails on the bytes it was handed.
+      act(() => {
+        audio.last()?.onerror?.();
+      });
+
+      expect(await screen.findByRole('status')).toHaveTextContent(
+        /couldn’t play the Academic sample/i,
+      );
+    });
+
+    it('goes back to idle — and says nothing — when a sample simply ends', async () => {
+      const audio = installAudio();
+      const user = userEvent.setup();
+      renderPage();
+      await waitForPersonas();
+
+      await user.click(
+        screen.getByRole('button', { name: 'Hear the Playful sample' }),
+      );
+      await waitFor(() => expect(audio.played).toHaveLength(1));
+
+      const ended = audio.last()?.onended;
+      act(() => {
+        ended?.();
+      });
+
+      // The other half of the distinction above: an ordinary ending stays
+      // wordless. A message here would make every finished sample look failed.
+      await waitFor(() =>
+        expect(screen.getByRole('status').textContent?.trim()).toBe(''),
+      );
     });
   });
 

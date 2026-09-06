@@ -36,6 +36,10 @@ import { AiStatusProvider } from '../../../contexts/AiStatusContext';
 import { lightTheme } from '../../../theme';
 import type { AiStatus } from '../../../types';
 import { server } from '../../mocks/server';
+import {
+  installFakeAudio,
+  type FakeAudioHandle,
+} from '../../utils/fake-audio';
 
 const QUESTION = 'Who is in charge of the executive branch?';
 
@@ -99,44 +103,25 @@ function endBrowserPlayback(utterance: FakeUtterance) {
 
 // ---------------------------------------------------------------------------
 // The premium element, faked. jsdom implements no media playback at all.
+//
+// THE SHARED FAKE (`../../utils/fake-audio`) since #389, which is also why the
+// waits below are on `audio.played` rather than on an element having been
+// CONSTRUCTED: the press now primes an element inside the click, so
+// construction happens a round trip before the clip is attached, and a wait on
+// construction would fire handlers that are not yet installed.
 // ---------------------------------------------------------------------------
 
-interface FakeAudioElement {
-  src: string;
-  paused: boolean;
-  onplay: (() => void) | null;
-  onended: (() => void) | null;
-  onerror: (() => void) | null;
-}
-
-let audios: FakeAudioElement[] = [];
-/** Whether `play()` resolves. `false` is an autoplay block — sound never starts. */
+let audio: FakeAudioHandle;
+/** Whether `play()` resolves for the CLIP. The silent unlock always resolves. */
 let audioCanPlay = true;
-let realAudio: unknown;
 
 function installAudio() {
-  class FakeAudio implements FakeAudioElement {
-    paused = false;
-    onplay: (() => void) | null = null;
-    onended: (() => void) | null = null;
-    onerror: (() => void) | null = null;
-    constructor(public src: string) {
-      audios.push(this);
-    }
-    play() {
-      if (!audioCanPlay) return Promise.reject(new Error('NotAllowedError'));
-      this.onplay?.();
-      return Promise.resolve();
-    }
-    pause() {
-      this.paused = true;
-    }
-    removeAttribute() {
-      this.src = '';
-    }
-  }
-  realAudio = (window as unknown as { Audio?: unknown }).Audio;
-  (window as unknown as { Audio: unknown }).Audio = FakeAudio;
+  audio = installFakeAudio({
+    play: (src) =>
+      audioCanPlay || src.startsWith('data:')
+        ? Promise.resolve()
+        : Promise.reject(new Error('NotAllowedError')),
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -182,7 +167,6 @@ function pressPlay() {
 beforeEach(() => {
   spoken = [];
   live = [];
-  audios = [];
   cancels = 0;
   statusCalls = 0;
   audioCanPlay = true;
@@ -193,7 +177,7 @@ beforeEach(() => {
 afterEach(() => {
   Reflect.deleteProperty(window, 'speechSynthesis');
   Reflect.deleteProperty(window, 'SpeechSynthesisUtterance');
-  (window as unknown as { Audio?: unknown }).Audio = realAudio;
+  audio.restore();
   vi.restoreAllMocks();
 });
 
@@ -233,10 +217,10 @@ describe('`onFinished` fires once, at a genuine end', () => {
     await waitFor(() => expect(statusCalls).toBeGreaterThan(0));
 
     pressPlay();
-    await waitFor(() => expect(audios).toHaveLength(1));
+    await waitFor(() => expect(audio.played).toHaveLength(1));
     expect(finished).toEqual([]);
 
-    act(() => audios[0].onended?.());
+    act(() => audio.last()?.onended?.());
 
     expect(finished).toEqual([{ reason: 'ended', source: 'premium' }]);
     // The browser voice never spoke: one play, one end, one source.
@@ -381,9 +365,9 @@ describe('a failure is reported as one, and never as an end', () => {
     await waitFor(() => expect(statusCalls).toBeGreaterThan(0));
 
     pressPlay();
-    await waitFor(() => expect(audios).toHaveLength(1));
+    await waitFor(() => expect(audio.played).toHaveLength(1));
 
-    act(() => audios[0].onerror?.());
+    act(() => audio.last()?.onerror?.());
 
     expect(finished).toEqual([{ reason: 'failed', source: 'premium' }]);
     // NOT a second reading: the fall-through belongs to a clip that never
@@ -490,16 +474,19 @@ describe('the `stop()` handle', () => {
     await waitFor(() => expect(statusCalls).toBeGreaterThan(0));
 
     pressPlay();
-    await waitFor(() => expect(audios).toHaveLength(1));
+    await waitFor(() => expect(audio.played).toHaveLength(1));
 
     act(() => ref.current?.stop());
     act(() => ref.current?.stop());
 
     // Paused, detached from its bytes, and reported to nobody.
-    expect(audios[0].paused).toBe(true);
-    expect(audios[0].src).toBe('');
+    expect(audio.last()?.paused).toBe(true);
+    expect(audio.last()?.src).toBe('');
     expect(finished).toEqual([]);
-    expect(audios).toHaveLength(1);
+    // ONE element throughout, kept across the stop: it carries the user
+    // activation of the press that unlocked it (#389), and a replacement
+    // would carry none.
+    expect(audio.elements).toHaveLength(1);
   });
 
   it('is optional, exactly like `onFinished`', async () => {

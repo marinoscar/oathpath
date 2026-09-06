@@ -80,7 +80,7 @@
  *      continuation, plays with no gesture of its own.
  *   3. Only then is the async half started, with `void requestPreview(...)`.
  *
- * A LATER EDIT THAT MOVES `new Audio(...)` OR `play()` BACK AFTER AN `await`
+ * A LATER EDIT THAT MOVES THE PRIMING OR THE PLAYBACK BACK AFTER AN `await`
  * REINTRODUCES #383 EXACTLY — and does so invisibly on a desktop browser,
  * where playback after any gesture in the page is permitted and the whole
  * thing looks like it works.
@@ -89,6 +89,13 @@
  * drop the `src`, revoke the blob URL — and never the element, because the
  * element is what carries the activation. Discarding the element is an
  * unmount-only act.
+ *
+ * SINCE #389 ALL THREE CALLS LIVE IN `lib/audioUnlock.ts`, not at the bottom of
+ * this file: `CoachSettings` and `QuestionAudio` had the identical
+ * after-the-await shape, and a subtle ordering rule stated in one of the three
+ * places it governs is a rule the other two are free to undo. That module's
+ * header is now where the full argument lives; what stays here is the part
+ * specific to a preview that spends a key.
  *
  * =============================================================================
  * BLOCKED PLAYBACK IS NAMED. IT IS NEVER RETURNED TO `idle` IN SILENCE
@@ -100,11 +107,11 @@
  * playback is the ONE outcome a learner most needs named, because it is the
  * one they can act on: unmute the phone, press Preview again.
  *
- * So `playSample` takes three separate callbacks and they mean three separate
- * things — `onEnd` (the sample finished, go back to `idle`), `onBlocked` (the
- * `play()` promise rejected), and `onError` (the element itself failed on the
- * bytes). Collapsing any of them back into a shared handler restores the
- * silence this fixed.
+ * So `playAudioSample` takes three separate callbacks and they mean three
+ * separate things — `onEnded` (the sample finished, go back to `idle`),
+ * `onBlocked` (the `play()` promise rejected), and `onError` (the element
+ * itself failed on the bytes). Collapsing any of them back into a shared
+ * handler restores the silence this fixed.
  *
  * IT IS STILL NOT AN ERROR, and the copy must never say the product is
  * broken — see the `speak` section above. The browser's own voice is reading
@@ -167,6 +174,11 @@ import {
 import VolumeUpIcon from '@mui/icons-material/VolumeUp';
 import visuallyHidden from '@mui/utils/visuallyHidden';
 
+import {
+  acquireAndPrimeAudio,
+  playAudioSample,
+  releaseAudioSample,
+} from '../../lib/audioUnlock';
 import { synthesizeSpeech } from '../../services/api';
 import {
   DEFAULT_VOICE_AUTO_SUBMIT_SPOKEN,
@@ -352,28 +364,7 @@ export function VoiceSettings({
    * replacement would carry none. Discarding it is an unmount-only act, below.
    */
   const releaseSample = useCallback(() => {
-    const audio = audioRef.current;
-    if (audio) {
-      // Off first: a handler still attached while we tear the source down
-      // would report an ending or an error that is ours, not the sample's.
-      audio.onended = null;
-      audio.onerror = null;
-      try {
-        audio.pause();
-      } catch {
-        // An element that will not pause is not worth failing a press over.
-      }
-      audio.removeAttribute('src');
-    }
-    const url = objectUrlRef.current;
-    objectUrlRef.current = null;
-    if (
-      url &&
-      typeof URL !== 'undefined' &&
-      typeof URL.revokeObjectURL === 'function'
-    ) {
-      URL.revokeObjectURL(url);
-    }
+    releaseAudioSample({ audioRef, objectUrlRef });
   }, []);
 
   // Leaving the page silences the sample, lets go of its bytes, and is the ONE
@@ -451,11 +442,11 @@ export function VoiceSettings({
         return;
       }
 
-      const played = playSample(result.audio, {
+      const { attached: played } = playAudioSample(result.audio, {
         audioRef,
         objectUrlRef,
         // Finished. Nothing to say — the learner just heard it.
-        onEnd: () => {
+        onEnded: () => {
           releaseSample();
           setPreview({ kind: 'idle' });
         },
@@ -1088,133 +1079,6 @@ export function VoiceSettings({
       </Card>
     </>
   );
-}
-
-/**
- * A few milliseconds of silent WAV, inline.
- *
- * INLINE RATHER THAN A FILE so priming can never become a network request.
- * A preview costs exactly one synthesis call and nothing else (file header),
- * and an element primed from a URL would add a fetch to every press.
- */
-const SILENT_AUDIO_DATA_URI =
-  'data:audio/wav;base64,UklGRjQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YRAAAAAAAAAAAAAAAAAAAAAAAAAA';
-
-/**
- * Acquire the one audio element and unlock it — CALLED INSIDE THE CLICK.
- *
- * Playing silence and pausing it is the standard autoplay unlock: it makes the
- * element user-activated for the rest of its life, so the `src` swap in
- * `playSample` — which happens a network round trip later, long after the
- * gesture has closed — plays instead of being rejected. See the file header
- * (#383).
- *
- * It must never throw out of a click handler and never make a request. An
- * environment with no `Audio` constructor at all (jsdom) returns `null`, and
- * the preview goes on to say plainly that nothing could be played.
- */
-function acquireAndPrimeAudio(audioRef: {
-  current: HTMLAudioElement | null;
-}): HTMLAudioElement | null {
-  if (typeof Audio === 'undefined') return null;
-
-  let element = audioRef.current;
-  if (!element) {
-    try {
-      element = new Audio();
-    } catch {
-      return null;
-    }
-    audioRef.current = element;
-  }
-  const audio = element;
-
-  try {
-    // Handlers off: priming is not a sample, and must not report itself as one
-    // that ended or failed.
-    audio.onended = null;
-    audio.onerror = null;
-    audio.src = SILENT_AUDIO_DATA_URI;
-    const primedSrc = audio.src;
-
-    const started: unknown = audio.play();
-    if (started && typeof (started as Promise<void>).then === 'function') {
-      void (started as Promise<void>)
-        .then(() => {
-          // Only while the silence is still what is loaded. This resolves on
-          // its own schedule, and pausing here after the real sample has been
-          // swapped in would stop the very audio the press asked for.
-          if (audio.src === primedSrc) audio.pause();
-        })
-        .catch(() => {
-          // A browser that refuses even silence tells us nothing actionable
-          // here; the real `play()` reports for real, and says so out loud.
-        });
-    } else {
-      audio.pause();
-    }
-  } catch {
-    // jsdom has no playback at all. Priming is an optimisation for mobile, not
-    // a precondition — the preview still runs.
-  }
-
-  return audio;
-}
-
-/**
- * Point the ONE unlocked element at synthesized bytes, returning whether
- * playback was started.
- *
- * Deliberately NOT awaited by the caller. `HTMLAudioElement.play()` resolves
- * when playback BEGINS, which in jsdom (and behind an autoplay policy) may be
- * never — so this reports "the element accepted the source and we asked it to
- * play", and the `onEnd` callback reports what actually happened. `false`
- * means there was nothing here that could play at all.
- *
- * IT CONSTRUCTS NOTHING. The element was made and unlocked inside the click by
- * `acquireAndPrimeAudio`; building one here would be building one after an
- * `await`, which is #383.
- */
-function playSample(
-  blob: Blob,
-  ctx: {
-    audioRef: { current: HTMLAudioElement | null };
-    objectUrlRef: { current: string | null };
-    /** The sample played through to its end. */
-    onEnd: () => void;
-    /** `play()` was rejected — most often an autoplay policy or a mute. */
-    onBlocked: () => void;
-    /** The element could not play the bytes it was given. */
-    onError: () => void;
-  },
-): boolean {
-  const audio = ctx.audioRef.current;
-  if (
-    !audio ||
-    typeof URL === 'undefined' ||
-    typeof URL.createObjectURL !== 'function'
-  ) {
-    return false;
-  }
-
-  const url = URL.createObjectURL(blob);
-  ctx.objectUrlRef.current = url;
-
-  audio.onended = ctx.onEnd;
-  audio.onerror = ctx.onError;
-  audio.src = url;
-
-  try {
-    // `onBlocked`, NOT `onEnd`. A rejection here is a browser refusing to make
-    // a sound the learner explicitly asked for, and reporting it as an ordinary
-    // ending is what made #383 invisible from the learner's side.
-    void Promise.resolve(audio.play()).catch(() => ctx.onBlocked());
-  } catch {
-    ctx.onBlocked();
-    return false;
-  }
-
-  return true;
 }
 
 export default VoiceSettings;

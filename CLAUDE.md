@@ -1465,6 +1465,39 @@ learner is sent: `apps/web/src/components/settings/DevicePermissions.tsx`'s
 header carries the full argument, and its tests assert the invariant over
 that file's own source. See [`docs/specs/voice.md`](docs/specs/voice.md) §5.1.
 
+### Playing audio the learner asked for
+
+Same family, one layer down: a mobile browser plays audio only through an
+`HTMLAudioElement` that was itself **started during a user gesture**, and
+every premium-voice surface here synthesizes over the network first — so an
+element built after that `await` is one the press never touched, and both
+Android Chrome and iOS Safari reject its `play()` **silently**. From the
+learner's side the button simply does nothing.
+
+`apps/web/src/lib/audioUnlock.ts` (issues #383, #389) is the one copy of
+that rule; its header carries the full argument and
+[`docs/specs/voice.md`](docs/specs/voice.md) §5.2 records the design. Two
+things a future agent must not get wrong:
+
+- **Prime inside the click, before the first `await`.** Call
+  `acquireAndPrimeAudio` synchronously in the `onClick`, then start the
+  async half detached; `playAudioSample` later only swaps the `src` on that
+  same element. Never construct or prime an audio element in the
+  continuation, and never discard the element between plays — the
+  activation belongs to the element, not the bytes. The three call sites
+  are `VoiceSettings.tsx`, `CoachSettings.tsx` and `QuestionAudio.tsx`.
+- **Never prime on a path with no gesture** — not in a `useEffect`, not on
+  mount, not on navigation. `QuestionAudio`'s `autoPlay` path
+  (`voice.readQuestionsAloud`) is the live case: it primes nothing, on
+  purpose, because there is no activation window to spend and the
+  browser-voice fall-through is the correct design there. `playFromGesture`
+  is the button's entry and the only caller of `acquireAndPrimeAudio` in
+  that file; `runPlay`, which both entries share, primes nothing.
+
+And a refusal is not a completion: `onBlocked` is a separate callback from
+`onEnded`, because "your phone would not play this" and "you have just
+heard it" must not be the same silence (#383).
+
 ### Adding a practice session kind
 
 `practice_sessions.kind` is a five-value Postgres enum — `quick`, `category`,

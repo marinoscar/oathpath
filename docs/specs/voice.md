@@ -814,6 +814,77 @@ reads the browser, live, and makes no authenticated API call at all, which
 is why its registry card declares no `permission` and its route carries no
 gate.
 
+### 5.2 Unlocking playback inside the gesture (issues #383, #389)
+
+The other half of §5.1's question again, one layer down: not "will this
+device permit the microphone" but "will this browser make a sound at all."
+
+A mobile browser plays audio only through an `HTMLAudioElement` that was
+itself started during a user gesture. Every premium-voice surface in this
+application synthesizes over the network first, so an element built in the
+continuation — after the `await` — is an element the press never touched.
+Android Chrome and iOS Safari reject its `play()`, and **they reject it
+silently**: nothing throws, no event fires, and from the learner's side the
+button simply does nothing.
+
+`apps/web/src/lib/audioUnlock.ts` is the one place that rule is written
+down and the one place it is implemented. Its three exports split a play
+into the two halves the browser measures:
+
+- **`acquireAndPrimeAudio(audioRef)`** — synchronous, called in the
+  `onClick` itself, before anything is awaited. It takes ONE element
+  (constructing it only the first time) and plays a **data URI of silence**
+  through it, then pauses it. The silence is load-bearing: some browsers
+  establish the unlock only when playback actually *begins*, and `play()`
+  on a sourceless element rejects before it can, spending the gesture for
+  nothing. It is an inline data URI rather than a file so priming can never
+  become a network request. It never throws — it is called first in a click
+  handler, so anything it threw would take the whole press with it — and
+  returns `null` where there is no `Audio` constructor at all.
+- **`playAudioSample(blob, ctx)`** — a round trip later, it SWAPS the `src`
+  on that already-unlocked element. It never primes.
+- **`releaseAudioSample(refs)`** — pauses, detaches the handlers, drops the
+  `src` and revokes the object URL, and deliberately **keeps the element**.
+  The activation belongs to the element, not to the bytes; a fresh element
+  per play is a fresh lock per play, and the second one was never touched by
+  a gesture. Discarding it is an unmount-only act.
+
+`playAudioSample` reports a **refusal** (`onBlocked`) separately from a
+**completion** (`onEnded`), and `onBlocked` falls back to `onError` — never
+to `onEnded`. That is #383's second half: a rejected `play()` used to run
+the same handler a finished sample runs, so "your phone would not play
+this" and "you have just heard it" were the same empty region on
+`/settings/voice`. Blocked playback is the one outcome a learner can act on
+(unmute the phone, press again), so it is the one that must be named. It is
+still not an error, and the copy must never say the product is broken —
+`VoiceSettings.tsx`'s `PLAYBACK_BLOCKED_MESSAGE` and
+`CoachSettings.tsx`'s `COACH_PLAYBACK_BLOCKED_MESSAGE` are the two worked
+examples.
+
+**`QuestionAudio`'s autoplay path is deliberately not fixable this way, and
+must not be "fixed".** Its `play` callback is reached from two places, and
+only one of them is a gesture:
+
+| Entry | Primes? | Why |
+|---|---|---|
+| `playFromGesture` — the button | **Yes** | A real press, with an activation window to spend. |
+| `play` — the `autoPlay` effect | **Never** | When `voice.readQuestionsAloud` starts a question with no tap there is no gesture to prime from. A `play()` in an effect is refused whether an element was primed or not, so priming there would unlock nothing, and would read to the next person as a promise the component cannot keep. The browser-voice fall-through (§2) is the correct design on that path, and it is unchanged. |
+
+The two entries share one `runPlay`, and `runPlay` primes nothing — which
+is what makes the asymmetry structural rather than a convention. A test
+(`QuestionAudio.unlock.test.tsx`) asserts the autoplay path primes nothing
+directly, because the failure it prevents is an edit that reads as tidying
+up.
+
+Severity differs by surface, and it is worth stating so a future reader
+does not assume all three sites were equally broken. On `/settings/voice`
+and `/settings/coach` a refused `play()` is the whole feature: the Preview
+and Hear buttons do nothing at all. On `QuestionAudio` the fall-through
+catches it and the learner still hears the question — in the free browser
+voice, while paying their own key for the premium one, on every mobile
+browser.
+
+
 ## 6. All inference through the dispatcher, on the caller's key
 
 Every speech call — transcription and synthesis alike — is dispatched
