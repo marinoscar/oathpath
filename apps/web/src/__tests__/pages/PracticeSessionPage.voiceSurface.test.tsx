@@ -21,10 +21,17 @@
  *     existing page with the session, the answered questions and the progress
  *     counter intact — which is structural, because none of those three was
  *     ever in the browser: they are `GET /api/practice/sessions/:id`'s.
+ *  5. **THE SWAP IS PER-TRANSPORT, NOT PER-DRIVER (#381).** Sections 1-4 run
+ *     over E13's request/response loop, whose `conversation.isRunning` was for
+ *     a while the ONLY thing that could open this surface — so on every
+ *     deployment with a `realtime` model bound, which is the ladder's FIRST
+ *     rung and therefore the common case, the surface could never render at
+ *     all and a learner who asked to talk was handed a keyboard. Section 5 is
+ *     that regression, pinned.
  */
 
 import { CssBaseline, ThemeProvider } from '@mui/material';
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
@@ -32,7 +39,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { AiStatusProvider } from '../../contexts/AiStatusContext';
 import { AuthContext } from '../../contexts/AuthContext';
-import PracticeSessionPage from '../../pages/PracticeSessionPage';
+import PracticeSessionPage, {
+  realtimeSessionIsUnderWay,
+  realtimeStageAsPhase,
+} from '../../pages/PracticeSessionPage';
 import { VOICE_SURFACE_TITLE } from '../../components/voice/VoiceSurface';
 import { lightTheme } from '../../theme';
 import type {
@@ -60,7 +70,14 @@ const captureControl = vi.hoisted(() => {
   return {
     listeners,
     state: { status: 'idle' } as { status: string; blob?: Blob },
-    stream: {} as MediaStream,
+    // ENOUGH OF A `MediaStream` FOR BOTH TRANSPORTS. E13's driver only ever
+    // passes it around, but the realtime transport hands its audio tracks to a
+    // peer connection (`services/realtimeConnection.ts`), so a bare `{}` would
+    // throw on `getAudioTracks()` before the surface could ever render.
+    stream: {
+      getTracks: () => [{ kind: 'audio', stop() {} }],
+      getAudioTracks: () => [{ kind: 'audio', stop() {} }],
+    } as unknown as MediaStream,
     set(next: { status: string; blob?: Blob }) {
       this.state = next;
       listeners.forEach((listener) => listener());
@@ -624,5 +641,404 @@ describe('leaving the surface', () => {
     // a keyboard user on a detached node the browser resets to `<body>`.
     expect(field).toHaveFocus();
     expect(screen.getByText('Question 2 of 5')).toBeInTheDocument();
+  });
+});
+
+// -----------------------------------------------------------------------------
+// 5. The realtime transport (#381)
+// -----------------------------------------------------------------------------
+//
+// Everything above pins `realtime` UNBOUND, deliberately, so that it keeps
+// exercising E13's request/response loop. This section is the other transport:
+// the same surface, entered from `realtime.stage` instead of from
+// `conversation.isRunning`.
+//
+// The fakes are `PracticeSessionPage.realtime.test.tsx`'s, kept to the minimum
+// this file needs — a peer connection whose data channel the test opens by
+// hand, so that `connecting` is a stable, observable stage rather than a frame
+// between two awaits.
+// -----------------------------------------------------------------------------
+
+class FakeDataChannel {
+  readyState: 'connecting' | 'open' | 'closed' = 'connecting';
+  onopen: (() => void) | null = null;
+  onclose: (() => void) | null = null;
+  onerror: (() => void) | null = null;
+  onmessage: ((event: MessageEvent) => void) | null = null;
+  send = vi.fn();
+  close = vi.fn(() => {
+    this.readyState = 'closed';
+  });
+}
+
+class FakePeerConnection {
+  connectionState = 'new';
+  channel: FakeDataChannel | null = null;
+  addedTracks: unknown[] = [];
+  ontrack: ((event: { streams: MediaStream[] }) => void) | null = null;
+  onconnectionstatechange: (() => void) | null = null;
+  closed = false;
+
+  constructor() {
+    peerConnections.push(this);
+  }
+  createDataChannel() {
+    this.channel = new FakeDataChannel();
+    return this.channel;
+  }
+  addTrack(track: unknown) {
+    this.addedTracks.push(track);
+  }
+  getReceivers() {
+    return [];
+  }
+  async createOffer() {
+    return { type: 'offer', sdp: 'v=0\r\nfake-offer' };
+  }
+  async setLocalDescription() {}
+  async setRemoteDescription() {}
+  close() {
+    this.closed = true;
+  }
+}
+
+let peerConnections: FakePeerConnection[] = [];
+
+/** The mint's answer. `unavailable` is how this file reaches `fallback`. */
+type MintOutcome = 'ok' | 'unavailable';
+
+/**
+ * The same wire as `installHandlers`, with `realtime` BOUND.
+ *
+ * `transcribe` stays bound too, so that a fallback lands on E13's loop rather
+ * than all the way on text — which is what makes the `fallback` case below able
+ * to assert that a learner can still restart by voice.
+ */
+function installRealtimeHandlers(mint: MintOutcome = 'ok') {
+  const detail = detailFor();
+  const status: AiStatus = {
+    userKeyConfigured: true,
+    systemReady: true,
+    enabled: true,
+    providerConfigured: true,
+    unboundRoles: ['speak'],
+  };
+
+  server.use(
+    http.get(`${API_BASE}/user-settings`, () => HttpResponse.json({ data: stored })),
+    http.patch(`${API_BASE}/user-settings`, () => HttpResponse.json({ data: stored })),
+    http.get(`${API_BASE}/ai/status`, () => HttpResponse.json({ data: status })),
+    http.get(`${API_BASE}/practice/sessions/${SESSION_ID}`, () =>
+      HttpResponse.json({ data: detail }),
+    ),
+    http.post(`${API_BASE}/practice/sessions/${SESSION_ID}/realtime-session`, () =>
+      HttpResponse.json({
+        data:
+          mint === 'ok'
+            ? {
+                status: 'ok',
+                clientSecret: 'ek_ephemeral_secret_for_one_session',
+                expiresAt: '2026-09-01T12:01:00.000Z',
+                modelId: 'gpt-4o-realtime-preview',
+              }
+            : { status: 'unavailable', cause: 'role_unbound' },
+      }),
+    ),
+    http.post(
+      `${API_BASE}/practice/sessions/${SESSION_ID}/realtime/tool-calls`,
+      () =>
+        HttpResponse.json({
+          data: {
+            status: 'ok',
+            tool: 'next_question',
+            say: [QUESTION_1.prompt],
+            then: 'await_answer',
+            questionId: QUESTION_1.id,
+          },
+        }),
+    ),
+    // Browser ↔ provider, directly. Never an API route of this application's.
+    http.post('https://api.openai.com/v1/realtime/calls', () =>
+      HttpResponse.text('v=0\r\nfake-answer'),
+    ),
+  );
+}
+
+/** Choose Voice on a deployment where Voice means the live transport. */
+async function chooseVoice(user: ReturnType<typeof userEvent.setup>) {
+  await screen.findByRole('heading', { level: 2, name: QUESTION_1.prompt });
+  await waitFor(() =>
+    expect(screen.queryByRole('button', { name: /^voice$/i })).not.toBeNull(),
+  );
+  await user.click(screen.getByRole('button', { name: /^voice$/i }));
+  await screen.findByRole('button', { name: /start live voice/i });
+}
+
+/** Press Start and stop at `connecting`: the data channel is left unopened. */
+async function startConnecting(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(screen.getByRole('button', { name: /start live voice/i }));
+}
+
+/** Open the data channel, which is what takes the hook from `connecting` to `live`. */
+async function goLive() {
+  await waitFor(() => expect(peerConnections.length).toBe(1));
+  await act(async () => {
+    const dc = peerConnections[0].channel!;
+    dc.readyState = 'open';
+    dc.onopen?.();
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+}
+
+function typingControlsArePresent(): boolean {
+  return screen.queryByLabelText(/your answer/i) !== null;
+}
+
+beforeEach(() => {
+  peerConnections = [];
+  (globalThis as unknown as { RTCPeerConnection: unknown }).RTCPeerConnection =
+    FakePeerConnection;
+});
+
+afterEach(() => {
+  Reflect.deleteProperty(
+    globalThis as unknown as Record<string, unknown>,
+    'RTCPeerConnection',
+  );
+});
+
+describe('the stage → phase mapping', () => {
+  it('maps the two stages a session is under way in, and nothing else', () => {
+    // The two that matter, and the only two the gate ever renders.
+    expect(realtimeStageAsPhase('connecting')).toBe('preparing');
+    expect(realtimeStageAsPhase('live')).toBe('listening');
+
+    // The three the surface must NOT be showing for. They map to `idle` so the
+    // mapping is total; correctness for them comes from the gate excluding
+    // them, which is the next `describe`.
+    expect(realtimeStageAsPhase('idle')).toBe('idle');
+    expect(realtimeStageAsPhase('fallback')).toBe('idle');
+    expect(realtimeStageAsPhase('ended')).toBe('idle');
+  });
+
+  it('calls exactly `connecting` and `live` a session under way', () => {
+    expect(realtimeSessionIsUnderWay('connecting')).toBe(true);
+    expect(realtimeSessionIsUnderWay('live')).toBe(true);
+    expect(realtimeSessionIsUnderWay('idle')).toBe(false);
+    expect(realtimeSessionIsUnderWay('fallback')).toBe(false);
+    expect(realtimeSessionIsUnderWay('ended')).toBe(false);
+  });
+});
+
+describe('a live realtime session is its own screen — THE #381 REGRESSION GUARD', () => {
+  it('renders the surface, and NOT the typing layout, while the stage is `live`', async () => {
+    const user = userEvent.setup();
+    installRealtimeHandlers();
+    renderSession();
+    await chooseVoice(user);
+    await startConnecting(user);
+    await goLive();
+
+    // THE BUG, IN ONE ASSERTION. Before #381 this branch could not be taken at
+    // all — `conversation.isRunning` is `false` for the whole life of a
+    // realtime session — so a learner who asked to talk fell through to the
+    // ordinary page and was handed the keyboard.
+    expect(await screen.findByRole('region', { name: VOICE_SURFACE_TITLE }))
+      .toBeInTheDocument();
+    expect(screen.queryByLabelText('Your answer')).toBeNull();
+    expect(screen.queryByRole('button', { name: /^submit$/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /show me the answer/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^skip$/i })).toBeNull();
+
+    // And the inline realtime panel is not underneath it either — the early
+    // return is what makes that structural rather than a `display: none`.
+    expect(screen.queryByRole('button', { name: /start live voice/i })).toBeNull();
+    expect(screen.queryByText(/billed by the minute/i)).toBeNull();
+
+    // The surface's own chrome, on the transport that never had it.
+    expect(screen.getAllByRole('heading', { level: 1 })).toHaveLength(1);
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent(
+      VOICE_SURFACE_TITLE,
+    );
+    expect(
+      screen.getByRole('heading', { level: 2, name: QUESTION_1.prompt }),
+    ).toBeInTheDocument();
+    expect(screen.getByText('Question 2 of 5')).toBeInTheDocument();
+    expect(document.body.style.overflow).toBe('hidden');
+  });
+
+  it('renders the surface, and NOT the typing layout, while the stage is `connecting`', async () => {
+    const user = userEvent.setup();
+    installRealtimeHandlers();
+    renderSession();
+    await chooseVoice(user);
+    await startConnecting(user);
+
+    // `connecting` IS a session: the microphone is open and the mint has been
+    // spent on the learner's own key. They are waiting on a voice, not on a
+    // control, and the keyboard is the wrong screen for that.
+    expect(await screen.findByRole('region', { name: VOICE_SURFACE_TITLE }))
+      .toBeInTheDocument();
+    expect(screen.queryByLabelText('Your answer')).toBeNull();
+    expect(screen.queryByRole('button', { name: /^submit$/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /show me the answer/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^skip$/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /start live voice/i })).toBeNull();
+  });
+
+  it('takes the phase sentence from `REALTIME_STAGE_TEXT`, never from E13’s table', async () => {
+    const user = userEvent.setup();
+    installRealtimeHandlers();
+    renderSession();
+    await chooseVoice(user);
+    await startConnecting(user);
+    await goLive();
+
+    // SCOPED TO THE SURFACE, not to the document: the inline realtime panel
+    // renders the identical sentence from the identical table, so an unscoped
+    // query would pass on the very bug this file exists to pin.
+    const [region] = liveRegions(surface());
+    // The live transport's own sentence, from the table its own inline panel
+    // shares with it.
+    expect(region).toHaveTextContent('Live. Talk to the coach whenever you are ready.');
+    // NOT `CONVERSATION_PHASE_TEXT[listening]`, which is the phase this stage
+    // MAPS TO — the mapping decides the picture, never the words. A wiring
+    // that looked the sentence up from the mapped phase would read this, and
+    // would be describing a driver that is not running.
+    expect(region).not.toHaveTextContent('Listening. Answer when you are ready.');
+  });
+
+  it('shows what the provider heard, which is the realtime transport’s own field', async () => {
+    const user = userEvent.setup();
+    installRealtimeHandlers();
+    renderSession();
+    await chooseVoice(user);
+    await startConnecting(user);
+    await goLive();
+
+    // A realtime attempt is recorded by the engine inside the tool-call route
+    // and never sets this page's `result`, so the surface reads
+    // `realtime.heard` on this transport — the same field the inline panel
+    // renders as "Heard: …". Nothing has been said yet, so there is nothing to
+    // show, and the region is the phase sentence alone.
+    const [region] = liveRegions(surface());
+    expect(region).not.toHaveTextContent('We heard');
+  });
+});
+
+describe('leaving the realtime surface', () => {
+  it('Stop stops the REALTIME session, not E13’s driver', async () => {
+    const user = userEvent.setup();
+    installRealtimeHandlers();
+    renderSession();
+    await chooseVoice(user);
+    await startConnecting(user);
+    await goLive();
+
+    // FROM THE SURFACE'S OWN CONTROL. The inline panel has an identically
+    // named Stop, so an unscoped query would be testing the panel — which is
+    // exactly what was on screen before #381.
+    await user.click(within(surface()).getByRole('button', { name: /^stop$/i }));
+
+    // THE CONNECTION IS CLOSED. Stopping E13's driver here would have returned
+    // the learner to the ordinary page with the live connection still open and
+    // still billing by the minute.
+    await waitFor(() => expect(peerConnections[0].closed).toBe(true));
+
+    // Back on the page it left, mid-session, still in Voice, with the control
+    // that starts another one.
+    await waitFor(() =>
+      expect(screen.queryByRole('region', { name: VOICE_SURFACE_TITLE })).toBeNull(),
+    );
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Practice');
+    expect(screen.getByText('Question 2 of 5')).toBeInTheDocument();
+    expect(typingControlsArePresent()).toBe(true);
+    expect(
+      await screen.findByRole('button', { name: /start live voice/i }),
+    ).toBeInTheDocument();
+    expect(document.body.style.overflow).toBe('');
+  });
+
+  it('"Type instead" returns to the typed control and closes the connection', async () => {
+    const user = userEvent.setup();
+    installRealtimeHandlers();
+    renderSession();
+    await chooseVoice(user);
+    await startConnecting(user);
+    await goLive();
+
+    await user.click(within(surface()).getByRole('button', { name: /type instead/i }));
+
+    const field = await screen.findByLabelText(/your answer/i);
+    expect(field).toHaveFocus();
+    expect(screen.getByRole('button', { name: /^text$/i })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    await waitFor(() => expect(peerConnections[0].closed).toBe(true));
+  });
+});
+
+describe('the stages the surface must NOT be showing for', () => {
+  it('`idle`: the ordinary page, with the answer field and the Start control', async () => {
+    const user = userEvent.setup();
+    installRealtimeHandlers();
+    renderSession();
+    await chooseVoice(user);
+
+    expect(screen.queryByRole('region', { name: VOICE_SURFACE_TITLE })).toBeNull();
+    expect(typingControlsArePresent()).toBe(true);
+    expect(
+      screen.getByRole('button', { name: /start live voice/i }),
+    ).toBeInTheDocument();
+    // The panel's own copy, which lives nowhere else.
+    expect(screen.getByText(/billed by the minute/i)).toBeInTheDocument();
+  });
+
+  it('`ended`: the ordinary page comes back, and the Start control with it', async () => {
+    const user = userEvent.setup();
+    installRealtimeHandlers();
+    renderSession();
+    await chooseVoice(user);
+    await startConnecting(user);
+    await goLive();
+    await user.click(within(surface()).getByRole('button', { name: /^stop$/i }));
+
+    await waitFor(() =>
+      expect(screen.queryByRole('region', { name: VOICE_SURFACE_TITLE })).toBeNull(),
+    );
+    expect(typingControlsArePresent()).toBe(true);
+    expect(
+      await screen.findByRole('button', { name: /start live voice/i }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/billed by the minute/i)).toBeInTheDocument();
+  });
+
+  it('`fallback`: the ordinary page, the spoken reason, and a way to go on', async () => {
+    const user = userEvent.setup();
+    installRealtimeHandlers('unavailable');
+    renderSession();
+    await chooseVoice(user);
+    await startConnecting(user);
+
+    // NO SURFACE. A fallback is not a session under way, so the gate keeps it
+    // off the screen exactly as it does for `idle` and `ended`.
+    await waitFor(() =>
+      expect(screen.queryByText(/live voice practice is not set up/i)).not.toBeNull(),
+    );
+    expect(screen.queryByRole('region', { name: VOICE_SURFACE_TITLE })).toBeNull();
+
+    // TYPING ALWAYS WORKS, in every cell of every ladder.
+    expect(typingControlsArePresent()).toBe(true);
+
+    // And the ladder has moved a rung, which is #355's behaviour and not this
+    // change's: the realtime panel is UNMOUNTED on a fallback by definition
+    // (`voiceTransport` is no longer `'realtime'`), and E13's loop is what
+    // Voice means now — so there is still a spoken session one tap away.
+    expect(screen.queryByRole('button', { name: /start live voice/i })).toBeNull();
+    expect(
+      await screen.findByRole('button', { name: /start hands-free/i }),
+    ).toBeInTheDocument();
   });
 });

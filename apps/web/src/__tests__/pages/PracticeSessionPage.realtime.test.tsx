@@ -602,12 +602,17 @@ describe('exactly one live `getUserMedia` stream, per page', () => {
     expect(liveStreamCount()).toBe(1);
 
     // Back to typing: the connection ends and the microphone goes out with it.
-    await user.click(screen.getByRole('button', { name: /^text$/i }));
+    //
+    // FROM THE VOICE SURFACE, not from the `Text` button (#381). A live session
+    // is now a different screen — the picker is not on it, by design — and
+    // "Type instead" is the control that leaves it. It runs the identical
+    // `handleTypeInstead`, so this is the same mode switch it always was.
+    await user.click(screen.getByRole('button', { name: /type instead/i }));
     await waitFor(() => expect(liveStreamCount()).toBe(0));
     expect(peerConnections[0].closed).toBe(true);
 
     // And back to Voice again — still never two at once.
-    await user.click(voiceOption() as HTMLElement);
+    await user.click(await screen.findByRole('button', { name: /^voice$/i }));
     await startLiveVoice(user, 2);
     expect(liveStreamCount()).toBe(1);
     expect(getUserMedia).toHaveBeenCalledTimes(2);
