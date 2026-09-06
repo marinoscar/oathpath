@@ -748,17 +748,39 @@ export function realtimeSessionIsUnderWay(stage: RealtimePracticeStage): boolean
  * is `phaseText`, which every transport passes from its OWN table — see that
  * prop's doc comment — so this mapping is never asked to produce words.
  *
- * The two stages that matter map to the two phases that describe them:
+ * The two stages that matter map to the phases that describe them:
  *
  *   * `connecting` → `preparing`, the phase #349 added for exactly this span —
  *     the microphone dialogue and the round trip before the first word. It
  *     draws "Thinking", which is what a learner needs from the picture while
  *     the application is busy and it is not yet their turn.
- *   * `live` → `listening`. A full-duplex session's microphone is open for the
- *     whole of it: it is ALWAYS the learner's turn, which is precisely what
- *     `listening` says. There is no realtime stage for "the coach is speaking"
- *     — barge-in means the learner may talk over it — so collapsing to one
- *     picture is the honest rendering rather than a lossy one.
+ *   * `live` → `speakingQuestion` WHILE THE COACH IS TALKING, `listening`
+ *     otherwise.
+ *
+ * -----------------------------------------------------------------------------
+ * WHY `live` IS NOT ONE PICTURE (#386)
+ * -----------------------------------------------------------------------------
+ *
+ * This function used to collapse `live` to `listening` unconditionally, on the
+ * argument that a full-duplex microphone is open for the whole session so it is
+ * always the learner's turn. The argument confuses two different questions, and
+ * a 77-second device recording showed what it costs: the surface read
+ * "Listening" for 38 of 38 sampled frames — including the seconds the coach was
+ * reading a question aloud — so a learner glancing at the phone was invited to
+ * answer a question that had not finished being asked.
+ *
+ * THE PICTURE DESCRIBES WHAT THE COACH IS DOING. It is not a gate, a
+ * permission, or a statement about the microphone: barge-in is available at
+ * every moment of a `live` session, exactly as it was before, and
+ * `REALTIME_STAGE_TEXT.live` ("Live. Talk to the coach whenever you are ready.")
+ * is the sentence that says so. What changes is only that "Speaking" now means
+ * the coach is speaking, which `useRealtimePractice` has published as
+ * `isCoachSpeaking` since #355 and this screen simply ignored.
+ *
+ * `speakingQuestion` rather than `speakingAnswer` is arbitrary between the two:
+ * `voiceVisualState` maps both to the same `speaking` picture, and on this
+ * transport the coach's question and its verdict are one continuous stream with
+ * no boundary this side can see.
  *
  * THE OTHER THREE ARE THE STAGES THE SURFACE MUST NOT BE SHOWING AT ALL, and
  * `realtimeSessionIsUnderWay` is what keeps it off the screen for them. They
@@ -769,12 +791,15 @@ export function realtimeSessionIsUnderWay(stage: RealtimePracticeStage): boolean
  * this function returns for them. `idle` is the right last resort even so: it
  * draws "Paused", and none of the three is a session in progress.
  */
-export function realtimeStageAsPhase(stage: RealtimePracticeStage): ConversationPhase {
+export function realtimeStageAsPhase(
+  stage: RealtimePracticeStage,
+  isCoachSpeaking: boolean,
+): ConversationPhase {
   switch (stage) {
     case 'connecting':
       return 'preparing';
     case 'live':
-      return 'listening';
+      return isCoachSpeaking ? 'speakingQuestion' : 'listening';
     case 'idle':
     case 'fallback':
     case 'ended':
@@ -1861,6 +1886,26 @@ export default function PracticeSessionPage() {
   }, [realtimeQuestionId, realtimeStage, refresh]);
 
   /**
+   * When E13's request/response loop started, for the surface's cost clock.
+   *
+   * ISSUE #387. The realtime transport publishes its own `startedAt`; this is
+   * the same fact for the other spoken transport, and it is held here rather
+   * than inside `useConversationSession` because it is the PAGE that decides
+   * which transport the surface is rendering for and therefore which start it
+   * shows. `null` while nothing is running, so a stopped-and-restarted loop
+   * gets a new clock rather than resuming the old one.
+   */
+  const conversationIsRunning = conversation.isRunning;
+  const [conversationStartedAt, setConversationStartedAt] = useState<number | null>(
+    null,
+  );
+  useEffect(() => {
+    setConversationStartedAt((current) =>
+      conversationIsRunning ? (current ?? Date.now()) : null,
+    );
+  }, [conversationIsRunning]);
+
+  /**
    * Land on the mode the learner asked for, once.
    *
    * TWO SOURCES, AND THE TAP OUTRANKS THE PREFERENCE (#350, epic #345):
@@ -2305,7 +2350,20 @@ export default function PracticeSessionPage() {
   // The states that are not a question
   // ---------------------------------------------------------------------------
 
-  if (isLoading) {
+  // THE SPINNER IS FOR THE FIRST READ ONLY (#387).
+  //
+  // `usePracticeSession.refresh` sets `isLoading` on EVERY re-read, and this
+  // page re-reads on every question — after a typed attempt, and on every
+  // change of `realtime.questionId`. A bare `if (isLoading)` therefore replaced
+  // the whole page with a spinner once per question, which unmounted whatever
+  // was on screen and mounted a fresh copy when the request returned: on the
+  // voice surface that meant a full-screen flash mid-session and, because that
+  // component's elapsed clock started at MOUNT, a cost timer that restarted on
+  // every question (measured at 0:09, then 0:04, then 0:11 across a 68-second
+  // session). `detail` is what the page renders from, so once there is one, a
+  // refresh is a background read and the screen keeps rendering the session it
+  // already has.
+  if (isLoading && !detail) {
     return (
       <Container maxWidth="md" disableGutters>
         <Box role="status" aria-live="polite" aria-label="Loading your session">
@@ -2448,9 +2506,15 @@ export default function PracticeSessionPage() {
       <VoiceSurface
         phase={
           surfaceIsRealtime
-            ? realtimeStageAsPhase(realtime.stage)
+            ? realtimeStageAsPhase(realtime.stage, realtime.isCoachSpeaking)
             : conversation.phase
         }
+        // THE RUNNING TRANSPORT'S OWN SESSION START (#387), never the mount.
+        // The surface measures one continuous span — the session a learner is
+        // paying for by the minute — and it is remounted by anything that
+        // briefly takes it off the screen, so mount time is not that span. See
+        // `VoiceSurface`'s own `startedAt` comment.
+        startedAt={surfaceIsRealtime ? realtime.startedAt : conversationStartedAt}
         // THE SAME TABLE THE RUNNING DRIVER SPEAKS FROM — its own, never the
         // other's. Two renderings of one fact, per transport: that is why this
         // is a prop rather than a lookup inside `VoiceSurface` (its own doc
