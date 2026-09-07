@@ -843,6 +843,336 @@ describe('the cost clock measures the session, not a mount', () => {
   });
 });
 
+// -----------------------------------------------------------------------------
+// Issue #399: the coach's own voice must never become a recorded answer
+// -----------------------------------------------------------------------------
+
+describe('the microphone-heard guard (#399)', () => {
+  it('fails open: with no transcription ever observed on this connection, grade_answer is still relayed', async () => {
+    // NOT A SINGLE transcription event is emitted anywhere in this test — the
+    // deployment this connection represents may not transcribe input at all
+    // (an older API behind a cached bundle, a model that ignores the field).
+    // Enforcing "nothing heard" on absence here would refuse EVERY answer of
+    // EVERY session on such a deployment, which is worse than the bug #399
+    // fixes.
+    toolResults = [
+      nothingOutstanding(),
+      askedResult(),
+      {
+        status: 'ok',
+        tool: 'grade_answer',
+        say: ['That is right.'],
+        then: 'ask_next_question',
+        questionId: null,
+      },
+    ];
+    const view = renderRealtime();
+    await act(async () => view.result.current.start());
+    await completeHandshake();
+    await waitFor(() => expect(toolCalls.length).toBe(2));
+
+    await modelCalls('grade_answer', {
+      questionId: 'question-1',
+      transcript: 'the Constitution',
+    });
+    await waitFor(() => expect(toolCalls.length).toBe(3));
+
+    // POSTED, not refused.
+    expect(toolCalls[2]).toEqual({
+      tool: 'grade_answer',
+      questionId: 'question-1',
+      transcript: 'the Constitution',
+    });
+  });
+
+  it('arms on the first observed transcription, then refuses a grade_answer for a turn the microphone heard nothing in — and resets on the next question', async () => {
+    toolResults = [
+      nothingOutstanding(),
+      askedResult(), // question-1
+      {
+        status: 'ok',
+        tool: 'grade_answer',
+        say: ['Correct.'],
+        then: 'ask_next_question',
+        questionId: null,
+      },
+      askedResult({ questionId: 'question-2', say: ['Second question?'] }),
+    ];
+    const view = renderRealtime();
+    await act(async () => view.result.current.start());
+    await completeHandshake();
+    await waitFor(() => expect(toolCalls.length).toBe(2));
+
+    // Turn 1: the learner is heard, so grading proceeds normally — and this
+    // is also the event that ARMS the guard for every turn after it.
+    await emit({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'item-learner-1',
+      transcript: 'the Constitution',
+    });
+    await modelCalls('grade_answer', {
+      questionId: 'question-1',
+      transcript: 'the Constitution',
+    });
+    await waitFor(() => expect(toolCalls.length).toBe(3));
+    expect(toolCalls[2]).toEqual({
+      tool: 'grade_answer',
+      questionId: 'question-1',
+      transcript: 'the Constitution',
+    });
+
+    // The model asks for the next question — an HONOURED result that moves
+    // the outstanding question on, which is exactly when #399 says a new
+    // turn begins and the heard flag resets.
+    await modelCalls('next_question', {}, 'call-next');
+    await waitFor(() => expect(toolCalls.length).toBe(4));
+    expect(toolCalls[3]).toEqual({ tool: 'next_question' });
+
+    // Turn 2: NOTHING is transcribed this time — the coach's own voice, an
+    // acoustic dead spot, anything. The guard is now armed (turn 1 proved
+    // this deployment transcribes), so this call is refused HERE and never
+    // reaches the relay route.
+    await modelCalls(
+      'grade_answer',
+      { questionId: 'question-2', transcript: 'a fabricated answer' },
+      'call-grade-2',
+    );
+
+    // NEVER POSTED — this is the assertion that means "no practice_attempts
+    // row was written for an answer nobody gave".
+    expect(toolCalls).toHaveLength(4);
+
+    const rejection = toolOutputs().find((o) => o.call_id === 'call-grade-2');
+    expect(rejection?.output).toMatchObject({
+      status: 'rejected',
+      tool: 'grade_answer',
+      reason: 'nothing_heard',
+      instruction: expect.stringContaining('repeat_question'),
+    });
+
+    // AND THE SESSION IS STILL LIVE. One unheard call is not a failure.
+    expect(view.result.current.stage).toBe('live');
+  });
+
+  it('honours a grade_answer again once the learner is heard on a later turn', async () => {
+    toolResults = [
+      nothingOutstanding(),
+      askedResult(),
+      {
+        status: 'ok',
+        tool: 'grade_answer',
+        say: ['Correct.'],
+        then: 'ask_next_question',
+        questionId: null,
+      },
+      askedResult({ questionId: 'question-2', say: ['Second question?'] }),
+      {
+        status: 'ok',
+        tool: 'grade_answer',
+        say: ['Also correct.'],
+        then: 'ask_next_question',
+        questionId: null,
+      },
+    ];
+    const view = renderRealtime();
+    await act(async () => view.result.current.start());
+    await completeHandshake();
+    await waitFor(() => expect(toolCalls.length).toBe(2));
+
+    // Arm the guard on turn 1.
+    await emit({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'item-learner-1',
+      transcript: 'the Constitution',
+    });
+    await modelCalls(
+      'grade_answer',
+      { questionId: 'question-1', transcript: 'the Constitution' },
+      'call-grade-1',
+    );
+    await waitFor(() => expect(toolCalls.length).toBe(3));
+
+    await modelCalls('next_question', {}, 'call-next');
+    await waitFor(() => expect(toolCalls.length).toBe(4));
+
+    // Turn 2: heard this time, so the guard is a no-op and grading proceeds.
+    // A DIFFERENT call id from turn 1's grade_answer — the connection's own
+    // per-call de-duplication (issue #385) would otherwise drop this one as
+    // an already-relayed call, which is a fact about the fake model in this
+    // test, not about the guard under test.
+    await emit({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'item-learner-2',
+      transcript: 'freedom of speech',
+    });
+    await modelCalls(
+      'grade_answer',
+      { questionId: 'question-2', transcript: 'freedom of speech' },
+      'call-grade-3',
+    );
+    await waitFor(() => expect(toolCalls.length).toBe(5));
+    expect(toolCalls[4]).toEqual({
+      tool: 'grade_answer',
+      questionId: 'question-2',
+      transcript: 'freedom of speech',
+    });
+  });
+});
+
+describe('the coach-echo guard (#399, lib/coachEcho.ts)', () => {
+  it('refuses a grade_answer reporting the coach’s own last words, then relays a genuine answer for the same turn', async () => {
+    toolResults = [
+      nothingOutstanding(),
+      askedResult({ say: ['Where is the Statue of Liberty?'] }),
+      {
+        status: 'ok',
+        tool: 'grade_answer',
+        say: ['That is right.'],
+        then: 'ask_next_question',
+        questionId: null,
+      },
+    ];
+    const view = renderRealtime();
+    await act(async () => view.result.current.start());
+    await completeHandshake();
+    await waitFor(() => expect(toolCalls.length).toBe(2));
+
+    // The coach finished asking the question — its OWN transcript of its OWN
+    // output, exactly what `coachSpeech` stores as `coachUtteranceRef`.
+    await emit({
+      type: 'response.output_audio_transcript.done',
+      item_id: 'item-officer-1',
+      transcript: 'Where is the Statue of Liberty?',
+    });
+
+    // The microphone has to have heard SOMETHING this turn, or the
+    // nothing_heard guard refuses it before the echo guard is ever reached —
+    // armed here with a learner transcription of the SAME echoed words,
+    // which is exactly what an acoustic echo produces.
+    await emit({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'item-learner-1',
+      transcript: 'Where is the Statue of Liberty?',
+    });
+
+    await modelCalls(
+      'grade_answer',
+      { questionId: 'question-1', transcript: 'Where is the Statue of Liberty?' },
+      'call-echo',
+    );
+
+    // NEVER POSTED.
+    expect(toolCalls).toHaveLength(2);
+    const rejection = toolOutputs().find((o) => o.call_id === 'call-echo');
+    expect(rejection?.output).toMatchObject({
+      status: 'rejected',
+      tool: 'grade_answer',
+      reason: 'echoed_question',
+      instruction: expect.stringContaining('repeat_question'),
+    });
+
+    // A GENUINE answer for the same turn (the heard flag is still armed) is
+    // relayed normally — the echo guard never touches an answer that is not
+    // the coach's own words coming back.
+    await modelCalls(
+      'grade_answer',
+      { questionId: 'question-1', transcript: 'New York Harbor' },
+      'call-genuine',
+    );
+    await waitFor(() => expect(toolCalls.length).toBe(3));
+    expect(toolCalls[2]).toEqual({
+      tool: 'grade_answer',
+      questionId: 'question-1',
+      transcript: 'New York Harbor',
+    });
+  });
+});
+
+describe('the provider-error notice recovers on an honoured result (#399)', () => {
+  it('clears on the next HONOURED tool result', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      toolResults = [
+        nothingOutstanding(),
+        askedResult(),
+        askedResult({ questionId: 'question-2', say: ['Next question?'] }),
+      ];
+      const view = renderRealtime();
+      await act(async () => view.result.current.start());
+      await completeHandshake();
+      await waitFor(() => expect(view.result.current.stage).toBe('live'));
+
+      await emit({
+        type: 'error',
+        error: {
+          type: 'invalid_request_error',
+          code: 'conversation_already_has_active_response',
+          message: 'Conversation already has an active response.',
+        },
+      });
+      expect(view.result.current.notice?.message).toBe(
+        REALTIME_PRACTICE_PROVIDER_ERROR_LINE,
+      );
+
+      // An HONOURED result: the model calls a tool and the engine accepts it.
+      await modelCalls('next_question', {}, 'call-recover');
+      await waitFor(() => expect(toolCalls.length).toBe(3));
+
+      expect(view.result.current.notice).toBeNull();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('does NOT clear on a REJECTED result — the session moved, but nothing was shown to be working', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const duplicate = {
+        status: 'rejected',
+        tool: 'grade_answer',
+        reason: 'already_answered',
+        error: 'That question already has a recorded answer.',
+        instruction: 'Call next_question and say what it returns.',
+      };
+      toolResults = [nothingOutstanding(), askedResult(), duplicate];
+      const view = renderRealtime();
+      await act(async () => view.result.current.start());
+      await completeHandshake();
+      await waitFor(() => expect(view.result.current.stage).toBe('live'));
+
+      await emit({
+        type: 'error',
+        error: {
+          type: 'invalid_request_error',
+          code: 'conversation_already_has_active_response',
+          message: 'Conversation already has an active response.',
+        },
+      });
+      expect(view.result.current.notice?.message).toBe(
+        REALTIME_PRACTICE_PROVIDER_ERROR_LINE,
+      );
+
+      await emit({
+        type: 'conversation.item.input_audio_transcription.completed',
+        item_id: 'item-learner-1',
+        transcript: 'the Constitution',
+      });
+      await modelCalls('grade_answer', {
+        questionId: 'question-1',
+        transcript: 'the Constitution',
+      });
+      await waitFor(() => expect(toolCalls.length).toBe(3));
+
+      // STILL SET.
+      expect(view.result.current.notice?.message).toBe(
+        REALTIME_PRACTICE_PROVIDER_ERROR_LINE,
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
+
 describe('the learner’s API key is nowhere near this hook', () => {
   it('sends only the ephemeral secret to the provider, and stores nothing', async () => {
     toolResults = [nothingOutstanding(), askedResult()];

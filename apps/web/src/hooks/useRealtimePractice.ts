@@ -22,6 +22,18 @@
  * somebody adding "just a little" client-side bookkeeping to make a screen
  * nicer.
  *
+ * THE TWO EXCEPTIONS, AND NEITHER IS A SECOND OPINION (issue #399). A
+ * `grade_answer` is refused here, and never posted, when the provider
+ * transcribed no learner speech at all this turn, and when the transcript it
+ * reports is the coach's own last utterance coming back through the
+ * microphone. Both are questions about PROVENANCE — did these words come from
+ * the learner? — and neither reads a transcript for meaning, compares anything
+ * to an accepted answer, or forms a verdict. What they buy is that an answer
+ * nobody gave cannot become a `practice_attempts` row, which is a fact only
+ * this process holds the evidence for. See `heardThisTurnRef` for the first,
+ * `transcriptionSeenRef` for why absence alone is never enough to refuse on,
+ * and `lib/coachEcho.ts` for the second.
+ *
  * A REFUSAL IS A NORMAL RESULT, NOT AN ERROR. The route answers a rejected
  * tool call with HTTP 200 and an `instruction` field, and relaying that
  * instruction verbatim is what gets the session moving again. Treating it as a
@@ -110,6 +122,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 
+import { isLikelyCoachEcho } from '../lib/coachEcho';
 import {
   createPracticeRealtimeSession,
   sendPracticeRealtimeToolCall,
@@ -352,8 +365,10 @@ export interface UseRealtimePracticeReturn {
   /**
    * The learner's own last words, as the PROVIDER heard them.
    *
-   * Rendered so they can see they were heard — never so this hook can decide
-   * anything about it. Nothing here compares it to anything.
+   * Rendered so they can see they were heard. Nothing here compares its WORDS
+   * to anything — the one decision taken from learner speech (#399) is taken
+   * from whether any arrived this turn, never from what it said, and the
+   * grading ladder is still the engine's alone.
    */
   heard: string | null;
 
@@ -456,15 +471,49 @@ function localRejection(
   tool: string,
   reason: string,
   error: string,
+  instruction = 'Call next_question and say what it returns.',
 ): Record<string, unknown> {
   return {
     tool,
     status: 'rejected',
     reason,
     error,
-    instruction: 'Call next_question and say what it returns.',
+    instruction,
   };
 }
+
+/**
+ * The instruction a `grade_answer` gets when the microphone heard nothing.
+ *
+ * WORDED LIKE THE ENGINE'S OWN `emptyTranscriptRejection`, deliberately — that
+ * refusal covers the neighbouring case ("that call carried no answer") and this
+ * one covers "that call carried an answer we can find no evidence of". Both end
+ * the same way: ask again, take no decision on the learner's behalf, and never
+ * record something they did not say.
+ *
+ * `repeat_question` rather than `next_question`, because the question is still
+ * outstanding — the engine would refuse a `next_question` with
+ * `answer_outstanding` and the turn would cost a round trip to arrive back
+ * here. Read aloud again, it is also the only thing the learner needs: they are
+ * about to hear the question they were trying to answer.
+ */
+const NOTHING_HEARD_INSTRUCTION =
+  'Call repeat_question and say what it returns. Do not call skip_question ' +
+  'unless the learner has asked to move on, and never report an answer they ' +
+  'did not give.';
+
+/**
+ * The instruction a `grade_answer` gets when it reported the coach's own words.
+ *
+ * The same two moves {@link NOTHING_HEARD_INSTRUCTION} offers, for the same
+ * reason — the learner has still not answered — with one addition the model can
+ * act on: waiting. An echo means the question reached the room; what has not
+ * happened yet is a reply to it.
+ */
+const ECHOED_QUESTION_INSTRUCTION =
+  'That was your own voice coming back, not the learner. Call repeat_question ' +
+  'and say what it returns, then wait for their reply. Never report an answer ' +
+  'they did not give.';
 
 export function useRealtimePractice(
   options: UseRealtimePracticeOptions,
@@ -509,6 +558,91 @@ export function useRealtimePractice(
    */
   const borrowedRef = useRef(false);
   const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // ---------------------------------------------------------------------------
+  // DID THE MICROPHONE HEAR ANYTHING THIS TURN? (issue #399)
+  // ---------------------------------------------------------------------------
+  //
+  // The one check on this transport that is not a relay, and it is here rather
+  // than server-side because the evidence exists only here: the provider's
+  // transcription of the LEARNER'S INPUT AUDIO arrives on the browser's own
+  // data channel and reaches no other process. Until #399 it was rendered and
+  // otherwise discarded, so what the model CLAIMED it heard was never set
+  // against what the microphone actually picked up — and a model grading its
+  // own voice returning through a loudspeaker was believed all the way into a
+  // `practice_attempts` row, about an answer nobody gave.
+  //
+  // IT DECIDES NOTHING ABOUT CORRECTNESS. It does not read the transcript, does
+  // not compare it to an answer and does not know what a right answer is; it
+  // asks only whether the learner's microphone produced ANY speech since the
+  // current question was asked. The grading ladder is still the engine's, and
+  // still the only one.
+
+  /**
+   * Has the provider transcribed any learner speech since this question was
+   * asked?
+   *
+   * RESET WHEN A QUESTION IS ASKED, never on a timer: a turn is bounded by the
+   * question it belongs to, and a clock would decide that a learner who thought
+   * for eleven seconds had not spoken.
+   */
+  const heardThisTurnRef = useRef(false);
+
+  /**
+   * Has this hook EVER seen the provider transcribe learner input?
+   *
+   * THE DIFFERENCE BETWEEN "TRANSCRIBED NOTHING" AND "DOES NOT TRANSCRIBE", and
+   * without it the guard above is a brick rather than a safeguard. A realtime
+   * session only transcribes its input when the mint asked it to (it now does —
+   * `openai.provider.ts`'s `DEFAULT_REALTIME_TRANSCRIPTION_MODEL`), and a
+   * deployment where that never reaches the provider — an older API behind a
+   * cached bundle, a model that ignores the field — would produce no
+   * transcription events at all. Enforcing on absence there would refuse EVERY
+   * answer of every session, which is a far worse failure than the one being
+   * fixed.
+   *
+   * So the guard arms itself only once this connection has PROVEN the provider
+   * transcribes: fail open until then, closed ever after. It is monotonic and
+   * never reset, including across a re-mint, because it describes the
+   * deployment rather than the connection.
+   */
+  const transcriptionSeenRef = useRef(false);
+
+  /** The question the engine last said was outstanding. A join key, not a verdict. */
+  const lastQuestionIdRef = useRef<string | null>(null);
+
+  /**
+   * The last thing the coach finished saying, as the provider transcribed its
+   * own output.
+   *
+   * HELD FOR ONE PURPOSE ONLY (#399): so a `grade_answer` reporting those exact
+   * words can be recognised as the loudspeaker rather than the learner. See
+   * `lib/coachEcho.ts`, which is where the comparison lives and where its
+   * limits are argued.
+   *
+   * ONLY THE LAST COMPLETED UTTERANCE, not a history. An echo is of what was
+   * just played, and keeping a transcript of the session would be keeping the
+   * coach's every word to compare answers against — a much larger surface, for
+   * a case that does not happen.
+   */
+  const coachUtteranceRef = useRef<string | null>(null);
+
+  /** Start a fresh turn: nothing has been heard for the question just asked. */
+  const beginTurn = useCallback(() => {
+    heardThisTurnRef.current = false;
+  }, []);
+
+  /**
+   * May a `grade_answer` be relayed at all?
+   *
+   * `true` when the microphone produced speech this turn — and also when this
+   * deployment has never been observed transcribing input, for the reason
+   * {@link transcriptionSeenRef} states.
+   */
+  const heardSomethingThisTurn = useCallback(
+    () => heardThisTurnRef.current || !transcriptionSeenRef.current,
+    [],
+  );
 
   // ---------------------------------------------------------------------------
   // Ending a session
@@ -668,6 +802,39 @@ export function useRealtimePractice(
       if (!isMounted()) return result;
 
       if (result.status === 'ok') {
+        // THE SESSION HAS DEMONSTRABLY RECOVERED (#399), so whatever the last
+        // provider error said stops being true here.
+        //
+        // `providerError` sets a notice and, until this line, only a reconnect
+        // or the learner's own dismissal cleared it — so ONE turn-level
+        // rejection at eight seconds branded the remaining thirty-nine of a
+        // working session with "the voice connection hit a snag". That message
+        // is about a turn, and its own doc comment says the session usually
+        // keeps running; a sentence that outlives the thing it describes is a
+        // sentence a learner reads as the app being broken.
+        //
+        // AN HONOURED TOOL RESULT IS THE PROOF, and it is the strongest one
+        // available: the model called a tool, the engine accepted it, and the
+        // coach is about to speak. A REJECTED result deliberately does not
+        // clear it — the session moved, but nothing was shown to be working.
+        // Nothing here says anything new; it only stops saying something that
+        // has stopped being so.
+        setNotice(null);
+
+        // A NEW TURN BEGINS WHEN A QUESTION IS ASKED (#399), which is exactly
+        // these two cases: a tool that puts a question in the air, and any
+        // honoured result that moved the outstanding question on. Never a
+        // timer — see `heardThisTurnRef`. `repeat_question` counts because the
+        // learner is being asked again and has not answered yet.
+        if (
+          call.tool === 'next_question' ||
+          call.tool === 'repeat_question' ||
+          result.questionId !== lastQuestionIdRef.current
+        ) {
+          beginTurn();
+        }
+        lastQuestionIdRef.current = result.questionId;
+
         setQuestionId(result.questionId);
         if (result.then === 'session_complete') {
           // §10's first close condition. The engine — not this hook and not the
@@ -691,7 +858,7 @@ export function useRealtimePractice(
 
       return result;
     },
-    [endSession, isMounted, touchIdle],
+    [beginTurn, endSession, isMounted, touchIdle],
   );
 
   /** Turn one tool call from the model into an HTTP relay. */
@@ -725,9 +892,66 @@ export function useRealtimePractice(
         return;
       }
 
+      // ---- THE ONE CALL THAT IS NOT RELAYED UNCONDITIONALLY (#399) ---------
+      //
+      // A `grade_answer` for a turn in which the microphone produced no speech
+      // at all is refused HERE, and it never reaches
+      // `POST /api/practice/sessions/:id/realtime/tool-calls` — so no
+      // `practice_attempts` row can be written for it, whatever the acoustics
+      // in the room. The engine cannot make this check itself: the evidence is
+      // the provider's transcription of the learner's input audio, which
+      // arrives on this data channel and nowhere else.
+      //
+      // NOT A FALLBACK, NOT A TEARDOWN AND NOT AN ERROR ON SCREEN. The session
+      // is working; one call was not honoured. The model is handed the same
+      // refusal shape every other locally-refused call gets, and its
+      // instruction asks for the question to be read again — so a learner who
+      // was talked over simply hears it a second time.
+      if (call.tool === 'grade_answer' && !heardSomethingThisTurn()) {
+        connectionRef.current?.sendToolResult(
+          event.callId,
+          localRejection(
+            'grade_answer',
+            'nothing_heard',
+            'Your microphone picked up no speech since that question was asked.',
+            NOTHING_HEARD_INSTRUCTION,
+          ),
+        );
+        return;
+      }
+
+      // ---- AND THE SAME REFUSAL FOR THE COACH'S OWN VOICE (#399) -----------
+      //
+      // NOT REDUNDANT ALONGSIDE THE CHECK ABOVE, and it is worth saying why
+      // rather than leaving it to look like belt and braces. That check catches
+      // a `grade_answer` with no learner audio behind it at all. An ACOUSTIC
+      // echo is the opposite case: the coach's voice really does arrive at the
+      // microphone, the provider really does transcribe it as learner input,
+      // and the turn therefore reads as heard. The two guards cover the two
+      // ways a fabricated attempt reaches the engine, and neither covers the
+      // other's.
+      //
+      // A PROVENANCE TEST, NOT A GRADING ONE — `lib/coachEcho.ts` carries the
+      // rule and the argument for how blunt it is.
+      if (
+        call.tool === 'grade_answer' &&
+        isLikelyCoachEcho(call.transcript, coachUtteranceRef.current)
+      ) {
+        connectionRef.current?.sendToolResult(
+          event.callId,
+          localRejection(
+            'grade_answer',
+            'echoed_question',
+            'That was the question coming back through the microphone, not an answer.',
+            ECHOED_QUESTION_INSTRUCTION,
+          ),
+        );
+        return;
+      }
+
       void relay(call, event.callId);
     },
-    [relay],
+    [heardSomethingThisTurn, relay],
   );
 
   /**
@@ -945,6 +1169,13 @@ export function useRealtimePractice(
   const coachSpeech = useCallback(
     (event: RealtimeSpeechEvent) => {
       touchIdle();
+      // KEPT, NOT RENDERED (#399). The completed utterance is what an echo
+      // would be an echo OF — see `coachUtteranceRef`. Only the `done` event,
+      // because a delta is half a sentence and half a sentence would match
+      // things the whole one does not.
+      if (event.done && event.text.trim() !== '') {
+        coachUtteranceRef.current = event.text;
+      }
       if (!isMounted()) return;
       setIsCoachSpeaking(!event.done);
     },
@@ -956,10 +1187,26 @@ export function useRealtimePractice(
   const learnerSpeech = useCallback(
     (event: RealtimeSpeechEvent) => {
       touchIdle();
+
+      // THE ONE THING THIS EVENT IS NOW READ FOR (#399): whether there was any
+      // learner speech at all this turn. Not its words, not their meaning —
+      // only that the microphone produced some. Deltas count as much as the
+      // final event: a learner who was cut off mid-answer still spoke.
+      //
+      // BEFORE THE MOUNT CHECK, on purpose. The flags are what the next
+      // `grade_answer` is measured against, and a hook whose component has
+      // unmounted still owns a live connection until its teardown runs — an
+      // utterance dropped here would become an answer that could not be
+      // accounted for.
+      if (event.text.trim() !== '') {
+        transcriptionSeenRef.current = true;
+        heardThisTurnRef.current = true;
+      }
+
       if (!isMounted()) return;
-      // DISPLAY ONLY. It is not compared to anything, not stored, and not sent
-      // anywhere — what reaches the engine is the transcript the MODEL reports
-      // on its own `grade_answer` call.
+      // DISPLAY. What reaches the engine is still the transcript the MODEL
+      // reports on its own `grade_answer` call — this is never sent anywhere
+      // and is never compared to an answer.
       if (event.done) setHeard(event.text || null);
     },
     [isMounted, touchIdle],
@@ -976,6 +1223,11 @@ export function useRealtimePractice(
    * which is what a learner needs. The session is left running because most of
    * these end a single turn — falling back here would close a live, working
    * connection over a hiccup the next question would not have noticed.
+   *
+   * AND IT IS NO LONGER PERMANENT (#399). Because most of these end one turn,
+   * the notice this sets is cleared by the next honoured tool result in
+   * `relay` — the session saying, in the only way it can, that the turn it
+   * described is over.
    */
   const providerError = useCallback(
     (error: RealtimeProviderError) => {

@@ -103,11 +103,68 @@ const EVENT_CHANNEL = 'oai-events';
  * So the payload is a frozen constant with no interpolation and no caller
  * input, and a test asserts that what goes on the wire names neither
  * `instructions` nor `tools`.
+ *
+ * -----------------------------------------------------------------------------
+ * WHY {@link INPUT_TRANSCRIPTION} JOINED IT, AND WHY THAT IS NOT AN EXCEPTION
+ * -----------------------------------------------------------------------------
+ *
+ * Issue #399. It is an AUDIO field, in exactly the class this section's title
+ * names, and it is NOT this client choosing session policy: the mint already
+ * asked for input transcription server-side
+ * (`openai.provider.ts`'s `DEFAULT_REALTIME_TRANSCRIPTION_MODEL`), and this is
+ * a restatement of what was already requested.
+ *
+ * IT IS HERE BECAUSE THE MERGE SEMANTICS OF `session.update` ARE NOT SOMETHING
+ * WE SHOULD HAVE TO KNOW. If the provider deep-merges `audio.input`, sending
+ * `turn_detection` alone is harmless and this key is redundant. If it REPLACES
+ * `audio.input` wholesale, sending `turn_detection` alone would silently wipe
+ * the transcription the mint configured — and the failure is invisible: no
+ * error, no rejected event, just a session that never emits a
+ * `conversation.item.input_audio_transcription.*` again, and a `grade_answer`
+ * guard that never has the evidence to arm. Carrying both keys makes the
+ * question stop mattering under either semantics.
+ *
+ * The `instructions`/`tools` rule above is untouched by this and must stay
+ * untouched: those are the fields through which a client could hand the model
+ * back the authority the epic exists to take away from it. A transcription
+ * model is not one of them.
  */
 const TURN_DETECTION = Object.freeze({
   type: 'semantic_vad' as const,
   interrupt_response: true,
   create_response: true,
+});
+
+/**
+ * The model that transcribes the LEARNER'S own audio.
+ *
+ * DUPLICATED, DELIBERATELY, FROM `DEFAULT_REALTIME_TRANSCRIPTION_MODEL` in
+ * `apps/api/src/ai/providers/openai.provider.ts`, which is the authority: that
+ * is where the value is chosen, and the reasoning for `whisper-1` over the
+ * cheaper alternatives (availability, because an unreachable transcription
+ * model is a mint that FAILS rather than a transcript that degrades) lives
+ * there and is not restated here.
+ *
+ * The two are separate packages with no shared module between them, and the
+ * alternatives are worse than a duplicate a comment points at: a cross-package
+ * import would couple the browser bundle to the API's source tree, and putting
+ * the name on the mint response would add a field to a contract for a value the
+ * client only needs in order to repeat it. If it changes, change it in BOTH —
+ * and a disagreement is benign in the direction that matters, because whichever
+ * of the two the provider honours, it still transcribes.
+ */
+const INPUT_TRANSCRIPTION_MODEL = 'whisper-1';
+
+/**
+ * Input transcription, restated on the wire. See {@link TURN_DETECTION}'s last
+ * section for why this is here and why it is not an exception to that rule.
+ *
+ * A FROZEN CONSTANT WITH NO CALLER INPUT, exactly like `TURN_DETECTION`: a
+ * client that could be handed a transcription model could be handed a different
+ * one per session, which is session policy arriving from the wrong side.
+ */
+const INPUT_TRANSCRIPTION = Object.freeze({
+  model: INPUT_TRANSCRIPTION_MODEL,
 });
 
 /** One function call the model emitted, as the relay receives it. */
@@ -218,10 +275,34 @@ export const TOOL_CALL_MEMORY = 64;
 export const REALTIME_STALL_NUDGE_MS = 6_000;
 
 /**
+ * How long a deferred `response.create` waits for the in-flight response to
+ * finish before it is sent anyway.
+ *
+ * ISSUE #399, AND IT IS A SAFETY VALVE RATHER THAN A TUNING KNOB. The queue
+ * below waits for `response.done`, which is the provider's own statement that
+ * the active response is over. A response we were told STARTED and are never
+ * told FINISHED about — a dropped event, a shape a later API version stops
+ * emitting — would otherwise park every subsequent tool result forever, which
+ * is precisely the silent-coach failure the queue exists to prevent, arrived
+ * at from the other direction.
+ *
+ * SENDING LATE IS RECOVERABLE; WAITING FOREVER IS NOT. The worst case of
+ * releasing early is one more `conversation_already_has_active_response`, which
+ * this module now reports and the practice hook now clears on the next
+ * honoured result. The worst case of waiting is a live, per-minute-billing
+ * connection in which the coach never speaks again.
+ *
+ * Longer than {@link REALTIME_STALL_NUDGE_MS} on purpose: an ordinary spoken
+ * response is seconds, so this only ever fires on a turn that has already gone
+ * wrong.
+ */
+export const REALTIME_RESPONSE_DEFER_MS = 10_000;
+
+/**
  * One connection's memory of its own turns.
  *
- * TWO FACTS, ONE OWNER, because both are per-connection and both are read by
- * {@link handleProviderEvent}, which is otherwise stateless:
+ * THREE FACTS, ONE OWNER, because all three are per-connection and all three
+ * are read by {@link handleProviderEvent}, which is otherwise stateless:
  *
  *  1. **Which call ids have already been relayed.** The current Realtime API
  *     announces one function call with BOTH `response.function_call_arguments.done`
@@ -235,6 +316,18 @@ export const REALTIME_STALL_NUDGE_MS = 6_000;
  *     is the only signal the stall nudge below trusts. A counter rather than a
  *     boolean, so a watcher can ask "has anything happened SINCE this moment"
  *     without owning a flag somebody has to reset.
+ *  3. **Whether a response is in flight right now.** Issue #399. There are
+ *     three independent senders of `response.create` on this connection — the
+ *     PROVIDER's own, via `TURN_DETECTION`'s `create_response`, which fires
+ *     when the learner stops speaking; a tool result's, which fires when the
+ *     engine has answered; and the stall nudge's. All three are legitimate and
+ *     none may be removed, but a second one landing while a response is active
+ *     is rejected with `conversation_already_has_active_response` — and the
+ *     turn that was supposed to read the question aloud produces silence.
+ *     Knowing whether one is active is what lets a sender WAIT instead of
+ *     being refused, and it has to live here because
+ *     {@link handleProviderEvent} is the only thing that sees
+ *     `response.created` and `response.done`.
  */
 export interface RealtimeTurnTracker {
   /**
@@ -249,6 +342,29 @@ export interface RealtimeTurnTracker {
   noteModelActivity: () => void;
   /** How many activity signals this connection has seen. Monotonic. */
   activityCount: () => number;
+
+  /** A response has started (`response.created`). Idempotent. */
+  beginResponse: () => void;
+  /**
+   * The in-flight response has finished (`response.done`).
+   *
+   * Runs every {@link onResponseIdle} listener, ONCE PER TRANSITION: a
+   * `response.done` for a response nobody saw start must not release a queue
+   * that is waiting on a different one.
+   */
+  endResponse: () => void;
+  /** Is a response in flight? Nothing may send `response.create` while it is. */
+  isResponseActive: () => boolean;
+  /**
+   * Run this when the connection goes from busy to idle.
+   *
+   * A LISTENER RATHER THAN A POLL, because the release has to happen on the
+   * transition itself: draining a queue on "any event where nothing is active"
+   * would send a second `response.create` in the window after the first went
+   * out and before the provider's `response.created` came back, which is the
+   * same collision one layer along.
+   */
+  onResponseIdle: (listener: () => void) => void;
 }
 
 export function createRealtimeTurnTracker(
@@ -258,8 +374,22 @@ export function createRealtimeTurnTracker(
   // OLDEST id a `values().next()` rather than a second data structure.
   const seen = new Set<string>();
   let activity = 0;
+  let responseActive = false;
+  const idleListeners: (() => void)[] = [];
 
   return {
+    beginResponse: () => {
+      responseActive = true;
+    },
+    endResponse: () => {
+      if (!responseActive) return;
+      responseActive = false;
+      for (const listener of idleListeners) listener();
+    },
+    isResponseActive: () => responseActive,
+    onResponseIdle: (listener) => {
+      idleListeners.push(listener);
+    },
     claimToolCall: (callId) => {
       if (seen.has(callId)) return false;
       seen.add(callId);
@@ -399,9 +529,114 @@ export async function openRealtimeConnection(
       stallTimer = null;
       if (closed) return;
       if (turns.activityCount() !== activityBefore) return;
-      send({ type: 'response.create' });
+      // THROUGH THE ONE DOOR (#399), like every other `response.create` here.
+      // In practice this always sends immediately — an active response is
+      // activity, and activity cancels the nudge above — but a third sender
+      // that could bypass the queue is a third sender that could collide, and
+      // "it cannot happen today" is not the same as "it cannot happen".
+      requestResponse({ type: 'response.create' }, false);
     }, REALTIME_STALL_NUDGE_MS);
   };
+
+  // ---------------------------------------------------------------------------
+  // ONE DOOR FOR `response.create` (issue #399)
+  // ---------------------------------------------------------------------------
+  //
+  // `TURN_DETECTION.create_response` means the PROVIDER creates a response the
+  // moment it decides the learner stopped speaking, and a tool result needs an
+  // explicit `response.create` of its own or the coach holds the engine's
+  // answer and says nothing. Both are needed and neither may be removed; what
+  // was missing is that neither checked whether a response was already in
+  // flight. The measured cost was `conversation_already_has_active_response` —
+  // and it is the ORDINARY case, not a rare race: a function call arrives
+  // inside a response, so the tool result answering it is almost always sent
+  // while that very response is still running.
+  //
+  // THE ANSWER IS TO WAIT, NEVER TO DROP. Dropping a rejected
+  // `response.create` reintroduces exactly the silent coach that line exists to
+  // prevent, so a request that arrives at a busy moment is queued and sent when
+  // `response.done` says the connection is idle again.
+  //
+  // IT CANNOT DOUBLE-FIRE: an entry is removed from the queue before it is
+  // dispatched, `dispatchResponse` is the only thing that puts a
+  // `response.create` on the wire, and the queue is drained ONE ENTRY PER
+  // `response.done` rather than all at once — draining two would put the second
+  // on the wire while the first was still starting.
+  //
+  // IT CANNOT LEAK ACROSS A TEARDOWN: `teardown` empties the queue and cancels
+  // the release timer, and every path here returns early once `closed`.
+
+  /** One `response.create` waiting its turn. */
+  interface PendingResponse {
+    payload: unknown;
+    /** Whether dispatching it should arm the stall watch. */
+    watch: boolean;
+  }
+
+  const pendingResponses: PendingResponse[] = [];
+
+  /** The one pending release. See {@link REALTIME_RESPONSE_DEFER_MS}. */
+  let deferTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const clearDeferTimer = () => {
+    if (deferTimer === null) return;
+    clearTimeout(deferTimer);
+    deferTimer = null;
+  };
+
+  /** Arm the safety valve, but only while something is actually waiting. */
+  const armDeferTimer = () => {
+    clearDeferTimer();
+    if (pendingResponses.length === 0) return;
+    deferTimer = setTimeout(() => {
+      deferTimer = null;
+      if (closed) return;
+      // Forcing the tracker idle rather than sending directly, so the release
+      // takes the SAME path a real `response.done` takes and the flag is left
+      // in a state later requests can also get out of.
+      turns.endResponse();
+    }, REALTIME_RESPONSE_DEFER_MS);
+  };
+
+  const dispatchResponse = (entry: PendingResponse) => {
+    send(entry.payload);
+    if (entry.watch) watchForStall();
+  };
+
+  /**
+   * Ask for a response — now if the connection is idle, later if it is not.
+   *
+   * The queue is checked as well as the flag: between dispatching an entry and
+   * the provider's `response.created` coming back, nothing is "active" yet and
+   * a new request that jumped the queue would arrive on top of the one just
+   * sent.
+   */
+  const requestResponse = (payload: unknown, watch: boolean) => {
+    if (closed) return;
+    if (turns.isResponseActive() || pendingResponses.length > 0) {
+      pendingResponses.push({ payload, watch });
+      armDeferTimer();
+      return;
+    }
+    dispatchResponse({ payload, watch });
+  };
+
+  /** Send the next waiting request, if any. Runs on every busy → idle edge. */
+  const releaseNextResponse = () => {
+    clearDeferTimer();
+    if (closed) {
+      pendingResponses.length = 0;
+      return;
+    }
+    const next = pendingResponses.shift();
+    if (!next) return;
+    dispatchResponse(next);
+    // Whatever is still waiting now waits on THIS response — including the
+    // valve, which is re-armed against the new wait rather than the old one.
+    armDeferTimer();
+  };
+
+  turns.onResponseIdle(releaseNextResponse);
 
   /**
    * Has the handshake finished?
@@ -426,6 +661,11 @@ export async function openRealtimeConnection(
     if (closed) return;
     closed = true;
     clearStallTimer();
+    // NOTHING SURVIVES THE TEARDOWN (#399). A queued `response.create` released
+    // after the connection ended would be a send on a dead channel at best, and
+    // on a re-mint a request belonging to a session that is over.
+    clearDeferTimer();
+    pendingResponses.length = 0;
 
     // The tracks first, and before any awaiting: the microphone light goes out
     // when the session ends, not when a promise settles. See `close`.
@@ -520,12 +760,21 @@ export async function openRealtimeConnection(
 
   handshakeDone = true;
 
-  // BARGE-IN, ENABLED THE MOMENT THE CHANNEL IS OPEN. Audio fields only — see
-  // `TURN_DETECTION` for why this payload may never grow an `instructions` or
-  // a `tools` key.
+  // BARGE-IN, ENABLED THE MOMENT THE CHANNEL IS OPEN — and, since #399, input
+  // transcription restated alongside it so that `audio.input` carries both keys
+  // whether the provider merges this object into the minted session or replaces
+  // it. Audio fields only — see `TURN_DETECTION` for why this payload may never
+  // grow an `instructions` or a `tools` key, and why these two are not that.
   send({
     type: 'session.update',
-    session: { audio: { input: { turn_detection: TURN_DETECTION } } },
+    session: {
+      audio: {
+        input: {
+          turn_detection: TURN_DETECTION,
+          transcription: INPUT_TRANSCRIPTION,
+        },
+      },
+    },
   });
 
   return {
@@ -551,12 +800,25 @@ export async function openRealtimeConnection(
       // active is rejected with `conversation_already_has_active_response`,
       // and the turn that was supposed to read the question aloud produces
       // silence.
-      send({ type: 'response.create' });
-      watchForStall();
+      //
+      // AND EXACTLY ONE AT A TIME (#399): de-duplication makes this the only
+      // request for THIS call, but the provider's own turn detection is a
+      // separate sender, and a function call arrives inside a response that is
+      // still running. `requestResponse` waits for that response rather than
+      // being refused by it — the stall watch is armed when the request
+      // actually goes out, not when it is queued, so a legitimate wait is never
+      // mistaken for a dead turn.
+      requestResponse({ type: 'response.create' }, true);
     },
 
     speakVerbatim: (text) => {
-      send({
+      // THROUGH THE QUEUE TOO (#399), and this one was colliding with ITSELF:
+      // the opening turn speaks each of the engine's `say` lines as its own
+      // `response.create`, so a two-line opening sent the second while the
+      // first was still being spoken and the provider refused it — a line of
+      // code-owned copy silently lost before a learner had said a word. Queued,
+      // the lines are spoken in order, all of them.
+      requestResponse({
         type: 'response.create',
         response: {
           // VERBATIM, and said as an instruction rather than as a conversation
@@ -567,7 +829,7 @@ export async function openRealtimeConnection(
             'Say this to the applicant now, word for word, and say nothing ' +
             `else:\n\n${text}`,
         },
-      });
+      }, false);
     },
 
     close: () => teardown('closed'),
@@ -669,6 +931,24 @@ export function handleProviderEvent(
   const type = typeof event.type === 'string' ? event.type : '';
 
   if (MODEL_ACTIVITY_EVENTS.has(type)) tracker.noteModelActivity();
+
+  // ---- A response started, and then finished ------------------------------
+  //
+  // ISSUE #399. The two edges of the one fact every `response.create` sender on
+  // this connection has to respect. `response.done` is the provider's own
+  // statement that the turn is over, and it arrives for an INTERRUPTED response
+  // as well as a completed one — which is what keeps barge-in from parking the
+  // queue: a learner talking over the coach ends the coach's response, and the
+  // waiting request goes out on that edge like any other.
+  if (type === 'response.created') {
+    tracker.beginResponse();
+    return;
+  }
+
+  if (type === 'response.done') {
+    tracker.endResponse();
+    return;
+  }
 
   // ---- The provider refused something -------------------------------------
   //

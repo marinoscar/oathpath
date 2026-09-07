@@ -20,6 +20,7 @@ import {
   isRealtimeToolName,
   openRealtimeConnection,
   REALTIME_CALL_URL,
+  REALTIME_RESPONSE_DEFER_MS,
   REALTIME_STALL_NUDGE_MS,
   TOOL_CALL_MEMORY,
   type RealtimeConnectionHandlers,
@@ -573,5 +574,157 @@ describe('one relayed call is one response.create', () => {
 
     vi.advanceTimersByTime(REALTIME_STALL_NUDGE_MS * 5);
     expect(responseCreates(live.dc)).toHaveLength(1);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Issue #399: a response.create is queued, never dropped, while one is active
+  // ---------------------------------------------------------------------------
+  //
+  // The harness gap the implementer flagged: none of the tests above ever
+  // deliver `response.done`, so none of them ever leave a response "active"
+  // long enough for a second `response.create` to have anywhere to queue.
+  // Every test below drives the full `response.created` → `response.done`
+  // lifecycle explicitly, on the same `FakeChannel`/`LivePeerConnection`
+  // harness this describe block already sets up — no second harness.
+  describe('the response queue (#399)', () => {
+    /** The provider announces that a response has begun. */
+    function responseCreated(dc: FakeChannel) {
+      dc.onmessage?.({
+        data: frame({ type: 'response.created' }),
+      } as MessageEvent);
+    }
+
+    /** The provider announces that the active response is over. */
+    function responseDone(dc: FakeChannel) {
+      dc.onmessage?.({ data: frame({ type: 'response.done' }) } as MessageEvent);
+    }
+
+    it('queues the SECOND line of a multi-line speakVerbatim opening, and releases it on response.done', async () => {
+      // THE HIGHEST-VALUE CASE (per the issue): the opening turn speaks each
+      // of the engine's `say` lines as its own `response.create`. Before this
+      // fix, the second line's `response.create` was sent immediately, landed
+      // on top of the first (still active) response, and the provider
+      // rejected it — the second line of code-owned copy was silently lost
+      // before the learner had said a word.
+      const h = handlers();
+      const live = await openLive(h);
+
+      live.connection.speakVerbatim('Welcome to your practice session.');
+      expect(responseCreates(live.dc)).toHaveLength(1);
+
+      // The provider begins responding to the first line.
+      responseCreated(live.dc);
+
+      live.connection.speakVerbatim('Here is your first question.');
+      // NOT SENT YET — a response is active, so the second line waits.
+      expect(responseCreates(live.dc)).toHaveLength(1);
+
+      // The first line finishes.
+      responseDone(live.dc);
+
+      expect(responseCreates(live.dc)).toHaveLength(2);
+      const second = responseCreates(live.dc)[1] as {
+        response?: { instructions?: string };
+      };
+      expect(second.response?.instructions).toContain(
+        'Here is your first question.',
+      );
+    });
+
+    it('queues a tool result’s response.create while one is active, and sends it once response.done arrives', async () => {
+      // The ordinary case #399 names: a function call arrives INSIDE a
+      // response, so the tool result answering it is almost always sent
+      // while that very response is still running.
+      const h = handlers();
+      const live = await openLive(h);
+
+      live.connection.sendToolResult('call-1', { status: 'ok' });
+      expect(responseCreates(live.dc)).toHaveLength(1);
+
+      responseCreated(live.dc);
+
+      live.connection.sendToolResult('call-2', { status: 'ok' });
+      // NOT SENT YET — this is the assertion that means "no
+      // conversation_already_has_active_response, and no silence".
+      expect(responseCreates(live.dc)).toHaveLength(1);
+
+      responseDone(live.dc);
+      expect(responseCreates(live.dc)).toHaveLength(2);
+    });
+
+    it('releases only ONE queued response.create per response.done, never both at once', async () => {
+      const h = handlers();
+      const live = await openLive(h);
+
+      live.connection.speakVerbatim('Line one.');
+      responseCreated(live.dc);
+      live.connection.speakVerbatim('Line two.');
+      live.connection.speakVerbatim('Line three.');
+      expect(responseCreates(live.dc)).toHaveLength(1);
+
+      // The first response ends — releasing exactly the NEXT one, which then
+      // becomes the new "active" response, so the third stays queued.
+      responseDone(live.dc);
+      expect(responseCreates(live.dc)).toHaveLength(2);
+
+      responseCreated(live.dc);
+      expect(responseCreates(live.dc)).toHaveLength(2);
+
+      responseDone(live.dc);
+      expect(responseCreates(live.dc)).toHaveLength(3);
+    });
+
+    it('force-releases a queued response.create after REALTIME_RESPONSE_DEFER_MS when response.done never arrives', async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+
+      const h = handlers();
+      const live = await openLive(h);
+
+      live.connection.speakVerbatim('Line one.');
+      responseCreated(live.dc);
+      live.connection.speakVerbatim('Line two.');
+      expect(responseCreates(live.dc)).toHaveLength(1);
+
+      // response.done never arrives — a dropped event, a shape a later API
+      // version stops emitting. Sending late is recoverable; waiting forever
+      // is a live, per-minute-billing connection in which the coach never
+      // speaks again.
+      vi.advanceTimersByTime(REALTIME_RESPONSE_DEFER_MS - 1);
+      expect(responseCreates(live.dc)).toHaveLength(1);
+
+      vi.advanceTimersByTime(2);
+      expect(responseCreates(live.dc)).toHaveLength(2);
+    });
+
+    it('empties the queue on teardown, and a response.done arriving after close does not resurrect it', async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+
+      const h = handlers();
+      const live = await openLive(h);
+
+      live.connection.speakVerbatim('Line one.');
+      responseCreated(live.dc);
+      live.connection.speakVerbatim('Line two.');
+      expect(responseCreates(live.dc)).toHaveLength(1);
+
+      live.connection.close();
+
+      // Well past the valve. If the queue survived teardown, this would fire.
+      vi.advanceTimersByTime(REALTIME_RESPONSE_DEFER_MS * 5);
+      expect(responseCreates(live.dc)).toHaveLength(1);
+
+      // A response.done for the closed connection's own last response,
+      // arriving late, must not release anything either.
+      responseDone(live.dc);
+      expect(responseCreates(live.dc)).toHaveLength(1);
+    });
+
+    it('sends the FIRST response.create immediately when nothing is active — no needless queueing', async () => {
+      const h = handlers();
+      const live = await openLive(h);
+
+      live.connection.speakVerbatim('Line one.');
+      expect(responseCreates(live.dc)).toHaveLength(1);
+    });
   });
 });
