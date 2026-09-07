@@ -19,6 +19,6 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
 // would put that work in front of the first paint for no benefit — the worker
 // controls the NEXT navigation, never this one.
 //
-// Self-gating: this is a no-op in test and in dev unless `VITE_ENABLE_SW=true`.
-// See `sw/registerServiceWorker.ts` for why each of those is off.
+// Self-gating: this is a no-op in test, and only in test (issue #397).
+// See `sw/registerServiceWorker.ts` for why that one is off.
 void registerServiceWorker();

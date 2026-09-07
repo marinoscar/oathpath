@@ -2,45 +2,30 @@
  * Service worker registration and the update handshake (issue #359, epic #345).
  *
  * -----------------------------------------------------------------------------
- * WHERE THE WORKER IS DISABLED, AND WHY EACH ONE MATTERS
+ * WHERE THE WORKER IS DISABLED, AND WHY
  * -----------------------------------------------------------------------------
  *
- *   test  — ALWAYS off. The suite's fixtures come from MSW, which works by
- *           patching `fetch`; a service worker sits in front of that and would
- *           answer from Cache Storage instead, turning a deterministic suite
- *           into one that depends on what a previous test cached. jsdom has no
- *           `navigator.serviceWorker` either, so the guard also keeps this
- *           module importable from a component test.
- *   dev   — off unless `VITE_ENABLE_SW=true`. A worker caching a dev server's
- *           output is the classic "my edit didn't apply" afternoon, and the
- *           precached shell would be a bundle Vite has already replaced.
- *   prod  — on.
+ *   test  — OFF, and the only environment that is. The suite's fixtures come
+ *           from MSW, which works by patching `fetch`; a service worker sits in
+ *           front of that and would answer from Cache Storage instead, turning
+ *           a deterministic suite into one that depends on what a previous test
+ *           cached. jsdom has no `navigator.serviceWorker` either, so the guard
+ *           also keeps this module importable from a component test.
+ *   dev   — ON (issue #397). It used to be off behind a `VITE_ENABLE_SW`
+ *           opt-in, which meant the PWA was inert on the one environment this
+ *           app is actually exercised in: not installable, no offline shell,
+ *           and an update handshake nobody could reach.
  *
- * -----------------------------------------------------------------------------
- * `VITE_ENABLE_SW` HAS TO BE PLUMBED, NOT JUST READ  (issue #395)
- * -----------------------------------------------------------------------------
- *
- * This line used to read "off unless `VITE_ENABLE_SW=true`" and stop there,
- * which described a switch nobody could actually flip. The flag was declared by
- * issue #359 and read in two places — `process.env.VITE_ENABLE_SW` by `pwa()`'s
- * dev middleware in `vite.config.ts`, deciding which worker `/sw.js` serves,
- * and `import.meta.env.VITE_ENABLE_SW` by `shouldRegisterServiceWorker` below,
- * deciding whether the client registers it at all — but it was never passed
- * into the `web` service by `infra/compose/dev.compose.yml` and never mentioned
- * in `infra/compose/.env.example`. So the containerised dev deployment, which
- * is the environment this app is actually tested on, served the self-destroying
- * placeholder unconditionally: not installable, no offline shell, a dead update
- * handshake, and nothing anywhere reporting a disabled feature.
- *
- * `dev.compose.yml` now passes `VITE_ENABLE_SW=${VITE_ENABLE_SW:-false}`, so
- * the default is still off — #359's reasoning above is unchanged and this is
- * an opt-in, not a re-enable. Both readers see the same value because Vite
- * exposes any `VITE_`-prefixed variable from the server's own environment to
- * the client bundle; there is no second variable to keep in step.
- *
- * The gates are ordered, and the order is the point: `MODE === 'test'` is
- * checked FIRST and no value of the flag gets past it, so setting the flag in
- * CI can never put a worker in front of MSW.
+ *           What makes that safe is not this file, it is the dev build id:
+ *           `buildDevServiceWorkerSource` in `buildServiceWorker.ts` gives the
+ *           dev worker a VOLATILE, per-process id, so every dev-server restart
+ *           and every container rebuild retires the previous run's caches. Its
+ *           doc comment carries the full argument, including why a fixed id was
+ *           the one place dev staleness could genuinely have bitten. Everything
+ *           else was already handled by the worker's own policy: network-first
+ *           navigations, no interception of `/src/**` or the HMR client, and
+ *           nothing under `/api` ever cached.
+ *   prod  — ON.
  *
  * -----------------------------------------------------------------------------
  * THE UPDATE HANDSHAKE
@@ -102,15 +87,12 @@ export function resetUpdateStateForTests(): void {
 interface RegistrationEnv {
   MODE?: string;
   PROD?: boolean;
-  VITE_ENABLE_SW?: string;
 }
 
 export function shouldRegisterServiceWorker(
   env: RegistrationEnv = import.meta.env as unknown as RegistrationEnv,
 ): boolean {
-  if (env.MODE === 'test') return false;
-  if (env.PROD) return true;
-  return env.VITE_ENABLE_SW === 'true';
+  return env.MODE !== 'test';
 }
 
 export async function registerServiceWorker(): Promise<void> {
