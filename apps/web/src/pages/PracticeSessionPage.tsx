@@ -2551,6 +2551,41 @@ export default function PracticeSessionPage() {
   const surfaceIsRealtime = !conversation.isRunning && realtimeUnderWay;
 
   /**
+   * The question the learner is being asked RIGHT NOW, as one fact (#402).
+   *
+   * ---------------------------------------------------------------------------
+   * THE SCREEN FOLLOWS THE COACH. IT DOES NOT RESOLVE ITS OWN QUESTION.
+   * ---------------------------------------------------------------------------
+   *
+   * `question` is seeded from `GET /api/practice/sessions/:id`'s
+   * `nextQuestion`, which is a FRESH DRAW from `mastery/selector.ts`' unseeded
+   * shuffle on every read — two reads a second apart legitimately name two
+   * different questions, with nothing wrong anywhere. That is exactly right for
+   * the typed path, where the screen is the only thing asking anything and
+   * whatever it draws IS the question.
+   *
+   * It is exactly wrong the moment a coach is speaking. The realtime engine
+   * serves its own draw, remembers it (`practice-realtime-asked.ts`) and grades
+   * the answer against it; the screen, re-reading the session after every turn,
+   * drew something else and rendered that. So a learner read one question and
+   * was asked another aloud, from the first question of every spoken session
+   * onward — #402, where the audio looked "a question behind" and the question
+   * the coach actually asked never appeared on screen at all.
+   *
+   * `realtime.question` is the engine's own answer, carried out on the tool
+   * result beside the words it gave the model to say. While the live transport
+   * is the one running, it wins outright — NOT `realtime.question ?? question`,
+   * because falling back to the page's draw is precisely how a question the
+   * coach is not asking gets on screen. Before the first `next_question`
+   * lands it is `null`, and the surface renders no prompt for that second,
+   * which is honest: nothing has been asked yet.
+   *
+   * E13's loop and the typed path are untouched — they read `question`, as
+   * they always have, because there the page IS the thing asking.
+   */
+  const askedQuestion = surfaceIsRealtime ? realtime.question : question;
+
+  /**
    * The coach's voice, declared once and mounted in exactly one of two places.
    *
    * While the live session is under way it belongs to the surface (as hidden
@@ -2598,8 +2633,10 @@ export default function PracticeSessionPage() {
             ? (realtime.notice?.message ?? null)
             : (conversation.notice?.message ?? null)
         }
-        questionNumber={question?.number ?? null}
-        questionPrompt={question?.prompt ?? null}
+        // THE QUESTION THE COACH WAS GIVEN, on the realtime transport — never
+        // a draw this page resolved for itself. See `askedQuestion`.
+        questionNumber={askedQuestion?.number ?? null}
+        questionPrompt={askedQuestion?.prompt ?? null}
         position={position}
         planned={planned}
         // #347's RMS publisher, finally consumed. See `VoiceStateVisual`.
