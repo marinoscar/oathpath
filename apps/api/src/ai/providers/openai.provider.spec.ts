@@ -1851,19 +1851,31 @@ describe('OpenAiProvider.createRealtimeSession', () => {
     });
   });
 
-  it('sends OUR session configuration: model, instructions, tools and a default voice', async () => {
+  it('sends OUR session configuration: model, instructions, tools, a default voice and input transcription', async () => {
     clientSecretsCreateMock.mockResolvedValue(mintedSecret());
 
     const p = new OpenAiProvider(credentialsReturning(null), usageStub());
     await p.createRealtimeSession(CALLER, USER_KEY, sessionRequest());
 
+    // `audio.input.transcription` IS THE ASSERTION THAT MATTERS HERE (#399), and
+    // it is written out rather than left to `objectContaining` because its
+    // absence is invisible at run time. A realtime session does not transcribe
+    // its input unless it is asked to, and one that is not asked emits no
+    // `conversation.item.input_audio_transcription.*` at all — no error, no
+    // rejected event, just a browser that can never compare what the model
+    // CLAIMED the learner said against what the microphone actually picked up.
+    // That is how a coach's own voice, returning through a loudspeaker, became
+    // a `practice_attempts` row for an answer nobody gave.
     expect(clientSecretsCreateMock).toHaveBeenCalledWith(
       expect.objectContaining({
         session: expect.objectContaining({
           type: 'realtime',
           model: REALTIME_MODEL,
           instructions: 'You are a USCIS officer conducting an interview.',
-          audio: { output: { voice: 'alloy' } },
+          audio: {
+            input: { transcription: { model: 'whisper-1' } },
+            output: { voice: 'alloy' },
+          },
           tools: [
             {
               type: 'function',
@@ -1920,7 +1932,13 @@ describe('OpenAiProvider.createRealtimeSession', () => {
     expect(clientSecretsCreateMock).toHaveBeenCalledWith(
       expect.objectContaining({
         session: expect.objectContaining({
-          audio: { output: { voice: 'verse' } },
+          audio: {
+            // Unchanged by the caller's choice of voice: input transcription is
+            // this application's own decision (#399), not one a request field
+            // can reach. See `DEFAULT_REALTIME_TRANSCRIPTION_MODEL`.
+            input: { transcription: { model: 'whisper-1' } },
+            output: { voice: 'verse' },
+          },
         }),
       }),
     );
