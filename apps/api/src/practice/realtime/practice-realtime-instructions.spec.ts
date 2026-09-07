@@ -66,8 +66,49 @@ describe('buildPracticeRealtimeInstructions', () => {
     // The paragraph the whole contract exists to back up: in practice the
     // verdict is a stored row, not a spoken sentence.
     expect(instructions()).toMatch(/you are not the judge of an answer/i);
-    expect(instructions()).toMatch(/never tell the learner whether they were/i);
+    expect(instructions()).toMatch(
+      /never decide for yourself whether they were right or wrong/i,
+    );
     expect(instructions()).toMatch(/never supply, complete or correct an answer/i);
+  });
+
+  it('says the verdict lines are the model’s to SPEAK, not to summarise', () => {
+    // Issue #403. The old wording — "say back what it returns" — was true and
+    // insufficient: the coach called `grade_answer`, was handed a composed turn
+    // beginning with the verdict, and narrated its own tool use instead, four
+    // times out of four in the recording that opened the issue. The field is
+    // now named, and so is what to do with every element of it.
+    expect(instructions()).toMatch(/every result has a say field/i);
+    expect(instructions()).toMatch(
+      /speak every line in it, in order, word for word/i,
+    );
+    expect(instructions()).toMatch(/do not skip one/i);
+
+    // And the reason, stated to the model rather than left implicit: those
+    // lines are the ONLY way a learner is told whether they were right.
+    expect(instructions()).toMatch(
+      /how the learner is told whether they were right/i,
+    );
+  });
+
+  it('forbids narrating tool use and naming the application’s own plumbing', () => {
+    // Issue #403's second defect. Every turn of the recording was wrapped in
+    // sentences nobody authored — "let me check that response against the
+    // sessions grading", "I'll hand you the next prompt from the session" —
+    // which is this application's internals read aloud to a learner who has no
+    // idea what "the session" is.
+    expect(instructions()).toMatch(/never talk about your tools/i);
+    expect(instructions()).toMatch(/do not announce that you are calling one/i);
+    expect(instructions()).toMatch(/let me check/i);
+
+    // The vocabulary itself, named so the model cannot reach for it.
+    expect(instructions()).toMatch(
+      /do not refer to the session, the application, the system, the grading/i,
+    );
+
+    // AND THE POSITIVE HALF: silence is the correct thing to do while waiting.
+    // A model told only what not to say fills the gap with something else.
+    expect(instructions()).toMatch(/say nothing at all/i);
   });
 
   it('states the negative case for a skip: silence is not a skip', () => {
