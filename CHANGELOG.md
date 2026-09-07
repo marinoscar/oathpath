@@ -343,6 +343,37 @@ spec in this file.
 
 ### Fixed
 
+- **The coach's own voice could return through the microphone and be graded
+  as the learner's answer, advancing questions faster than a learner could
+  possibly respond (issue #399).** A live realtime practice session never
+  asked the provider to transcribe the learner's own input audio, so nothing
+  anywhere could compare what the model *claimed* it heard against what the
+  microphone actually picked up — on a full-duplex, always-on microphone,
+  browser echo cancellation is best-effort and fails routinely at volume,
+  and a model that heard its own question return through the loudspeaker was
+  believed all the way into a `practice_attempts` row for an answer nobody
+  gave. Four fixes: (1) the mint now asks for input transcription
+  (`openai.provider.ts`), restated in the browser's own `session.update` so
+  the guard below arms whichever way the provider merges that update; (2) a
+  `grade_answer` for a turn in which the provider transcribed no learner
+  speech at all is refused in `useRealtimePractice.ts` and never posted —
+  arming only once a connection has proven this deployment transcribes at
+  all, so an older API behind a cached bundle fails open instead of
+  refusing every answer of every session; (3) a new `lib/coachEcho.ts`
+  refuses a `grade_answer` whose transcript is provenance-matched to the
+  coach's own last utterance — an exact match at any length, or a run of at
+  least five words in the coach's own order — while never touching a short
+  genuine answer that happens to reuse the question's phrasing ("the
+  president" inside "who is the president now"); (4) `response.create` is
+  now queued rather than dropped while a response is already active,
+  released on `response.done` with a bounded force-release valve, which
+  also fixed a real regression along the way: a multi-line spoken opening
+  was silently losing its second line to exactly this collision. The
+  provider-error notice also now clears on the next honoured tool result
+  instead of outliving the single turn it described. See
+  `docs/specs/realtime-practice.md`, and the release checklist note at the
+  top of this file — a manual pass against a real deployment and a real
+  microphone is still owed before this ships, per that checklist.
 - **The dev service worker was unreachable in the one environment this app
   is actually exercised in (issue #397).** `VITE_ENABLE_SW` was declared by
   issue #359 and read in two places, but never plumbed through
