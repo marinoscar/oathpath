@@ -54,6 +54,7 @@ import { describeCaptureProblem } from '../../hooks/useAudioCapture';
 import { lightTheme } from '../../theme';
 import type {
   AiStatus,
+  CoachPersona,
   PracticeAttempt,
   PracticeAttemptResult,
   PracticeOutcome,
@@ -508,6 +509,20 @@ interface Options {
   outcome?: PracticeOutcome;
   nextQuestion?: PracticeQuestion | null;
   transcript?: string;
+  /**
+   * The coach's line on the recorded attempt, in a named persona (issue #404).
+   *
+   * OMITTED BY DEFAULT, and the rest of this file leaves it omitted on
+   * purpose: `coachReaction: null` is the shape a learner who turned reactions
+   * off gets, and every phase, retry and "type instead" assertion here should
+   * keep passing without one. What it adds is the one thing those cannot show
+   * — that a line the learner CHOSE is spoken rather than dropped between the
+   * response and the speaker.
+   *
+   * Appended as the turn's last element, which is where `composeSpokenTurn`
+   * puts element 5 on a turn with no retry armed.
+   */
+  coach?: { persona: CoachPersona; text: string };
 }
 
 function installHandlers(options: Options = {}) {
@@ -567,12 +582,22 @@ function installHandlers(options: Options = {}) {
       async ({ request }) => {
         const input = (await request.json()) as RecordPracticeAttemptInput;
         posted.push(input);
-        const attempt = makeAttempt({
+        const base = makeAttempt({
           id: `attempt-${posted.length}`,
           questionId: input.questionId,
           outcome: options.outcome ?? 'correct',
           retryOfAttemptId: input.retryOfAttemptId ?? null,
         });
+        const attempt: PracticeAttempt = options.coach
+          ? {
+              ...base,
+              coachReaction: {
+                text: options.coach.text,
+                persona: options.coach.persona,
+              },
+              spokenTurn: [...base.spokenTurn, options.coach.text],
+            }
+          : base;
         const result: PracticeAttemptResult = {
           attempt,
           acceptedAnswers: attempt.answerSnapshot.answers,
@@ -868,6 +893,82 @@ describe('the hands-free loop', () => {
     // the loop's player mounts, so waiting on either alone leaves the mount
     // that speaks question 2 still pending when the case ends.
     await waitFor(() => expect(speech.spoken).toContain(QUESTION_2.prompt));
+  });
+
+  // ---------------------------------------------------------------------------
+  // The coach's own line, spoken (issue #404)
+  // ---------------------------------------------------------------------------
+  //
+  // "The personality is a must for me, make sure it is active both on voice
+  // and text." The API side of that is held in `practice.service.spec.ts`,
+  // which proves the chosen persona's line reaches `coachReaction` and
+  // `spokenTurn`. THIS is the other half, and it is a different claim: that a
+  // line already on the response is actually SPOKEN by the hands-free loop
+  // rather than dropped somewhere between the fetch and the speaker.
+  //
+  // It cannot be inferred from the assertions above. Every other test in this
+  // file runs with `coachReaction: null` — the shape a learner with reactions
+  // off gets — so the loop could speak only element 2 of a turn and every one
+  // of them would still pass. The turn is passed through VERBATIM
+  // (`useConversationSession` speaks `spokenTurn` line by line), which is
+  // exactly why the failure mode is silent: nothing type-checks how many of
+  // the lines are reached.
+  //
+  // TWO CONTRASTING PERSONAS, on the same correct answer, because "a line was
+  // spoken" is weaker than "the line this learner chose was spoken" — a loop
+  // that spoke a hard-coded sentence would satisfy the first.
+  //
+  // `finishSpeaking` IS `drainSpokenTurn` (#403). A single-pass drain returns
+  // in the gap between two lines of a turn, and the coach's line is the LAST
+  // element — the one a mid-turn return is guaranteed to miss.
+
+  it('speaks the coach’s line as part of the turn, in the learner’s own persona', async () => {
+    const user = userEvent.setup();
+    installHandlers({
+      coach: { persona: 'unfiltered', text: 'Correct. Don’t get comfortable.' },
+    });
+    renderSession();
+
+    await startLoop(user);
+    await finishSpeaking();
+    emitVoiceActivity('onset');
+    emitVoiceActivity('endOfTurn');
+    deliverRecording();
+
+    await waitFor(() => expect(posted).toHaveLength(1));
+    await screen.findByText('Telling you the answer.');
+    await finishSpeaking();
+
+    // THE VERDICT AND THE COACH, both — not one instead of the other. The
+    // verdict is the sentence #403 exists to protect and the coach's line is
+    // the sentence #404 does, and a turn that spoke either alone would be a
+    // regression in the other's direction.
+    expect(speech.spoken).toContain(SPOKEN_TURN_CORRECT[0]);
+    expect(speech.spoken).toContain('Correct. Don’t get comfortable.');
+  });
+
+  it('speaks the OTHER persona’s line for the same answer', async () => {
+    const user = userEvent.setup();
+    installHandlers({
+      coach: { persona: 'supportive', text: 'Correct. You had that ready.' },
+    });
+    renderSession();
+
+    await startLoop(user);
+    await finishSpeaking();
+    emitVoiceActivity('onset');
+    emitVoiceActivity('endOfTurn');
+    deliverRecording();
+
+    await waitFor(() => expect(posted).toHaveLength(1));
+    await screen.findByText('Telling you the answer.');
+    await finishSpeaking();
+
+    expect(speech.spoken).toContain('Correct. You had that ready.');
+    // AND NOT THE OTHER ONE. The page renders and speaks what the server sent
+    // and holds no bank of its own; this is the assertion that fails if it
+    // ever grows one.
+    expect(speech.spoken).not.toContain('Correct. Don’t get comfortable.');
   });
 
   it('stops, spoken and on screen, when there is no next question', async () => {
