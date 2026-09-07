@@ -1399,9 +1399,43 @@ readiness engine, and none should ever be added: a coach's tone is read
 *after* every one of those has already finished deciding what actually
 happened, never consulted while any of them decide it.
 
+**Practice carries the persona on BOTH transports, and that is a product
+requirement rather than a nice-to-have** (issue #404, reversing a
+previously locked exclusion; the owner's words are *"the personality is a
+must for me, make sure it is active both on voice and text"*). A learner
+who chose `unfiltered` is needled and one who chose `supportive` is
+encouraged, on the typed request/response path and aloud in a live spoken
+session alike.
+
+The mechanism is the same on both, because there is only one computation:
+`toAttemptResponse` builds `coachReaction` and `spokenTurn` once, per
+attempt, after grading. The text path renders the first
+(`AiFeedbackCard.tsx`, as the block's largest line) and the realtime path
+hands the second to the model as `say`
+(`PracticeRealtimeService.record`), so a persona reaches the screen and
+the speaker from one place and cannot be honoured on one and dropped on
+the other. Since #404 the session's **closing** line works the same way —
+`endSession` speaks `completeSession`'s own `spokenTurn` before the
+code-owned `PRACTICE_REALTIME_CLOSING_LINE`, which stays last because it
+is the turn's forward-pointing door.
+
+**What does NOT reach spoken practice is the `promptFragment`**, and that
+absence is still enforced and still correct:
+`buildPracticeRealtimeInstructions()` takes no arguments, imports no
+persona registry, and is asserted to contain none of the four fragments.
+Colouring a *session* prompt would colour every spoken word for a whole
+conversation, including words the application never authored, and it
+would contradict the standing rule #403 added there telling the model to
+speak its given lines and nothing else. A future agent asked for more
+personality in spoken practice extends the reaction bank or the composed
+turn — never that prompt. Do not read the fragment's absence as evidence
+that spoken practice should be flat; that inference is the exact one #404
+overruled.
+
 **Three surfaces are deliberately excluded, permanently, not merely
 unwired in v1** (`docs/specs/coach-personality.md` §10 is the source for
-each; do not re-derive a different reason for any of them):
+each; do not re-derive a different reason for any of them — and note that
+practice, on either transport, is not among them):
 
 - **The mock-interview officer, on both transports, and its debrief.** The
   officer's own `OFFICER_VERDICT_PROHIBITION` means it gives no

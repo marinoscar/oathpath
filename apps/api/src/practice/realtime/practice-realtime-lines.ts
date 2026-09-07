@@ -16,7 +16,13 @@
 //     `realtime-practice.md` §4's "say them as given" rule is easiest to keep
 //     when what is given is exactly one string from the database.
 //   * `end_session` is the one turn with no database string behind it, and this
-//     file is that one line.
+//     file is that one line. SINCE #404 IT IS NOT THE WHOLE TURN: the session's
+//     own closing coach line (`composeSessionClosingTurn`, read off
+//     `completeSession`'s return value) is spoken FIRST and this constant
+//     follows it, so the persona a learner chose is the second-to-last thing
+//     they hear and the forward-pointing door below is still the last. That
+//     line is selected from the curated bank exactly as an attempt's is — this
+//     file still authors no persona copy and still knows nothing about one.
 //
 // -----------------------------------------------------------------------------
 // WHY A CONSTANT AND NOT A MODEL-AUTHORED CLOSING
@@ -62,7 +68,9 @@
  * pressure, shame, fear, or unhealthy compulsion").
  *
  * FORWARD-POINTING, per `COACH_INVARIANT_FLOOR`'s closing rule — the last thing
- * said is a door, not a grade.
+ * said is a door, not a grade. STILL LAST AFTER #404, which is why the coach's
+ * closing line is prepended to this one rather than appended: a persona's
+ * parting shot in the final position would take the door away.
  */
 export const PRACTICE_REALTIME_CLOSING_LINE =
   'That’s the end of this practice session. Your progress is saved — come back whenever you’re ready.';

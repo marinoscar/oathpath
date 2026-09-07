@@ -931,7 +931,33 @@ with no backfill.
 ## 10. The exclusions, as reasoned decisions
 
 Six surfaces this epic could plausibly have touched, each excluded for a
-stated reason rather than left out silently:
+stated reason rather than left out silently.
+
+> **Read this list as exactly six, amended by issue #404.** Spoken practice
+> — the realtime transport of a practice session — was **never** on it and
+> must never be added to it. The product owner's instruction settles it in
+> their own words: *"the personality is a must for me, make sure it is
+> active both on voice and text."* A learner who chose `unfiltered` is
+> needled and a learner who chose `supportive` is encouraged, on the text
+> request/response path and aloud in a live spoken session alike.
+>
+> The distinction that makes this consistent with everything below is
+> **which of E14's two mechanisms** reaches spoken practice.
+> `docs/specs/realtime-practice.md` §7 excludes the *prompt fragment* from
+> the realtime session's standing instructions, and that exclusion holds:
+> a fragment there would colour every spoken word for a whole conversation,
+> including words the application never authored, from a prompt written
+> before the learner answered anything. The *curated reaction-line bank* —
+> the free, instant, AI-independent mechanism of §4.1 — is what carries the
+> persona, selected per attempt after the outcome is known and spoken to
+> the learner as an element of `composeSpokenTurn`'s turn. #404 also
+> extended that to the session's closing line, the last turn on that
+> transport that still ended in a voice nobody chose.
+>
+> The failure mode this note exists to prevent is a future agent reading
+> "no persona fragment in the realtime prompt" as "no persona in spoken
+> practice" and quietly restoring a flat coach. The two are different
+> claims. Only the first is true.
 
 **The mock-interview officer and its debrief — permanent, tied to
 realism.** `OFFICER_ROLE_DESCRIPTION`'s own comment (quoted in §2) already

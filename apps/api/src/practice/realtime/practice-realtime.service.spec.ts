@@ -13,6 +13,7 @@ import {
 import { PracticeService } from '../practice.service';
 import { PracticeRealtimeService } from './practice-realtime.service';
 import { buildPracticeRealtimeInstructions } from './practice-realtime-instructions';
+import { PRACTICE_REALTIME_CLOSING_LINE } from './practice-realtime-lines';
 import { SPEAK_VERBATIM_INSTRUCTION } from './practice-realtime-tool-calls';
 import { PRACTICE_REALTIME_SESSION_TTL_SECONDS } from './practice-realtime-tools';
 
@@ -511,6 +512,18 @@ describe('a realtime binding and system readiness', () => {
 // =============================================================================
 
 const Q1 = 'q1111111-1111-4111-8111-111111111111';
+
+/**
+ * A closing coach line, standing in for whatever the bank draws (issue #404).
+ *
+ * A LITERAL RATHER THAN A REAL BANK LOOKUP, deliberately: this file tests what
+ * `endSession` does with the line `completeSession` hands it, not which line
+ * the bank picks. `practice.service.spec.ts` already owns the second question
+ * ("the closing line is drawn from the curated bank, in the learner's own
+ * persona") and asserting it twice would tie this suite to a bank edit that
+ * has nothing to do with the transport.
+ */
+const CLOSING_COACH_LINE = 'That’s a wrap. Come back and beat it.';
 const Q2 = 'q2222222-2222-4222-8222-222222222222';
 
 describe('PracticeRealtimeService.handleToolCall', () => {
@@ -561,7 +574,15 @@ describe('PracticeRealtimeService.handleToolCall', () => {
     practice = {
       getSession: jest.fn().mockResolvedValue(detail()),
       recordAttempt: jest.fn().mockResolvedValue(recorded()),
-      completeSession: jest.fn().mockResolvedValue({ id: SESSION_ID }),
+      // `spokenTurn` IS PART OF THE CONTRACT THIS DOUBLE STANDS IN FOR (issue
+      // #404). `toSessionResponse` always sets it — `composeSessionClosingTurn`'s
+      // output, one persona line or `[]` — and `endSession` now speaks it before
+      // the code-owned closing. A fixture without the field would have let the
+      // regression this fixes reappear as `undefined` spreading to nothing.
+      completeSession: jest.fn().mockResolvedValue({
+        id: SESSION_ID,
+        spokenTurn: [CLOSING_COACH_LINE],
+      }),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -1014,12 +1035,82 @@ describe('PracticeRealtimeService.handleToolCall', () => {
     expect(result).toEqual({
       status: 'ok',
       tool: 'end_session',
-      say: [expect.stringContaining('end of this practice session')],
+      say: [
+        CLOSING_COACH_LINE,
+        expect.stringContaining('end of this practice session'),
+      ],
       then: 'session_complete',
       questionId: null,
       instruction: SPEAK_VERBATIM_INSTRUCTION,
       question: null,
     });
+  });
+
+  // ---------------------------------------------------------------------------
+  // end_session — the coach's closing line (issue #404)
+  // ---------------------------------------------------------------------------
+  //
+  // THE ONE PLACE THIS TRANSPORT USED TO END FLAT. Every other spoken turn on
+  // this transport is `composeSpokenTurn`'s output, coach line included; the
+  // closing was a lone code-owned constant, so a learner who chose a persona
+  // heard it on every answer and then lost it at the one moment a session has
+  // a last word. `practice.service.spec.ts` proves `completeSession` composes
+  // the line; these prove this transport speaks it.
+  // ---------------------------------------------------------------------------
+
+  it('speaks the session’s own closing coach line before the code-owned closing', async () => {
+    const result: any = await call({
+      tool: 'end_session',
+      reason: 'learner_asked',
+    });
+
+    // THE COACH FIRST, THE DOOR LAST — the order the return statement argues
+    // for. Asserted as positions rather than as `toContain`, because "the
+    // closing line is last" is the half `COACH_INVARIANT_FLOOR`'s closing rule
+    // actually cares about and a containment check would pass either way round.
+    expect(result.say[0]).toBe(CLOSING_COACH_LINE);
+    expect(result.say[result.say.length - 1]).toBe(
+      PRACTICE_REALTIME_CLOSING_LINE,
+    );
+  });
+
+  it('composes nothing of its own — the closing line is whatever the session returned', async () => {
+    // A DIFFERENT PERSONA'S LINE, and the only thing that changes. If this
+    // method ever grew a bank lookup, a persona branch, or a rewrite of the
+    // string it is handed, this is the test that fails: the assertion is
+    // equality with the exact bytes the double returned, not a shape.
+    practice.completeSession.mockResolvedValue({
+      id: SESSION_ID,
+      spokenTurn: ['You showed up. That counts, and it compounds.'],
+    });
+
+    const result: any = await call({
+      tool: 'end_session',
+      reason: 'learner_asked',
+    });
+
+    expect(result.say).toEqual([
+      'You showed up. That counts, and it compounds.',
+      PRACTICE_REALTIME_CLOSING_LINE,
+    ]);
+  });
+
+  it('says the closing line alone when the learner has reactions off', async () => {
+    // `[]` IS THE ORDINARY ANSWER for `coach.reactions: false`, and it is the
+    // shape `toCoachReaction` produces — the preference became `null` once,
+    // server-side. Silence here must be silence, never a neutral substitute
+    // line standing in for the coach, and the session must still end.
+    practice.completeSession.mockResolvedValue({
+      id: SESSION_ID,
+      spokenTurn: [],
+    });
+
+    const result: any = await call({
+      tool: 'end_session',
+      reason: 'learner_asked',
+    });
+
+    expect(result.say).toEqual([PRACTICE_REALTIME_CLOSING_LINE]);
   });
 
   it('refuses "no questions left" while the session still has questions', async () => {

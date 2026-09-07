@@ -163,11 +163,21 @@ describe('buildPracticeRealtimeInstructions', () => {
     });
 
     it('contains no persona fragment, for any of the four personas', () => {
-      // Epic #345's locked decision. `coach.persona` colours text the
-      // application composes one call at a time, AFTER grading; a fragment in
-      // a SESSION prompt would colour every spoken word for the whole
-      // conversation, including words the application never authored and never
-      // sees.
+      // A fragment in a SESSION prompt would colour every spoken word for the
+      // whole conversation, including words the application never authored and
+      // never sees, from a prompt written before the learner answered
+      // anything.
+      //
+      // THIS ASSERTION SURVIVED #404 UNCHANGED, AND THAT IS THE POINT. #404
+      // reversed the conclusion that spoken practice therefore has no
+      // personality — the owner's requirement is that it has one on both
+      // transports — and delivered it the way the issue's Option B specifies:
+      // by colouring the lines the application composes (`composeSpokenTurn`,
+      // and since #404 the closing turn in `PracticeRealtimeService`), which
+      // reach the model through `say` and are already chosen per attempt after
+      // the outcome is known. None of that touches this prompt. A future agent
+      // wiring more personality into spoken practice must not weaken this test
+      // to do it; there is nothing it needs from here.
       const built = instructions();
 
       for (const persona of AI_COACH_PERSONAS) {
