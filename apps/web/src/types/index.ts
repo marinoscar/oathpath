@@ -3465,6 +3465,29 @@ export interface PracticeRealtimeToolOk {
   then: PracticeRealtimeThen;
   /** The question now outstanding, or `null`. A join key, never a verdict. */
   questionId: string | null;
+  /**
+   * What to do with {@link say}: speak every line, in order, and nothing else.
+   *
+   * The SAME string on every honoured result whatever the outcome — the API's
+   * own `SPEAK_VERBATIM_INSTRUCTION`. It is handed to the model with the rest
+   * of the result and is never read by this application.
+   */
+  instruction: string;
+  /**
+   * The outstanding question in full, or `null` — **the screen's field**.
+   *
+   * Issue #402: the browser must render the question whose words the coach was
+   * handed. `GET /api/practice/sessions/:id`'s own `nextQuestion` is a fresh
+   * draw from an unseeded shuffle on every read, so a page resolving it there
+   * showed one question and the coach asked another, from the first question of
+   * every spoken session onward.
+   *
+   * Always `null` or the question whose id is {@link questionId}, and never an
+   * answer — `PracticeQuestion` carries the API's compile-time proof of that.
+   * The relay does NOT forward this field to the model: see
+   * `useRealtimePractice.ts`'s `forModel`.
+   */
+  question: PracticeQuestion | null;
 }
 
 /**
