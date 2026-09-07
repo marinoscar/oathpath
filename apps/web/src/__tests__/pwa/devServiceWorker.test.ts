@@ -2,32 +2,26 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
-import {
-  buildDevServiceWorkerSource,
-  SELF_DESTROYING_SERVICE_WORKER,
-  STATIC_SHELL_URLS,
-} from '../../sw/buildServiceWorker';
+import { buildDevServiceWorkerSource, STATIC_SHELL_URLS } from '../../sw/buildServiceWorker';
 
 // =============================================================================
-// Which worker a DEV SERVER serves  (issue #395)
+// The worker a DEV SERVER serves, always  (issue #397)
 // =============================================================================
 //
-// `VITE_ENABLE_SW` was declared and read by issue #359 but never plumbed
-// through `infra/compose`, so the containerised dev deployment — the one this
-// application is actually exercised on — always took the disabled branch and
-// served the self-destroying placeholder. The PWA was inert there: not
-// installable, no offline shell, a dead update handshake, and nothing anywhere
-// reporting a disabled feature. The branch had no test, so nothing failed.
+// `VITE_ENABLE_SW` is gone. `buildDevServiceWorkerSource` now takes one
+// argument and always returns the real worker — the same function `pwa()`'s
+// middleware in `vite.config.ts` calls to answer `/sw.js`. Booting a Vite
+// server inside vitest would reach the same code through an HTTP stack that
+// has nothing to do with what this suite covers, and re-implementing the
+// substitution here would assert against a paraphrase of the shipped file
+// rather than the file itself.
 //
-// This suite covers the branch itself, through `buildDevServiceWorkerSource` —
-// the exact function `pwa()`'s middleware in `vite.config.ts` calls. Booting a
-// Vite server inside vitest would reach the same code through an HTTP stack
-// that has nothing to do with what broke, and re-implementing the ternary here
-// would assert against a paraphrase of it.
-//
-// Note what this suite does NOT test: whether the flag is ON anywhere. It is
-// off by default and must stay off (see `registerServiceWorker.ts`); the defect
-// was that it could not be turned on, not that it was not on.
+// What makes always-on safe is NOT that the dev worker is inert — it is the
+// real worker, unconditionally — it is (1) the precache list being exactly
+// the static shell and nothing Vite serves from its module graph, and (2) the
+// dev build id being volatile per process, so a restart or rebuild retires
+// the previous run's caches instead of serving stale `public/` bytes forever.
+// Both properties are covered below.
 // =============================================================================
 
 const rawSource = readFileSync(resolve(__dirname, '..', '..', 'sw', 'service-worker.js'), 'utf8');
@@ -39,15 +33,23 @@ function precacheUrlsIn(source: string): string[] {
   return JSON.parse(match[1]) as string[];
 }
 
-describe('buildDevServiceWorkerSource', () => {
-  it('serves the REAL worker when the flag is on', () => {
-    const source = buildDevServiceWorkerSource(rawSource, true);
+/** Reads the build id back out of an emitted worker. */
+function buildIdIn(source: string): string {
+  const match = source.match(/const BUILD_ID = "([^"]*)";/);
+  if (!match) throw new Error('emitted worker has no BUILD_ID assignment');
+  return match[1];
+}
 
-    // The real worker, identified by the policy it carries rather than by its
-    // length: the placeholder has no fetch handler and no cache routing at all.
+describe('buildDevServiceWorkerSource', () => {
+  it('always emits the real worker, unconditionally', () => {
+    const source = buildDevServiceWorkerSource(rawSource);
+
+    // The real worker, identified by the policy it carries: a fetch handler
+    // and the caching-policy header that only the real worker has. There is
+    // no disabled branch left to distinguish this from.
     expect(source).toContain("addEventListener('fetch'");
+    expect(source).toContain('CACHING POLICY');
     expect(source).toContain('PRECACHE_URLS');
-    expect(source).not.toBe(SELF_DESTROYING_SERVICE_WORKER);
     expect(source).not.toContain('self.registration.unregister()');
 
     // Both build placeholders substituted. Shipping either literal would be a
@@ -56,14 +58,6 @@ describe('buildDevServiceWorkerSource', () => {
     // fails on a URL that does not exist.
     expect(source).not.toContain('__SW_BUILD_ID__');
     expect(source).not.toContain('__PRECACHE_MANIFEST__');
-    expect(source).toContain('"dev"');
-  });
-
-  it('serves the self-destroying placeholder when the flag is off', () => {
-    // Byte-identical, not merely similar: this is the branch a dev stack takes
-    // by default, and it is also the only way back out for anyone who has a
-    // real worker still installed from a session with the flag on.
-    expect(buildDevServiceWorkerSource(rawSource, false)).toBe(SELF_DESTROYING_SERVICE_WORKER);
   });
 
   it('precaches the static shell and NOTHING ELSE', () => {
@@ -72,30 +66,44 @@ describe('buildDevServiceWorkerSource', () => {
     // module URL stops existing the moment a file is saved — and because
     // `addAll` is atomic, that is not a stale entry, it is an install that
     // fails outright and a worker that never activates.
-    expect(precacheUrlsIn(buildDevServiceWorkerSource(rawSource, true))).toEqual(
-      STATIC_SHELL_URLS,
-    );
+    expect(precacheUrlsIn(buildDevServiceWorkerSource(rawSource))).toEqual(STATIC_SHELL_URLS);
   });
 
   it('never precaches anything Vite serves from the module graph', () => {
     // Stated separately from the equality above so the intent survives a future
     // edit to STATIC_SHELL_URLS: whatever that list grows to, none of it may be
     // a dev-server URL.
-    for (const url of precacheUrlsIn(buildDevServiceWorkerSource(rawSource, true))) {
+    for (const url of precacheUrlsIn(buildDevServiceWorkerSource(rawSource))) {
       expect(url).not.toMatch(/^\/(src|@vite|@react-refresh|@fs|node_modules)\//);
       expect(url).not.toMatch(/\.(tsx?|jsx)$/);
       expect(url).not.toContain('?v=');
     }
   });
-});
 
-describe('the placeholder worker describes when it is used', () => {
-  it('does not claim the real worker only ships in a production build', () => {
-    // It used to, in its own first comment, and that was false the day #359
-    // shipped: the dev middleware emits the real worker under the flag. The
-    // claim mattered because it is the text a developer reads at the exact
-    // moment they are looking at /sw.js wondering why the PWA is dead.
-    expect(SELF_DESTROYING_SERVICE_WORKER).not.toContain('only for a production build');
-    expect(SELF_DESTROYING_SERVICE_WORKER).toContain('VITE_ENABLE_SW=true');
+  it('uses a build id shaped like `dev-<timestamp>`, never a fixed literal', () => {
+    // A SHAPE check, not the literal `'dev'`: the id is `dev-${Date.now()}`,
+    // computed once at module scope, so asserting an exact value here would
+    // make the test depend on when it happened to run.
+    const buildId = buildIdIn(buildDevServiceWorkerSource(rawSource));
+    expect(buildId).toMatch(/^dev-\d+$/);
+  });
+
+  it('is not the literal string "dev" and is not a placeholder', () => {
+    // Guards against a regression to the exact staleness bug #397 closed: a
+    // fixed dev build id meant `PRECACHE_NAME`/`RUNTIME_NAME` never changed,
+    // so a container rebuild shipping new `public/` bytes served the old ones
+    // forever.
+    const buildId = buildIdIn(buildDevServiceWorkerSource(rawSource));
+    expect(buildId).not.toBe('dev');
+    expect(buildId).not.toBe('__SW_BUILD_ID__');
+  });
+
+  it('emits the SAME build id across two calls in one process', () => {
+    // This is the property that stops cache churn on every refresh: the id is
+    // computed once at module scope (`DEV_BUILD_ID`), so it is stable for the
+    // life of this process and only changes across process restarts.
+    const first = buildIdIn(buildDevServiceWorkerSource(rawSource));
+    const second = buildIdIn(buildDevServiceWorkerSource(rawSource));
+    expect(first).toBe(second);
   });
 });

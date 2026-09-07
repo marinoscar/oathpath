@@ -7,7 +7,6 @@ import {
   onUpdateReady,
   resetUpdateStateForTests,
 } from '../../sw/registerServiceWorker';
-import { SELF_DESTROYING_SERVICE_WORKER } from '../../sw/buildServiceWorker';
 
 // =============================================================================
 // Where the service worker is allowed to exist  (issue #359, epic #345)
@@ -23,27 +22,25 @@ import { SELF_DESTROYING_SERVICE_WORKER } from '../../sw/buildServiceWorker';
 
 describe('shouldRegisterServiceWorker', () => {
   it('is off in the test environment', () => {
+    // `MODE === 'test'` is checked first and nothing overrides it — see this
+    // file's own header on why that ordering is the point.
     expect(shouldRegisterServiceWorker({ MODE: 'test', PROD: false })).toBe(false);
-    // Even an explicit opt-in does not override the test gate: a suite that set
-    // the flag for one case would be caching fixtures for every other one.
-    expect(
-      shouldRegisterServiceWorker({ MODE: 'test', PROD: false, VITE_ENABLE_SW: 'true' }),
-    ).toBe(false);
   });
 
-  it('is off in development unless explicitly enabled', () => {
-    expect(shouldRegisterServiceWorker({ MODE: 'development', PROD: false })).toBe(false);
-    expect(
-      shouldRegisterServiceWorker({ MODE: 'development', PROD: false, VITE_ENABLE_SW: 'true' }),
-    ).toBe(true);
-    // Exactly `'true'` — a truthy-string check would enable it for `'false'`.
-    expect(
-      shouldRegisterServiceWorker({ MODE: 'development', PROD: false, VITE_ENABLE_SW: 'false' }),
-    ).toBe(false);
+  it('is on in development — there is no opt-in left to gate it (issue #397)', () => {
+    expect(shouldRegisterServiceWorker({ MODE: 'development', PROD: false })).toBe(true);
   });
 
   it('is on in production', () => {
     expect(shouldRegisterServiceWorker({ MODE: 'production', PROD: true })).toBe(true);
+  });
+
+  it('registers with no VITE_ENABLE_SW property present at all', () => {
+    // Pins the removal of the flag with an assertion rather than leaving it to
+    // be true only by the absence of a property nobody checks.
+    const env: { MODE?: string; PROD?: boolean } = { MODE: 'development', PROD: false };
+    expect('VITE_ENABLE_SW' in env).toBe(false);
+    expect(shouldRegisterServiceWorker(env)).toBe(true);
   });
 
   it('reads the real environment as off, because this IS the test environment', () => {
@@ -93,16 +90,5 @@ describe('the update publisher', () => {
     notifyUpdateReady(vi.fn());
 
     expect(listener).not.toHaveBeenCalled();
-  });
-});
-
-describe('the development placeholder worker', () => {
-  it('uninstalls itself and drops every cache', () => {
-    // A no-op would not be enough. Anyone who once ran with `VITE_ENABLE_SW`
-    // keeps that worker until something replaces it, and a stale worker in
-    // front of a dev server is edits that do not appear.
-    expect(SELF_DESTROYING_SERVICE_WORKER).toContain('self.registration.unregister()');
-    expect(SELF_DESTROYING_SERVICE_WORKER).toContain('caches.delete');
-    expect(SELF_DESTROYING_SERVICE_WORKER).toContain('self.skipWaiting()');
   });
 });
