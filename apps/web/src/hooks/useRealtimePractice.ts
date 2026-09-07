@@ -8,31 +8,44 @@
  *
  * `docs/specs/realtime-practice.md` §1 and §4. Five tools arrive over the data
  * channel; each one is posted, unexamined, to
- * `POST /api/practice/sessions/:id/realtime/tool-calls`, and whatever comes
- * back is handed to the model VERBATIM.
+ * `POST /api/practice/sessions/:id/realtime/tool-calls`, and what comes back is
+ * handed to the model VERBATIM — minus exactly one field, which is addressed to
+ * the screen rather than to the model. See {@link forModel}, and issue #402 for
+ * the defect that made a screen-facing field necessary at all.
  *
  * Nothing in this file compares an answer to anything, counts a correct answer,
  * counts how many questions have been asked, selects a question, or knows a
  * pass mark — there is no such value here to look at. The result shape it
  * receives deliberately cannot carry one (`PracticeRealtimeToolOk` has `say`,
- * `then` and `questionId`, and the API carries a compile-time proof that no
- * `outcome`, `correct` or `score` can be added to it), and the call shape it
- * sends deliberately cannot express one either. `useRealtimePractice.source.test.ts`
- * reads this file and asserts both absences, because the way this regresses is
- * somebody adding "just a little" client-side bookkeeping to make a screen
- * nicer.
+ * `then`, `questionId`, `instruction` and `question` — the last being the
+ * prompt-only `PracticeQuestion` the coach was served, which carries its own
+ * compile-time proof that no answer can be added to it — and the API carries a
+ * second proof that no `outcome`, `correct` or `score` can be added to the
+ * result), and the call shape it sends deliberately cannot express one either.
+ * `useRealtimePractice.source.test.ts` reads this file and asserts both
+ * absences, because the way this regresses is somebody adding "just a little"
+ * client-side bookkeeping to make a screen nicer.
  *
  * THE TWO EXCEPTIONS, AND NEITHER IS A SECOND OPINION (issue #399). A
- * `grade_answer` is refused here, and never posted, when the provider
- * transcribed no learner speech at all this turn, and when the transcript it
+ * `grade_answer` is refused here, and never posted, when the microphone
+ * produced no learner speech at all this turn, and when the transcript it
  * reports is the coach's own last utterance coming back through the
  * microphone. Both are questions about PROVENANCE — did these words come from
  * the learner? — and neither reads a transcript for meaning, compares anything
  * to an accepted answer, or forms a verdict. What they buy is that an answer
  * nobody gave cannot become a `practice_attempts` row, which is a fact only
  * this process holds the evidence for. See `heardThisTurnRef` for the first,
- * `transcriptionSeenRef` for why absence alone is never enough to refuse on,
+ * `speechEvidenceSeenRef` for why absence alone is never enough to refuse on,
  * and `lib/coachEcho.ts` for the second.
+ *
+ * THE FIRST OF THE TWO NOW MEASURES A FASTER CLOCK (issue #403). It used to
+ * ask the provider's TRANSCRIPTION of the learner's audio whether anything had
+ * been said — a separate, slower pipeline than the speech-to-speech model's own
+ * hearing, which does not wait for it. So a `grade_answer` for a real answer
+ * could be decided while the guard's answer was still "not yet", and the
+ * refusal had the coach read the question out loud again. The turn detector's
+ * `speech_started`/`speech_stopped` edges now count as the same evidence and
+ * arrive in time to be useful; see `voiceActivity`.
  *
  * A REFUSAL IS A NORMAL RESULT, NOT AN ERROR. The route answers a rejected
  * tool call with HTTP 200 and an `instruction` field, and relaying that

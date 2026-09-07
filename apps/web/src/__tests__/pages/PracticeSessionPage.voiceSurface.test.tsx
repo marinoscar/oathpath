@@ -754,6 +754,16 @@ function installRealtimeHandlers(mint: MintOutcome = 'ok') {
             say: [QUESTION_1.prompt],
             then: 'await_answer',
             questionId: QUESTION_1.id,
+            instruction:
+              'Speak every line in say, in order, word for word, and then stop. ' +
+              'Say nothing else: do not add, drop, reorder, summarise or explain a ' +
+              'line, do not announce that you are calling a tool or waiting for one, ' +
+              'and never mention the application, the session or its grading.',
+            // THE QUESTION THE COACH WAS HANDED (#402). The surface renders
+            // this, not the session endpoint's own freshly-drawn `nextQuestion`
+            // — so a fixture that omits it renders no prompt at all, which is
+            // the honest answer to "nothing has been asked yet".
+            question: QUESTION_1,
           },
         }),
     ),

@@ -906,6 +906,8 @@ describe('the elapsed clock measures the session, not the last question', () => 
               say: [QUESTION_1.prompt],
               then: 'await_answer',
               questionId: `question-${asked}`,
+              instruction: SPEAK_VERBATIM,
+              question: { ...QUESTION_1, id: `question-${asked}` },
             },
           });
         },
