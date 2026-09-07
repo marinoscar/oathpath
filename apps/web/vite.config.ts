@@ -9,8 +9,8 @@ import { renderWebManifest } from './src/config/webManifest';
 import { renderOfflineShell } from './src/sw/offlineShell';
 import {
   buildServiceWorkerSource,
+  buildDevServiceWorkerSource,
   STATIC_SHELL_URLS,
-  SELF_DESTROYING_SERVICE_WORKER,
 } from './src/sw/buildServiceWorker';
 
 /**
@@ -83,6 +83,13 @@ function appName(): Plugin {
  * self-destroying worker unless `VITE_ENABLE_SW=true`. See
  * `src/sw/registerServiceWorker.ts` for the matching client-side gate and for
  * why the default is off in dev and in test.
+ *
+ * `VITE_ENABLE_SW` is read HERE from `process.env`, at server start, and
+ * separately by the client through `import.meta.env` — one variable, two
+ * readers, and both have to see it. A containerised dev stack therefore has to
+ * pass it into the `web` service, which is what `infra/compose/dev.compose.yml`
+ * now does (issue #395); before that it could not be set at all and this
+ * middleware always took the disabled branch.
  */
 function pwa(): Plugin {
   const here = resolve(fileURLToPath(import.meta.url), '..');
@@ -111,14 +118,7 @@ function pwa(): Plugin {
           // Never cached, in either branch — a worker the browser will not
           // re-fetch is a worker that can never be replaced.
           res.setHeader('Cache-Control', 'no-cache');
-          res.end(
-            enabled
-              ? buildServiceWorkerSource(readServiceWorkerSource(), {
-                  buildId: 'dev',
-                  precacheUrls: STATIC_SHELL_URLS,
-                })
-              : SELF_DESTROYING_SERVICE_WORKER,
-          );
+          res.end(buildDevServiceWorkerSource(readServiceWorkerSource(), enabled));
           return;
         }
         next();

@@ -17,6 +17,32 @@
  *   prod  — on.
  *
  * -----------------------------------------------------------------------------
+ * `VITE_ENABLE_SW` HAS TO BE PLUMBED, NOT JUST READ  (issue #395)
+ * -----------------------------------------------------------------------------
+ *
+ * This line used to read "off unless `VITE_ENABLE_SW=true`" and stop there,
+ * which described a switch nobody could actually flip. The flag was declared by
+ * issue #359 and read in two places — `process.env.VITE_ENABLE_SW` by `pwa()`'s
+ * dev middleware in `vite.config.ts`, deciding which worker `/sw.js` serves,
+ * and `import.meta.env.VITE_ENABLE_SW` by `shouldRegisterServiceWorker` below,
+ * deciding whether the client registers it at all — but it was never passed
+ * into the `web` service by `infra/compose/dev.compose.yml` and never mentioned
+ * in `infra/compose/.env.example`. So the containerised dev deployment, which
+ * is the environment this app is actually tested on, served the self-destroying
+ * placeholder unconditionally: not installable, no offline shell, a dead update
+ * handshake, and nothing anywhere reporting a disabled feature.
+ *
+ * `dev.compose.yml` now passes `VITE_ENABLE_SW=${VITE_ENABLE_SW:-false}`, so
+ * the default is still off — #359's reasoning above is unchanged and this is
+ * an opt-in, not a re-enable. Both readers see the same value because Vite
+ * exposes any `VITE_`-prefixed variable from the server's own environment to
+ * the client bundle; there is no second variable to keep in step.
+ *
+ * The gates are ordered, and the order is the point: `MODE === 'test'` is
+ * checked FIRST and no value of the flag gets past it, so setting the flag in
+ * CI can never put a worker in front of MSW.
+ *
+ * -----------------------------------------------------------------------------
  * THE UPDATE HANDSHAKE
  * -----------------------------------------------------------------------------
  *
