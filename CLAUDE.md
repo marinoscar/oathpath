@@ -685,7 +685,13 @@ that is a single count either way. See
 the persistent-stream voice-activity detector, the barge-in and earcon
 design, and the wake lock, and
 [`docs/specs/realtime-practice.md`](docs/specs/realtime-practice.md) for
-the realtime transport and its degradation ladder. **E15 (epic #345) adds
+the realtime transport and its degradation ladder, and
+[`docs/voice-agent-challenges.md`](docs/voice-agent-challenges.md) before
+changing any of it — the field guide to what a real device found wrong with
+this path (grading the coach's own echoed voice, the screen and the coach
+asking different questions, a verdict composed but never spoken, and the
+protocol/browser mechanics underneath) and why each fix is shaped the way
+it is. **E15 (epic #345) adds
 no permission string and no migration** — see the Practice paragraph
 under RBAC below, and "Adding a New Setting" below for why widening an
 existing namespace by a field needs no migration either.
