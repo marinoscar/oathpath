@@ -22,14 +22,17 @@
  * somebody adding "just a little" client-side bookkeeping to make a screen
  * nicer.
  *
- * THE ONE EXCEPTION, AND IT IS NOT A SECOND OPINION (issue #399). A
- * `grade_answer` for a turn in which the provider transcribed no learner speech
- * at all is refused here and never posted, so an answer nobody gave cannot
- * become a `practice_attempts` row. It reads no transcript, compares nothing to
- * an accepted answer and forms no verdict — it asks only whether the microphone
- * produced anything since the current question was asked, which is a fact only
- * this process holds. See `heardThisTurnRef` for the mechanism and
- * `transcriptionSeenRef` for why absence alone is never enough to refuse on.
+ * THE TWO EXCEPTIONS, AND NEITHER IS A SECOND OPINION (issue #399). A
+ * `grade_answer` is refused here, and never posted, when the provider
+ * transcribed no learner speech at all this turn, and when the transcript it
+ * reports is the coach's own last utterance coming back through the
+ * microphone. Both are questions about PROVENANCE — did these words come from
+ * the learner? — and neither reads a transcript for meaning, compares anything
+ * to an accepted answer, or forms a verdict. What they buy is that an answer
+ * nobody gave cannot become a `practice_attempts` row, which is a fact only
+ * this process holds the evidence for. See `heardThisTurnRef` for the first,
+ * `transcriptionSeenRef` for why absence alone is never enough to refuse on,
+ * and `lib/coachEcho.ts` for the second.
  *
  * A REFUSAL IS A NORMAL RESULT, NOT AN ERROR. The route answers a rejected
  * tool call with HTTP 200 and an `instruction` field, and relaying that
@@ -119,6 +122,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 
+import { isLikelyCoachEcho } from '../lib/coachEcho';
 import {
   createPracticeRealtimeSession,
   sendPracticeRealtimeToolCall,
@@ -498,6 +502,19 @@ const NOTHING_HEARD_INSTRUCTION =
   'unless the learner has asked to move on, and never report an answer they ' +
   'did not give.';
 
+/**
+ * The instruction a `grade_answer` gets when it reported the coach's own words.
+ *
+ * The same two moves {@link NOTHING_HEARD_INSTRUCTION} offers, for the same
+ * reason — the learner has still not answered — with one addition the model can
+ * act on: waiting. An echo means the question reached the room; what has not
+ * happened yet is a reply to it.
+ */
+const ECHOED_QUESTION_INSTRUCTION =
+  'That was your own voice coming back, not the learner. Call repeat_question ' +
+  'and say what it returns, then wait for their reply. Never report an answer ' +
+  'they did not give.';
+
 export function useRealtimePractice(
   options: UseRealtimePracticeOptions,
 ): UseRealtimePracticeReturn {
@@ -593,6 +610,22 @@ export function useRealtimePractice(
 
   /** The question the engine last said was outstanding. A join key, not a verdict. */
   const lastQuestionIdRef = useRef<string | null>(null);
+
+  /**
+   * The last thing the coach finished saying, as the provider transcribed its
+   * own output.
+   *
+   * HELD FOR ONE PURPOSE ONLY (#399): so a `grade_answer` reporting those exact
+   * words can be recognised as the loudspeaker rather than the learner. See
+   * `lib/coachEcho.ts`, which is where the comparison lives and where its
+   * limits are argued.
+   *
+   * ONLY THE LAST COMPLETED UTTERANCE, not a history. An echo is of what was
+   * just played, and keeping a transcript of the session would be keeping the
+   * coach's every word to compare answers against — a much larger surface, for
+   * a case that does not happen.
+   */
+  const coachUtteranceRef = useRef<string | null>(null);
 
   /** Start a fresh turn: nothing has been heard for the question just asked. */
   const beginTurn = useCallback(() => {
@@ -887,6 +920,35 @@ export function useRealtimePractice(
         return;
       }
 
+      // ---- AND THE SAME REFUSAL FOR THE COACH'S OWN VOICE (#399) -----------
+      //
+      // NOT REDUNDANT ALONGSIDE THE CHECK ABOVE, and it is worth saying why
+      // rather than leaving it to look like belt and braces. That check catches
+      // a `grade_answer` with no learner audio behind it at all. An ACOUSTIC
+      // echo is the opposite case: the coach's voice really does arrive at the
+      // microphone, the provider really does transcribe it as learner input,
+      // and the turn therefore reads as heard. The two guards cover the two
+      // ways a fabricated attempt reaches the engine, and neither covers the
+      // other's.
+      //
+      // A PROVENANCE TEST, NOT A GRADING ONE — `lib/coachEcho.ts` carries the
+      // rule and the argument for how blunt it is.
+      if (
+        call.tool === 'grade_answer' &&
+        isLikelyCoachEcho(call.transcript, coachUtteranceRef.current)
+      ) {
+        connectionRef.current?.sendToolResult(
+          event.callId,
+          localRejection(
+            'grade_answer',
+            'echoed_question',
+            'That was the question coming back through the microphone, not an answer.',
+            ECHOED_QUESTION_INSTRUCTION,
+          ),
+        );
+        return;
+      }
+
       void relay(call, event.callId);
     },
     [heardSomethingThisTurn, relay],
@@ -1107,6 +1169,13 @@ export function useRealtimePractice(
   const coachSpeech = useCallback(
     (event: RealtimeSpeechEvent) => {
       touchIdle();
+      // KEPT, NOT RENDERED (#399). The completed utterance is what an echo
+      // would be an echo OF — see `coachUtteranceRef`. Only the `done` event,
+      // because a delta is half a sentence and half a sentence would match
+      // things the whole one does not.
+      if (event.done && event.text.trim() !== '') {
+        coachUtteranceRef.current = event.text;
+      }
       if (!isMounted()) return;
       setIsCoachSpeaking(!event.done);
     },
