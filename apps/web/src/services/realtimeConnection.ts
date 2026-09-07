@@ -103,11 +103,68 @@ const EVENT_CHANNEL = 'oai-events';
  * So the payload is a frozen constant with no interpolation and no caller
  * input, and a test asserts that what goes on the wire names neither
  * `instructions` nor `tools`.
+ *
+ * -----------------------------------------------------------------------------
+ * WHY {@link INPUT_TRANSCRIPTION} JOINED IT, AND WHY THAT IS NOT AN EXCEPTION
+ * -----------------------------------------------------------------------------
+ *
+ * Issue #399. It is an AUDIO field, in exactly the class this section's title
+ * names, and it is NOT this client choosing session policy: the mint already
+ * asked for input transcription server-side
+ * (`openai.provider.ts`'s `DEFAULT_REALTIME_TRANSCRIPTION_MODEL`), and this is
+ * a restatement of what was already requested.
+ *
+ * IT IS HERE BECAUSE THE MERGE SEMANTICS OF `session.update` ARE NOT SOMETHING
+ * WE SHOULD HAVE TO KNOW. If the provider deep-merges `audio.input`, sending
+ * `turn_detection` alone is harmless and this key is redundant. If it REPLACES
+ * `audio.input` wholesale, sending `turn_detection` alone would silently wipe
+ * the transcription the mint configured — and the failure is invisible: no
+ * error, no rejected event, just a session that never emits a
+ * `conversation.item.input_audio_transcription.*` again, and a `grade_answer`
+ * guard that never has the evidence to arm. Carrying both keys makes the
+ * question stop mattering under either semantics.
+ *
+ * The `instructions`/`tools` rule above is untouched by this and must stay
+ * untouched: those are the fields through which a client could hand the model
+ * back the authority the epic exists to take away from it. A transcription
+ * model is not one of them.
  */
 const TURN_DETECTION = Object.freeze({
   type: 'semantic_vad' as const,
   interrupt_response: true,
   create_response: true,
+});
+
+/**
+ * The model that transcribes the LEARNER'S own audio.
+ *
+ * DUPLICATED, DELIBERATELY, FROM `DEFAULT_REALTIME_TRANSCRIPTION_MODEL` in
+ * `apps/api/src/ai/providers/openai.provider.ts`, which is the authority: that
+ * is where the value is chosen, and the reasoning for `whisper-1` over the
+ * cheaper alternatives (availability, because an unreachable transcription
+ * model is a mint that FAILS rather than a transcript that degrades) lives
+ * there and is not restated here.
+ *
+ * The two are separate packages with no shared module between them, and the
+ * alternatives are worse than a duplicate a comment points at: a cross-package
+ * import would couple the browser bundle to the API's source tree, and putting
+ * the name on the mint response would add a field to a contract for a value the
+ * client only needs in order to repeat it. If it changes, change it in BOTH —
+ * and a disagreement is benign in the direction that matters, because whichever
+ * of the two the provider honours, it still transcribes.
+ */
+const INPUT_TRANSCRIPTION_MODEL = 'whisper-1';
+
+/**
+ * Input transcription, restated on the wire. See {@link TURN_DETECTION}'s last
+ * section for why this is here and why it is not an exception to that rule.
+ *
+ * A FROZEN CONSTANT WITH NO CALLER INPUT, exactly like `TURN_DETECTION`: a
+ * client that could be handed a transcription model could be handed a different
+ * one per session, which is session policy arriving from the wrong side.
+ */
+const INPUT_TRANSCRIPTION = Object.freeze({
+  model: INPUT_TRANSCRIPTION_MODEL,
 });
 
 /** One function call the model emitted, as the relay receives it. */
@@ -703,12 +760,21 @@ export async function openRealtimeConnection(
 
   handshakeDone = true;
 
-  // BARGE-IN, ENABLED THE MOMENT THE CHANNEL IS OPEN. Audio fields only — see
-  // `TURN_DETECTION` for why this payload may never grow an `instructions` or
-  // a `tools` key.
+  // BARGE-IN, ENABLED THE MOMENT THE CHANNEL IS OPEN — and, since #399, input
+  // transcription restated alongside it so that `audio.input` carries both keys
+  // whether the provider merges this object into the minted session or replaces
+  // it. Audio fields only — see `TURN_DETECTION` for why this payload may never
+  // grow an `instructions` or a `tools` key, and why these two are not that.
   send({
     type: 'session.update',
-    session: { audio: { input: { turn_detection: TURN_DETECTION } } },
+    session: {
+      audio: {
+        input: {
+          turn_detection: TURN_DETECTION,
+          transcription: INPUT_TRANSCRIPTION,
+        },
+      },
+    },
   });
 
   return {

@@ -307,6 +307,15 @@ const DEFAULT_REALTIME_VOICE = 'alloy';
  * some deployments and absent on others — and a safety check that is only
  * sometimes possible is one no client can rely on. This is session
  * configuration, decided once, server-side, for every deployment alike.
+ *
+ * THIS IS THE AUTHORITY, AND THERE IS EXACTLY ONE DUPLICATE OF THE VALUE:
+ * `INPUT_TRANSCRIPTION_MODEL` in `apps/web/src/services/realtimeConnection.ts`,
+ * which restates it in the browser's own `session.update` so that `audio.input`
+ * carries transcription whether the provider merges that update into the minted
+ * session or replaces it wholesale. The argument for a duplicate rather than a
+ * shared module is on that constant. If this value changes, change it there
+ * too — and note that a disagreement is benign in the direction that matters,
+ * because whichever of the two the provider honours, it still transcribes.
  */
 const DEFAULT_REALTIME_TRANSCRIPTION_MODEL = 'whisper-1';
 
