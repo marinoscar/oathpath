@@ -2,6 +2,7 @@ import { createZodDto } from 'nestjs-zod';
 import { z } from 'zod';
 
 import { MAX_RESPONSE_LENGTH } from '../answer-matching';
+import { practiceQuestionSchema } from './practice-question.dto';
 import {
   END_SESSION_REASONS,
   type EndSessionReason,
@@ -222,6 +223,24 @@ export class PracticeToolCallOkDto extends createZodDto(
     then: z.enum(['await_answer', 'ask_next_question', 'session_complete']),
     /** The question now outstanding, or null. A join key, never a verdict. */
     questionId: z.string().nullable(),
+    /**
+     * What to do with `say`: speak every line, in order, and say nothing else.
+     *
+     * The SAME string on every honoured result, whatever the outcome — see
+     * `realtime/practice-realtime-tool-calls.ts`'s `SPEAK_VERBATIM_INSTRUCTION`
+     * on why an instruction that varied would be a verdict in disguise.
+     */
+    instruction: z.string(),
+    /**
+     * The outstanding question in full, or null — ADDRESSED TO THE SCREEN.
+     *
+     * Issue #402: the browser must render the question whose words the coach
+     * was handed, and `GET /api/practice/sessions/{id}`'s own `nextQuestion` is
+     * a fresh draw from an unseeded shuffle, so resolving it there asked the
+     * learner one question on screen and another aloud. Always `null` or the
+     * question whose id is `questionId`; never an answer, by construction.
+     */
+    question: practiceQuestionSchema.nullable(),
   }),
 ) {}
 
