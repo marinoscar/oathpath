@@ -946,6 +946,130 @@ describe('PracticeService', () => {
       expect(result.attempt.spokenTurn[result.attempt.spokenTurn.length - 1]).toBe(line);
     });
 
+    // -------------------------------------------------------------------------
+    // Two contrasting personas, on the fields BOTH transports read (issue #404)
+    // -------------------------------------------------------------------------
+    //
+    // The product owner's requirement, as a test: "the personality is a must
+    // for me, make sure it is active both on voice and text."
+    //
+    // ONE BLOCK COVERS BOTH TRANSPORTS, and that is a property of the design
+    // rather than a shortcut. `coachReaction` and `spokenTurn` are computed
+    // once, in `toAttemptResponse`, and the two transports READ THE SAME TWO
+    // FIELDS: the text path renders `coachReaction` (`AiFeedbackCard.tsx`) and
+    // speaks `spokenTurn` when E13's loop is driving, and the realtime path
+    // hands `spokenTurn` to the model as `say`
+    // (`PracticeRealtimeService.record`, asserted in that file's own suite).
+    // A test per transport would be two tests of one computation; what is
+    // worth holding is that the computation is persona-dependent at all.
+    //
+    // THE CORRECT ANSWER IS THE CASE THAT MATTERS MOST HERE. It is graded on
+    // rung 1, so NO grader runs and `aiFeedback` is null — `coachReaction` is
+    // then the ONLY persona-carrying text on the whole response, on either
+    // transport. If the reaction were ever gated on `gradingMethod`, or
+    // dropped from `spokenTurn`, a right answer would come back with no
+    // personality at all and every other test in this file would still pass.
+    //
+    // ASSERTED AGAINST EACH PERSONA'S OWN BANK rather than merely "the two
+    // differ": two personas could differ while both drawing from the wrong
+    // cell. Membership in `COACH_REACTION_LINES[key][event]` is the property
+    // that says the learner got the voice they chose.
+    describe('two contrasting personas reach both transports', () => {
+      /** Record one attempt as a learner with `persona` stored. */
+      async function attemptAs(
+        persona: 'supportive' | 'unfiltered',
+        responseText: string,
+      ) {
+        userSettings.readCoachPreferences.mockResolvedValue({ persona });
+
+        return service.recordAttempt(
+          USER_A,
+          SESSION_ID,
+          attemptInput({ responseText }),
+        );
+      }
+
+      it('a correct answer is encouraged for one learner and needled for the other', async () => {
+        const supportive = await attemptAs('supportive', 'Congress');
+        const unfiltered = await attemptAs('unfiltered', 'Congress');
+
+        // Rung 1 for both: no grader ran, so the reaction is the only
+        // persona-carrying text there is. This is the precondition the whole
+        // case rests on, asserted rather than assumed.
+        expect(supportive.attempt.gradingMethod).toBe('exact');
+        expect(supportive.attempt.aiFeedback).toBeNull();
+        expect(unfiltered.attempt.aiFeedback).toBeNull();
+
+        expect(supportive.attempt.coachReaction?.persona).toBe('supportive');
+        expect(unfiltered.attempt.coachReaction?.persona).toBe('unfiltered');
+
+        expect(COACH_REACTION_LINES.supportive['answer.correct']).toContain(
+          supportive.attempt.coachReaction?.text,
+        );
+        expect(COACH_REACTION_LINES.unfiltered['answer.correct']).toContain(
+          unfiltered.attempt.coachReaction?.text,
+        );
+
+        // AND IT IS AUDIBLE, not merely on the wire: the same line is the last
+        // element of the turn the voice transports speak.
+        expect(supportive.attempt.spokenTurn).toContain(
+          supportive.attempt.coachReaction?.text,
+        );
+        expect(unfiltered.attempt.spokenTurn).toContain(
+          unfiltered.attempt.coachReaction?.text,
+        );
+      });
+
+      it('a wrong answer draws from each learner’s own incorrect cell', async () => {
+        // The grader is unavailable in this block's `beforeEach`, which makes
+        // this the deployment with no AI configured at all — and the case
+        // where the curated bank is the ENTIRE personality mechanism. It has
+        // to work there: `coachReaction` is composed outside every AI gate,
+        // and a persona that only survived when a grader happened to run would
+        // be a preference that silently does nothing on most deployments.
+        const supportive = await attemptAs('supportive', 'A wrong answer');
+        const unfiltered = await attemptAs('unfiltered', 'A wrong answer');
+
+        expect(supportive.attempt.outcome).toBe('incorrect');
+        expect(unfiltered.attempt.outcome).toBe('incorrect');
+
+        expect(COACH_REACTION_LINES.supportive['answer.incorrect']).toContain(
+          supportive.attempt.coachReaction?.text,
+        );
+        expect(COACH_REACTION_LINES.unfiltered['answer.incorrect']).toContain(
+          unfiltered.attempt.coachReaction?.text,
+        );
+
+        expect(supportive.attempt.spokenTurn).toContain(
+          supportive.attempt.coachReaction?.text,
+        );
+        expect(unfiltered.attempt.spokenTurn).toContain(
+          unfiltered.attempt.coachReaction?.text,
+        );
+      });
+
+      it('changes wording only — never the outcome, the method or the schedule', async () => {
+        // `CLAUDE.md`'s "Adding a coach persona": a persona is read AFTER
+        // everything that decides what happened has already finished deciding
+        // it. Two learners giving the SAME answer to the SAME question differ
+        // in exactly one field, and this is the assertion that fails if a
+        // persona ever reaches a grading, scoring or scheduling input.
+        const supportive = await attemptAs('supportive', 'Congress');
+        const unfiltered = await attemptAs('unfiltered', 'Congress');
+
+        expect(unfiltered.attempt.outcome).toBe(supportive.attempt.outcome);
+        expect(unfiltered.attempt.gradingMethod).toBe(
+          supportive.attempt.gradingMethod,
+        );
+        expect(unfiltered.attempt.failureCause).toBe(
+          supportive.attempt.failureCause,
+        );
+        expect(unfiltered.attempt.answerSnapshot).toEqual(
+          supportive.attempt.answerSnapshot,
+        );
+      });
+    });
+
     it('defers the accepted answer past the retry boundary for a spoken miss', async () => {
       const result = await service.recordAttempt(
         USER_A,
