@@ -769,6 +769,25 @@ export function useRealtimePractice(
       if (!isMounted()) return result;
 
       if (result.status === 'ok') {
+        // THE SESSION HAS DEMONSTRABLY RECOVERED (#399), so whatever the last
+        // provider error said stops being true here.
+        //
+        // `providerError` sets a notice and, until this line, only a reconnect
+        // or the learner's own dismissal cleared it — so ONE turn-level
+        // rejection at eight seconds branded the remaining thirty-nine of a
+        // working session with "the voice connection hit a snag". That message
+        // is about a turn, and its own doc comment says the session usually
+        // keeps running; a sentence that outlives the thing it describes is a
+        // sentence a learner reads as the app being broken.
+        //
+        // AN HONOURED TOOL RESULT IS THE PROOF, and it is the strongest one
+        // available: the model called a tool, the engine accepted it, and the
+        // coach is about to speak. A REJECTED result deliberately does not
+        // clear it — the session moved, but nothing was shown to be working.
+        // Nothing here says anything new; it only stops saying something that
+        // has stopped being so.
+        setNotice(null);
+
         // A NEW TURN BEGINS WHEN A QUESTION IS ASKED (#399), which is exactly
         // these two cases: a tool that puts a question in the air, and any
         // honoured result that moved the outstanding question on. Never a
@@ -1135,6 +1154,11 @@ export function useRealtimePractice(
    * which is what a learner needs. The session is left running because most of
    * these end a single turn — falling back here would close a live, working
    * connection over a hiccup the next question would not have noticed.
+   *
+   * AND IT IS NO LONGER PERMANENT (#399). Because most of these end one turn,
+   * the notice this sets is cleared by the next honoured tool result in
+   * `relay` — the session saying, in the only way it can, that the turn it
+   * described is over.
    */
   const providerError = useCallback(
     (error: RealtimeProviderError) => {
