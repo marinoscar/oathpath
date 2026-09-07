@@ -227,6 +227,39 @@ export type RealtimeCloseReason =
   /** The peer connection failed or the channel went away mid-session. */
   | 'dropped';
 
+/**
+ * The provider's voice-activity detector heard the microphone start or stop.
+ *
+ * =============================================================================
+ * WHY THIS EXISTS ALONGSIDE `onApplicantSpeech` (issue #403)
+ * =============================================================================
+ *
+ * They report the same fact from two pipelines that run at different speeds,
+ * and the difference is the whole point.
+ *
+ * `conversation.item.input_audio_transcription.*` is a TRANSCRIPTION: a
+ * separate model reading the committed audio, whose result arrives when it
+ * arrives. The speech-to-speech model does not wait for it — it understands
+ * the audio itself — so it can and does emit a `grade_answer` for an answer
+ * whose transcription has not landed yet.
+ *
+ * `input_audio_buffer.speech_started` / `speech_stopped` are the turn
+ * detector's own events, raised the moment the microphone crosses the
+ * threshold and the moment it falls back under it. They arrive BEFORE the
+ * model has finished hearing the utterance, let alone before it can act on it.
+ *
+ * #399 measured "did the learner say anything this turn" on the transcription
+ * events alone, which meant the answer to that question could still be "not
+ * yet" at the moment a legitimate `grade_answer` was being decided. This is
+ * the earlier, cheaper evidence of the identical fact. It carries NO WORDS —
+ * see {@link RealtimeVoiceActivityEvent} — so nothing that reads it can drift
+ * into reading a transcript.
+ */
+export interface RealtimeVoiceActivityEvent {
+  /** `started` when the microphone opened on speech, `stopped` when it closed. */
+  edge: 'started' | 'stopped';
+}
+
 export interface RealtimeConnectionHandlers {
   /** The model wants a tool call relayed. The engine answers it, never this. */
   onToolCall: (call: RealtimeToolCallEvent) => void;
@@ -246,6 +279,22 @@ export interface RealtimeConnectionHandlers {
    * compile error instead.
    */
   onProviderError: (error: RealtimeProviderError) => void;
+  /**
+   * The turn detector heard the learner's microphone start or stop.
+   *
+   * OPTIONAL, and it is the one handler in this interface that is. Two callers
+   * share this module and only one of them measures speech presence; requiring
+   * it would make the mock interview implement a handler it has nothing to do
+   * with. A deployment whose turn detection emits no such events (a provider
+   * without server VAD) simply never calls it, which is why the one consumer
+   * that does read it must fail OPEN on silence rather than treating the
+   * absence as proof.
+   *
+   * CARRIES NO TEXT, deliberately. It answers "was the microphone open" and
+   * nothing else; a field with words in it would make this a second, faster
+   * transcript for something to start grading.
+   */
+  onVoiceActivity?: (event: RealtimeVoiceActivityEvent) => void;
   /** The connection ended. Fired at most once. */
   onClosed: (reason: RealtimeCloseReason) => void;
 }
@@ -1035,6 +1084,22 @@ export function handleProviderEvent(
       itemId: stringField(event, 'item_id'),
       text: stringField(event, 'transcript'),
       done: true,
+    });
+    return;
+  }
+
+  // ---- The microphone opening and closing, with no words in it -------------
+  //
+  // THE TURN DETECTOR, NOT A TRANSCRIPT (#403). Raised as the learner starts
+  // and stops speaking, well before any transcription of what they said —
+  // which is exactly why the nothing-heard guard reads these rather than
+  // waiting on a pipeline the model does not wait on either.
+  if (
+    type === 'input_audio_buffer.speech_started' ||
+    type === 'input_audio_buffer.speech_stopped'
+  ) {
+    handlers.onVoiceActivity?.({
+      edge: type === 'input_audio_buffer.speech_started' ? 'started' : 'stopped',
     });
     return;
   }

@@ -33,6 +33,8 @@ function handlers(): RealtimeConnectionHandlers & {
   toolCalls: unknown[];
   officer: unknown[];
   applicant: unknown[];
+  /** The turn detector's edges, with no words on them (#403). */
+  activity: unknown[];
   errors: RealtimeProviderError[];
   /** THIS connection's memory of its own turns. One per `handlers()`. */
   turns: RealtimeTurnTracker;
@@ -40,16 +42,19 @@ function handlers(): RealtimeConnectionHandlers & {
   const toolCalls: unknown[] = [];
   const officer: unknown[] = [];
   const applicant: unknown[] = [];
+  const activity: unknown[] = [];
   const errors: RealtimeProviderError[] = [];
   return {
     toolCalls,
     officer,
     applicant,
+    activity,
     errors,
     turns: createRealtimeTurnTracker(),
     onToolCall: (call) => toolCalls.push(call),
     onOfficerSpeech: (event) => officer.push(event),
     onApplicantSpeech: (event) => applicant.push(event),
+    onVoiceActivity: (event) => activity.push(event),
     onProviderError: (error) => errors.push(error),
     onRemoteStream: () => undefined,
     onClosed: () => undefined,
@@ -84,6 +89,63 @@ function outputItemDone(callId: string, name = 'next_question', args = '{}') {
     item: { type: 'function_call', call_id: callId, name, arguments: args },
   });
 }
+
+describe('the turn detector, as evidence with no words in it (#403)', () => {
+  it('reports both edges of the learner\u2019s microphone opening and closing', () => {
+    const h = handlers();
+
+    deliver(
+      h,
+      frame({ type: 'input_audio_buffer.speech_started', item_id: 'item-1' }),
+    );
+    deliver(
+      h,
+      frame({ type: 'input_audio_buffer.speech_stopped', item_id: 'item-1' }),
+    );
+
+    expect(h.activity).toEqual([{ edge: 'started' }, { edge: 'stopped' }]);
+  });
+
+  it('carries no text, so nothing downstream can start reading one', () => {
+    // THE POINT OF THE EVENT'S SHAPE. It answers "was the microphone open" and
+    // nothing else — a field with words in it would be a second, faster
+    // transcript, and a second transcript is where a client-side grading ladder
+    // starts. The transcription events remain the only source of the learner's
+    // words, and they still reach `onApplicantSpeech` alone.
+    const h = handlers();
+
+    deliver(
+      h,
+      frame({
+        type: 'input_audio_buffer.speech_started',
+        item_id: 'item-1',
+        transcript: 'the Constitution',
+        delta: 'the Constitution',
+      }),
+    );
+
+    expect(h.activity).toEqual([{ edge: 'started' }]);
+    expect(JSON.stringify(h.activity)).not.toContain('Constitution');
+    expect(h.applicant).toEqual([]);
+  });
+
+  it('is optional: a caller that does not implement it is unaffected', () => {
+    // The mock interview shares this module and does not measure speech
+    // presence. A required handler would be one it had to implement for a
+    // reason that is not its own.
+    const h = handlers();
+    const withoutIt: RealtimeConnectionHandlers = { ...h };
+    delete (withoutIt as { onVoiceActivity?: unknown }).onVoiceActivity;
+
+    expect(() =>
+      handleProviderEvent(
+        frame({ type: 'input_audio_buffer.speech_started', item_id: 'i' }),
+        withoutIt,
+        h.turns,
+      ),
+    ).not.toThrow();
+  });
+});
 
 describe('provider events', () => {
   it('surfaces a tool call only when its arguments are COMPLETE', () => {
