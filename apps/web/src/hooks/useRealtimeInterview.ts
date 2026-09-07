@@ -34,6 +34,46 @@
  * so, which is the worst failure mode this screen has.
  *
  * =============================================================================
+ * THE TWO EXCEPTIONS, AND NEITHER IS A SECOND OPINION (issue #400)
+ * =============================================================================
+ *
+ * A `grade_answer` is refused here, and never posted, in exactly two cases: the
+ * microphone produced no applicant speech at all since the question was asked,
+ * and the transcript the model reports is the officer's own last utterance
+ * coming back through the loudspeaker. Both are questions about PROVENANCE —
+ * did these words come from the applicant? — and neither reads a transcript for
+ * meaning, compares anything to an accepted answer, or forms a verdict of any
+ * kind. The section above is untouched by them: this file still holds no
+ * civics row, no answer, no tally and no pass mark to decide anything with.
+ *
+ * WHAT THEY BUY IS THAT AN ANSWER NOBODY GAVE CANNOT BE RECORDED, and on this
+ * transport that is a larger claim than on practice's. An honoured
+ * `grade_answer` here writes a `practice_attempts` row with
+ * `source: mock_interview`, moves `mock_interviews.civics_asked` and
+ * `civics_correct` — the inputs to the stop rule and to `passedCivics` — adds a
+ * `mock_interview_turns` row, and feeds the readiness recompute at completion.
+ * The evidence that the room was silent, or that the room was only this
+ * application's own loudspeaker, exists in this process and nowhere else, so
+ * the engine cannot make either check for itself.
+ *
+ * Both are ported from `useRealtimePractice.ts` (issue #399), which closed the
+ * identical hole on the practice transport: `heardThisTurnRef` is the first,
+ * `transcriptionSeenRef` is why absence alone is never enough to refuse on, and
+ * `lib/coachEcho.ts` — reused, never forked — is the second.
+ *
+ * THE ECHO GUARD IS DISARMED FOR THE READING PHASE, AND ONLY THERE. The officer
+ * SAYS the reading sentence aloud — `interviews.service.ts` composes that turn
+ * as intro + `OFFICER_TURN_SEPARATOR` + `english_sentences.text` and pushes it
+ * to `spoken`, and `realtime-interview.md` §5 says the same thing ("the
+ * officer's tool-mediated turn presents one `english_sentences` row verbatim,
+ * the learner reads it aloud") — and the applicant is then required to say
+ * those exact words back. A provenance test has no discriminating power there
+ * BY CONSTRUCTION: a correct reading attempt IS the officer's last utterance,
+ * word for word, so an armed guard would refuse precisely the right answers,
+ * which is the worst false positive available. The nothing-heard guard stays
+ * armed throughout reading — the applicant does speak.
+ *
+ * =============================================================================
  * THE WRITING SENTENCE NEVER REACHES THE DOM. TWICE OVER.
  * =============================================================================
  *
@@ -80,6 +120,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 
+import { isLikelyCoachEcho } from '../lib/coachEcho';
 import {
   completeInterview,
   createRealtimeSession,
@@ -200,6 +241,19 @@ export interface UseRealtimeInterviewReturn {
   /** Set exactly when `stage === 'fallback'`. */
   fallback: RealtimeFallback | null;
 
+  /**
+   * The live conversation, for the screen to render.
+   *
+   * DISPLAY, AND STILL ONLY DISPLAY. What reaches the engine is the transcript
+   * the MODEL reports on its own `grade_answer` call; nothing in this array is
+   * ever sent anywhere, and nothing here is compared to an accepted answer.
+   *
+   * Since #400 an applicant speech event ALSO sets a provenance flag on its way
+   * past — that SOME speech arrived this turn, never what it said — and the
+   * officer's completed utterances are kept in a ref for the echo check.
+   * Neither of those reads these entries, and neither is a second opinion about
+   * a verdict; see the file header.
+   */
   transcript: RealtimeTranscriptEntry[];
   /** True while the officer's words are still arriving. */
   isOfficerSpeaking: boolean;
@@ -279,6 +333,43 @@ const CONNECTION_LOST: RealtimeFallback = {
   retryable: false,
 };
 
+/**
+ * The instruction this hook sends when it refuses a `grade_answer` (#400).
+ *
+ * WORDED FROM THE ENGINE'S OWN VOCABULARY, not invented here. Both sentences
+ * are `interviews/realtime/realtime-tool-calls.ts`'s: the first is its
+ * `answer_outstanding` rejection, which covers the neighbouring situation
+ * exactly ("the applicant has not yet answered the question you last asked")
+ * and asks for precisely the move that is wanted here; the second is the tail
+ * of its `CONTINUE_INSTRUCTION`, which every refusal on that route already ends
+ * with. That file's own reason for having one constant applies to having this
+ * one match it: a model handed two slightly different phrasings for the same
+ * situation is a model choosing between them.
+ *
+ * NOTHING IS ASKED FOR OUT LOUD, and that is the interview-specific half of the
+ * decision. Practice's equivalent has the coach call `repeat_question`; there
+ * is no such tool in this contract, and a real officer does not re-ask because
+ * the room was noisy — `mock-interview.md`'s realism argument. So the applicant
+ * hears nothing at all: no verdict is stated or implied, no acknowledgement is
+ * spoken, and `OFFICER_VERDICT_PROHIBITION` is untouched by either refusal.
+ */
+const NOTHING_HEARD_INSTRUCTION =
+  'Wait for the applicant to answer, then call grade_answer with what you ' +
+  'heard. Do not tell the applicant anything happened.';
+
+/**
+ * The same refusal, for a `grade_answer` that reported the officer's own words.
+ *
+ * ONE SENTENCE MORE THAN {@link NOTHING_HEARD_INSTRUCTION}, naming what
+ * happened, because it is something the model can act on: an echo means the
+ * question reached the room, and what has not happened yet is a reply to it.
+ * The recovery is identical, and deliberately the same string, so the two
+ * refusals cannot drift apart.
+ */
+const ECHOED_QUESTION_INSTRUCTION =
+  'That was your own voice coming back, not the applicant. ' +
+  NOTHING_HEARD_INSTRUCTION;
+
 export function useRealtimeInterview(
   id: string | null | undefined,
 ): UseRealtimeInterviewReturn {
@@ -339,6 +430,141 @@ export function useRealtimeInterview(
    * carefully withholding. See the file header.
    */
   const withholdOfficerRef = useRef(false);
+
+  // ---------------------------------------------------------------------------
+  // DID THE MICROPHONE HEAR THE APPLICANT THIS TURN? (issue #400)
+  // ---------------------------------------------------------------------------
+  //
+  // The two checks on this transport that are not a relay, ported from
+  // `useRealtimePractice.ts` (#399), which closed the identical hole for spoken
+  // practice. They live here rather than server-side because the evidence lives
+  // only here: the provider's transcription of the APPLICANT'S INPUT AUDIO
+  // arrives on the browser's own data channel and reaches no other process.
+  // Until #400 it was folded into the rendered transcript and otherwise
+  // discarded, so what the model CLAIMED to have heard was never set against
+  // what the microphone actually picked up — and the officer's own question,
+  // returning through the phone's speaker, was believed all the way into a
+  // `practice_attempts` row about an answer nobody gave.
+  //
+  // THEY DECIDE NOTHING ABOUT CORRECTNESS. Neither reads a transcript for
+  // meaning, neither has an accepted answer to read, and neither can express a
+  // verdict: one is a boolean about whether any speech arrived, the other a
+  // boolean about where a string came from. The grading ladder is still the
+  // engine's, and still the only one.
+
+  /**
+   * Has the provider transcribed any applicant speech since the officer's last
+   * question?
+   *
+   * RESET WHEN A QUESTION IS ASKED, never on a timer: a turn is bounded by the
+   * question it belongs to, and a clock would decide that an applicant who
+   * thought for eleven seconds had not spoken. The reset happens in `relay`, on
+   * an honoured `next_question` — which is the only thing that opens a turn on
+   * this transport. Practice has a second reset condition and this deliberately
+   * does not; see that call site.
+   */
+  const heardThisTurnRef = useRef(false);
+
+  /**
+   * Has this hook EVER seen the provider transcribe applicant speech?
+   *
+   * THE DIFFERENCE BETWEEN "HEARD NOTHING" AND "DOES NOT REPORT HEARING", and
+   * without it the guard above is a brick rather than a safeguard. A realtime
+   * session transcribes its input only when the mint asked it to, and a
+   * deployment where that never reaches the provider — an older API behind a
+   * cached bundle, a model that ignores the field — would produce no applicant
+   * transcription events at all. Enforcing on absence there would refuse EVERY
+   * answer of every interview, which is a far worse failure than the one being
+   * fixed: an applicant whose whole rehearsal records nothing, days before the
+   * appointment it exists to prepare them for.
+   *
+   * So the guard arms itself only once the provider has PROVEN it reports
+   * applicant speech: fail OPEN until then, closed ever after. Monotonic, and
+   * never reset — including across a re-mint, because it describes the
+   * deployment rather than the connection.
+   */
+  const transcriptionSeenRef = useRef(false);
+
+  /**
+   * The last thing the officer finished saying, as the provider transcribed its
+   * OWN output.
+   *
+   * HELD FOR ONE PURPOSE ONLY (#400): so a `grade_answer` reporting those exact
+   * words can be recognised as the loudspeaker rather than the applicant. See
+   * `lib/coachEcho.ts`, which is where the comparison lives and where its
+   * bluntness is argued — reused here, never forked.
+   *
+   * ONLY THE LAST COMPLETED UTTERANCE, not a history. An echo is of what was
+   * just played, and keeping the officer's whole side of the conversation would
+   * be keeping every question asked to compare answers against — a much larger
+   * surface, for a case that does not happen.
+   *
+   * NOT `withholdOfficerRef`, AND NOT AN EXCEPTION TO IT — the two must not be
+   * conflated, which is why this says so rather than leaving it to be noticed.
+   * The withholding rule is a DOM invariant (this file's own header section):
+   * the writing test's dictated sentence must never be RENDERED. What is kept
+   * here is never rendered, never put in state and never sent anywhere; it is
+   * read by one pure function, and both refusal payloads that function can lead
+   * to are code-owned constants carrying no transcript. So nothing leaks by
+   * keeping it during a dictation — and it MUST be kept there: `writing` is the
+   * one phase where the officer's spoken words ARE the answer, so an echoed
+   * `grade_answer` would score as a perfect one.
+   *
+   * A genuine writing answer is out of reach of both guards by construction: it
+   * is TYPED, and `submitWriting` relays it with `relay(..., null)` without
+   * passing through `handleToolCall` at all. A model-originated `grade_answer`
+   * during the dictation is caught by the nothing-heard guard too — the
+   * applicant said nothing, because they were writing.
+   */
+  const officerUtteranceRef = useRef<string | null>(null);
+
+  /**
+   * May the echo check refuse a `grade_answer` in the phase now running?
+   *
+   * FALSE FOR `reading`, AND ONLY FOR `reading`. The officer says the reading
+   * sentence aloud and the applicant is required to say those exact words back,
+   * so a correct reading attempt IS the officer's last utterance, word for
+   * word. `isLikelyCoachEcho` therefore has no discriminating power there by
+   * construction, and an armed guard would refuse precisely the right answers —
+   * the worst false positive available. The file header carries the full
+   * argument and the two sources that establish it.
+   *
+   * ARMED BY DEFAULT, so a phase this hook has not yet been told about is
+   * guarded rather than exempt. Set from the ENGINE's own `phase` on each
+   * honoured `next_question`, beside the turn reset, so the arming and the turn
+   * can never be describing different questions.
+   */
+  const echoGuardArmedRef = useRef(true);
+
+  /** Start a fresh turn: nothing has been heard for the question just asked. */
+  const beginTurn = useCallback(() => {
+    heardThisTurnRef.current = false;
+  }, []);
+
+  /**
+   * Record that the microphone produced applicant speech in this turn.
+   *
+   * ONE WRITER FOR BOTH FLAGS, so they can never be set by one path and not the
+   * other — {@link transcriptionSeenRef} is what makes the guard fail open on a
+   * deployment that transcribes nothing, and it would be useless if a caller
+   * could set `heardThisTurnRef` without it.
+   */
+  const noteApplicantSpeech = useCallback(() => {
+    transcriptionSeenRef.current = true;
+    heardThisTurnRef.current = true;
+  }, []);
+
+  /**
+   * May a `grade_answer` be relayed at all?
+   *
+   * `true` when the microphone produced speech this turn — and also when this
+   * hook has never been observed transcribing applicant speech at all, for the
+   * reason {@link transcriptionSeenRef} states.
+   */
+  const heardSomethingThisTurn = useCallback(
+    () => heardThisTurnRef.current || !transcriptionSeenRef.current,
+    [],
+  );
 
   // ---------------------------------------------------------------------------
   // Reading the interview
@@ -455,6 +681,22 @@ export function useRealtimeInterview(
       applyTurnStatus(result);
 
       if (result.status === 'ok' && result.tool === 'next_question') {
+        // A NEW TURN BEGINS WHEN A QUESTION IS ASKED (#400), and on this
+        // transport an honoured `next_question` is the ONLY thing that begins
+        // one. Practice resets on a second condition as well — an honoured
+        // result whose `questionId` moved on — and has a `repeat_question` tool
+        // that counts as a third; neither exists here, because this contract's
+        // results carry no question id at all and there is no tool that
+        // re-reads a question. Never on a timer, for the reason
+        // `heardThisTurnRef` gives.
+        beginTurn();
+
+        // AND THE ECHO GUARD IS ARMED FOR EVERY PHASE BUT READING. The phase is
+        // the engine's own, read off the same honoured result that begins the
+        // turn, so the arming and the turn can never describe different
+        // questions. See `echoGuardArmedRef` and the file header.
+        echoGuardArmedRef.current = result.phase !== 'reading';
+
         // Held for a reconnect, and — for a dictation — this is the ONLY copy.
         pendingLineRef.current = result.text;
         withholdOfficerRef.current = result.speakOnly;
@@ -484,7 +726,7 @@ export function useRealtimeInterview(
 
       return result;
     },
-    [applyTurnStatus, id, isMounted],
+    [applyTurnStatus, beginTurn, id, isMounted],
   );
 
   /** Turn one tool call from the model into an HTTP relay. */
@@ -516,9 +758,77 @@ export function useRealtimeInterview(
         return;
       }
 
+      // ---- THE ONE CALL THAT IS NOT RELAYED UNCONDITIONALLY (#400) --------
+      //
+      // A `grade_answer` for a turn in which the microphone produced no
+      // applicant speech at all is refused HERE, and never reaches
+      // `POST /api/interviews/:id/realtime/tool-calls` — so no
+      // `practice_attempts` row is written for it, `civics_asked` and
+      // `civics_correct` do not move, no `mock_interview_turns` row is added,
+      // and nothing enters the readiness recompute, whatever the acoustics in
+      // the room. The engine cannot make this check for itself: the evidence is
+      // the provider's transcription of the applicant's input audio, which
+      // arrives on this data channel and nowhere else.
+      //
+      // ARMED IN EVERY PHASE, reading and writing included. In reading the
+      // applicant does speak, so silence is still evidence of no answer; in
+      // writing they type, and a `grade_answer` the model originated there has
+      // no spoken answer behind it by definition — the real one arrives through
+      // `submitWriting`, which never passes through this function.
+      //
+      // NOT A FALLBACK, NOT A TEARDOWN AND NOTHING ON SCREEN. The interview is
+      // working; one call was not honoured. The model is handed the same
+      // refusal shape every other locally-refused call gets, and the applicant
+      // hears nothing at all — see {@link NOTHING_HEARD_INSTRUCTION}.
+      if (call.tool === 'grade_answer' && !heardSomethingThisTurn()) {
+        connectionRef.current?.sendToolResult(event.callId, {
+          tool: 'grade_answer',
+          status: 'rejected',
+          reason: 'nothing_heard',
+          error:
+            'The microphone picked up no speech since that question was asked.',
+          instruction: NOTHING_HEARD_INSTRUCTION,
+        });
+        return;
+      }
+
+      // ---- AND THE SAME REFUSAL FOR THE OFFICER'S OWN VOICE (#400) ---------
+      //
+      // NOT REDUNDANT ALONGSIDE THE CHECK ABOVE, and it is worth saying why
+      // rather than leaving it to look like belt and braces. That check catches
+      // a `grade_answer` with no applicant audio behind it at all. An ACOUSTIC
+      // echo is the opposite case: the officer's voice really does arrive at
+      // the microphone, the provider really does transcribe it as applicant
+      // input, and the turn therefore reads as heard. The two guards cover the
+      // two ways a fabricated attempt reaches the engine, and neither covers
+      // the other's.
+      //
+      // DISARMED IN THE READING PHASE, where a right answer and an echo are the
+      // same words by design — `echoGuardArmedRef` and the file header carry
+      // that argument in full.
+      //
+      // A PROVENANCE TEST, NOT A GRADING ONE — `lib/coachEcho.ts` holds the
+      // rule and the argument for how blunt it is, and is reused rather than
+      // reimplemented for this transport.
+      if (
+        call.tool === 'grade_answer' &&
+        echoGuardArmedRef.current &&
+        isLikelyCoachEcho(call.transcript, officerUtteranceRef.current)
+      ) {
+        connectionRef.current?.sendToolResult(event.callId, {
+          tool: 'grade_answer',
+          status: 'rejected',
+          reason: 'echoed_question',
+          error:
+            'That was the question coming back through the microphone, not an answer.',
+          instruction: ECHOED_QUESTION_INSTRUCTION,
+        });
+        return;
+      }
+
       void relay(call, event.callId);
     },
-    [relay],
+    [heardSomethingThisTurn, relay],
   );
 
   // ---------------------------------------------------------------------------
@@ -726,6 +1036,18 @@ export function useRealtimeInterview(
   handleToolCallRef.current = handleToolCall;
 
   const officerSpeech = useCallback((event: RealtimeSpeechEvent) => {
+    // KEPT, NOT RENDERED (#400). The completed utterance is what an echo would
+    // be an echo OF — see `officerUtteranceRef`, including why keeping it
+    // during a dictation leaks nothing. Only the `done` event, because a delta
+    // is half a sentence and half a sentence would match things the whole one
+    // does not.
+    //
+    // BEFORE THE MOUNT CHECK, for the same reason `applicantSpeech` is: the
+    // connection outlives the component until teardown runs, and an utterance
+    // dropped here is one a later `grade_answer` could not be measured against.
+    if (event.done && event.text.trim() !== '') {
+      officerUtteranceRef.current = event.text;
+    }
     if (!isMounted()) return;
     setIsOfficerSpeaking(!event.done);
     // WITHHELD DURING A DICTATION — the officer's audio at that moment IS the
@@ -736,9 +1058,27 @@ export function useRealtimeInterview(
   officerSpeechRef.current = officerSpeech;
 
   const applicantSpeech = useCallback((event: RealtimeSpeechEvent) => {
+    // THE ONE THING THIS EVENT IS NOW READ FOR BESIDES RENDERING (#400):
+    // whether there was any applicant speech at all this turn. Not its words,
+    // not their meaning — only that the microphone produced some. Deltas count
+    // as much as the final event: an applicant who was cut off mid-answer still
+    // spoke.
+    //
+    // BEFORE THE MOUNT CHECK, on purpose. The flags are what the next
+    // `grade_answer` is measured against, and a hook whose component has
+    // unmounted still owns a live connection until its teardown runs — an
+    // utterance dropped here would become an answer that could not be accounted
+    // for.
+    if (event.text.trim() !== '') {
+      noteApplicantSpeech();
+    }
+
     if (!isMounted()) return;
+    // DISPLAY. What reaches the engine is still the transcript the MODEL
+    // reports on its own `grade_answer` call; this is never sent anywhere and
+    // is never compared to an answer.
     appendSpeech(setTranscript, 'applicant', event, false);
-  }, [isMounted]);
+  }, [isMounted, noteApplicantSpeech]);
   const applicantSpeechRef = useRef(applicantSpeech);
   applicantSpeechRef.current = applicantSpeech;
 
