@@ -642,6 +642,21 @@ different one was outstanding.
 
 ## 7. Persona as a curated line, not a licence
 
+> **Amended by issue #404.** The product owner's instruction — "the
+> personality is a must for me, make sure it is active both on voice and
+> text" — settles a question this section previously left open by
+> implication. Everything below about the *session prompt* is unchanged
+> and still enforced: no persona fragment, the floor last, `say` spoken
+> verbatim. What changed is the conclusion a reader should draw from it.
+> A persona is **required** on this transport, and it arrives exactly the
+> way this section already describes — through the curated bank, inside
+> `say` — never through the prompt. #404 also closed the one turn where
+> that was not yet true: `end_session` spoke a lone code-owned constant
+> and discarded the closing coach line `completeSession` had already
+> composed, so the session ended in a voice nobody chose. It now speaks
+> that line first and the constant last. See the amendment note at the
+> end of this section.
+
 The realtime session's own instructions string ends with
 `COACH_INVARIANT_FLOOR` (`apps/api/src/ai/coach/invariants.ts:63`),
 **imported verbatim and appended last** — the identical placement its own
@@ -672,6 +687,29 @@ tutor's civics explanation are; it is an acknowledgement sentence the engine
 tightly constrains, the identical "no field to put it in" enforcement §4
 already applies to a verdict.
 
+**The closing turn carries the coach too, since #404.** `end_session` is
+the one tool whose `say` has no `composeSpokenTurn` output behind it — the
+session is over, there is no attempt to react to — and until #404 it was
+`PRACTICE_REALTIME_CLOSING_LINE` alone. But `completeSession`, which that
+handler already calls, returns a session whose `spokenTurn` is
+`composeSessionClosingTurn`'s output: the coach's closing line, drawn from
+the `session.complete_*` cells of the learner's own persona, selected once
+in `toCoachReaction` and seeded by the session's id. The request/response
+transport has spoken it since #352 (`PracticeSessionPage.handleFinish`) and
+the summary screen has rendered it just as long; the realtime transport
+discarded it. It is now `[...completed.spokenTurn,
+PRACTICE_REALTIME_CLOSING_LINE]`.
+
+**The coach's line goes first and the constant stays last**, which is not
+cosmetic: `practice-realtime-lines.ts` writes that constant to be
+forward-pointing per `COACH_INVARIANT_FLOOR`'s closing rule — the last
+thing a learner hears is a door, not a grade — and a persona's parting shot
+after it would take the door away. `[]` remains ordinary and remains
+silence: a learner with `coach.reactions` off gets the constant alone, with
+no suppression branch in the handler and no neutral line substituted for
+the coach, because the preference already became `null` once, server-side,
+in `toCoachReaction`.
+
 **Session instructions contain no question, no accepted answer, no planned
 count, and no persona fragment** — the identical assertion
 `realtime-interview.md` §4 already makes about the officer's own
@@ -680,6 +718,16 @@ not a prose promise: a test asserts each absence, and a second test asserts
 `COACH_INVARIANT_FLOOR` is imported and not restated inline (the identical
 guard `interviews/realtime/realtime-instructions.spec.ts` already runs for
 the interview's own instructions).
+
+**That absence assertion survived #404 unchanged, and it is meant to.**
+Reversing the "spoken practice has no personality" conclusion did not need
+a single byte of the session prompt, because the mechanism that delivers
+the personality never went through it. A future agent asked for *more*
+personality on this transport should extend the bank or the composed turn;
+weakening `practice-realtime-instructions.spec.ts` to add a fragment here
+is Option A, which #404 considered by name and rejected again — it would
+also contradict the standing instruction #403 added to this same prompt,
+which tells the model to speak its given lines and nothing else.
 
 ## 8. The degradation ladder, and its single decision site
 

@@ -37,16 +37,38 @@ import { PRACTICE_REALTIME_TOOL_NAMES } from './practice-realtime-tools';
 //     rule, applied to a prompt. THE PROMPT BELOW CONTAINS NO DIGIT AT ALL,
 //     which is what its own spec asserts.
 //
-//   * NO PERSONA FRAGMENT. Epic #345's locked decision, and it is the one
-//     absence that is a choice rather than a safety rule: `coach.persona`
-//     colours the grader's `feedback` sentence and the tutor's explanation —
-//     text the application composes, one call at a time, after grading has
-//     finished. A fragment pushed into a SESSION prompt would colour every
-//     spoken word for the whole conversation, including words the application
-//     never authored and never sees, and it would do so from a prompt written
-//     before the learner answered anything. `AI_COACH_PERSONAS` is not
-//     imported here at all, and the spec asserts none of the four fragments
-//     appears in the built string.
+//   * NO PERSONA FRAGMENT. Still true of THIS FILE, still asserted, and the
+//     one absence that is a choice rather than a safety rule: a fragment
+//     pushed into a SESSION prompt would colour every spoken word for the
+//     whole conversation, including words the application never authored and
+//     never sees, and it would do so from a prompt written before the learner
+//     answered anything. `AI_COACH_PERSONAS` is not imported here at all, and
+//     the spec asserts none of the four fragments appears in the built string.
+//
+//     READ THE SCOPE OF THAT SENTENCE CAREFULLY, because #404 narrowed what
+//     it is evidence FOR. It used to sit under the heading "epic #345's locked
+//     decision" beside a clause reading "`coach.persona` colours the grader's
+//     `feedback` sentence and the tutor's explanation", which invited exactly
+//     one wrong inference: that the persona does not reach spoken practice at
+//     all. It does, and it must — the product owner's requirement on #404 is
+//     "the personality is a must for me, make sure it is active both on voice
+//     and text", and that instruction OVERRULES any reading of this paragraph
+//     as a decision to keep spoken practice flat.
+//
+//     What it reaches spoken practice THROUGH is the other E14 mechanism: the
+//     curated reaction-line bank, selected per attempt, after the outcome is
+//     known, and carried to the model inside `say` as one of
+//     `composeSpokenTurn`'s elements — never as licence over the conversation.
+//     Since #404 that includes the session's closing line as well
+//     (`PracticeRealtimeService.endSession`), which was the last turn on this
+//     transport that still ended in a voice nobody chose.
+//
+//     So the rule this paragraph states is unchanged and the reasoning behind
+//     it is unchanged; only the conclusion somebody might draw from it is.
+//     Option A (a fragment here) stays rejected. Option B (colour the lines
+//     the application composes) is what shipped. A future agent reading this
+//     file must not "restore" a flat spoken coach on the strength of it, and
+//     must not add a fragment here on the strength of #404 either.
 //
 // -----------------------------------------------------------------------------
 // `COACH_INVARIANT_FLOOR` IS IMPORTED VERBATIM AND APPENDED LAST
