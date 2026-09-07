@@ -274,6 +274,43 @@ const EMPTY_SPEECH_USAGE: AiUsage = {
 const DEFAULT_REALTIME_VOICE = 'alloy';
 
 /**
+ * The model that transcribes the LEARNER'S OWN AUDIO on a realtime session.
+ *
+ * ISSUE #399. A realtime session does not transcribe its input unless it is
+ * told to, and until this constant existed none of ours were: the browser
+ * therefore never received a single
+ * `conversation.item.input_audio_transcription.*` event, the "here is what we
+ * heard" line on the spoken practice surface could never render, and — the
+ * reason this is a bug rather than a missing nicety — nothing anywhere could
+ * compare what the model CLAIMED the learner said against what the microphone
+ * actually picked up. A model that graded its own voice returning through a
+ * loudspeaker was believed, and the engine wrote a `practice_attempts` row for
+ * an answer nobody gave.
+ *
+ * IT IS AN EXTRA BILLED TRANSCRIPTION, ON THE LEARNER'S OWN KEY, for every
+ * utterance of every spoken session — and that is the price of not recording
+ * answers nobody gave. It is small beside what it rides on: realtime audio is
+ * charged by the minute at an order of magnitude more than this, so a session
+ * that was already affordable stays affordable.
+ *
+ * WHY `whisper-1` RATHER THAN THE CHEAPER `gpt-4o-mini-transcribe`:
+ * AVAILABILITY, NOT PRICE. A transcription model the account cannot reach is
+ * not a degraded transcript — it is a mint that fails, which takes the whole
+ * spoken feature down for that deployment. `whisper-1` is the most widely
+ * available of the options and the one the provider's own realtime examples
+ * name; the price difference is noise against the audio it accompanies.
+ * Changing it later is a one-line edit made with that tradeoff in view.
+ *
+ * SEPARATE FROM THE `transcribe` MODEL ROLE, deliberately. That role is an
+ * admin's OPTIONAL binding (`ai-model-roles.ts`: wiring it never touches
+ * `systemReady`), so reading it here would make input transcription present on
+ * some deployments and absent on others — and a safety check that is only
+ * sometimes possible is one no client can rely on. This is session
+ * configuration, decided once, server-side, for every deployment alike.
+ */
+const DEFAULT_REALTIME_TRANSCRIPTION_MODEL = 'whisper-1';
+
+/**
  * Usage for a realtime mint.
  *
  * ALL NULL, and not because anything failed or because we were not told:
@@ -984,6 +1021,16 @@ export class OpenAiProvider extends BaseAiProvider {
         model: request.modelId,
         instructions: request.instructions,
         audio: {
+          // THE LEARNER'S OWN AUDIO, TRANSCRIBED (#399). Set here, at the
+          // mint, rather than by the browser: `realtimeConnection.ts`'s
+          // `TURN_DETECTION` is the ONLY field that client ever sends in a
+          // `session.update`, and widening that payload is what its own header
+          // forbids by name. Session configuration is decided server-side on
+          // this surface — see {@link DEFAULT_REALTIME_TRANSCRIPTION_MODEL} for
+          // what it costs and why it is worth it.
+          input: {
+            transcription: { model: DEFAULT_REALTIME_TRANSCRIPTION_MODEL },
+          },
           // The default is a product decision made once, here, rather than at
           // each call site — see `AiRealtimeSessionRequest.voice`.
           output: { voice: request.voice ?? DEFAULT_REALTIME_VOICE },
