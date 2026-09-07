@@ -343,6 +343,23 @@ spec in this file.
 
 ### Fixed
 
+- **The dev service worker was unreachable in the one environment this app
+  is actually exercised in (issue #397).** `VITE_ENABLE_SW` was declared by
+  issue #359 and read in two places, but never plumbed through
+  `infra/compose`, so every containerised dev deployment took the disabled
+  branch and served the self-destroying placeholder worker unconditionally:
+  not installable, no offline shell, a dead update handshake, and nothing
+  anywhere reporting a disabled feature. The flag, the opt-in, and the
+  placeholder branch are now gone entirely — `/sw.js` always serves the real
+  worker in development and the client registers it everywhere except the
+  test suite, where MSW's `fetch` patch would otherwise compete with the
+  worker's own cache. What makes always-on safe was already true of the
+  worker's own policy (network-first navigations, no interception of
+  `/src/**` or the HMR client, nothing under `/api` ever cached); the one
+  gap — a fixed dev build id that would have let a container rebuild serve
+  stale `public/` bytes forever — is closed by giving the dev build id a
+  value volatile per process (`dev-${Date.now()}`), so every restart and
+  rebuild retires the previous run's caches on `activate`.
 - **Audio the learner pressed for made no sound on a phone (issue #389).**
   A mobile browser plays audio only through an element that was itself
   started during a user gesture, and every premium-voice surface here
