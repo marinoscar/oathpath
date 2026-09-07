@@ -24,6 +24,35 @@
  * heavily documented precisely because these rules are easy to break by
  * accident, and a test that failed on the word "answered" inside a sentence
  * explaining why nothing is compared would teach exactly the wrong lesson.
+ *
+ * =============================================================================
+ * ISSUE #399 MOVED ONE COMPARISON OUT OF THIS FILE'S SCOPE, DELIBERATELY
+ * =============================================================================
+ *
+ * `lib/coachEcho.ts`'s `isLikelyCoachEcho` reads two transcripts and decides
+ * whether one is the other coming back through a loudspeaker — a word-level
+ * comparison that would, on its face, look exactly like the "compares
+ * nothing" test just below forbids. It is not a second opinion on grading
+ * (its own header argues why at length), but the decision worth recording
+ * explicitly is where its CONTRACT is tested.
+ *
+ * IT IS NOT ADDED HERE. The invariant this file polices was never "no file
+ * anywhere compares two strings" — it is "this hook, the one thing every
+ * tool call on a live connection passes through, decides nothing about
+ * correctness itself". That invariant survives #399 exactly as stated: the
+ * hook still only ASKS `isLikelyCoachEcho` a yes/no question and acts on the
+ * answer, which is what `useRealtimePractice.test.tsx`'s integration tests
+ * confirm. Reading `coachEcho.ts`'s source from THIS file would conflate two
+ * modules' contracts in one test, which is the opposite of what a
+ * source-reading test is for — the point is to bind one file's promises to
+ * that file, not to grow into a registry of every absence anywhere in the
+ * feature.
+ *
+ * `coachEcho.test.ts` carries the equivalent contract for its OWN file: a
+ * "this module is a provenance check, not a grading one" section that reads
+ * `coachEcho.ts`'s source the same way this file reads `useRealtimePractice.ts`'s
+ * — one door, one file, one test, the same shape `personas.spec.ts` and
+ * `reaction-lines.spec.ts` already keep separate on the coach-persona axis.
  */
 
 import { readFileSync } from 'node:fs';
