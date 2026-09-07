@@ -787,6 +787,128 @@ A rejected call, for contrast — the model tries to end the phase early:
 [model → server]  next_question()
 ```
 
+## 4.5 Client-side provenance guards on the applicant's turn (issue #400)
+
+`useRealtimeInterview.ts` had the identical hole issue #399 closed for
+spoken practice (`docs/specs/realtime-practice.md` §11): nothing checked
+the realtime model's claimed `grade_answer` transcript against what the
+microphone actually heard, so the officer's own question, echoing back
+through the phone's speaker over browser echo cancellation that is
+best-effort and fails routinely at volume, could be believed all the way
+into a recorded answer. **This is worse here than it was for practice.**
+An interview's `grade_answer` writes a `practice_attempts` row with
+`source: 'mock_interview'` and a `mock_interviewId`, moves
+`mock_interviews.civicsAsked`/`civicsCorrect` — the tally
+`passedCivics` (§4.3, §8) is computed from — writes the
+`mock_interview_turns` row the debrief is assembled from, and feeds the
+readiness recompute `POST /api/interviews/{id}/complete` triggers (§8). A
+fabricated answer here does not cost a learner one mis-scheduled practice
+question; it can tell them they passed or failed a rehearsal on words they
+never said, and the number persists in `readiness_snapshots` history.
+
+Both of #399's guards are ported unforked, reusing
+`apps/web/src/lib/coachEcho.ts`'s `isLikelyCoachEcho` — the file's own
+header states why it is a provenance check, not a grading one, and that
+reasoning is not restated here. Both run in the browser, before a
+`grade_answer` call is ever relayed to
+`POST /api/interviews/:id/realtime/tool-calls`:
+
+1. **Nothing heard.** A `grade_answer` for a turn in which the provider
+   transcribed no applicant speech at all is refused locally and never
+   posted. It arms only once the connection has proven this deployment
+   actually transcribes input at all — monotonic, never reset, including
+   across a re-mint (§3) — so a deployment whose provider never emits a
+   transcription event fails open rather than refusing every answer of
+   every session; the identical arm-once discipline `useRealtimePractice.ts`
+   already holds for the same reason.
+2. **Officer echo.** A `grade_answer` whose transcript is provenance-matched
+   to the officer's own last completed utterance — `isLikelyCoachEcho`'s
+   exact-match-at-any-length or five-or-more-word-run-in-order rule — is
+   refused the same way.
+
+**Both are provenance checks, and neither is a grading one.** Neither reads
+a transcript for meaning, compares anything to an accepted answer, or forms
+a verdict of its own; each answers exactly one question — "did these words
+come from the applicant, just now?" — and the engine's grading ladder
+(§4.2, `AttemptGradingService`) remains the only place a `correct`/
+`partial`/`incorrect` verdict is decided. §4's own framing —
+`interviews.service.ts`'s "the browser is a relay, not a participant" — is
+**narrowed by these two guards, not abandoned**: the browser still forwards
+every honoured tool call unexamined and routes every result back over the
+same data channel with no per-tool knowledge (§4's "one route for three
+tools" design, unchanged); what these two checks add is a right of refusal
+before a `grade_answer` is forwarded at all, exercised on provenance alone,
+never on content. A relay that may decline to carry one shape of cargo, on
+a rule that never inspects what the cargo says, is still a relay.
+
+Four decisions specific to the interview transport, none of them present
+on practice's own version of this guard:
+
+**The echo guard is disarmed in the `reading` phase, and only there.**
+`InterviewsService`'s civics-turn assembly (§4.1) composes the reading
+officer turn as `ENGLISH_SEGMENT_LINES.reading` joined by
+`OFFICER_TURN_SEPARATOR` to the sentence's own `text`, and pushes it with
+`speakOnly` false — the officer says the reading sentence aloud, and §5
+below has the applicant read those exact words back. A provenance test has
+no discriminating power there **by construction**: a correct reading
+attempt IS the officer's last utterance, word for word, so an armed guard
+would refuse precisely the right answers — the worst false positive this
+mechanism could produce. The nothing-heard guard stays armed throughout
+`reading`; the applicant does speak, and its check (was anything heard at
+all) is orthogonal to what was said. Both guards are armed or disarmed per
+turn from the honoured `next_question` result's own `phase` (§4.1) — never
+from a client-side guess at what phase the interview is in.
+
+**The dictation rule and `withholdOfficerRef` do not interact with this,
+and the echo guard stays fully armed through `writing`.** The withholding
+rule (§5's "never shown... a DOM invariant") is enforced by holding the
+officer's spoken sentence in a ref (`withholdOfficerRef`,
+`useRealtimeInterview.ts`) that is never rendered, never put into React
+state, and never sent anywhere — so nothing about it leaks through this
+epic's guard either. The echo guard must stay armed in `writing`, and this
+is the opposite requirement from `reading`: here the officer's spoken words
+ARE the answer if repeated back rather than typed, so an unguarded echoed
+`grade_answer` would score a perfect, unearned attempt. This is also why a
+genuine writing answer can never trip the guard in the first place: it is
+TYPED, and reaches the engine through the page's own `submitWriting`
+(`relay(..., null)`, `RealtimeInterviewPage.tsx`), which never passes
+through the tool-call handler these two guards sit in at all — structurally
+untouchable by either check, not merely untriggered by it in practice.
+
+**The turn boundary is an honoured `next_question`, and nothing else.**
+Unlike practice's five-tool contract, the interview's tool results carry no
+`questionId` field and there is no `repeat_question` tool (§4.1–§4.3), so an
+honoured `next_question` is the only event that puts a civics question "in
+the air" for either guard to arm against. Neither guard is driven by a
+timer, a turn count, or any signal besides that one tool result.
+
+**The refusal is silent to the applicant, and worded from the engine's own
+existing vocabulary — the interview invents no third phrasing.** Practice's
+own two refusals instruct the model to call `repeat_question`; this
+transport has no such tool, and a real USCIS officer does not re-ask a
+question because the room was noisy (`docs/specs/mock-interview.md`'s
+realism argument, §1). `realtime-tool-calls.ts` already states the right
+recovery for "the applicant has not answered yet" —
+`answer_outstanding`'s own rejection, *"Wait for the applicant to answer,
+then call grade_answer with what you heard,"* — and its shared
+`CONTINUE_INSTRUCTION` already ends every rejection with *"Do not tell the
+applicant anything happened."* Both of this section's local refusals reuse
+that exact pairing rather than adding a fourth wording for the same
+situation, so `OFFICER_VERDICT_PROHIBITION` stays untouched and nothing is
+spoken aloud to explain the refusal. The `reason` strings on both local
+rejections are `nothing_heard` and `echoed_question` — the identical two
+strings `useRealtimePractice.ts` uses for the same two situations, so a log
+line or a bug report naming one reads identically on either transport.
+
+**One thing this fix gives the interview transport for free, already
+shipped by #399 rather than added here:** input transcription at the mint
+and `services/realtimeConnection.ts`'s deferred-`response.create` fix are
+both shared with practice, so this transport picks up two side effects
+neither guard is responsible for — the applicant's live transcript renders
+during a spoken interview for the first time, and each spoken interview now
+costs one extra billed transcription call on the learner's own key,
+alongside the realtime session itself.
+
 ## 5. Phase sequencing with the E10 segments
 
 `INTERVIEW_PHASES` (`phases.ts`) is unchanged: `smalltalk → n400 → civics →
