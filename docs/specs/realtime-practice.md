@@ -10,6 +10,17 @@ hands-free loop this epic adds a second transport alongside, never replaces)
 and `docs/specs/voice.md`, `docs/specs/voice-hands-free.md`,
 `docs/specs/coach-personality.md` next.
 
+This document describes the design as intended. For the device-found
+defects that design met on a real phone — grading the coach's own voice,
+the screen and the coach asking different questions, the coach never
+speaking its own verdict, the protocol collisions and the browser/device
+mechanics underneath all of it — and for the corrected-hypothesis history
+behind each fix, read
+[`docs/voice-agent-challenges.md`](../voice-agent-challenges.md). Sections
+6.1, 6.2 and 11 below are this document's own record of the same
+amendments in spec form; the field guide is the fuller argument and the
+evidence.
+
 Source of truth for every claim below, verified against this repository's
 real state (the `feat/e15-346-docs` worktree, tracking `main`) rather than
 assumed from an issue's prose:
