@@ -55,6 +55,7 @@ import type {
   RecordPracticeAttemptInput,
 } from '../../types';
 import { server } from '../mocks/server';
+import { drainSpokenTurn } from '../utils/fake-speech';
 import { mockUser } from '../utils/test-utils';
 
 // -----------------------------------------------------------------------------
@@ -216,12 +217,18 @@ function installSpeechSynthesis() {
     };
 }
 
+/**
+ * Let whatever is speaking finish.
+ *
+ * DRAINS UNTIL QUIET, NOT ONCE (#403). This used to be a single pass, which is
+ * the shape that is wrong the moment a turn is more than one utterance: ending
+ * line 1 merely makes line 2 live, and the helper returns with the loop still
+ * mid-turn. #403 made the coach speak a verdict, a reason and the accepted
+ * answer where it used to speak one line, so every call site of this became
+ * exposed at once. `utils/fake-speech.ts` carries the rule and the argument.
+ */
 async function finishSpeaking() {
-  await act(async () => {
-    const live = speech.live;
-    speech.live = [];
-    for (const utterance of live) utterance.onend?.();
-  });
+  await drainSpokenTurn(speech);
 }
 
 function installMediaEnvironment() {
