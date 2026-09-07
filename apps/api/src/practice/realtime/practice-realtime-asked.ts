@@ -3,7 +3,9 @@
 // =============================================================================
 //
 // A tiny, bounded, in-process map from a practice session id to the question
-// this API last handed a realtime model to speak — its id AND its exact words.
+// this API last handed a realtime model to speak — the whole question, so that
+// the coach's mouth and the learner's screen read one fact rather than two
+// (see "WHAT IT HOLDS" below, and issue #402).
 //
 // -----------------------------------------------------------------------------
 // WHY IT EXISTS: THE SELECTOR IS DELIBERATELY NOT DETERMINISTIC
