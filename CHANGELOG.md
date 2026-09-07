@@ -343,6 +343,68 @@ spec in this file.
 
 ### Fixed
 
+- **The spoken coach never told a learner whether their answer was right —
+  it narrated its own tool use instead (issue #403).** Over a 71-second
+  device recording the coach took four answers and spoke zero verdicts,
+  wrapping every turn in sentences nobody authored: "let me check that
+  response against the sessions grading", "I'll hand you the next prompt
+  from the session". The verdict was never missing from the data — the
+  engine composed it (`composeSpokenTurn`, issue #351) and handed it to the
+  model in the tool result's `say` — and the recording is its own tell: the
+  model spoke `next_question`'s `say` faithfully throughout and summarised
+  `grade_answer`'s away every time, because the session prompt said "say
+  back what it returns" and nothing named the field, the order, or the
+  requirement to speak all of it. Four changes: (1) the prompt now names
+  `say`, says every line must be spoken in order and word for word, and
+  states plainly that those lines are the only way a learner is told
+  whether they were right; (2) a new prompt rule forbids narrating tool use
+  and naming the application's own vocabulary at all, and states the
+  positive half too — silence while waiting on a tool is correct; (3) every
+  honoured tool result now carries an `instruction` of its own, a single
+  constant identical for a right answer, a wrong one, a skip and a
+  mishearing, because a refusal has carried one since #354 and an honoured
+  result carried none; (4) a `grade_answer` naming the wrong question — or
+  no question, which is what the first answer of every session produced,
+  since the opening turn is served by the browser and never reaches the
+  model as a tool result — is now refused with the outstanding question
+  named, so the model re-sends silently instead of having the coach read
+  the whole question out again.
+
+- **#399's nothing-heard guard could refuse a real answer because the
+  transcription had not arrived yet (issue #403).** The guard measured
+  "did the learner say anything this turn" on
+  `conversation.item.input_audio_transcription.*`, which is a separate,
+  slower pipeline than the speech-to-speech model's own understanding of
+  the audio — the model does not wait for it, so a `grade_answer` for a
+  genuine answer can be decided while the answer to that question is still
+  "not yet". `input_audio_buffer.speech_started`/`speech_stopped` — the
+  turn detector's own events, raised the moment the microphone crosses the
+  threshold — now count as the same evidence, so the guard is measuring an
+  affirmative report that the learner spoke rather than the absence of a
+  report that may simply be late. The protection is unchanged: some
+  evidence is still required, the guard still fails open on a deployment
+  that reports neither kind, and the coach-echo guard is untouched.
+
+- **The question on screen and the question the coach spoke were different
+  (issue #402).** Over the same recording the screen showed four questions
+  the coach never asked, and the question the coach *did* ask first never
+  appeared at all. Not a race: two independent draws. The page rendered
+  `GET /api/practice/sessions/:id`'s `nextQuestion`, which
+  `mastery/selector.ts` produces with real, unseeded randomness on every
+  read — correct for the typed path, where the screen is the thing doing
+  the asking, and wrong the moment a coach is speaking, because the engine
+  serves and remembers its own draw and grades the answer against that one.
+  The realtime tool result now carries the whole prompt-only question the
+  coach was handed, the relay publishes it, and the voice surface renders
+  it outright while a live session is running — not "the engine's, falling
+  back to the page's", because falling back is precisely how a question
+  nobody is asking gets on screen. The field is stripped before the result
+  reaches the model: it already has the words and the id, and all the
+  object would add is a question number a speech-to-speech model could read
+  out loud. Nothing was ever mis-graded — the attempt was always recorded
+  against the question the learner actually heard — but the screen was
+  lying about which question was outstanding.
+
 - **The coach's own voice could return through the microphone and be graded
   as the learner's answer, advancing questions faster than a learner could
   possibly respond (issue #399).** A live realtime practice session never
