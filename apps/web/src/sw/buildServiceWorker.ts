@@ -65,56 +65,27 @@ export const STATIC_SHELL_URLS = [
 ];
 
 /**
- * The worker served in development and in any build that has not opted in.
+ * The dev server's build id, fixed for the life of THIS PROCESS and different
+ * in the next one.
  *
- * A NO-OP WOULD NOT BE ENOUGH. Anyone who once ran the app with a real worker
- * registered keeps that worker until something replaces it, and a stale worker
- * intercepting a dev server is a genuinely confusing failure — edits that do
- * not appear, fixtures answered from cache. So the dev worker actively
- * uninstalls itself and drops every cache it finds, which is the standard
- * "self-destroying service worker" and the only reliable way back out.
+ * See `buildDevServiceWorkerSource` below for why that volatility is the
+ * property the whole always-on dev worker rests on.
  */
-export const SELF_DESTROYING_SERVICE_WORKER = `// Development placeholder worker (issue #359).
-// This is what /sw.js serves when the real worker is NOT wanted: a production
-// build always emits the real one, and a dev server emits it too when
-// VITE_ENABLE_SW=true (see \`buildDevServiceWorkerSource\` below and \`pwa()\` in
-// vite.config.ts). Reaching this file therefore means the opt-in is off, not
-// that the build was a development one.
-// This worker exists to UNINSTALL any worker a previous run left behind.
-self.addEventListener('install', function () {
-  self.skipWaiting();
-});
-self.addEventListener('activate', function (event) {
-  event.waitUntil(
-    (async function () {
-      const names = await caches.keys();
-      await Promise.all(names.map(function (name) { return caches.delete(name); }));
-      await self.registration.unregister();
-      const clientList = await self.clients.matchAll({ type: 'window' });
-      clientList.forEach(function (client) { client.navigate(client.url); });
-    })(),
-  );
-});
-`;
-
+const DEV_BUILD_ID = `dev-${Date.now()}`;
 
 /**
- * The `/sw.js` body a DEV SERVER serves, on either side of the `VITE_ENABLE_SW`
- * gate (issue #395).
+ * The `/sw.js` body a DEV SERVER serves — always the real worker (issue #397).
  *
- * This is the branch that issue #359 wrote and issue #395 found nobody could
- * reach: the flag it reads was never plumbed through `infra/compose`, so every
- * containerised dev deployment took the `false` path and shipped the
- * self-destroying placeholder — a PWA that could not be installed, with no
- * offline shell and a dead update handshake, on the one environment the app is
- * actually exercised in.
+ * There is no longer a flag, an opt-in, or a placeholder branch. The dev
+ * middleware in `pwa()` (`vite.config.ts`) serves this to every dev stack, and
+ * the client registers it everywhere except the test suite.
  *
  * It lives here, beside the emit path, rather than inline in `pwa()`'s
  * middleware, for the same reason `buildServiceWorkerSource` is shared with the
  * worker's own suite (see this file's header): a test that re-implemented the
- * ternary would assert against a paraphrase of the thing that broke rather than
- * the thing itself, and the alternative — booting a Vite server inside vitest —
- * would reach the branch through an HTTP stack that has nothing to do with it.
+ * substitution would assert against a paraphrase of the shipped file rather
+ * than the file itself, and the alternative — booting a Vite server inside
+ * vitest — would reach it through an HTTP stack that has nothing to do with it.
  *
  * TWO PROPERTIES THIS FUNCTION IS THE SINGLE SITE OF:
  *
@@ -123,14 +94,36 @@ self.addEventListener('activate', function (event) {
  *     precaching any of it would be precaching a URL that stops existing the
  *     moment a file is saved. `addAll` is atomic, so that is not a stale entry,
  *     it is an install that fails outright.
- *   - `buildId` is the fixed string `'dev'`. The production id is a hash of the
- *     precache list, which is what retires old caches across deployments; here
- *     the list never varies, so there is nothing to hash and nothing to retire.
+ *   - `buildId` is VOLATILE PER PROCESS (`DEV_BUILD_ID` above) — stable for one
+ *     server run, different in the next. THIS IS THE PROPERTY THAT REPLACES THE
+ *     FLAG, so it is worth saying plainly what it closes.
+ *
+ *     Everything else about serving the real worker in development was already
+ *     safe, by the worker's own policy: navigations are network-first (they are
+ *     classified before the precache is consulted, so an edited `index.html` is
+ *     never stale), `/src/**`, `/@vite/client` and `/@react-refresh` are
+ *     classified `other` and never intercepted at all (HMR is untouched),
+ *     nothing under `/api` is ever cached, and the worker never passes
+ *     `ignoreSearch`, so Vite's `?v=`/`?t=` versioning makes a changed module a
+ *     different cache key.
+ *
+ *     The ONE place staleness could genuinely have bitten was a FIXED build id.
+ *     `PRECACHE_NAME`/`RUNTIME_NAME` are suffixed with it, and the precached
+ *     `public/` entries — the icons, `fonts/inter.css`, `offline.html` — are
+ *     cache-first with no version in their URLs. With a constant id like
+ *     `'dev'` those cache names never changed, so a container rebuild shipping
+ *     new bytes for any of them would have gone on serving the old ones
+ *     forever, with nothing a refresh could do about it.
+ *
+ *     A volatile id closes exactly that: every dev-server restart and every
+ *     container rebuild produces new cache names, and the worker's own
+ *     `activate` handler deletes the caches that do not match — which is
+ *     precisely the deploy boundary production gets from hashing the precache
+ *     list.
  */
-export function buildDevServiceWorkerSource(source: string, enabled: boolean): string {
-  if (!enabled) return SELF_DESTROYING_SERVICE_WORKER;
+export function buildDevServiceWorkerSource(source: string): string {
   return buildServiceWorkerSource(source, {
-    buildId: 'dev',
+    buildId: DEV_BUILD_ID,
     precacheUrls: STATIC_SHELL_URLS,
   });
 }

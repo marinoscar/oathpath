@@ -78,18 +78,20 @@ function appName(): Plugin {
  *   dist/sw.js                 from `src/sw/service-worker.js`, with its build
  *                              id and precache manifest substituted in
  *
- * In DEV all three are served from middleware instead, so `/manifest.webmanifest`
- * and `/offline.html` are never missing — except `sw.js`, which is the
- * self-destroying worker unless `VITE_ENABLE_SW=true`. See
- * `src/sw/registerServiceWorker.ts` for the matching client-side gate and for
- * why the default is off in dev and in test.
+ * In DEV all three are served from middleware instead, so `/manifest.webmanifest`,
+ * `/offline.html` and `/sw.js` are never missing — and `/sw.js` is the REAL
+ * worker, unconditionally (issue #397). There is no flag and no placeholder.
  *
- * `VITE_ENABLE_SW` is read HERE from `process.env`, at server start, and
- * separately by the client through `import.meta.env` — one variable, two
- * readers, and both have to see it. A containerised dev stack therefore has to
- * pass it into the `web` service, which is what `infra/compose/dev.compose.yml`
- * now does (issue #395); before that it could not be set at all and this
- * middleware always took the disabled branch.
+ * That is safe because of what the worker itself does: navigations are
+ * network-first, `/src/**`, `/@vite/client` and `/@react-refresh` are never
+ * intercepted at all, nothing under `/api` is ever cached, and Vite's
+ * `?v=`/`?t=` query versioning is part of every cache key. The one genuine
+ * hazard — cache names that never changed, so rebuilt `public/` bytes stayed
+ * stale forever — is closed by the volatile per-process dev build id in
+ * `buildDevServiceWorkerSource` (`src/sw/buildServiceWorker.ts`), which retires
+ * the previous run's caches on every restart. See
+ * `src/sw/registerServiceWorker.ts` for the matching client-side gate, where
+ * `test` is now the only environment the worker is off in.
  */
 function pwa(): Plugin {
   const here = resolve(fileURLToPath(import.meta.url), '..');
@@ -100,7 +102,6 @@ function pwa(): Plugin {
     name: 'oathpath-pwa',
 
     configureServer(server) {
-      const enabled = process.env.VITE_ENABLE_SW === 'true';
       server.middlewares.use((req, res, next) => {
         const path = (req.url ?? '').split('?')[0];
         if (path === '/manifest.webmanifest') {
@@ -115,10 +116,10 @@ function pwa(): Plugin {
         }
         if (path === '/sw.js') {
           res.setHeader('Content-Type', 'text/javascript');
-          // Never cached, in either branch — a worker the browser will not
-          // re-fetch is a worker that can never be replaced.
+          // Never cached — a worker the browser will not re-fetch is a worker
+          // that can never be replaced.
           res.setHeader('Cache-Control', 'no-cache');
-          res.end(buildDevServiceWorkerSource(readServiceWorkerSource(), enabled));
+          res.end(buildDevServiceWorkerSource(readServiceWorkerSource()));
           return;
         }
         next();
