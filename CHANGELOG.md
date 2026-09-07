@@ -15,8 +15,8 @@ therefore the one place a person compiling that entry cannot miss it.
 `apps/api/src/ai/providers/`'s `transcribe`/`synthesize`/`createRealtimeSession`
 paths, anything under `apps/api/src/interviews/realtime/` **or
 `apps/api/src/practice/realtime/`** (added by E15, epic #345), or
-`apps/web/src/services/realtimeConnection.ts` **or
-`apps/web/src/hooks/useRealtimePractice.ts`/`useConversationSession.ts`**
+`apps/web/src/services/realtimeConnection.ts`, `apps/web/src/hooks/useRealtimeInterview.ts`,
+**or `apps/web/src/hooks/useRealtimePractice.ts`/`useConversationSession.ts`**
 — run the manual verification checklist in
 [`docs/specs/realtime-interview.md`](docs/specs/realtime-interview.md) §11:
 eight numbered items (barge-in in both directions, end-to-end latency, the
@@ -342,6 +342,66 @@ spec in this file.
   database is `oathpath`, and the OpenTelemetry service is `oathpath-api`.
 
 ### Fixed
+
+- **The officer's own question could echo back through the phone's speaker
+  and be graded as the applicant's answer, in an interview whose verdict
+  feeds `passedCivics`, the debrief, and readiness history (issue #400).**
+  `useRealtimeInterview.ts` had the identical hole issue #399 closed for
+  spoken practice: nothing checked the realtime model's claimed
+  `grade_answer` transcript against what the microphone actually heard, and
+  full-duplex browser echo cancellation is best-effort and fails routinely
+  at volume. This is worse here than on practice's own transport — a
+  fabricated interview answer writes a `practice_attempts` row with
+  `source: 'mock_interview'`, moves `mock_interviews.civicsAsked`/
+  `civicsCorrect`, writes the `mock_interview_turns` row the debrief is
+  built from, and feeds the readiness recompute `POST
+  /api/interviews/{id}/complete` triggers — so a learner could be told they
+  passed or failed a rehearsal on words they never said, and the number
+  would persist in their readiness history. Both #399 guards are now ported
+  unforked, reusing `lib/coachEcho.ts`'s `isLikelyCoachEcho`: (1) a
+  `grade_answer` for a turn with no evidence the applicant spoke at all is
+  refused in the browser and never posted; (2) a `grade_answer` whose
+  transcript is provenance-matched to the officer's own last completed
+  utterance is refused the same way. Porting the first guard on input
+  transcription alone, as #399 originally shipped it, would have
+  reintroduced a bug already observed and fixed once on the practice
+  transport (issue #403): transcription is a separate, slower pipeline than
+  the speech-to-speech model's own hearing, and the model does not wait for
+  it, so a `grade_answer` for a genuine answer can arrive while the
+  transcription pipeline's own answer is still "not yet" — refusing a real
+  one. It lands worse on this transport than it did on practice's, because
+  this transport's refusal is deliberately silent: a falsely refused answer
+  leaves the officer simply waiting with nothing on screen to explain it.
+  So the guard also counts the turn detector's
+  `input_audio_buffer.speech_started`/`speech_stopped` edges as evidence —
+  `speech_started` fires the moment the microphone crosses the detector's
+  threshold, before the model has finished hearing the utterance, let alone
+  before it can call a tool about it — and arms only once the connection
+  has proven this deployment reports applicant speech by *either* means,
+  so a deployment where neither signal reaches the provider still fails
+  open rather than refusing every answer of every session. Both are
+  provenance checks, never grading ones — neither reads a transcript for
+  meaning or forms a verdict, and the engine's grading ladder remains the
+  only one. Two decisions specific to this transport: the echo guard is
+  disarmed only in the `reading` phase, where the applicant is *supposed*
+  to say the officer's own words back (an armed guard there would refuse
+  precisely the right answers), and stays fully armed through `writing`,
+  where the officer's sentence is dictated aloud and a genuine answer is
+  always typed, never spoken back. The interview has no `repeat_question`
+  tool, so both local refusals reuse `answer_outstanding`'s existing
+  recovery wording ("Wait for the applicant to answer, then call
+  grade_answer with what you heard.") rather than inventing a third
+  phrasing, and stay silent to the applicant exactly as every other
+  rejection on this transport already does. #399 already gave this
+  transport input transcription at the mint and the shared
+  `realtimeConnection.ts` deferred-`response.create` fix for free, with two
+  side effects: the applicant's live transcript now renders during a
+  spoken interview for the first time, and each spoken interview costs one
+  extra billed transcription call on the learner's own key. See
+  [`docs/specs/realtime-interview.md`](docs/specs/realtime-interview.md)
+  §4.5, and the release checklist note at the top of this file — a manual
+  pass against a real deployment and a real microphone is still owed
+  before this ships, per that checklist.
 
 - **The spoken coach never told a learner whether their answer was right —
   it narrated its own tool use instead (issue #403).** Over a 71-second
