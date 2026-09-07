@@ -734,6 +734,13 @@ export class PracticeRealtimeService {
    * `in_progress` when this request read it, so reaching that exception means
    * something closed the session in between, and the model's correct response
    * is to stop talking — not to receive a 5xx.
+   *
+   * `say` IS THE SESSION'S OWN CLOSING TURN FOLLOWED BY THE CODE-OWNED CLOSING
+   * LINE (issue #404). `completeSession`'s return value already carries
+   * `spokenTurn` — the coach's closing line, in the learner's chosen persona,
+   * from the curated bank — and until #404 this method discarded it and spoke
+   * the constant alone, so the one transport where the coach has a voice was
+   * the one transport that ended flat. See the return statement.
    */
   private async endSession(
     userId: string,
@@ -747,8 +754,10 @@ export class PracticeRealtimeService {
       return this.refuse(userId, sessionId, decision);
     }
 
+    let completed;
+
     try {
-      await this.practice.completeSession(userId, sessionId);
+      completed = await this.practice.completeSession(userId, sessionId);
     } catch (error) {
       if (error instanceof ConflictException) {
         return this.refuse(
@@ -774,10 +783,30 @@ export class PracticeRealtimeService {
     return {
       status: 'ok',
       tool: 'end_session',
-      // ONE CODE-OWNED LINE, the same for both reasons — see
-      // `practice-realtime-lines.ts` on why the closing is not the model's to
-      // write and why it carries no count.
-      say: [PRACTICE_REALTIME_CLOSING_LINE],
+      // THE COACH FIRST, THEN THE CODE-OWNED CLOSING (issue #404).
+      //
+      // `completed.spokenTurn` is `composeSessionClosingTurn`'s output, read
+      // off the session `completeSession` just returned — the SAME array the
+      // request/response transport speaks at the end of a voice session
+      // (`PracticeSessionPage.handleFinish`) and the same line the summary
+      // screen renders, selected once in `toCoachReaction` and seeded by the
+      // session's own id. Not a second selection: this method composes
+      // nothing, exactly as `record` above composes nothing.
+      //
+      // It is ORDINARILY ONE LINE and legitimately `[]` — a learner who turned
+      // `coach.reactions` off, or a session with no summary to react to. Empty
+      // spreads to nothing and this turn is the closing line alone, which is
+      // what every session said before #404. There is no suppression branch
+      // here and there must not be one; the preference became `null` once,
+      // server-side, in `toCoachReaction`.
+      //
+      // THE COACH LINE GOES FIRST so `PRACTICE_REALTIME_CLOSING_LINE` stays
+      // LAST — that constant is the turn's forward-pointing door
+      // (`COACH_INVARIANT_FLOOR`'s closing rule, and the reason
+      // `practice-realtime-lines.ts` writes it the way it does), and a
+      // persona's parting shot after it would take the door away from the last
+      // thing a learner hears.
+      say: [...completed.spokenTurn, PRACTICE_REALTIME_CLOSING_LINE],
       then: 'session_complete',
       questionId: null,
       instruction: SPEAK_VERBATIM_INSTRUCTION,
