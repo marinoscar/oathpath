@@ -56,10 +56,26 @@
  * application's own loudspeaker, exists in this process and nowhere else, so
  * the engine cannot make either check for itself.
  *
- * Both are ported from `useRealtimePractice.ts` (issue #399), which closed the
- * identical hole on the practice transport: `heardThisTurnRef` is the first,
- * `transcriptionSeenRef` is why absence alone is never enough to refuse on, and
- * `lib/coachEcho.ts` — reused, never forked — is the second.
+ * Both are ported from `useRealtimePractice.ts` (issues #399 and #403), which
+ * closed the identical hole on the practice transport: `heardThisTurnRef` is
+ * the first, `speechEvidenceSeenRef` is why absence alone is never enough to
+ * refuse on, and `lib/coachEcho.ts` — reused, never forked — is the second.
+ *
+ * AND THE FIRST OF THE TWO MEASURES A FASTER CLOCK (issue #403), which is
+ * ported here in the same change rather than left for later. Asked on
+ * `conversation.item.input_audio_transcription.*` alone, "has the applicant
+ * said anything this turn?" is answered by a SEPARATE, SLOWER pipeline than the
+ * speech-to-speech model's own hearing — and the model does not wait for it. So
+ * a `grade_answer` for a real answer can be decided while the guard's answer is
+ * still "not yet", and the guard refuses it. That is #403's own 17-27s
+ * signature, and on this transport it lands worse than it did on practice's:
+ * practice's refusal has the coach read the question out again, while this
+ * one's is deliberately silent (see {@link NOTHING_HEARD_INSTRUCTION}), so the
+ * officer simply waits, the applicant is told nothing, and the rehearsal stalls
+ * with nothing on screen — the failure this file's own header calls the worst
+ * one this screen has. The turn detector's `speech_started`/`speech_stopped`
+ * edges now count as the same evidence and arrive in time to be useful; see
+ * `voiceActivity`.
  *
  * THE ECHO GUARD IS DISARMED FOR THE READING PHASE, AND ONLY THERE. The officer
  * SAYS the reading sentence aloud — `interviews.service.ts` composes that turn
@@ -134,6 +150,7 @@ import {
   type RealtimeProviderError,
   type RealtimeSpeechEvent,
   type RealtimeToolCallEvent,
+  type RealtimeVoiceActivityEvent,
 } from '../services/realtimeConnection';
 import {
   classifyGetUserMediaError,
@@ -466,24 +483,30 @@ export function useRealtimeInterview(
   const heardThisTurnRef = useRef(false);
 
   /**
-   * Has this hook EVER seen the provider transcribe applicant speech?
+   * Has this hook EVER seen the provider report applicant speech, BY ANY MEANS?
    *
    * THE DIFFERENCE BETWEEN "HEARD NOTHING" AND "DOES NOT REPORT HEARING", and
    * without it the guard above is a brick rather than a safeguard. A realtime
-   * session transcribes its input only when the mint asked it to, and a
-   * deployment where that never reaches the provider — an older API behind a
-   * cached bundle, a model that ignores the field — would produce no applicant
-   * transcription events at all. Enforcing on absence there would refuse EVERY
-   * answer of every interview, which is a far worse failure than the one being
-   * fixed: an applicant whose whole rehearsal records nothing, days before the
+   * session transcribes its input only when the mint asked it to, and turn
+   * detection is a session setting in exactly the same way; a deployment where
+   * NEITHER reaches the provider — an older API behind a cached bundle, a model
+   * that ignores the fields — would produce no applicant-speech events of any
+   * kind. Enforcing on absence there would refuse EVERY answer of every
+   * interview, which is a far worse failure than the one being fixed: an
+   * applicant whose whole rehearsal records nothing, days before the
    * appointment it exists to prepare them for.
+   *
+   * BY ANY MEANS is what #403 widened it to, and the wording is load-bearing:
+   * both the transcription events and the turn detector's edges set it, through
+   * the one writer below, so a deployment that reports speech by either route
+   * arms the guard and one that reports it by neither leaves it open.
    *
    * So the guard arms itself only once the provider has PROVEN it reports
    * applicant speech: fail OPEN until then, closed ever after. Monotonic, and
    * never reset — including across a re-mint, because it describes the
    * deployment rather than the connection.
    */
-  const transcriptionSeenRef = useRef(false);
+  const speechEvidenceSeenRef = useRef(false);
 
   /**
    * The last thing the officer finished saying, as the provider transcribed its
@@ -544,13 +567,13 @@ export function useRealtimeInterview(
   /**
    * Record that the microphone produced applicant speech in this turn.
    *
-   * ONE WRITER FOR BOTH FLAGS, so they can never be set by one path and not the
-   * other — {@link transcriptionSeenRef} is what makes the guard fail open on a
-   * deployment that transcribes nothing, and it would be useless if a caller
-   * could set `heardThisTurnRef` without it.
+   * ONE WRITER FOR BOTH EVIDENCE SOURCES (#403), so the two flags can never be
+   * set by one and not the other — {@link speechEvidenceSeenRef} is what makes
+   * the guard fail open on a deployment that reports neither, and it would be
+   * useless if a source could set `heardThisTurnRef` without it.
    */
   const noteApplicantSpeech = useCallback(() => {
-    transcriptionSeenRef.current = true;
+    speechEvidenceSeenRef.current = true;
     heardThisTurnRef.current = true;
   }, []);
 
@@ -558,11 +581,11 @@ export function useRealtimeInterview(
    * May a `grade_answer` be relayed at all?
    *
    * `true` when the microphone produced speech this turn — and also when this
-   * hook has never been observed transcribing applicant speech at all, for the
-   * reason {@link transcriptionSeenRef} states.
+   * hook has never been observed reporting applicant speech by any means at
+   * all, for the reason {@link speechEvidenceSeenRef} states.
    */
   const heardSomethingThisTurn = useCallback(
-    () => heardThisTurnRef.current || !transcriptionSeenRef.current,
+    () => heardThisTurnRef.current || !speechEvidenceSeenRef.current,
     [],
   );
 
@@ -976,6 +999,11 @@ export function useRealtimeInterview(
             onToolCall: (event) => handleToolCallRef.current(event),
             onOfficerSpeech: (event) => officerSpeechRef.current(event),
             onApplicantSpeech: (event) => applicantSpeechRef.current(event),
+            // THE TURN DETECTOR (#403). Earlier evidence of the same fact the
+            // transcription events carry, and the reason the nothing-heard
+            // guard no longer refuses answers whose transcription is merely
+            // late. See `voiceActivity`.
+            onVoiceActivity: (event) => voiceActivityRef.current(event),
             onProviderError: (error) => providerErrorRef.current(error),
             onRemoteStream: (remote) => {
               if (isMounted()) setRemoteStream(remote);
@@ -1064,6 +1092,10 @@ export function useRealtimeInterview(
     // as much as the final event: an applicant who was cut off mid-answer still
     // spoke.
     //
+    // NO LONGER THE ONLY SOURCE OF THAT FACT (#403): the turn detector says it
+    // sooner, and this pipeline can and does land after the model has already
+    // called `grade_answer`. See `voiceActivity` below.
+    //
     // BEFORE THE MOUNT CHECK, on purpose. The flags are what the next
     // `grade_answer` is measured against, and a hook whose component has
     // unmounted still owns a live connection until its teardown runs — an
@@ -1081,6 +1113,51 @@ export function useRealtimeInterview(
   }, [isMounted, noteApplicantSpeech]);
   const applicantSpeechRef = useRef(applicantSpeech);
   applicantSpeechRef.current = applicantSpeech;
+
+  /**
+   * The provider's turn detector heard the microphone open or close (#403).
+   *
+   * ---------------------------------------------------------------------------
+   * THE SAME QUESTION AS `applicantSpeech`, ANSWERED IN TIME TO BE USEFUL
+   * ---------------------------------------------------------------------------
+   *
+   * #400's guard measured "did the applicant say anything this turn" on
+   * `conversation.item.input_audio_transcription.*` alone. That is a SEPARATE,
+   * SLOWER pipeline from the model's own understanding of the audio: the
+   * speech-to-speech model does not wait for a transcription before acting, so
+   * a `grade_answer` for a real answer can — and, on a phone, does — arrive
+   * while the answer to "have we heard anything?" is still "not yet". The guard
+   * then refuses a genuine answer, and on this transport the refusal is
+   * deliberately silent: the officer waits, the applicant is told nothing, and
+   * the rehearsal stalls with nothing on screen. That is #403's 17-27s
+   * signature, in the failure mode this file's header calls the worst one this
+   * screen has.
+   *
+   * `input_audio_buffer.speech_started` is raised the moment the microphone
+   * crosses the turn detector's threshold — before the model has finished
+   * hearing the utterance, let alone before it can call a tool about it. So the
+   * guard is now measuring an AFFIRMATIVE report that the applicant spoke,
+   * rather than the absence of a report that may simply not have arrived.
+   *
+   * BOTH EDGES COUNT. `stopped` without a preceding `started` is not a shape
+   * this provider produces, but if it ever did, the applicant has still
+   * demonstrably spoken — and treating the end of speech as evidence of no
+   * speech would be the exact inversion this measure exists to remove.
+   *
+   * THE GUARD IS NOT WEAKENED BY THIS. #400's second failure was the officer's
+   * own question being graded into a `practice_attempts` row; that case is
+   * `isLikelyCoachEcho`'s, it compares words, and it is untouched here — which
+   * is precisely why the two guards were always independent. This one catches a
+   * `grade_answer` with no applicant audio behind it AT ALL, and an echo that
+   * reaches the microphone raises these events too.
+   */
+  const voiceActivity = useCallback((_event: RealtimeVoiceActivityEvent) => {
+    // NO TEXT REACHES HERE, BY CONSTRUCTION (`RealtimeVoiceActivityEvent`
+    // carries none), so there is nothing this could grow into reading.
+    noteApplicantSpeech();
+  }, [noteApplicantSpeech]);
+  const voiceActivityRef = useRef(voiceActivity);
+  voiceActivityRef.current = voiceActivity;
 
   /**
    * The provider reported an error (#385).
