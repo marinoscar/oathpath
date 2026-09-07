@@ -626,8 +626,29 @@ function decideRecorded(
       tool,
       'wrong_question',
       'That is not the question the learner is answering.',
-      'Use the question id the last tool result gave you, or call repeat_question to hear ' +
-        'the outstanding question again.',
+      // THE OUTSTANDING ID IS NAMED, not merely referred to (issue #403).
+      //
+      // "Use the question id the last tool result gave you" is sound advice
+      // and unusable in the one case that matters: the OPENING turn is served
+      // by the browser, not by a tool call the model made, so there is no "last
+      // tool result" for it — the first question of every session reaches the
+      // model as words to speak and nothing else. A model that then has to name
+      // an id it was never given either omits one or invents one, and both land
+      // here.
+      //
+      // Without the id the only recovery is `repeat_question`, which reads the
+      // whole question out loud again — the 22-27s repeat in #403's transcript,
+      // spent on a learner who had already answered correctly. With it the
+      // model re-sends the same answer against the right question and nothing
+      // is said aloud at all.
+      //
+      // SAFE TO DISCLOSE: it is the id of the question this session is already
+      // asking, which the model is already speaking, and it carries nothing
+      // about the answer. It is not a licence to grade anything — a re-sent
+      // `grade_answer` is graded by the same ladder as any other.
+      `The learner is answering question ${context.outstandingQuestionId}. Send this ` +
+        'again with that id and the same transcript, or call repeat_question to hear the ' +
+        'outstanding question again. Never say an id out loud.',
     );
   }
 
