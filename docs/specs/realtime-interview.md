@@ -813,14 +813,41 @@ reasoning is not restated here. Both run in the browser, before a
 `grade_answer` call is ever relayed to
 `POST /api/interviews/:id/realtime/tool-calls`:
 
-1. **Nothing heard.** A `grade_answer` for a turn in which the provider
-   transcribed no applicant speech at all is refused locally and never
-   posted. It arms only once the connection has proven this deployment
-   actually transcribes input at all — monotonic, never reset, including
-   across a re-mint (§3) — so a deployment whose provider never emits a
-   transcription event fails open rather than refusing every answer of
-   every session; the identical arm-once discipline `useRealtimePractice.ts`
-   already holds for the same reason.
+1. **Nothing heard.** A `grade_answer` for a turn with no evidence the
+   applicant spoke at all is refused locally and never posted — and the
+   evidence is deliberately **not** "the provider transcribed applicant
+   speech." It is an affirmative report that the applicant spoke, by
+   either of two independent signals: input transcription
+   (`conversation.item.input_audio_transcription.*`) is one, and the turn
+   detector's `input_audio_buffer.speech_started`/`speech_stopped` edges
+   are the other. Porting #399's guard on transcription alone would have
+   reintroduced a bug already observed and fixed once on the practice
+   transport (issue #403): transcription is a separate, slower pipeline
+   than the speech-to-speech model's own hearing, and the model does not
+   wait for it, so a `grade_answer` for a genuine answer can arrive while
+   the transcription pipeline's own answer is still "not yet" — and a
+   guard listening only to that pipeline refuses a real one.
+   `speech_started` closes the gap: it fires the moment the microphone
+   crosses the detector's threshold, before the model has finished
+   hearing the utterance, let alone before it can call a tool about it,
+   so the guard measures an affirmative report that arrives in time
+   rather than the absence of one that may simply not have arrived yet.
+   Both edges count as evidence, `speech_stopped` included — an
+   applicant cut off mid-answer has still demonstrably spoken. This lands
+   worse here than it did on practice: this transport's refusal is
+   deliberately silent (decision below), so a falsely refused answer
+   leaves the officer simply waiting with nothing on screen to explain
+   it — the failure this file's own header calls the worst one this
+   screen has. The guard arms only once the connection has proven this
+   deployment reports applicant speech **by either means** — monotonic,
+   never reset, including across a re-mint (§3) — so a deployment where
+   neither signal reaches the provider still fails open rather than
+   refusing every answer of every session; the identical arm-once
+   discipline `useRealtimePractice.ts` already holds for the same reason.
+   The echo guard (below) is untouched by any of this: it compares words,
+   and an echo that reaches the microphone raises the turn detector's
+   events too, which is exactly why the two guards have always been
+   independent.
 2. **Officer echo.** A `grade_answer` whose transcript is provenance-matched
    to the officer's own last completed utterance — `isLikelyCoachEcho`'s
    exact-match-at-any-length or five-or-more-word-run-in-order rule — is

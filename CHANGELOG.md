@@ -359,11 +359,27 @@ spec in this file.
   passed or failed a rehearsal on words they never said, and the number
   would persist in their readiness history. Both #399 guards are now ported
   unforked, reusing `lib/coachEcho.ts`'s `isLikelyCoachEcho`: (1) a
-  `grade_answer` for a turn in which the provider transcribed no applicant
-  speech at all is refused in the browser and never posted, arming only
-  once the connection has proven this deployment transcribes input at all;
-  (2) a `grade_answer` whose transcript is provenance-matched to the
-  officer's own last completed utterance is refused the same way. Both are
+  `grade_answer` for a turn with no evidence the applicant spoke at all is
+  refused in the browser and never posted; (2) a `grade_answer` whose
+  transcript is provenance-matched to the officer's own last completed
+  utterance is refused the same way. Porting the first guard on input
+  transcription alone, as #399 originally shipped it, would have
+  reintroduced a bug already observed and fixed once on the practice
+  transport (issue #403): transcription is a separate, slower pipeline than
+  the speech-to-speech model's own hearing, and the model does not wait for
+  it, so a `grade_answer` for a genuine answer can arrive while the
+  transcription pipeline's own answer is still "not yet" — refusing a real
+  one. It lands worse on this transport than it did on practice's, because
+  this transport's refusal is deliberately silent: a falsely refused answer
+  leaves the officer simply waiting with nothing on screen to explain it.
+  So the guard also counts the turn detector's
+  `input_audio_buffer.speech_started`/`speech_stopped` edges as evidence —
+  `speech_started` fires the moment the microphone crosses the detector's
+  threshold, before the model has finished hearing the utterance, let alone
+  before it can call a tool about it — and arms only once the connection
+  has proven this deployment reports applicant speech by *either* means,
+  so a deployment where neither signal reaches the provider still fails
+  open rather than refusing every answer of every session. Both are
   provenance checks, never grading ones — neither reads a transcript for
   meaning or forms a verdict, and the engine's grading ladder remains the
   only one. Two decisions specific to this transport: the echo guard is
