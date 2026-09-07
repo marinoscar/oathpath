@@ -75,9 +75,12 @@ export const STATIC_SHELL_URLS = [
  * "self-destroying service worker" and the only reliable way back out.
  */
 export const SELF_DESTROYING_SERVICE_WORKER = `// Development placeholder worker (issue #359).
-// The real worker is emitted only for a production build; see \`pwa()\` in
-// vite.config.ts and \`registerServiceWorker.ts\` for the registration gate.
-// This one exists to UNINSTALL any worker a previous run left behind.
+// This is what /sw.js serves when the real worker is NOT wanted: a production
+// build always emits the real one, and a dev server emits it too when
+// VITE_ENABLE_SW=true (see \`buildDevServiceWorkerSource\` below and \`pwa()\` in
+// vite.config.ts). Reaching this file therefore means the opt-in is off, not
+// that the build was a development one.
+// This worker exists to UNINSTALL any worker a previous run left behind.
 self.addEventListener('install', function () {
   self.skipWaiting();
 });
@@ -93,3 +96,41 @@ self.addEventListener('activate', function (event) {
   );
 });
 `;
+
+
+/**
+ * The `/sw.js` body a DEV SERVER serves, on either side of the `VITE_ENABLE_SW`
+ * gate (issue #395).
+ *
+ * This is the branch that issue #359 wrote and issue #395 found nobody could
+ * reach: the flag it reads was never plumbed through `infra/compose`, so every
+ * containerised dev deployment took the `false` path and shipped the
+ * self-destroying placeholder — a PWA that could not be installed, with no
+ * offline shell and a dead update handshake, on the one environment the app is
+ * actually exercised in.
+ *
+ * It lives here, beside the emit path, rather than inline in `pwa()`'s
+ * middleware, for the same reason `buildServiceWorkerSource` is shared with the
+ * worker's own suite (see this file's header): a test that re-implemented the
+ * ternary would assert against a paraphrase of the thing that broke rather than
+ * the thing itself, and the alternative — booting a Vite server inside vitest —
+ * would reach the branch through an HTTP stack that has nothing to do with it.
+ *
+ * TWO PROPERTIES THIS FUNCTION IS THE SINGLE SITE OF:
+ *
+ *   - `precacheUrls` is `STATIC_SHELL_URLS` and NOTHING ELSE. In dev there is
+ *     no bundle: the "shell" is a module graph Vite rewrites on every edit, and
+ *     precaching any of it would be precaching a URL that stops existing the
+ *     moment a file is saved. `addAll` is atomic, so that is not a stale entry,
+ *     it is an install that fails outright.
+ *   - `buildId` is the fixed string `'dev'`. The production id is a hash of the
+ *     precache list, which is what retires old caches across deployments; here
+ *     the list never varies, so there is nothing to hash and nothing to retire.
+ */
+export function buildDevServiceWorkerSource(source: string, enabled: boolean): string {
+  if (!enabled) return SELF_DESTROYING_SERVICE_WORKER;
+  return buildServiceWorkerSource(source, {
+    buildId: 'dev',
+    precacheUrls: STATIC_SHELL_URLS,
+  });
+}

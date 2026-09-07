@@ -40,7 +40,32 @@ services:
     build:
       target: development
     volumes:
+      # NOTE: `src` ONLY. `vite.config.ts` and `public/` are baked into the
+      # image by `COPY apps/web ./apps/web` in apps/web/Dockerfile, so a change
+      # to either needs a rebuild of this service and not just a restart. That
+      # is the operational trap behind VITE_ENABLE_SW below.
       - ../../apps/web/src:/app/apps/web/src:ro
     environment:
       - NODE_ENV=development
+      # Opt in to the real service worker in development (issue #395).
+      #
+      # OFF BY DEFAULT, and it must stay that way: issue #359 disabled the PWA
+      # in dev on purpose, because a worker in front of a dev server serves
+      # edits that were already replaced. This entry exists so the switch can be
+      # flipped at all — it was declared and read by #359 but never passed into
+      # this service, so the dev stack always served the self-destroying
+      # placeholder and the PWA was inert on the one environment it gets tested
+      # on.
+      #
+      # `:-false` rather than a bare `${VITE_ENABLE_SW}`, for the reason
+      # base.compose.yml's `environment` block spells out: an unset variable
+      # interpolates to an empty string, and `enabled` is an exact `=== 'true'`
+      # comparison either way.
+      #
+      # Read twice from one value: by `pwa()`'s dev middleware in
+      # apps/web/vite.config.ts (which worker /sw.js serves) and, because Vite
+      # exposes VITE_-prefixed variables to the bundle, by
+      # `shouldRegisterServiceWorker` in apps/web/src/sw/registerServiceWorker.ts
+      # (whether the client registers it). See infra/compose/.env.example.
+      - VITE_ENABLE_SW=${VITE_ENABLE_SW:-false}
     command: npm run dev
