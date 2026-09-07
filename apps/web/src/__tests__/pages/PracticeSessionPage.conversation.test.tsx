@@ -64,6 +64,7 @@ import type {
   VoiceSettings,
 } from '../../types';
 import { server } from '../mocks/server';
+import { drainSpokenTurn } from '../utils/fake-speech';
 import { mockUser } from '../utils/test-utils';
 
 // -----------------------------------------------------------------------------
@@ -364,27 +365,15 @@ function installMediaEnvironment({
 /**
  * Let whatever is speaking finish, the way a real engine eventually does.
  *
- * DRAINS UNTIL QUIET, not once (#375). A turn used to be a single utterance —
- * the accepted answer — so ending the live one ended the turn. It is now the
- * composed `spokenTurn`, spoken one utterance per line with the driver
- * awaiting each before queueing the next, so ending line 1 merely makes line 2
- * live. Draining once would leave the loop mid-turn and every phase this
- * helper is used to reach would time out.
- *
- * The bound is a safety net against a driver that queues forever, not an
- * expected count: a real engine does eventually go quiet, and a helper that
- * span here would hang the suite instead of failing it.
+ * DRAINS UNTIL QUIET, not once (#375) — and "quiet" now means quiet across
+ * several settles rather than one empty read (#403). The old loop returned the
+ * first time it observed an empty queue, which is a state that occurs between
+ * EVERY pair of lines in a turn, so it could return mid-turn; #403 made the
+ * turn several lines long and turned that into a CI failure. The rule, and the
+ * reason a shared module owns it, are in `utils/fake-speech.ts`.
  */
 async function finishSpeaking() {
-  for (let pass = 0; pass < 20; pass += 1) {
-    if (speech.live.length === 0) return;
-    await act(async () => {
-      const live = speech.live;
-      speech.live = [];
-      for (const utterance of live) utterance.onend?.();
-    });
-  }
-  throw new Error('finishSpeaking: still speaking after 20 passes');
+  await drainSpokenTurn(speech);
 }
 
 // -----------------------------------------------------------------------------

@@ -85,6 +85,19 @@ const SESSION_BASE: PracticeSession = {
   summary: null,
 };
 
+/**
+ * The engine's constant instruction on every honoured result (#403).
+ *
+ * Present in these fixtures because a result without it is not a result the
+ * API produces, and a screen test built on an unrealistic shape is a screen
+ * test that keeps passing while the real thing changes.
+ */
+const SPEAK_VERBATIM =
+  'Speak every line in say, in order, word for word, and then stop. Say nothing ' +
+  'else: do not add, drop, reorder, summarise or explain a line, do not announce ' +
+  'that you are calling a tool or waiting for one, and never mention the ' +
+  'application, the session or its grading.';
+
 const DETAIL: PracticeSessionDetail = {
   session: SESSION_BASE,
   nextQuestion: QUESTION_1,
@@ -331,6 +344,10 @@ function installHandlers(deployment: Deployment) {
             say: [QUESTION_1.prompt],
             then: 'await_answer',
             questionId: QUESTION_1.id,
+            instruction: SPEAK_VERBATIM,
+            // THE COACH'S OWN QUESTION, carried out to the screen (#402). The
+            // page renders this rather than re-drawing one from the session.
+            question: QUESTION_1,
           },
         });
       },
@@ -714,6 +731,81 @@ describe('a mid-session fallback is spoken, and loses nothing', () => {
 });
 
 // -----------------------------------------------------------------------------
+// 6b. The screen asks the question the coach asked — issue #402
+// -----------------------------------------------------------------------------
+
+describe('the question on screen is the question the coach was given (#402)', () => {
+  it('renders the engine\u2019s served question, not the session\u2019s own fresh draw', async () => {
+    // MEASURED DEFECT: over a 71-second recording the screen showed Q79, Q80,
+    // Q83 and Q88 while the coach asked four entirely different questions, and
+    // the first question the coach asked never appeared on screen at all.
+    //
+    // THE CAUSE IS NOT A RACE, IT IS TWO DRAWS. `GET /api/practice/sessions/:id`
+    // resolves `nextQuestion` through `mastery/selector.ts`, which shuffles with
+    // real, unseeded randomness on every read — so the page's draw and the
+    // engine's draw are two different questions almost every time, with nothing
+    // wrong anywhere. This fixture makes that structural fact explicit: the
+    // session endpoint answers with one question and the tool-call route serves
+    // another, exactly as the live selector does.
+    const user = userEvent.setup();
+    installHandlers({ realtimeBound: true, transcribeBound: true });
+
+    const SPOKEN = {
+      id: 'question-spoken',
+      number: 79,
+      prompt: 'What group of people was taken and sold as slaves?',
+      categoryId: 'category-1',
+      dynamicScope: 'none' as const,
+    };
+
+    server.use(
+      http.post(
+        `${API_BASE}/practice/sessions/${SESSION_ID}/realtime/tool-calls`,
+        async ({ request }) => {
+          const body = (await request.json()) as Record<string, unknown>;
+          toolCalls.push(body);
+          if (body.tool === 'repeat_question') {
+            return HttpResponse.json({
+              data: {
+                status: 'rejected',
+                tool: 'repeat_question',
+                reason: 'no_answer_outstanding',
+                error: 'Nothing is waiting to be answered.',
+                instruction: 'Call next_question and say what it returns.',
+              },
+            });
+          }
+          return HttpResponse.json({
+            data: {
+              status: 'ok',
+              tool: 'next_question',
+              say: [SPOKEN.prompt],
+              then: 'await_answer',
+              questionId: SPOKEN.id,
+              instruction: SPEAK_VERBATIM,
+              question: SPOKEN,
+            },
+          });
+        },
+      ),
+    );
+
+    renderSession();
+    await chooseVoice(user);
+    await startLiveVoice(user);
+    await waitFor(() => expect(toolCalls.length).toBeGreaterThanOrEqual(2));
+
+    // THE SPOKEN QUESTION IS ON SCREEN, with its own number.
+    expect(await screen.findByText(SPOKEN.prompt)).toBeInTheDocument();
+    expect(screen.getByText(/Question 79/)).toBeInTheDocument();
+
+    // AND THE PAGE'S OWN DRAW IS NOWHERE. This is the half that matters: the
+    // learner must not be able to read a question nobody is asking them.
+    expect(screen.queryByText(QUESTION_1.prompt)).toBeNull();
+  });
+});
+
+// -----------------------------------------------------------------------------
 // 7. What the picture says the COACH is doing — issue #386
 // -----------------------------------------------------------------------------
 
@@ -814,6 +906,8 @@ describe('the elapsed clock measures the session, not the last question', () => 
               say: [QUESTION_1.prompt],
               then: 'await_answer',
               questionId: `question-${asked}`,
+              instruction: SPEAK_VERBATIM,
+              question: { ...QUESTION_1, id: `question-${asked}` },
             },
           });
         },

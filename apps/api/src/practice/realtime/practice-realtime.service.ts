@@ -21,6 +21,7 @@ import {
   decideSkipQuestion,
   emptyTranscriptRejection,
   noQuestionToServe,
+  SPEAK_VERBATIM_INSTRUCTION,
   type PracticeRealtimeRejection,
   type PracticeRealtimeThen,
   type PracticeRealtimeToolCall,
@@ -370,7 +371,7 @@ export class PracticeRealtimeService {
 
     const context: PracticeRealtimeTurnContext = {
       sessionStatus: detail.session.status,
-      outstandingQuestionId: outstanding?.questionId ?? null,
+      outstandingQuestionId: outstanding?.id ?? null,
       questionsRemaining:
         outstanding === null && detail.nextQuestion === null
           ? 0
@@ -432,10 +433,10 @@ export class PracticeRealtimeService {
       return this.refuse(userId, sessionId, noQuestionToServe('next_question'));
     }
 
-    this.asked.record(sessionId, {
-      questionId: question.id,
-      prompt: question.prompt,
-    });
+    // THE WHOLE QUESTION, not an id and a prompt (issue #402). It is what the
+    // browser renders, and remembering only the two fields the model needs is
+    // what left the screen resolving the rest for itself.
+    this.asked.record(sessionId, question);
 
     return {
       status: 'ok',
@@ -447,6 +448,10 @@ export class PracticeRealtimeService {
       say: [question.prompt],
       then: 'await_answer',
       questionId: question.id,
+      instruction: SPEAK_VERBATIM_INSTRUCTION,
+      // THE SAME QUESTION AS `questionId`, IN FULL, FOR THE SCREEN. See the
+      // field's own comment on why the browser must not resolve this itself.
+      question,
     };
   }
 
@@ -493,7 +498,12 @@ export class PracticeRealtimeService {
       tool: 'repeat_question',
       say: [outstanding.prompt],
       then: 'await_answer',
-      questionId: outstanding.questionId,
+      questionId: outstanding.id,
+      instruction: SPEAK_VERBATIM_INSTRUCTION,
+      // THE LEDGER'S OWN ENTRY, never a fresh read: the whole reason the
+      // question is remembered is that resolving it again could name a
+      // different one.
+      question: outstanding,
     };
   }
 
@@ -696,6 +706,9 @@ export class PracticeRealtimeService {
       // outstanding — handing one back here would ask a question nobody has
       // spoken yet.
       questionId: null,
+      instruction: SPEAK_VERBATIM_INSTRUCTION,
+      // NULL FOR THE SAME REASON `questionId` IS. The two never disagree.
+      question: null,
     };
   }
 
@@ -767,6 +780,8 @@ export class PracticeRealtimeService {
       say: [PRACTICE_REALTIME_CLOSING_LINE],
       then: 'session_complete',
       questionId: null,
+      instruction: SPEAK_VERBATIM_INSTRUCTION,
+      question: null,
     };
   }
 

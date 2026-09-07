@@ -35,7 +35,7 @@
  */
 
 import { CssBaseline, ThemeProvider } from '@mui/material';
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
@@ -57,6 +57,7 @@ import type {
   VoiceSettings,
 } from '../../types';
 import { server } from '../mocks/server';
+import { drainSpokenTurn } from '../utils/fake-speech';
 import { mockUser } from '../utils/test-utils';
 import { ORIENTED_PROFILE } from '../utils/journey-fixtures';
 import { CATEGORIES, civicsHandlers, journeyProfileHandler } from '../utils/civics-fixtures';
@@ -652,13 +653,15 @@ describe('with the microphone blocked', () => {
 // -----------------------------------------------------------------------------
 // Housekeeping: the fake voice must not be left holding an utterance open
 // between cases, which would make a later case's phase assertion read a stale
-// one. `act` because ending an utterance drives the loop.
+// one.
+//
+// DRAINED TO QUIET, NOT ONE PASS (#403). A single pass ended line 1 of the
+// turn and left lines 2..N queued — the exact leak this block exists to
+// prevent, reintroduced by the block itself, and reachable as soon as a turn
+// carried more than one line. `utils/fake-speech.ts` owns the rule; `act` is
+// inside it, because ending an utterance drives the loop.
 // -----------------------------------------------------------------------------
 
 afterEach(async () => {
-  await act(async () => {
-    const live = speech.live;
-    speech.live = [];
-    for (const utterance of live) utterance.onend?.();
-  });
+  await drainSpokenTurn(speech);
 });

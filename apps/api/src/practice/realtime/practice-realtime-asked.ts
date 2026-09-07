@@ -3,7 +3,9 @@
 // =============================================================================
 //
 // A tiny, bounded, in-process map from a practice session id to the question
-// this API last handed a realtime model to speak — its id AND its exact words.
+// this API last handed a realtime model to speak — the whole question, so that
+// the coach's mouth and the learner's screen read one fact rather than two
+// (see "WHAT IT HOLDS" below, and issue #402).
 //
 // -----------------------------------------------------------------------------
 // WHY IT EXISTS: THE SELECTOR IS DELIBERATELY NOT DETERMINISTIC
@@ -29,6 +31,27 @@
 // `repeat_question` honest: it returns the same words, not a fresh lookup that
 // could have been re-resolved in between. It is also what keeps this directory
 // free of any database access at all (`practice-realtime-purity.spec.ts`).
+//
+// -----------------------------------------------------------------------------
+// WHAT IT HOLDS, AND WHY IT IS THE WHOLE QUESTION (issue #402)
+// -----------------------------------------------------------------------------
+//
+// It used to hold an id and a prompt, because those were the two things the
+// MODEL needed. The screen needs the same fact and was resolving it
+// independently — `PracticeSessionPage` rendered `GET /api/practice/sessions/:id`'s
+// own `nextQuestion`, which, per the paragraph above, is a fresh draw. So the
+// learner read one question and was asked another aloud, from the first
+// question of every spoken session onward, and answered the one they could
+// hear. Nothing was mis-graded (the answer is recorded against the question the
+// ledger names, which is the spoken one), but the screen was lying about which
+// question was outstanding.
+//
+// The entry is therefore the whole `PracticeQuestion` — the SAME prompt-only
+// object `getSession` would have returned — so the tool result can carry it out
+// to the browser and the screen can render exactly what the coach was handed.
+// A `PracticeQuestion` is answer-free by construction and carries its own
+// compile-time proof of that (`dto/practice-question.dto.ts`), which is why
+// widening this entry costs no new argument about what a ledger may hold.
 //
 // -----------------------------------------------------------------------------
 // IN-PROCESS, AND WHY THAT IS THE RIGHT PLACE FOR IT
@@ -87,6 +110,8 @@
 // without a second thing to test.
 // =============================================================================
 
+import type { PracticeQuestion } from '../dto/practice-question.dto';
+
 /**
  * How many sessions' served questions are remembered at once.
  *
@@ -99,12 +124,18 @@
  */
 export const ASKED_LEDGER_MAX_ENTRIES = 4096;
 
-/** What was handed over: which question, and the exact words. */
-export interface AskedQuestion {
-  readonly questionId: string;
-  /** `civics_questions.prompt`, as it was spoken. Never re-resolved. */
-  readonly prompt: string;
-}
+/**
+ * What was handed over: the prompt-only question, exactly as it was served.
+ *
+ * AN ALIAS RATHER THAN A NARROWER STRUCT OF ITS OWN. The two consumers want
+ * different halves of it — the model wants `prompt` (that is what
+ * `repeat_question` says back), the screen wants `number` and `prompt` — and a
+ * struct holding a subset would be a third description of one row, free to
+ * disagree with both. `PracticeQuestion` is already the shape this application
+ * serves a question in, and already carries the proof that it can never grow an
+ * answer field.
+ */
+export type AskedQuestion = PracticeQuestion;
 
 /**
  * The questions realtime connections have been told to say but not yet had
@@ -155,7 +186,7 @@ export class PracticeRealtimeAskedLedger {
 
     if (remembered === undefined) return null;
 
-    if (answeredQuestionIds.has(remembered.questionId)) {
+    if (answeredQuestionIds.has(remembered.id)) {
       this.served.delete(sessionId);
       return null;
     }

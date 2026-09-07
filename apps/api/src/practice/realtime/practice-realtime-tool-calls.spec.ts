@@ -117,6 +117,14 @@ describe('decideGradeAnswer', () => {
 
     expectWellFormedRefusal(decision, 'wrong_question', 'grade_answer');
     expect((decision as any).instruction).toMatch(/repeat_question/);
+
+    // AND IT NAMES THE OUTSTANDING QUESTION (#403). The opening turn is served
+    // by the browser, so the first question of a session never reaches the
+    // model as a tool result — "use the id the last tool result gave you" has
+    // no referent there, and the only recovery left was reading the whole
+    // question out loud again. Naming it makes the recovery silent.
+    expect((decision as any).instruction).toContain(QUESTION);
+    expect((decision as any).instruction).not.toContain(OTHER_QUESTION);
   });
 
   it('refuses an answer when nothing is outstanding', () => {

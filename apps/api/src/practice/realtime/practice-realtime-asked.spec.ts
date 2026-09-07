@@ -1,3 +1,4 @@
+import type { PracticeQuestion } from '../dto/practice-question.dto';
 import {
   ASKED_LEDGER_MAX_ENTRIES,
   PracticeRealtimeAskedLedger,
@@ -16,8 +17,27 @@ import {
 const SESSION = 'session-1';
 const OTHER = 'session-2';
 
-const Q1 = { questionId: 'question-1', prompt: 'Who is the Chief Justice?' };
-const Q2 = { questionId: 'question-2', prompt: 'What is the supreme law?' };
+/**
+ * A served question, as the ledger now holds it: the WHOLE prompt-only
+ * question, not an id and a prompt (issue #402).
+ *
+ * The extra fields are not decoration. `number` is what the screen renders
+ * above the prompt, and it was the screen resolving that for itself — from
+ * `getSession`'s freshly-drawn `nextQuestion` — that had the learner reading
+ * one question while the coach asked another.
+ */
+function question(index: number, prompt: string): PracticeQuestion {
+  return {
+    id: `question-${index}`,
+    number: index,
+    prompt,
+    categoryId: 'category-1',
+    dynamicScope: 'none',
+  };
+}
+
+const Q1 = question(1, 'Who is the Chief Justice?');
+const Q2 = question(2, 'What is the supreme law?');
 
 /** Nothing has been answered in this session yet. */
 const NONE: ReadonlySet<string> = new Set<string>();
@@ -53,7 +73,7 @@ describe('PracticeRealtimeAskedLedger', () => {
     // `grade_answer` refused as a duplicate, for ever.
     ledger.record(SESSION, Q1);
 
-    const answered = new Set([Q1.questionId]);
+    const answered = new Set([Q1.id]);
 
     expect(ledger.outstanding(SESSION, answered)).toBeNull();
     // And it is really gone, not merely reported absent once.
@@ -63,7 +83,7 @@ describe('PracticeRealtimeAskedLedger', () => {
   it('keeps a memory that another question’s answer does not touch', () => {
     ledger.record(SESSION, Q2);
 
-    expect(ledger.outstanding(SESSION, new Set([Q1.questionId]))).toEqual(Q2);
+    expect(ledger.outstanding(SESSION, new Set([Q1.id]))).toEqual(Q2);
   });
 
   it('keeps sessions apart', () => {
@@ -91,10 +111,7 @@ describe('PracticeRealtimeAskedLedger', () => {
 
   it('never grows past its cap', () => {
     for (let index = 0; index < ASKED_LEDGER_MAX_ENTRIES + 50; index += 1) {
-      ledger.record(`session-${index}`, {
-        questionId: `question-${index}`,
-        prompt: `Question ${index}?`,
-      });
+      ledger.record(`session-${index}`, question(index, `Question ${index}?`));
     }
 
     expect(ledger.size).toBe(ASKED_LEDGER_MAX_ENTRIES);
@@ -113,15 +130,12 @@ describe('PracticeRealtimeAskedLedger', () => {
     ledger.record(SESSION, Q1);
 
     for (let index = 0; index < ASKED_LEDGER_MAX_ENTRIES - 1; index += 1) {
-      ledger.record(`filler-${index}`, {
-        questionId: `question-${index}`,
-        prompt: `Question ${index}?`,
-      });
+      ledger.record(`filler-${index}`, question(index, `Question ${index}?`));
     }
 
     // Touched again: it moves to the newest end.
     ledger.record(SESSION, Q2);
-    ledger.record('one-more', { questionId: 'question-x', prompt: 'Last?' });
+    ledger.record('one-more', question(9999, 'Last?'));
 
     expect(ledger.outstanding(SESSION, NONE)).toEqual(Q2);
     expect(ledger.outstanding('filler-0', NONE)).toBeNull();

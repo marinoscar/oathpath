@@ -108,18 +108,52 @@ export function buildPracticeRealtimeInstructions(): string {
     // model never sees it; here the model must SPEAK it, so the rule has to be
     // stated as an instruction, and `next_question`'s own tool description
     // states it again for the same reason.
-    'The words a tool gives you are the session itself. Say them as they are given: do ' +
-      'not rephrase, translate, simplify, expand, shorten, or explain them, and never ask ' +
-      'a question of your own. You may repeat a question word for word if the learner ' +
-      'asks you to — call repeat_question and say what it returns.',
+    //
+    // `say` IS NAMED, AND SO IS THE ORDER (issue #403). "Say back what it
+    // returns" was true and insufficient: a tool result is an object with five
+    // fields, and a model told to say back "what it returns" is free to decide
+    // which of them, and in what words. In the recording that opened #403 it
+    // decided, four times out of four, that the answer was a summary — and the
+    // one field it summarised away was the verdict.
+    'The words a tool gives you are the session itself. Every result has a say field: an ' +
+      'ordered list of lines. Speak every line in it, in order, word for word, and then ' +
+      'stop. Do not rephrase, translate, simplify, expand, shorten, reorder, or explain ' +
+      'them, do not skip one, and never ask a question of your own. You may repeat a ' +
+      'question word for word if the learner asks you to — call repeat_question and say ' +
+      'what it returns.',
+
+    // THE NARRATION RULE (issue #403's second defect).
+    //
+    // Nothing above forbade the model from talking ABOUT its tools, so it did:
+    // "let me check that response against the sessions grading", "I'll hand you
+    // the next prompt from the session", in every single turn of the recording.
+    // Nobody authored those sentences. They are this application's plumbing
+    // read aloud to a learner who has no idea what "the session" is, and they
+    // arrive in the same warm voice as the exam material, which is what makes
+    // them worse than merely redundant.
+    //
+    // STATED AS A LIST OF FORBIDDEN MOVES rather than as "be natural", because
+    // the failure is a model filling a silence it finds awkward — a round trip
+    // it is waiting on — and "say nothing" is a thing a model will do only if
+    // it is told that silence is the correct answer.
+    'Never talk about your tools or about this application. Do not announce that you are ' +
+      'calling one, checking something, looking something up, waiting, or continuing; do ' +
+      'not say "let me check", "one moment", "I will see what it says", or anything like ' +
+      'them. Do not refer to the session, the application, the system, the grading, a ' +
+      'prompt, a result or a tool by name or by implication. Between the learner speaking ' +
+      'and a tool answering you, say nothing at all — a short silence is correct, and ' +
+      'filling it is not. When the result arrives, speak its lines and nothing else: no ' +
+      'introduction before them, no bridge between them, and no remark after them.',
 
     // THE VERDICT BOUNDARY. This is the paragraph the whole contract exists to
     // back up: in practice the verdict is a stored row, not a spoken sentence.
     'You are not the judge of an answer. When the learner answers, call grade_answer with ' +
-      'what you heard, word for word, and then say back what it returns. The application ' +
-      'decides whether the answer was right. Never tell the learner whether they were ' +
-      'right or wrong on your own, never hint at it before the tool has answered, and ' +
-      'never supply, complete or correct an answer yourself.',
+      'what you heard, word for word, and then speak the lines it gives you back, in ' +
+      'order, exactly as written. Those lines are how the learner is told whether they ' +
+      'were right — they are the most important thing you say, and leaving one out means ' +
+      'nobody tells them. Never decide for yourself whether they were right or wrong, ' +
+      'never hint at it before the tool has answered, and never supply, complete or ' +
+      'correct an answer yourself.',
 
     // SILENCE IS NOT A SKIP. `voice-hands-free.md` §1's rule, stated as the
     // NEGATIVE case because that is the one a model gets wrong: a skip is

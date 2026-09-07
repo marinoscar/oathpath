@@ -8,31 +8,44 @@
  *
  * `docs/specs/realtime-practice.md` §1 and §4. Five tools arrive over the data
  * channel; each one is posted, unexamined, to
- * `POST /api/practice/sessions/:id/realtime/tool-calls`, and whatever comes
- * back is handed to the model VERBATIM.
+ * `POST /api/practice/sessions/:id/realtime/tool-calls`, and what comes back is
+ * handed to the model VERBATIM — minus exactly one field, which is addressed to
+ * the screen rather than to the model. See {@link forModel}, and issue #402 for
+ * the defect that made a screen-facing field necessary at all.
  *
  * Nothing in this file compares an answer to anything, counts a correct answer,
  * counts how many questions have been asked, selects a question, or knows a
  * pass mark — there is no such value here to look at. The result shape it
  * receives deliberately cannot carry one (`PracticeRealtimeToolOk` has `say`,
- * `then` and `questionId`, and the API carries a compile-time proof that no
- * `outcome`, `correct` or `score` can be added to it), and the call shape it
- * sends deliberately cannot express one either. `useRealtimePractice.source.test.ts`
- * reads this file and asserts both absences, because the way this regresses is
- * somebody adding "just a little" client-side bookkeeping to make a screen
- * nicer.
+ * `then`, `questionId`, `instruction` and `question` — the last being the
+ * prompt-only `PracticeQuestion` the coach was served, which carries its own
+ * compile-time proof that no answer can be added to it — and the API carries a
+ * second proof that no `outcome`, `correct` or `score` can be added to the
+ * result), and the call shape it sends deliberately cannot express one either.
+ * `useRealtimePractice.source.test.ts` reads this file and asserts both
+ * absences, because the way this regresses is somebody adding "just a little"
+ * client-side bookkeeping to make a screen nicer.
  *
  * THE TWO EXCEPTIONS, AND NEITHER IS A SECOND OPINION (issue #399). A
- * `grade_answer` is refused here, and never posted, when the provider
- * transcribed no learner speech at all this turn, and when the transcript it
+ * `grade_answer` is refused here, and never posted, when the microphone
+ * produced no learner speech at all this turn, and when the transcript it
  * reports is the coach's own last utterance coming back through the
  * microphone. Both are questions about PROVENANCE — did these words come from
  * the learner? — and neither reads a transcript for meaning, compares anything
  * to an accepted answer, or forms a verdict. What they buy is that an answer
  * nobody gave cannot become a `practice_attempts` row, which is a fact only
  * this process holds the evidence for. See `heardThisTurnRef` for the first,
- * `transcriptionSeenRef` for why absence alone is never enough to refuse on,
+ * `speechEvidenceSeenRef` for why absence alone is never enough to refuse on,
  * and `lib/coachEcho.ts` for the second.
+ *
+ * THE FIRST OF THE TWO NOW MEASURES A FASTER CLOCK (issue #403). It used to
+ * ask the provider's TRANSCRIPTION of the learner's audio whether anything had
+ * been said — a separate, slower pipeline than the speech-to-speech model's own
+ * hearing, which does not wait for it. So a `grade_answer` for a real answer
+ * could be decided while the guard's answer was still "not yet", and the
+ * refusal had the coach read the question out loud again. The turn detector's
+ * `speech_started`/`speech_stopped` edges now count as the same evidence and
+ * arrive in time to be useful; see `voiceActivity`.
  *
  * A REFUSAL IS A NORMAL RESULT, NOT AN ERROR. The route answers a rejected
  * tool call with HTTP 200 and an `instruction` field, and relaying that
@@ -133,10 +146,12 @@ import {
   type RealtimeProviderError,
   type RealtimeSpeechEvent,
   type RealtimeToolCallEvent,
+  type RealtimeVoiceActivityEvent,
 } from '../services/realtimeConnection';
 import { useIsMounted } from './useIsMounted';
 import type {
   AiUnavailableCause,
+  PracticeQuestion,
   PracticeRealtimeToolCallInput,
   PracticeRealtimeToolCallResponse,
   PracticeRealtimeToolName,
@@ -360,6 +375,34 @@ export interface UseRealtimePracticeReturn {
    */
   questionId: string | null;
 
+  /**
+   * The question the coach was actually handed, or `null` before the first one.
+   *
+   * ---------------------------------------------------------------------------
+   * THE SCREEN'S SOURCE OF TRUTH FOR "WHICH QUESTION IS BEING ASKED" (#402)
+   * ---------------------------------------------------------------------------
+   *
+   * The page used to render `GET /api/practice/sessions/:id`'s own
+   * `nextQuestion`, which `practice-realtime-asked.ts` explains is a FRESH DRAW
+   * from an unseeded shuffle on every read. Two reads a second apart name two
+   * different questions with nothing wrong anywhere — so while the coach asked
+   * one question aloud, the screen showed another, from the first question of
+   * every spoken session onward. The learner answered what they could hear and
+   * read something else the whole time.
+   *
+   * This is the engine's own answer, carried out on the tool result beside the
+   * words it gave the model to say. The page renders it and resolves nothing.
+   *
+   * IT HOLDS THE LAST QUESTION SERVED, and does not go back to `null` when one
+   * is answered — unlike {@link questionId}, which is the engine's literal
+   * "what is outstanding right now" and is `null` for exactly the window
+   * between a graded answer and the next question. The screen must not blank
+   * the question out during that window: it is when the coach is speaking the
+   * verdict for it, and it is the moment a learner most wants to see what they
+   * were asked.
+   */
+  question: PracticeQuestion | null;
+
   /** True while the coach's words are still arriving. Drives `aria-busy`. */
   isCoachSpeaking: boolean;
   /**
@@ -483,6 +526,46 @@ function localRejection(
 }
 
 /**
+ * The tool result as the MODEL sees it: everything but the screen's own field.
+ *
+ * =============================================================================
+ * THE ONE THING THE RELAY REMOVES, AND WHY IT IS NOT A REWRITE (#402)
+ * =============================================================================
+ *
+ * `question` is the whole outstanding `PracticeQuestion`, carried on an
+ * honoured result so the browser can render exactly the question the coach was
+ * handed — instead of resolving one of its own from
+ * `GET /api/practice/sessions/:id`, whose `nextQuestion` is a fresh draw from
+ * an unseeded shuffle and therefore names a DIFFERENT question most of the
+ * time. That divergence is #402: the learner read one question and was asked
+ * another, aloud, from the first question of every spoken session onward.
+ *
+ * The model has no use for it. It already holds the words (`say`) and the id
+ * (`questionId`), which are the only two things it does anything with; what the
+ * full object adds is a question NUMBER, and a number in front of a
+ * speech-to-speech model is a number that can be read out loud.
+ * `practice-realtime-instructions.ts` keeps every digit out of the session
+ * prompt for exactly that reason, and this keeps them out of the tool results
+ * for the same one.
+ *
+ * NOTHING IS ADDED, REORDERED OR REPHRASED. `say`, `then`, `questionId`,
+ * `instruction` and `status` — and, on a rejection, `reason`, `error` and
+ * `instruction` — reach the model precisely as the engine wrote them. This is
+ * still the relay the file header describes; it now has two audiences and hands
+ * each one its own half.
+ */
+function forModel(
+  result: PracticeRealtimeToolCallResponse,
+): Record<string, unknown> {
+  // A rejection has no screen-facing field at all: it is `reason`, `error` and
+  // `instruction`, every one of which is addressed to the model.
+  if (result.status !== 'ok') return { ...result };
+
+  const { question: _forTheScreenOnly, ...rest } = result;
+  return rest;
+}
+
+/**
  * The instruction a `grade_answer` gets when the microphone heard nothing.
  *
  * WORDED LIKE THE ENGINE'S OWN `emptyTranscriptRejection`, deliberately — that
@@ -522,6 +605,14 @@ export function useRealtimePractice(
   const [fallback, setFallback] = useState<RealtimePracticeFallback | null>(null);
   const [notice, setNotice] = useState<RealtimePracticeNotice | null>(null);
   const [questionId, setQuestionId] = useState<string | null>(null);
+  /**
+   * The last question the ENGINE handed over, kept across the grading turn.
+   *
+   * See {@link UseRealtimePracticeReturn.question}: `questionId` goes `null`
+   * while a verdict is being spoken, and the screen must not blank the question
+   * out at exactly that moment.
+   */
+  const [question, setQuestion] = useState<PracticeQuestion | null>(null);
   const [isCoachSpeaking, setIsCoachSpeaking] = useState(false);
   const [heard, setHeard] = useState<string | null>(null);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
@@ -589,24 +680,24 @@ export function useRealtimePractice(
   const heardThisTurnRef = useRef(false);
 
   /**
-   * Has this hook EVER seen the provider transcribe learner input?
+   * Has this hook EVER seen the provider report learner speech, by any means?
    *
-   * THE DIFFERENCE BETWEEN "TRANSCRIBED NOTHING" AND "DOES NOT TRANSCRIBE", and
+   * THE DIFFERENCE BETWEEN "HEARD NOTHING" AND "DOES NOT REPORT HEARING", and
    * without it the guard above is a brick rather than a safeguard. A realtime
    * session only transcribes its input when the mint asked it to (it now does —
-   * `openai.provider.ts`'s `DEFAULT_REALTIME_TRANSCRIPTION_MODEL`), and a
-   * deployment where that never reaches the provider — an older API behind a
-   * cached bundle, a model that ignores the field — would produce no
-   * transcription events at all. Enforcing on absence there would refuse EVERY
-   * answer of every session, which is a far worse failure than the one being
-   * fixed.
+   * `openai.provider.ts`'s `DEFAULT_REALTIME_TRANSCRIPTION_MODEL`), and turn
+   * detection is a session setting too; a deployment where neither reaches the
+   * provider — an older API behind a cached bundle, a model that ignores the
+   * field — would produce no learner-speech events at all. Enforcing on absence
+   * there would refuse EVERY answer of every session, which is a far worse
+   * failure than the one being fixed.
    *
    * So the guard arms itself only once this connection has PROVEN the provider
-   * transcribes: fail open until then, closed ever after. It is monotonic and
-   * never reset, including across a re-mint, because it describes the
-   * deployment rather than the connection.
+   * reports learner speech: fail open until then, closed ever after. It is
+   * monotonic and never reset, including across a re-mint, because it describes
+   * the deployment rather than the connection.
    */
-  const transcriptionSeenRef = useRef(false);
+  const speechEvidenceSeenRef = useRef(false);
 
   /** The question the engine last said was outstanding. A join key, not a verdict. */
   const lastQuestionIdRef = useRef<string | null>(null);
@@ -633,14 +724,27 @@ export function useRealtimePractice(
   }, []);
 
   /**
+   * Record that the microphone produced learner speech in this turn.
+   *
+   * ONE WRITER FOR BOTH EVIDENCE SOURCES, so the two flags can never be set by
+   * one and not the other — {@link speechEvidenceSeenRef} is what makes the
+   * guard fail open on a deployment that reports neither, and it would be
+   * useless if a source could set `heardThisTurnRef` without it.
+   */
+  const noteLearnerSpeech = useCallback(() => {
+    speechEvidenceSeenRef.current = true;
+    heardThisTurnRef.current = true;
+  }, []);
+
+  /**
    * May a `grade_answer` be relayed at all?
    *
    * `true` when the microphone produced speech this turn — and also when this
-   * deployment has never been observed transcribing input, for the reason
-   * {@link transcriptionSeenRef} states.
+   * deployment has never been observed reporting learner speech at all, for the
+   * reason {@link speechEvidenceSeenRef} states.
    */
   const heardSomethingThisTurn = useCallback(
-    () => heardThisTurnRef.current || !transcriptionSeenRef.current,
+    () => heardThisTurnRef.current || !speechEvidenceSeenRef.current,
     [],
   );
 
@@ -795,9 +899,25 @@ export function useRealtimePractice(
         return null;
       }
 
-      // VERBATIM, INCLUDING A REJECTION. `instruction` is the field that gets
-      // the session moving again.
-      if (callId !== null) connectionRef.current?.sendToolResult(callId, result);
+      // VERBATIM, INCLUDING A REJECTION — MINUS THE ONE FIELD ADDRESSED TO THE
+      // SCREEN (#402).
+      //
+      // `question` is the whole outstanding question, carried on the result so
+      // the browser can render exactly what the coach was handed rather than
+      // resolving one for itself. The model has no use for it: it already has
+      // the words in `say` and the id in `questionId`, and the only thing the
+      // extra fields could add to a spoken session is a question NUMBER it
+      // might read out loud. `practice-realtime-instructions.ts`'s own header
+      // keeps digits out of the prompt for that reason; this keeps them out of
+      // the tool results too.
+      //
+      // Everything else goes through untouched, and nothing is rewritten:
+      // `say`, `then`, `questionId`, `instruction`, `status` and — on a
+      // rejection — `reason`, `error` and `instruction` reach the model exactly
+      // as the engine wrote them.
+      if (callId !== null) {
+        connectionRef.current?.sendToolResult(callId, forModel(result));
+      }
 
       if (!isMounted()) return result;
 
@@ -836,6 +956,12 @@ export function useRealtimePractice(
         lastQuestionIdRef.current = result.questionId;
 
         setQuestionId(result.questionId);
+        // ONLY WHEN THE ENGINE NAMED ONE. A graded answer's result carries
+        // `question: null` — nothing is outstanding at that instant — and
+        // blanking the screen there would take the question away at exactly
+        // the moment the coach is speaking the verdict for it. See
+        // `UseRealtimePracticeReturn.question`.
+        if (result.question) setQuestion(result.question);
         if (result.then === 'session_complete') {
           // §10's first close condition. The engine — not this hook and not the
           // model — has said there is nothing left to ask.
@@ -887,6 +1013,27 @@ export function useRealtimePractice(
             event.name,
             'malformed_arguments',
             'Those arguments were not the ones that tool takes.',
+            // THE ONE REFUSAL THAT CAN NAME THE WAY OUT (#403).
+            //
+            // A `grade_answer` reaches here mainly one way: the model was
+            // asked to supply a `questionId` it was never given. The opening
+            // turn is served by this hook — `relay(..., null)` — so the first
+            // question of every session arrives as words to speak, with no tool
+            // result behind it and therefore no id. The generic instruction
+            // ("call next_question") is actively wrong there: a question IS
+            // outstanding, so the engine refuses that too, and the model's only
+            // remaining move is to read the whole question out again.
+            //
+            // `lastQuestionIdRef` is the engine's own last answer to "what is
+            // outstanding", never this hook's guess, and it is handed back as a
+            // value to quote rather than as anything to act on. Nothing is
+            // graded here and no call is rewritten: the model re-sends its own
+            // transcript against the right question, and the refusal the engine
+            // would have raised for the wrong one still stands.
+            lastQuestionIdRef.current !== null
+              ? `The learner is answering question ${lastQuestionIdRef.current}. ` +
+                'Send this again with that id. Never say an id out loud.'
+              : undefined,
           ),
         );
         return;
@@ -1109,6 +1256,11 @@ export function useRealtimePractice(
             // coach, and nothing but the label differs.
             onOfficerSpeech: (event) => coachSpeechRef.current(event),
             onApplicantSpeech: (event) => learnerSpeechRef.current(event),
+            // THE TURN DETECTOR (#403). Earlier evidence of the same fact the
+            // transcription events carry, and the reason the nothing-heard
+            // guard no longer refuses answers whose transcription is merely
+            // late. See `voiceActivity`.
+            onVoiceActivity: (event) => voiceActivityRef.current(event),
             onProviderError: (error) => providerErrorRef.current(error),
             onRemoteStream: (remote) => {
               if (isMounted()) setRemoteStream(remote);
@@ -1193,14 +1345,17 @@ export function useRealtimePractice(
       // only that the microphone produced some. Deltas count as much as the
       // final event: a learner who was cut off mid-answer still spoke.
       //
+      // NO LONGER THE ONLY SOURCE OF THAT FACT (#403): the turn detector says
+      // it sooner, and this pipeline can and does land after the model has
+      // already called `grade_answer`. See `voiceActivity` below.
+      //
       // BEFORE THE MOUNT CHECK, on purpose. The flags are what the next
       // `grade_answer` is measured against, and a hook whose component has
       // unmounted still owns a live connection until its teardown runs — an
       // utterance dropped here would become an answer that could not be
       // accounted for.
       if (event.text.trim() !== '') {
-        transcriptionSeenRef.current = true;
-        heardThisTurnRef.current = true;
+        noteLearnerSpeech();
       }
 
       if (!isMounted()) return;
@@ -1209,10 +1364,57 @@ export function useRealtimePractice(
       // and is never compared to an answer.
       if (event.done) setHeard(event.text || null);
     },
-    [isMounted, touchIdle],
+    [isMounted, noteLearnerSpeech, touchIdle],
   );
   const learnerSpeechRef = useRef(learnerSpeech);
   learnerSpeechRef.current = learnerSpeech;
+
+  /**
+   * The provider's turn detector heard the microphone open or close (#403).
+   *
+   * ---------------------------------------------------------------------------
+   * THE SAME QUESTION AS `learnerSpeech`, ANSWERED IN TIME TO BE USEFUL
+   * ---------------------------------------------------------------------------
+   *
+   * #399's guard measured "did the learner say anything this turn" on
+   * `conversation.item.input_audio_transcription.*` alone. That is a SEPARATE,
+   * SLOWER pipeline from the model's own understanding of the audio: the
+   * speech-to-speech model does not wait for a transcription before acting, so
+   * a `grade_answer` for a real answer can — and, on a phone, does — arrive
+   * while the answer to "have we heard anything?" is still "not yet". The guard
+   * then refuses a legitimate answer, and its instruction has the coach read
+   * the question out again. That is the 17-27s signature in #403's own
+   * transcript.
+   *
+   * `input_audio_buffer.speech_started` is raised the moment the microphone
+   * crosses the turn detector's threshold — before the model has finished
+   * hearing the utterance, let alone before it can call a tool about it. So the
+   * guard is now measuring an AFFIRMATIVE report that the learner spoke, rather
+   * than the absence of a report that may simply not have arrived.
+   *
+   * BOTH EDGES COUNT. `stopped` without a preceding `started` is not a shape
+   * this provider produces, but if it ever did, the learner has still
+   * demonstrably spoken — and treating the end of speech as evidence of no
+   * speech would be the exact inversion this fix exists to remove.
+   *
+   * THE GUARD IS NOT WEAKENED BY THIS. #399's failure was the coach's own voice
+   * being graded and written to `practice_attempts`; that case is caught by
+   * `isLikelyCoachEcho`, which compares words and is untouched here. This one
+   * catches a `grade_answer` with no learner audio behind it AT ALL, and an
+   * echo that reaches the microphone will raise these events too — which is
+   * precisely why the two guards were always independent.
+   */
+  const voiceActivity = useCallback(
+    (_event: RealtimeVoiceActivityEvent) => {
+      touchIdle();
+      // NO TEXT REACHES HERE, BY CONSTRUCTION (`RealtimeVoiceActivityEvent`
+      // carries none), so there is nothing this could grow into reading.
+      noteLearnerSpeech();
+    },
+    [noteLearnerSpeech, touchIdle],
+  );
+  const voiceActivityRef = useRef(voiceActivity);
+  voiceActivityRef.current = voiceActivity;
 
   /**
    * The provider reported an error (#385).
@@ -1338,6 +1540,7 @@ export function useRealtimePractice(
     fallback,
     notice,
     questionId,
+    question,
     isCoachSpeaking,
     heard,
     remoteStream,

@@ -155,14 +155,25 @@ describe('the realtime practice hook is a relay: it decides nothing', () => {
     expect(code).not.toMatch(/\bselectQuestion\b/);
   });
 
-  it('reads only `status`, `say`, `then` and `questionId` off a tool result', () => {
+  it('reads only `status`, `say`, `then`, `questionId` and `question` off a tool result', () => {
     const code = hookCode();
 
     // The positive form of the first assertion, and the stronger one: rather
     // than listing the fields that must not be read, this enumerates every
     // field that IS read and checks the set. A verdict-shaped field added to
     // the wire tomorrow is caught here even though no test knows its name yet.
-    const allowed = new Set(['status', 'say', 'then', 'questionId']);
+    //
+    // `question` JOINED THE SET IN #402, and it is worth saying why that is not
+    // a widening of what this hook may know. It is the whole prompt-only
+    // `PracticeQuestion` the engine served — the same object
+    // `GET /api/practice/sessions/:id` returns as `nextQuestion` — carried on
+    // the tool result so the SCREEN can render the question the coach was
+    // actually handed instead of drawing one of its own from an unseeded
+    // shuffle. It carries no answer and cannot: the API's
+    // `PRACTICE_QUESTION_CARRIES_NO_ANSWER` proof fails the build if anybody
+    // adds one. The hook does nothing with it but publish it; every assertion
+    // above still holds unchanged.
+    const allowed = new Set(['status', 'say', 'then', 'questionId', 'question']);
     const reads = [...code.matchAll(/\b(?:result|first|next)\.(\w+)/g)].map(
       (match) => match[1],
     );

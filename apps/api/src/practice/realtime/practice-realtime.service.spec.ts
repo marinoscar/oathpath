@@ -13,6 +13,7 @@ import {
 import { PracticeService } from '../practice.service';
 import { PracticeRealtimeService } from './practice-realtime.service';
 import { buildPracticeRealtimeInstructions } from './practice-realtime-instructions';
+import { SPEAK_VERBATIM_INSTRUCTION } from './practice-realtime-tool-calls';
 import { PRACTICE_REALTIME_SESSION_TTL_SECONDS } from './practice-realtime-tools';
 
 // =============================================================================
@@ -596,6 +597,11 @@ describe('PracticeRealtimeService.handleToolCall', () => {
       say: ['Who is the Chief Justice?'],
       then: 'await_answer',
       questionId: Q1,
+      instruction: SPEAK_VERBATIM_INSTRUCTION,
+      // THE SCREEN'S COPY OF THE SAME FACT (#402). The browser renders this
+      // rather than resolving `nextQuestion` for itself, which is what had it
+      // showing one question while the coach asked another.
+      question: { id: Q1, number: 1, prompt: 'Who is the Chief Justice?' },
     });
   });
 
@@ -606,6 +612,50 @@ describe('PracticeRealtimeService.handleToolCall', () => {
 
     for (const forbidden of ['outcome', 'correct', 'score', 'failureCause']) {
       expect(result).not.toHaveProperty(forbidden);
+    }
+  });
+
+  it('names the same question in `question` as in `questionId`, always (#402)', async () => {
+    // ONE FACT, TWO SHAPES, and this is what keeps them from becoming two
+    // facts. `questionId` is the join key the model quotes back on its next
+    // `grade_answer`; `question` is what the browser renders. A result where
+    // they disagreed would put the learner back where #402 found them —
+    // reading one question and being asked another — with the divergence
+    // moved inside a single response instead of between two of them.
+    await ask();
+
+    const results: any[] = [
+      await call({ tool: 'repeat_question' }),
+      await call({ tool: 'grade_answer', questionId: Q1, transcript: 'John Roberts' }),
+      await ask(),
+      await call({ tool: 'end_session', reason: 'learner_asked' }),
+    ];
+
+    for (const result of results) {
+      expect(result.status).toBe('ok');
+      expect(result.question?.id ?? null).toBe(result.questionId);
+    }
+  });
+
+  it('tells every honoured result to speak `say` verbatim, in the same words (#403)', async () => {
+    // THE INSTRUCTION MUST NOT VARY WITH THE OUTCOME, and this is the runtime
+    // half of that rule. A per-result instruction is how the model is told
+    // that `say` is to be spoken rather than summarised — the defect #403
+    // recorded — but an instruction free to be warmer after a right answer
+    // than after a wrong one would be a verdict travelling back to the model
+    // in a field `OK_RESULT_DECLARES_NO_VERDICT` does not police.
+    await ask();
+
+    const results: any[] = [
+      await call({ tool: 'repeat_question' }),
+      await call({ tool: 'grade_answer', questionId: Q1, transcript: 'John Roberts' }),
+      await ask(),
+      await call({ tool: 'end_session', reason: 'learner_asked' }),
+    ];
+
+    for (const result of results) {
+      expect(result.status).toBe('ok');
+      expect(result.instruction).toBe(SPEAK_VERBATIM_INSTRUCTION);
     }
   });
 
@@ -698,6 +748,10 @@ describe('PracticeRealtimeService.handleToolCall', () => {
       tool: 'repeat_question',
       say: ['Who is the Chief Justice?'],
       then: 'await_answer',
+      instruction: SPEAK_VERBATIM_INSTRUCTION,
+      // THE LEDGER'S OWN ENTRY, not the fresh draw the mock now returns —
+      // the same reason `say` is the original words.
+      question: { id: Q1, number: 1, prompt: 'Who is the Chief Justice?' },
       questionId: Q1,
     });
     expect(practice.recordAttempt).not.toHaveBeenCalled();
@@ -781,6 +835,12 @@ describe('PracticeRealtimeService.handleToolCall', () => {
       // Nothing is outstanding now — the next question is served by the next
       // `next_question`, which is the only thing that makes one outstanding.
       questionId: null,
+      // THE SAME INSTRUCTION AS EVERY OTHER HONOURED RESULT. It is what tells
+      // the model that `say` — which is the only place a verdict ever reaches
+      // a learner on this transport — is to be spoken rather than summarised.
+      instruction: SPEAK_VERBATIM_INSTRUCTION,
+      // NULL FOR THE SAME REASON `questionId` IS: the two never disagree.
+      question: null,
     });
   });
 
@@ -957,6 +1017,8 @@ describe('PracticeRealtimeService.handleToolCall', () => {
       say: [expect.stringContaining('end of this practice session')],
       then: 'session_complete',
       questionId: null,
+      instruction: SPEAK_VERBATIM_INSTRUCTION,
+      question: null,
     });
   });
 

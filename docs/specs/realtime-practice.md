@@ -528,6 +528,118 @@ itself — see the amendment immediately below.
 > advances. See `docs/specs/conversation-mode.md` §4's own amendment for
 > the full mechanism, restated there rather than here.
 
+### 6.1 Amendment (issues #402, #403): composing the turn is not speaking it
+
+*Added after a 71-second device recording of a live session, 2026-09-06.*
+Everything above shipped and was correct: the engine composed the turn, the
+service put it in `say`, and the tool result reached the model intact. **The
+learner still heard no verdict, on four answers out of four.** Three things
+were wrong between the composed turn and the learner's ear, and they are
+worth stating separately because only one of them is in this document's
+original scope.
+
+**1. The model summarised `say` instead of speaking it.** The session
+instructions said "call `grade_answer` … and then say back what it returns".
+A tool result is an object with several fields, so a model told to say back
+"what it returns" decides which of them and in what words — and it decided,
+every time, that the answer was a paraphrase. The recording is its own
+control: `next_question`'s `say` was spoken verbatim throughout the same
+session, because a question is obviously the thing to say and a graded
+result is not. Two fixes, one prompt-level and one contract-level:
+
+  * The verbatim paragraph now **names the `say` field**, requires every
+    line in order and word for word, and tells the model outright that those
+    lines are the only way a learner learns whether they were right.
+  * `PracticeRealtimeToolOk` gained an **`instruction`**, mirroring the field
+    a refusal has carried since #354 for the identical reason ("telling a
+    model only that its call failed invites it to retry the same call"). It
+    is `SPEAK_VERBATIM_INSTRUCTION`, a single constant, **byte-identical for
+    a right answer, a wrong one, a skip, a mishearing, a repeat and the end
+    of the session** — §4's second mechanism keeps a verdict out of the
+    result's named fields, and an instruction free to be warmer after a
+    correct answer would reintroduce one in a field that proof does not
+    police. A test asserts the string is the same across every honoured
+    result the engine can produce.
+
+**2. It narrated its tool use.** "Let me check that response against the
+sessions grading." "I'll hand you the next prompt from the session." Every
+turn. Nothing in the prompt forbade talking *about* the tools, and a model
+waiting on a round trip fills the silence. The instructions now forbid the
+move by name — no announcing a call, no "let me check", no reference to the
+session, the application, the grading or a result — and state the positive
+half as well, because a model told only what not to say substitutes
+something else: **while a tool call is in flight, saying nothing is
+correct.**
+
+**3. It had no `questionId` for the first question of every session.** The
+opening turn is served by the browser (`useRealtimePractice.openingTurn`),
+which relays `repeat_question` and then `next_question` with `callId === null`
+— there is no tool call to answer, so the result is never handed to the
+model, and the question reaches it as words to speak and nothing else. A
+model that must then name an id it was never given omits one or invents one,
+and both land on `wrong_question`, whose only recovery was `repeat_question`:
+the whole question read aloud again, to a learner who had already answered it
+correctly. That is the repeat at 22-27s of the recording, which issue #403
+initially read as the `nothing_heard` guard firing. `wrong_question`'s
+instruction now **names the outstanding question id**, so the model re-sends
+the same answer against the right question and says nothing; the browser's
+own `malformed_arguments` refusal does the same when it knows one.
+
+**And separately, #399's guard was measuring the wrong clock.** It answered
+"did the learner say anything this turn" from
+`conversation.item.input_audio_transcription.*` alone. That is a *separate,
+slower* pipeline from the speech-to-speech model's own hearing: the model
+does not wait for a transcription before acting, so a `grade_answer` for a
+real answer can be decided while the guard's answer is still "not yet".
+`input_audio_buffer.speech_started` / `speech_stopped` — the turn detector's
+own events, raised as the microphone crosses the threshold — now count as
+the same evidence, reaching the hook through an optional `onVoiceActivity`
+handler that **carries no text at all**, so nothing downstream of it can grow
+into reading a second transcript. The guard is unchanged in kind: affirmative
+evidence of learner speech is still required, it still fails open on a
+deployment that reports neither sort, and `coachEcho.ts` — which is what
+actually catches #399's original failure — is untouched.
+
+### 6.2 Amendment (issue #402): the screen must not resolve its own question
+
+The same recording showed the screen displaying four questions the coach
+never asked, while the first question the coach *did* ask never appeared at
+all. It looked like the audio running a question behind the display. It was
+not a lag and not a race: it was **two independent draws of one fact.**
+
+`PracticeSessionPage` rendered `GET /api/practice/sessions/:id`'s
+`nextQuestion`, and `mastery/selector.ts` shuffles with real, unseeded
+randomness on every read — `practice-realtime-asked.ts`'s own header already
+says so, as the reason the ledger exists at all. Two reads a second apart
+legitimately name two different questions with nothing wrong anywhere. On the
+typed path that is exactly right, because the screen is the thing doing the
+asking and whatever it draws *is* the question. On this transport it is
+exactly wrong, because the engine draws, remembers, speaks and grades against
+its own.
+
+**The ledger owns the fact; the screen follows.** The ledger now holds the
+whole `PracticeQuestion` rather than an id and a prompt, an honoured tool
+result carries it as `question`, and the voice surface renders that outright
+while a live session is running — **not** `realtime.question ?? question`,
+since falling back to the page's own draw is precisely how a question nobody
+is asking gets on screen. Before the first `next_question` lands there is no
+prompt, which is honest: nothing has been asked yet.
+
+**It is removed on the way to the model.** The relay hands the model
+everything but this field (`useRealtimePractice.ts`'s `forModel`). The model
+already holds the words in `say` and the id in `questionId`; what the full
+object adds is a question *number*, and §6.1's whole subject is a model that
+speaks things it was not asked to speak. The prompt contains no digit at all
+by design (`practice-realtime-instructions.ts`), and this keeps the tool
+results in the same condition. A `PracticeQuestion` can never carry an answer
+— `PRACTICE_QUESTION_CARRIES_NO_ANSWER` fails the build if one is added — so
+widening the result by this field widens nothing §4 protects.
+
+**Nothing was ever mis-graded by this.** The attempt was always recorded
+against the question the ledger named, which is the question the learner
+actually heard. What was wrong was the screen, which was telling them a
+different one was outstanding.
+
 ## 7. Persona as a curated line, not a licence
 
 The realtime session's own instructions string ends with

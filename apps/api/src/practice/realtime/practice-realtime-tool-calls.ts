@@ -1,3 +1,4 @@
+import type { PracticeQuestion } from '../dto/practice-question.dto';
 import type { EndSessionReason } from './practice-realtime-tools';
 
 // =============================================================================
@@ -115,7 +116,8 @@ export type PracticeRealtimeThen =
   | 'session_complete';
 
 /**
- * An honoured tool call, as it reaches the model.
+ * An honoured tool call, as it reaches the model — and, in one field, the
+ * browser.
  *
  * ---------------------------------------------------------------------------
  * TWO FIELDS CARRY EVERYTHING, AND THE THIRD IS A JOIN KEY
@@ -130,6 +132,9 @@ export type PracticeRealtimeThen =
  *     nothing about any answer; it exists so the relay never has to guess
  *     which id a subsequent `grade_answer` must name, and never has to parse it
  *     out of the text.
+ *   * `instruction` — what to DO with `say`. See {@link SPEAK_VERBATIM_INSTRUCTION}.
+ *   * `question` — the same outstanding question, in full, ADDRESSED TO THE
+ *     SCREEN. See {@link PracticeRealtimeToolOk.question}.
  *
  * ---------------------------------------------------------------------------
  * WHAT IS NOT ON IT IS THE LOAD-BEARING PART
@@ -162,7 +167,91 @@ export interface PracticeRealtimeToolOk {
 
   /** The question now outstanding, or `null`. A join key, never a verdict. */
   readonly questionId: string | null;
+
+  /**
+   * What to do with {@link say}. Always {@link SPEAK_VERBATIM_INSTRUCTION}.
+   *
+   * THE SAME STRING ON EVERY HONOURED RESULT — see that constant for why an
+   * instruction that varied with the outcome would be a verdict wearing a
+   * different field name.
+   */
+  readonly instruction: string;
+
+  /**
+   * The outstanding question in full, or `null`. THE SCREEN'S FIELD.
+   *
+   * -------------------------------------------------------------------------
+   * WHY A WHOLE QUESTION WHEN `questionId` AND `say` ALREADY CARRY IT
+   * -------------------------------------------------------------------------
+   *
+   * Issue #402. The browser has to render the question the learner is being
+   * asked, and until this field existed it resolved that independently from
+   * `GET /api/practice/sessions/:id`'s `nextQuestion` — which
+   * `practice-realtime-asked.ts` explains at length is a FRESH DRAW from an
+   * unseeded shuffle on every read. So the screen and the loudspeaker asked
+   * different questions, every time, from the first question of every spoken
+   * session onward.
+   *
+   * The alternative was for the browser to read `say[0]` as the prompt. That
+   * works today and is exactly the kind of coupling that stops working the
+   * first time a question turn grows a second line: the client would be
+   * parsing a field whose contract is "words to speak", not "the question".
+   *
+   * ALWAYS EITHER `null` OR THE QUESTION WHOSE ID IS {@link questionId}. The
+   * two are one fact in two shapes and the service's own spec asserts they
+   * never disagree.
+   *
+   * IT CARRIES NO ANSWER, and cannot: `PracticeQuestion` holds its own
+   * compile-time proof that no answer-shaped field can be added to it
+   * (`dto/practice-question.dto.ts`). Widening the result by this field
+   * therefore does not widen what a model could ever be told about a verdict —
+   * and the relay does not hand the model this field at all
+   * (`useRealtimePractice.ts`'s `forModel`), because the model already has the
+   * words in `say` and has no use for a question number it might read out.
+   */
+  readonly question: PracticeQuestion | null;
 }
+
+/**
+ * What every honoured tool result tells the model to do with `say`.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THE OK RESULT NEEDED AN `instruction` AT ALL (issue #403)
+ * ---------------------------------------------------------------------------
+ *
+ * A refusal has carried one since #354, on the argument that "telling a model
+ * only that its call failed invites it to retry the same call". An honoured
+ * result carried none, and the field it had instead — `say` — was described
+ * only by the session's standing instructions, one paragraph among ten,
+ * written before the conversation started.
+ *
+ * That was not enough. In the recording attached to #403 the coach called
+ * `grade_answer`, was handed a composed turn beginning "That one didn't match.",
+ * and said "Okay, let me check that answer with the session before we continue"
+ * instead — four times out of four. It narrated the tool call and dropped the
+ * verdict, which is the ONE sentence a practice session exists to deliver. It
+ * spoke `next_question`'s `say` faithfully throughout the same recording,
+ * which is the tell: a result the model has no per-result instruction for is a
+ * result it feels free to summarise.
+ *
+ * ---------------------------------------------------------------------------
+ * ONE CONSTANT, NEVER A SENTENCE THAT VARIES
+ * ---------------------------------------------------------------------------
+ *
+ * It is the same string for a right answer, a wrong answer, a skip, a
+ * mishearing, a repeat and the end of the session — for exactly the reason
+ * `then` is the same for the first four. An instruction that read "tell them
+ * warmly that they were right" on one result and something else on another
+ * would be a verdict travelling back to the model in a field the compile-time
+ * proof below does not police, which is the hole that proof exists to close.
+ * `practice-realtime-tool-calls.spec.ts` asserts the string is byte-identical
+ * across every honoured result the engine can produce.
+ */
+export const SPEAK_VERBATIM_INSTRUCTION =
+  'Speak every line in say, in order, word for word, and then stop. Say nothing ' +
+  'else: do not add, drop, reorder, summarise or explain a line, do not announce ' +
+  'that you are calling a tool or waiting for one, and never mention the ' +
+  'application, the session or its grading.';
 
 /**
  * Why a tool call was refused. One of these, never a free-text reason.
@@ -537,8 +626,29 @@ function decideRecorded(
       tool,
       'wrong_question',
       'That is not the question the learner is answering.',
-      'Use the question id the last tool result gave you, or call repeat_question to hear ' +
-        'the outstanding question again.',
+      // THE OUTSTANDING ID IS NAMED, not merely referred to (issue #403).
+      //
+      // "Use the question id the last tool result gave you" is sound advice
+      // and unusable in the one case that matters: the OPENING turn is served
+      // by the browser, not by a tool call the model made, so there is no "last
+      // tool result" for it — the first question of every session reaches the
+      // model as words to speak and nothing else. A model that then has to name
+      // an id it was never given either omits one or invents one, and both land
+      // here.
+      //
+      // Without the id the only recovery is `repeat_question`, which reads the
+      // whole question out loud again — the 22-27s repeat in #403's transcript,
+      // spent on a learner who had already answered correctly. With it the
+      // model re-sends the same answer against the right question and nothing
+      // is said aloud at all.
+      //
+      // SAFE TO DISCLOSE: it is the id of the question this session is already
+      // asking, which the model is already speaking, and it carries nothing
+      // about the answer. It is not a licence to grade anything — a re-sent
+      // `grade_answer` is graded by the same ladder as any other.
+      `The learner is answering question ${context.outstandingQuestionId}. Send this ` +
+        'again with that id and the same transcript, or call repeat_question to hear the ' +
+        'outstanding question again. Never say an id out loud.',
     );
   }
 

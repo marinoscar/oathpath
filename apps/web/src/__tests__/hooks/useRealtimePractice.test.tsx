@@ -143,6 +143,19 @@ function json(data: unknown): Response {
 }
 
 /** The refusal a fresh session answers `repeat_question` with. */
+/**
+ * The engine's constant `SPEAK_VERBATIM_INSTRUCTION`, as the browser sees it.
+ *
+ * Not imported from the API — the two packages do not share a module — but
+ * asserted to be present on every honoured result, because it is what stops
+ * the coach paraphrasing the verdict away (#403).
+ */
+const SPEAK_VERBATIM =
+  'Speak every line in say, in order, word for word, and then stop. Say nothing ' +
+  'else: do not add, drop, reorder, summarise or explain a line, do not announce ' +
+  'that you are calling a tool or waiting for one, and never mention the ' +
+  'application, the session or its grading.';
+
 function nothingOutstanding() {
   return {
     status: 'rejected',
@@ -153,16 +166,56 @@ function nothingOutstanding() {
   };
 }
 
+/**
+ * An honoured `next_question`, as the engine really answers one.
+ *
+ * `question` and `instruction` are here rather than left off (#402, #403).
+ * `question` is the whole prompt-only question the coach was handed — the
+ * screen renders it instead of drawing one of its own — and `instruction` is
+ * the constant that tells the model to speak `say` rather than summarise it.
+ * A fixture missing either would let a regression that drops them pass.
+ */
 function askedResult(
   overrides: Record<string, unknown> = {},
 ): Record<string, unknown> {
+  const questionId = (overrides.questionId as string | undefined) ?? 'question-1';
+  const say = (overrides.say as string[] | undefined) ?? [
+    'What is the supreme law of the land?',
+  ];
+
   return {
     status: 'ok',
     tool: 'next_question',
-    say: ['What is the supreme law of the land?'],
+    say,
     then: 'await_answer',
-    questionId: 'question-1',
+    questionId,
+    instruction: SPEAK_VERBATIM,
+    question: {
+      id: questionId,
+      number: 1,
+      prompt: say[0],
+      categoryId: 'category-1',
+      dynamicScope: 'none',
+    },
     ...overrides,
+  };
+}
+
+/**
+ * An honoured `grade_answer`, as the engine really answers one.
+ *
+ * `questionId: null` and `question: null` together: nothing is outstanding the
+ * instant an answer is recorded, and the two fields never disagree.
+ */
+function gradedResult(say: string[]): Record<string, unknown> {
+  return {
+    status: 'ok',
+    tool: 'grade_answer',
+    say,
+    then: 'ask_next_question',
+    questionId: null,
+    instruction: SPEAK_VERBATIM,
+    question: null,
   };
 }
 
@@ -351,13 +404,7 @@ describe('the relay: unexamined out, verbatim back', () => {
     toolResults = [
       nothingOutstanding(),
       askedResult(),
-      {
-        status: 'ok',
-        tool: 'grade_answer',
-        say: ['That is right.', 'Here is the next one.'],
-        then: 'ask_next_question',
-        questionId: null,
-      },
+      gradedResult(['That is right.', 'Here is the next one.']),
     ];
     const view = renderRealtime();
     await act(async () => view.result.current.start());
@@ -378,18 +425,92 @@ describe('the relay: unexamined out, verbatim back', () => {
       transcript: 'the Constitution',
     });
 
-    // AND HANDED BACK WHOLE. Not summarised, not reshaped, not filtered.
+    // AND HANDED BACK WHOLE — MINUS THE ONE FIELD ADDRESSED TO THE SCREEN.
+    //
+    // Not summarised, not reshaped, not rewritten. `question` is dropped
+    // because it is the browser's half of the answer (#402): the whole
+    // prompt-only question the coach was handed, carried so the page can render
+    // exactly that instead of drawing one of its own. The model already holds
+    // the words in `say` and the id in `questionId`; what the object would add
+    // is a question NUMBER, and a number in front of a speech-to-speech model
+    // is a number it can read out loud. Everything the model acts on arrives
+    // untouched.
+    const { question: _screenOnly, ...asTheModelSeesIt } = gradedResult([
+      'That is right.',
+      'Here is the next one.',
+    ]);
+
     const outputs = toolOutputs();
     expect(outputs[outputs.length - 1]).toEqual({
       call_id: 'call-grade_answer',
-      output: {
-        status: 'ok',
-        tool: 'grade_answer',
-        say: ['That is right.', 'Here is the next one.'],
-        then: 'ask_next_question',
-        questionId: null,
-      },
+      output: asTheModelSeesIt,
     });
+    expect(outputs[outputs.length - 1].output).not.toHaveProperty('question');
+  });
+
+  it('never hands the model the screen-only `question` field, on any honoured result (#402)', async () => {
+    // THE GENERAL FORM OF THE ASSERTION ABOVE, over every tool that carries a
+    // question. `next_question` is the one whose result really holds one, and
+    // it is the one where reading it aloud would be worst: the model would have
+    // the question's official NUMBER sitting beside the words it is about to
+    // speak.
+    toolResults = [
+      nothingOutstanding(),
+      askedResult(),
+      gradedResult(['That is right.']),
+      askedResult({ questionId: 'question-2', say: ['A second question?'] }),
+    ];
+    const view = renderRealtime();
+    await act(async () => view.result.current.start());
+    await completeHandshake();
+    await waitFor(() => expect(toolCalls.length).toBe(2));
+
+    await modelCalls(
+      'grade_answer',
+      { questionId: 'question-1', transcript: 'the Constitution' },
+      'call-grade-1',
+    );
+    await waitFor(() => expect(toolCalls.length).toBe(3));
+    await modelCalls('next_question', {}, 'call-next-1');
+    await waitFor(() => expect(toolCalls.length).toBe(4));
+
+    for (const output of toolOutputs()) {
+      expect(output.output).not.toHaveProperty('question');
+    }
+
+    // AND THE SCREEN GOT IT. The field is removed on the way to the model and
+    // published to the page — the whole point of carrying it.
+    expect(view.result.current.question).toMatchObject({
+      id: 'question-2',
+      prompt: 'A second question?',
+    });
+  });
+
+  it('keeps the last question on screen while the verdict is being spoken (#402)', async () => {
+    // `questionId` goes null the instant an answer is recorded — nothing is
+    // outstanding — and the screen must NOT blank the question out there. That
+    // window is exactly when the coach is speaking the verdict for it, and it
+    // is the moment a learner most wants to see what they were asked.
+    toolResults = [
+      nothingOutstanding(),
+      askedResult(),
+      gradedResult(['That one didn’t match.', 'The answer is: the Constitution.']),
+    ];
+    const view = renderRealtime();
+    await act(async () => view.result.current.start());
+    await completeHandshake();
+    await waitFor(() => expect(toolCalls.length).toBe(2));
+    await waitFor(() =>
+      expect(view.result.current.question?.id).toBe('question-1'),
+    );
+
+    await modelCalls('grade_answer', {
+      questionId: 'question-1',
+      transcript: 'a wrong answer',
+    });
+    await waitFor(() => expect(view.result.current.questionId).toBeNull());
+
+    expect(view.result.current.question).toMatchObject({ id: 'question-1' });
   });
 
   it('relays a REFUSAL as an ordinary result, so the conversation continues', async () => {
@@ -718,13 +839,7 @@ describe('a doubly-announced tool call is relayed once', () => {
     toolResults = [
       nothingOutstanding(),
       askedResult(),
-      {
-        status: 'ok',
-        tool: 'grade_answer',
-        say: ['That is right.'],
-        then: 'ask_next_question',
-        questionId: null,
-      },
+      gradedResult(['That is right.']),
     ];
     const view = renderRealtime();
     await act(async () => view.result.current.start());
@@ -858,13 +973,7 @@ describe('the microphone-heard guard (#399)', () => {
     toolResults = [
       nothingOutstanding(),
       askedResult(),
-      {
-        status: 'ok',
-        tool: 'grade_answer',
-        say: ['That is right.'],
-        then: 'ask_next_question',
-        questionId: null,
-      },
+      gradedResult(['That is right.']),
     ];
     const view = renderRealtime();
     await act(async () => view.result.current.start());
@@ -889,13 +998,7 @@ describe('the microphone-heard guard (#399)', () => {
     toolResults = [
       nothingOutstanding(),
       askedResult(), // question-1
-      {
-        status: 'ok',
-        tool: 'grade_answer',
-        say: ['Correct.'],
-        then: 'ask_next_question',
-        questionId: null,
-      },
+      gradedResult(['Correct.']),
       askedResult({ questionId: 'question-2', say: ['Second question?'] }),
     ];
     const view = renderRealtime();
@@ -954,25 +1057,170 @@ describe('the microphone-heard guard (#399)', () => {
     expect(view.result.current.stage).toBe('live');
   });
 
+  it('names the outstanding question when a grade_answer arrives with no id (#403)', async () => {
+    // THE OPENING TURN NEVER REACHES THE MODEL AS A TOOL RESULT. It is served
+    // by this hook — `relay(..., null)` — so the first question of every
+    // session arrives as words to speak and nothing else, and the model has no
+    // `questionId` to quote when the learner answers it.
+    //
+    // The generic refusal ("call next_question") is actively wrong there: a
+    // question IS outstanding, so the engine refuses that too, and the model's
+    // only remaining move is `repeat_question` — the question read out loud a
+    // second time to somebody who has already answered it. That is the 22-27s
+    // repeat in #403's own transcript.
+    toolResults = [nothingOutstanding(), askedResult()];
+    const view = renderRealtime();
+    await act(async () => view.result.current.start());
+    await completeHandshake();
+    await waitFor(() => expect(toolCalls.length).toBe(2));
+
+    // A `grade_answer` with no id at all — what a model with nothing to quote
+    // produces.
+    await modelCalls(
+      'grade_answer',
+      { transcript: 'African Americans' },
+      'call-grade-noid',
+    );
+
+    // NOT POSTED: an answer that names no question is not routed to whatever
+    // happens to be current.
+    expect(toolCalls).toHaveLength(2);
+
+    const rejection = toolOutputs().find((o) => o.call_id === 'call-grade-noid');
+    expect(rejection?.output).toMatchObject({
+      status: 'rejected',
+      reason: 'malformed_arguments',
+    });
+    // AND THE WAY OUT IS NAMED, so the retry is silent rather than spoken.
+    expect((rejection?.output as { instruction: string }).instruction).toContain(
+      'question-1',
+    );
+    expect(view.result.current.stage).toBe('live');
+  });
+
+  it('accepts the turn detector as evidence, so a late transcription cannot refuse a real answer (#403)', async () => {
+    // THE ORDERING HAZARD #403 RECORDS, reproduced exactly.
+    //
+    // `conversation.item.input_audio_transcription.*` comes from a SEPARATE,
+    // slower pipeline than the speech-to-speech model's own understanding of
+    // the audio. The model does not wait for it, so a `grade_answer` for a real
+    // answer can arrive while "have we heard anything this turn?" is still
+    // "not yet" — and #399's guard, measuring only transcription, refused it
+    // and had the coach read the question out again.
+    //
+    // Turn 1 arms the guard with a transcription. Turn 2 emits ONLY the turn
+    // detector's `speech_started` — no transcription at all, the way a live
+    // session looks in the moment the model calls the tool — and the answer
+    // must be relayed.
+    toolResults = [
+      nothingOutstanding(),
+      askedResult(),
+      gradedResult(['Correct.']),
+      askedResult({ questionId: 'question-2', say: ['Second question?'] }),
+      gradedResult(['Also correct.']),
+    ];
+    const view = renderRealtime();
+    await act(async () => view.result.current.start());
+    await completeHandshake();
+    await waitFor(() => expect(toolCalls.length).toBe(2));
+
+    await emit({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'item-learner-1',
+      transcript: 'the Constitution',
+    });
+    await modelCalls(
+      'grade_answer',
+      { questionId: 'question-1', transcript: 'the Constitution' },
+      'call-grade-1',
+    );
+    await waitFor(() => expect(toolCalls.length).toBe(3));
+
+    await modelCalls('next_question', {}, 'call-next');
+    await waitFor(() => expect(toolCalls.length).toBe(4));
+
+    // The microphone opened. Nothing has been transcribed and, on a real
+    // connection, nothing will be for another few hundred milliseconds.
+    await emit({
+      type: 'input_audio_buffer.speech_started',
+      item_id: 'item-learner-2',
+    });
+    await modelCalls(
+      'grade_answer',
+      { questionId: 'question-2', transcript: 'freedom of speech' },
+      'call-grade-2',
+    );
+
+    // RELAYED. Before this fix it was refused with `nothing_heard`, and the
+    // learner heard their question a second time instead of a verdict.
+    await waitFor(() => expect(toolCalls.length).toBe(5));
+    expect(toolCalls[4]).toEqual({
+      tool: 'grade_answer',
+      questionId: 'question-2',
+      transcript: 'freedom of speech',
+    });
+    expect(
+      toolOutputs().find((o) => o.call_id === 'call-grade-2')?.output,
+    ).toMatchObject({ status: 'ok' });
+  });
+
+  it('still refuses when neither the detector nor a transcription reports speech (#399)', async () => {
+    // THE PROTECTION IS UNCHANGED. #403 widened what counts as evidence that
+    // the learner spoke; it did not weaken the rule that SOME evidence is
+    // required. Here the guard is armed by a turn-detector event on turn 1 —
+    // proving this deployment reports learner speech at all — and turn 2 has
+    // neither event, so the fabricated answer is refused before it can become
+    // a `practice_attempts` row.
+    toolResults = [
+      nothingOutstanding(),
+      askedResult(),
+      gradedResult(['Correct.']),
+      askedResult({ questionId: 'question-2', say: ['Second question?'] }),
+    ];
+    const view = renderRealtime();
+    await act(async () => view.result.current.start());
+    await completeHandshake();
+    await waitFor(() => expect(toolCalls.length).toBe(2));
+
+    await emit({
+      type: 'input_audio_buffer.speech_started',
+      item_id: 'item-learner-1',
+    });
+    await emit({
+      type: 'input_audio_buffer.speech_stopped',
+      item_id: 'item-learner-1',
+    });
+    await modelCalls(
+      'grade_answer',
+      { questionId: 'question-1', transcript: 'the Constitution' },
+      'call-grade-1',
+    );
+    await waitFor(() => expect(toolCalls.length).toBe(3));
+
+    await modelCalls('next_question', {}, 'call-next');
+    await waitFor(() => expect(toolCalls.length).toBe(4));
+
+    // Silence: no detector event, no transcription.
+    await modelCalls(
+      'grade_answer',
+      { questionId: 'question-2', transcript: 'a fabricated answer' },
+      'call-grade-2',
+    );
+
+    expect(toolCalls).toHaveLength(4);
+    expect(
+      toolOutputs().find((o) => o.call_id === 'call-grade-2')?.output,
+    ).toMatchObject({ reason: 'nothing_heard' });
+    expect(view.result.current.stage).toBe('live');
+  });
+
   it('honours a grade_answer again once the learner is heard on a later turn', async () => {
     toolResults = [
       nothingOutstanding(),
       askedResult(),
-      {
-        status: 'ok',
-        tool: 'grade_answer',
-        say: ['Correct.'],
-        then: 'ask_next_question',
-        questionId: null,
-      },
+      gradedResult(['Correct.']),
       askedResult({ questionId: 'question-2', say: ['Second question?'] }),
-      {
-        status: 'ok',
-        tool: 'grade_answer',
-        say: ['Also correct.'],
-        then: 'ask_next_question',
-        questionId: null,
-      },
+      gradedResult(['Also correct.']),
     ];
     const view = renderRealtime();
     await act(async () => view.result.current.start());
@@ -1024,13 +1272,7 @@ describe('the coach-echo guard (#399, lib/coachEcho.ts)', () => {
     toolResults = [
       nothingOutstanding(),
       askedResult({ say: ['Where is the Statue of Liberty?'] }),
-      {
-        status: 'ok',
-        tool: 'grade_answer',
-        say: ['That is right.'],
-        then: 'ask_next_question',
-        questionId: null,
-      },
+      gradedResult(['That is right.']),
     ];
     const view = renderRealtime();
     await act(async () => view.result.current.start());
